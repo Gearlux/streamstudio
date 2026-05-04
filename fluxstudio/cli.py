@@ -10,7 +10,6 @@ from __future__ import annotations
 import dataclasses
 import json
 import sys
-from pathlib import Path
 from typing import Any
 
 import uvicorn
@@ -38,13 +37,18 @@ def discover() -> None:
     sys.stdout.write("\n")
 
 
-@app.command(name="run")
-def run(yaml_path: str) -> None:
-    """Step through a Confluid pipeline and emit one NDJSON event per op application."""
-    path = Path(yaml_path)
-    if not path.exists():
-        logger.error(f"YAML not found: {path}")
+@app.script_command(name="run", flow_mode="manual")
+def run() -> None:
+    """Step through a Confluid pipeline and emit one NDJSON event per op application.
+
+    The pipeline YAML is supplied as the positional argument right after
+    ``run`` and is picked up by Liquify's config-promotion convention
+    (see ``LiquifyApp.script_command``).
+    """
+    if app.context is None or app.context.config_path is None:
+        logger.error("Pipeline YAML required: fluxstudio run <yaml>")
         sys.exit(2)
+    path = app.context.config_path
     flux: Any = confluid_load(path.read_text())
     executor = SteppingExecutor(flux)
     for event in executor.iter_events():

@@ -57,3 +57,12 @@ export interface StepEvent {
   filtered: boolean;
   final: boolean;
 }
+
+// Mirrors fluxstudio.preferences.Preferences. Each new field added on the
+// backend must be added here AND in components/SettingsDialog.tsx's schema.
+export interface Preferences {
+  confirm_clear_pipeline: boolean;
+  show_internal_ops: boolean;
+  default_save_filename: string;
+  theme: "auto" | "light" | "dark";
+}

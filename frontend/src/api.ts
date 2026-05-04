@@ -1,4 +1,4 @@
-import type { GraphSpec, OpSchema, StepEvent } from "./types";
+import type { GraphSpec, OpSchema, Preferences, StepEvent } from "./types";
 
 const API_BASE = "/api";
 
@@ -54,6 +54,22 @@ export async function controlRun(runId: string, command: "step" | "continue" | "
     body: JSON.stringify({ command }),
   });
   if (!res.ok) throw new Error(`/api/run/${runId}/control -> ${res.status}`);
+}
+
+export async function getPreferences(): Promise<Preferences> {
+  const res = await fetch(`${API_BASE}/preferences`);
+  if (!res.ok) throw new Error(`/api/preferences -> ${res.status}`);
+  return (await res.json()) as Preferences;
+}
+
+export async function updatePreferences(partial: Partial<Preferences>): Promise<Preferences> {
+  const res = await fetch(`${API_BASE}/preferences`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(partial),
+  });
+  if (!res.ok) throw new Error(`/api/preferences -> ${res.status}: ${await res.text()}`);
+  return (await res.json()) as Preferences;
 }
 
 export function openRunStream(

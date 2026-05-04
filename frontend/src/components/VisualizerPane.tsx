@@ -6,7 +6,7 @@ interface Props {
 
 export default function VisualizerPane({ event }: Props) {
   if (!event) {
-    return <div style={{ color: "#888", fontSize: 13 }}>Run a pipeline to see per-node previews here.</div>;
+    return <div style={{ color: "var(--text-faint)", fontSize: 13 }}>Run a pipeline to see per-node previews here.</div>;
   }
   return (
     <div style={{ fontSize: 12 }}>
@@ -21,13 +21,13 @@ export default function VisualizerPane({ event }: Props) {
           <Section title="target" payload={event.payload.target} />
           <details>
             <summary>metadata</summary>
-            <pre style={{ background: "#f7f7f7", padding: 6 }}>
+            <pre style={{ background: "var(--bg-subtle)", color: "var(--text-secondary)", padding: 6, borderRadius: 4 }}>
               {JSON.stringify(event.payload.metadata, null, 2)}
             </pre>
           </details>
         </>
       ) : (
-        <div style={{ color: "#888" }}>(no payload)</div>
+        <div style={{ color: "var(--text-faint)" }}>(no payload)</div>
       )}
     </div>
   );
@@ -36,7 +36,7 @@ export default function VisualizerPane({ event }: Props) {
 function Section({ title, payload }: { title: string; payload: Payload }) {
   return (
     <div style={{ marginBottom: 8 }}>
-      <div style={{ fontSize: 11, color: "#666", textTransform: "uppercase", marginBottom: 4 }}>
+      <div style={{ fontSize: 11, color: "var(--text-muted)", textTransform: "uppercase", marginBottom: 4 }}>
         {title}
       </div>
       <PayloadView payload={payload} />
@@ -47,7 +47,7 @@ function Section({ title, payload }: { title: string; payload: Payload }) {
 function PayloadView({ payload }: { payload: Payload }) {
   switch (payload.kind) {
     case "null":
-      return <span style={{ color: "#999" }}>null</span>;
+      return <span style={{ color: "var(--text-faint)" }}>null</span>;
     case "scalar":
       return <code>{String(payload.value)}</code>;
     case "image":
@@ -55,7 +55,7 @@ function PayloadView({ payload }: { payload: Payload }) {
         <img
           src={`data:${payload.mime};base64,${payload.data}`}
           alt={`${payload.width}×${payload.height}`}
-          style={{ maxWidth: "100%", border: "1px solid #ddd" }}
+          style={{ maxWidth: "100%", border: "1px solid var(--border)" }}
         />
       );
     case "ndarray":
@@ -66,7 +66,7 @@ function PayloadView({ payload }: { payload: Payload }) {
             shape={JSON.stringify(payload.shape)} dtype={payload.dtype}
           </div>
           {payload.stats && Object.keys(payload.stats).length > 0 && (
-            <div style={{ color: "#666" }}>
+            <div style={{ color: "var(--text-muted)" }}>
               min={payload.stats.min?.toFixed(3)} max={payload.stats.max?.toFixed(3)} mean=
               {payload.stats.mean?.toFixed(3)}
             </div>
@@ -75,7 +75,7 @@ function PayloadView({ payload }: { payload: Payload }) {
             <img
               src={`data:${payload.preview.mime};base64,${payload.preview.data}`}
               alt="preview"
-              style={{ marginTop: 4, maxWidth: "100%", border: "1px solid #ddd" }}
+              style={{ marginTop: 4, maxWidth: "100%", border: "1px solid var(--border)" }}
             />
           )}
         </div>
@@ -90,7 +90,7 @@ function PayloadView({ payload }: { payload: Payload }) {
       return <span>dict({payload.keys.join(", ")})</span>;
     case "opaque":
       return (
-        <code style={{ color: "#666" }}>
+        <code style={{ color: "var(--text-muted)" }}>
           {payload.type}: {payload.repr}
         </code>
       );

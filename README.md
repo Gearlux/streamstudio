@@ -16,6 +16,8 @@ To enable RF-domain visualizers (spectrograms, IQ time-domain plots) install wit
 pip install "fluxstudio[waivefront] @ git+https://github.com/Gearlux/fluxstudio.git@main"
 ```
 
+Tab completion: `fluxstudio --install-completion` (bash/zsh/fish auto-detected from `$SHELL`).
+
 ## Development
 
 ```bash

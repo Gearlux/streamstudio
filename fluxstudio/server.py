@@ -12,7 +12,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from logflow import get_logger
 
-from fluxstudio.api import graph_router, ops_router, runs_router
+from fluxstudio.api import graph_router, ops_router, preferences_router, runs_router
 from fluxstudio.static import mount_frontend
 
 logger = get_logger(__name__)
@@ -32,5 +32,6 @@ def create_app() -> FastAPI:
     app.include_router(ops_router, prefix="/api", tags=["ops"])
     app.include_router(graph_router, prefix="/api", tags=["graph"])
     app.include_router(runs_router, prefix="/api", tags=["runs"])
+    app.include_router(preferences_router, prefix="/api", tags=["preferences"])
     mount_frontend(app)
     return app
