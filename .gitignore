@@ -31,3 +31,8 @@ lightning_logs/
 frontend/node_modules/
 frontend/dist/
 frontend/.vite/
+
+# Training/runtime artifacts
+logs/
+checkpoints/
+runs/
