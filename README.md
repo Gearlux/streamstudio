@@ -2,7 +2,7 @@
 
 Node-based visual editor and step-debugger for [DataFlux](https://github.com/Gearlux/data-flux) pipelines.
 
-FluxStudio is the GUI layer of the [Taidal](https://github.com/Gearlux) Septet. Build, inspect, and step through DataFlux pipelines in a browser; reuse every existing op, source, sink, and visualizer that has already been written for DataFlux and Waivefront.
+FluxStudio is the GUI layer of the [Taidal](https://github.com/Gearlux) . Build, inspect, and step through DataFlux pipelines in a browser; reuse every existing op, source, sink, and visualizer that has already been written for DataFlux and Waivefront.
 
 ## Installation
 
