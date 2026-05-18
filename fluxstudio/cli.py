@@ -23,9 +23,6 @@ from fluxstudio.server import create_app
 
 logger = get_logger(__name__)
 
-if "." not in sys.path:
-    sys.path.insert(0, ".")
-
 app = LiquifyApp(name="fluxstudio", description="Visual editor + step debugger for DataFlux pipelines.")
 
 
