@@ -39,6 +39,14 @@ waivefront = ["waivefront"]
 [project.scripts]
 fluxstudio = "fluxstudio.cli:main"
 
+[tool.aisland.sys-dependencies]
+# `npm` is needed to build the frontend (`npm ci && npm run build`).
+# macOS: brew's `node` formula bundles npm.
+# Linux: aisland fetches the official Node LTS tarball into aisland/tools/
+#        and symlinks node/npm/npx into aisland/bin/ — no sudo required.
+brew      = ["node"]
+userspace = ["node"]
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["fluxstudio*"]
