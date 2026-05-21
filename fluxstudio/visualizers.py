@@ -13,9 +13,8 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, Optional
 
-from logflow import get_logger
-
 from fluxstudio.sample_codec import encode_value
+from logflow import get_logger
 
 logger = get_logger(__name__)
 
@@ -84,7 +83,9 @@ def _install_waivefront_optional() -> None:
         return  # waivefront extra not installed; silently skip
 
     def encode_spectrogram(value: Any) -> Dict[str, Any]:
-        op = RenderSpectrogramImageOp(image_width_px=512, image_height_px=128, draw_overlays=False)
+        op = RenderSpectrogramImageOp(
+            image_width_px=512, image_height_px=128, draw_overlays=False
+        )
         rendered = op(Sample(input=value, target=None, metadata={}))
         return encode_value(rendered.input)
 

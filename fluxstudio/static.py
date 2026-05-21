@@ -13,6 +13,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
+
 from logflow import get_logger
 
 logger = get_logger(__name__)
@@ -50,4 +51,6 @@ def mount_frontend(app: FastAPI) -> None:
     def _not_built() -> HTMLResponse:
         return HTMLResponse(_NOT_BUILT_HTML)
 
-    logger.info(f"FluxStudio: frontend/dist not found at {_DIST_DIR}; serving placeholder.")
+    logger.info(
+        f"FluxStudio: frontend/dist not found at {_DIST_DIR}; serving placeholder."
+    )

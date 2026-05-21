@@ -1,0 +1,8 @@
+# FluxStudio Mandates
+
+- **Reuse DataFlux + Waivefront Surfaces:** FluxStudio is the GUI layer over DataFlux pipelines. Every op, source, sink, and visualizer it surfaces MUST come from existing DataFlux / Waivefront passive discovery — never define a FluxStudio-only op or visualizer. If a visualization is missing, add it to waivefront.
+- **Graph ⇄ Confluid YAML Round-Trip:** The canonical pipeline representation is a Confluid YAML manifest. Graph serialization MUST round-trip without information loss for the linear-pipeline shape; non-linear extensions MUST extend the YAML schema, not invent a parallel JSON format.
+- **Single-Process Stepping Executor:** `SteppingExecutor` runs the pipeline in-process so the debugger can pause after each op. Multiprocess pipelines (`Tee` + sink + re-read) are an explicit follow-up — don't reach for `multiprocessing.spawn` inside the executor without a design discussion.
+- **Type-Driven Visualizer Registry:** Visualizers are resolved by the output type of each op via the type → visualizer registry. RF-domain visualizers MUST live behind the optional `[waivefront]` extra so the core install stays small.
+- **Frontend Build Out-of-Band:** The React + xyflow frontend ships as source under `frontend/`; CI does NOT yet build it. Frontend changes MUST be verified locally with `npm run build` before pushing; flag this as a CI gap, don't paper over it.
+- **API Surface Stability:** The FastAPI routes (`/api/{ops, visualizers, graph, run, run/{id}/{ws,history,control}}`) are the public surface. Breaking changes MUST update the frontend in the same commit; never ship a backend-only API rename.

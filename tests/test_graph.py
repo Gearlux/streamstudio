@@ -13,9 +13,21 @@ from fluxstudio.graph import Graph, GraphEdge, GraphNode
 def _example_graph() -> Graph:
     return Graph(
         nodes=[
-            GraphNode(id="n0", op_path="fluxstudio._fixtures:NumericArraySource", params={"count": 3, "size": 4}),
-            GraphNode(id="n1", op_path="dataflux.ops.numpy:RescaleOp", params={"in_min": 0.0, "in_max": 255.0}),
-            GraphNode(id="n2", op_path="dataflux.ops.numpy:StandardizeOp", params={"mean": 0.5, "std": 0.5}),
+            GraphNode(
+                id="n0",
+                op_path="fluxstudio._fixtures:NumericArraySource",
+                params={"count": 3, "size": 4},
+            ),
+            GraphNode(
+                id="n1",
+                op_path="dataflux.ops.numpy:RescaleOp",
+                params={"in_min": 0.0, "in_max": 255.0},
+            ),
+            GraphNode(
+                id="n2",
+                op_path="dataflux.ops.numpy:StandardizeOp",
+                params={"mean": 0.5, "std": 0.5},
+            ),
         ],
         edges=[
             GraphEdge(source="n0", target="n1"),

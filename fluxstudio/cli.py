@@ -13,17 +13,20 @@ import sys
 from typing import Any
 
 import uvicorn
-from confluid.loader import load as confluid_load
-from liquifai import LiquifyApp
-from logflow import get_logger
 
+from confluid.loader import load as confluid_load
 from fluxstudio.discovery import scan_packages
 from fluxstudio.executor import SteppingExecutor
 from fluxstudio.server import create_app
+from liquifai import LiquifyApp
+from logflow import get_logger
 
 logger = get_logger(__name__)
 
-app = LiquifyApp(name="fluxstudio", description="Visual editor + step debugger for DataFlux pipelines.")
+app = LiquifyApp(
+    name="fluxstudio",
+    description="Visual editor + step debugger for DataFlux pipelines.",
+)
 
 
 @app.command(name="discover")
@@ -58,7 +61,13 @@ def serve(host: str = "127.0.0.1", port: int = 8765, reload: bool = False) -> No
     """Start the FluxStudio HTTP/WebSocket server."""
     if reload:
         # Uvicorn's reload loader needs an import string, not an app instance.
-        uvicorn.run("fluxstudio.server:create_app", host=host, port=port, reload=True, factory=True)
+        uvicorn.run(
+            "fluxstudio.server:create_app",
+            host=host,
+            port=port,
+            reload=True,
+            factory=True,
+        )
     else:
         uvicorn.run(create_app(), host=host, port=port)
 
