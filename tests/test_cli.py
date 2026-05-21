@@ -15,9 +15,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from liquifai.context import set_context
 
 from fluxstudio.cli import app, main
+from liquifai.context import set_context
 
 
 @pytest.fixture(autouse=True)

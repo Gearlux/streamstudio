@@ -23,8 +23,9 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 import yaml
-from logflow import get_logger
 from pydantic import BaseModel, Field
+
+from logflow import get_logger
 
 logger = get_logger(__name__)
 
@@ -82,7 +83,9 @@ def _construct_class(loader: yaml.Loader, suffix: str, node: yaml.Node) -> _Clas
     elif isinstance(node, yaml.ScalarNode) and (node.value or "") == "":
         params = {}
     else:
-        raise yaml.YAMLError(f"!class:{suffix} must be a mapping or empty scalar; got {type(node).__name__}")
+        raise yaml.YAMLError(
+            f"!class:{suffix} must be a mapping or empty scalar; got {type(node).__name__}"
+        )
     return _ClassNode(target=suffix, params=params)
 
 
@@ -110,7 +113,9 @@ class GraphNode(BaseModel):
     """A single op in the pipeline. The first node is treated as the source."""
 
     id: str
-    op_path: str = Field(..., description="Confluid !class: target, e.g. 'dataflux.ops.numpy:RescaleOp'")
+    op_path: str = Field(
+        ..., description="Confluid !class: target, e.g. 'dataflux.ops.numpy:RescaleOp'"
+    )
     params: Dict[str, Any] = Field(default_factory=dict)
     viz: Optional[VisualizerSpec] = None
 
@@ -155,9 +160,16 @@ class Graph(BaseModel):
         flux = _ClassNode(
             target="dataflux.core.Flux()",
             params={
-                "source": _ClassNode(target=_op_path_to_tag_suffix(source.op_path), params=dict(source.params)),
+                "source": _ClassNode(
+                    target=_op_path_to_tag_suffix(source.op_path),
+                    params=dict(source.params),
+                ),
                 "ops": [
-                    _ClassNode(target=_op_path_to_tag_suffix(node.op_path), params=dict(node.params)) for node in ops
+                    _ClassNode(
+                        target=_op_path_to_tag_suffix(node.op_path),
+                        params=dict(node.params),
+                    )
+                    for node in ops
                 ],
             },
         )
@@ -167,10 +179,14 @@ class Graph(BaseModel):
     def from_confluid_yaml(cls, text: str) -> "Graph":
         loaded = yaml.load(text, Loader=_GraphLoader)
         if not isinstance(loaded, _ClassNode):
-            raise ValueError("Top-level document must be a !class:dataflux.core.Flux mapping.")
+            raise ValueError(
+                "Top-level document must be a !class:dataflux.core.Flux mapping."
+            )
         # Accept both 'X.Flux' (deferred) and 'X.Flux()' (instance) so a hand-
         # authored YAML round-trips even before the user adds the parens.
-        bare_target = loaded.target[:-2] if loaded.target.endswith("()") else loaded.target
+        bare_target = (
+            loaded.target[:-2] if loaded.target.endswith("()") else loaded.target
+        )
         if not bare_target.endswith(".Flux"):
             raise ValueError(f"Expected top-level Flux, got !class:{loaded.target}.")
 
@@ -196,7 +212,9 @@ class Graph(BaseModel):
             raise ValueError("Flux 'ops' must be a list of !class: mappings.")
         for i, entry in enumerate(ops_block, start=1):
             if not isinstance(entry, _ClassNode):
-                raise ValueError(f"Op #{i} must be a !class: mapping; got {type(entry).__name__}.")
+                raise ValueError(
+                    f"Op #{i} must be a !class: mapping; got {type(entry).__name__}."
+                )
             node_id = f"n{i}"
             nodes.append(
                 GraphNode(

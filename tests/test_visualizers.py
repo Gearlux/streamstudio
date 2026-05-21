@@ -42,7 +42,9 @@ def test_dispatch_uses_hint_first() -> None:
 
 
 def test_dispatch_falls_through_to_mro() -> None:
-    visualizers.register(np.ndarray, lambda v: {"kind": "tagged", "shape": list(v.shape)})
+    visualizers.register(
+        np.ndarray, lambda v: {"kind": "tagged", "shape": list(v.shape)}
+    )
     out = visualizers.dispatch(np.zeros((2, 3)))
     assert out == {"kind": "tagged", "shape": [2, 3]}
 

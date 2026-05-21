@@ -5,10 +5,10 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
-from logflow import get_logger
 
 from fluxstudio.discovery import DEFAULT_MODULES, scan_packages
 from fluxstudio.visualizers import list_encoders
+from logflow import get_logger
 
 logger = get_logger(__name__)
 
@@ -26,7 +26,9 @@ def list_ops(modules: Optional[str] = None) -> Dict[str, Any]:
     if modules:
         targets = [m.strip() for m in modules.split(",") if m.strip()]
         if not targets:
-            raise HTTPException(status_code=400, detail="Empty 'modules' query parameter.")
+            raise HTTPException(
+                status_code=400, detail="Empty 'modules' query parameter."
+            )
     schemas = scan_packages(targets)
     return {
         "modules_scanned": targets if targets is not None else list(DEFAULT_MODULES),

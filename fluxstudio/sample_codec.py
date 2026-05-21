@@ -13,6 +13,7 @@ import io
 from typing import Any, Dict, Optional
 
 import numpy as np
+
 from logflow import get_logger
 
 logger = get_logger(__name__)
@@ -157,9 +158,16 @@ def _safe_metadata(metadata: Any) -> Dict[str, Any]:
         elif isinstance(value, (list, tuple)):
             out[skey] = {"kind": "sequence", "length": len(value)}
         elif isinstance(value, dict):
-            out[skey] = {"kind": "mapping", "keys": [str(k) for k in list(value.keys())[:16]]}
+            out[skey] = {
+                "kind": "mapping",
+                "keys": [str(k) for k in list(value.keys())[:16]],
+            }
         elif isinstance(value, np.ndarray):
-            out[skey] = {"kind": "ndarray", "shape": list(value.shape), "dtype": str(value.dtype)}
+            out[skey] = {
+                "kind": "ndarray",
+                "shape": list(value.shape),
+                "dtype": str(value.dtype),
+            }
         else:
             out[skey] = repr(value)[:_REPR_MAX_LEN]
     return out

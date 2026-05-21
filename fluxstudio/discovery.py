@@ -36,7 +36,9 @@ def _categorize(module: str, name: str) -> str:
         return "DataSource"
     if lower_name.endswith("sink"):
         return "DataSink"
-    if "visualiz" in module.lower() or lower_name.startswith(("render", "plot", "saveimage", "spectrogram")):
+    if "visualiz" in module.lower() or lower_name.startswith(
+        ("render", "plot", "saveimage", "spectrogram")
+    ):
         return "Visualizer"
     return "DataOp"
 
@@ -52,7 +54,9 @@ def scan_packages(modules: Optional[Sequence[str]] = None) -> List[Dict[str, Any
     for module in targets:
         results = scan_module(module)
         if not results:
-            logger.debug(f"discovery: module {module!r} produced no schemas (missing or empty)")
+            logger.debug(
+                f"discovery: module {module!r} produced no schemas (missing or empty)"
+            )
             continue
         for schema in results:
             path = schema.get("path", "")

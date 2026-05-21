@@ -23,9 +23,8 @@ from typing import Any, Dict, Iterator, List, Optional
 
 from dataflux.core import Flux, _check_ops_materialized
 from dataflux.sample import Sample
-from logflow import get_logger
-
 from fluxstudio.sample_codec import encode_sample
+from logflow import get_logger
 
 logger = get_logger(__name__)
 
@@ -92,7 +91,9 @@ class SteppingExecutor:
         self._mode: str = self._CMD_CONTINUE
         self._abort = threading.Event()
 
-    def set_controller(self, ctrl: "queue.Queue[str]", initial_mode: str = "step") -> None:
+    def set_controller(
+        self, ctrl: "queue.Queue[str]", initial_mode: str = "step"
+    ) -> None:
         """Enable pause/resume by polling `ctrl` before each op.
 
         `initial_mode='step'` makes the executor block on the first op until
@@ -100,7 +101,9 @@ class SteppingExecutor:
         otherwise.
         """
         if initial_mode not in (self._CMD_STEP, self._CMD_CONTINUE):
-            raise ValueError(f"initial_mode must be 'step' or 'continue', got {initial_mode!r}")
+            raise ValueError(
+                f"initial_mode must be 'step' or 'continue', got {initial_mode!r}"
+            )
         self._controller = ctrl
         self._mode = initial_mode
 

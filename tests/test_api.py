@@ -69,7 +69,9 @@ def test_graph_to_yaml_rejects_empty_graph(client: TestClient) -> None:
     assert resp.status_code == 400
 
 
-def test_run_lifecycle_streams_step_events(client: TestClient, tiny_pipeline_yaml: Path) -> None:
+def test_run_lifecycle_streams_step_events(
+    client: TestClient, tiny_pipeline_yaml: Path
+) -> None:
     yaml_text = tiny_pipeline_yaml.read_text()
     start = client.post("/api/run", json={"yaml": yaml_text, "mode": "continue"})
     assert start.status_code == 200, start.text
@@ -87,11 +89,16 @@ def test_run_lifecycle_streams_step_events(client: TestClient, tiny_pipeline_yam
     assert events, "expected events to be recorded in history"
     # 4 samples × 2 ops = 8 events.
     assert len(events) == 8
-    assert all(e["payload"] is None or e["payload"]["input"]["kind"] in {"ndarray", "scalar"} for e in events)
+    assert all(
+        e["payload"] is None or e["payload"]["input"]["kind"] in {"ndarray", "scalar"}
+        for e in events
+    )
 
 
 def test_run_invalid_yaml_returns_400(client: TestClient) -> None:
-    resp = client.post("/api/run", json={"yaml": "not even close to confluid", "mode": "continue"})
+    resp = client.post(
+        "/api/run", json={"yaml": "not even close to confluid", "mode": "continue"}
+    )
     assert resp.status_code == 400
 
 
@@ -105,7 +112,9 @@ def test_control_unknown_run_returns_404(client: TestClient) -> None:
     assert resp.status_code == 404
 
 
-def test_control_rejects_unknown_command(client: TestClient, tiny_pipeline_yaml: Path) -> None:
+def test_control_rejects_unknown_command(
+    client: TestClient, tiny_pipeline_yaml: Path
+) -> None:
     yaml_text = tiny_pipeline_yaml.read_text()
     start = client.post("/api/run", json={"yaml": yaml_text, "mode": "continue"})
     run_id = start.json()["run_id"]
@@ -113,7 +122,9 @@ def test_control_rejects_unknown_command(client: TestClient, tiny_pipeline_yaml:
     assert resp.status_code == 400
 
 
-def test_websocket_replays_history_then_signals_final(client: TestClient, tiny_pipeline_yaml: Path) -> None:
+def test_websocket_replays_history_then_signals_final(
+    client: TestClient, tiny_pipeline_yaml: Path
+) -> None:
     yaml_text = tiny_pipeline_yaml.read_text()
     start = client.post("/api/run", json={"yaml": yaml_text, "mode": "continue"})
     run_id = start.json()["run_id"]
@@ -153,7 +164,9 @@ def test_landing_page_when_frontend_not_built(client: TestClient) -> None:
     assert b"FluxStudio" in resp.content
 
 
-def test_registry_grows_then_can_be_reset(client: TestClient, tiny_pipeline_yaml: Path) -> None:
+def test_registry_grows_then_can_be_reset(
+    client: TestClient, tiny_pipeline_yaml: Path
+) -> None:
     yaml_text = tiny_pipeline_yaml.read_text()
     before = _registry_size()
     client.post("/api/run", json={"yaml": yaml_text, "mode": "continue"})

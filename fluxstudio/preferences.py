@@ -20,8 +20,9 @@ import os
 from pathlib import Path
 from typing import Any, Dict, Literal
 
-from logflow import get_logger
 from pydantic import BaseModel, ConfigDict
+
+from logflow import get_logger
 
 logger = get_logger(__name__)
 

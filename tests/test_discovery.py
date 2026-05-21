@@ -45,4 +45,6 @@ def test_default_modules_is_a_tuple_of_strs() -> None:
 def test_categorization_marks_storage_as_data_source_or_sink() -> None:
     schemas = scan_packages(["dataflux.storage.hdf5"])
     by_category: Iterable[str] = (s["category"] for s in schemas)
-    assert "DataSource" in set(by_category) or "DataSink" in {s["category"] for s in schemas}
+    assert "DataSource" in set(by_category) or "DataSink" in {
+        s["category"] for s in schemas
+    }

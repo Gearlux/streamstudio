@@ -10,10 +10,10 @@ from __future__ import annotations
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from logflow import get_logger
 
 from fluxstudio.api import graph_router, ops_router, preferences_router, runs_router
 from fluxstudio.static import mount_frontend
+from logflow import get_logger
 
 logger = get_logger(__name__)
 
