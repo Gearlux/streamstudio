@@ -8,10 +8,10 @@ from typing import Iterator
 
 import numpy as np
 import pytest
-
 from dataflux.core import FilterOp, Flux
 from dataflux.ops.numpy import RescaleOp
 from dataflux.sample import Sample
+
 from fluxstudio.executor import SteppingExecutor
 
 

@@ -18,13 +18,13 @@ import threading
 import uuid
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
-from pydantic import BaseModel
-
 from confluid.loader import load as confluid_load
 from dataflux.core import Flux
-from fluxstudio.executor import StepEvent, SteppingExecutor
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from logflow import get_logger
+from pydantic import BaseModel
+
+from fluxstudio.executor import StepEvent, SteppingExecutor
 
 logger = get_logger(__name__)
 
@@ -59,9 +59,7 @@ class _Run:
             finally:
                 self.done.set()
 
-        self.thread = threading.Thread(
-            target=_run, name=f"run-{self.run_id}", daemon=True
-        )
+        self.thread = threading.Thread(target=_run, name=f"run-{self.run_id}", daemon=True)
         self.thread.start()
 
 
@@ -77,9 +75,7 @@ def get_run(run_id: str) -> _Run:
 
 class RunRequest(BaseModel):
     yaml: str
-    mode: str = (
-        "step"  # 'step' (pause before each op) or 'continue' (run to completion)
-    )
+    mode: str = "step"  # 'step' (pause before each op) or 'continue' (run to completion)
 
 
 class RunResponse(BaseModel):
@@ -96,9 +92,7 @@ async def start_run(req: RunRequest) -> RunResponse:
     try:
         flux = confluid_load(req.yaml)
     except Exception as exc:
-        raise HTTPException(
-            status_code=400, detail=f"Confluid failed to load YAML: {exc}"
-        )
+        raise HTTPException(status_code=400, detail=f"Confluid failed to load YAML: {exc}")
 
     if not isinstance(flux, Flux):
         raise HTTPException(

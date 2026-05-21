@@ -7,7 +7,6 @@ from typing import Iterator
 
 import numpy as np
 import pytest
-
 from dataflux.core import Flux
 from dataflux.ops.numpy import RescaleOp, StandardizeOp
 from dataflux.sample import Sample
@@ -39,9 +38,7 @@ def mini_flux() -> Flux:
             return 4
 
     flux = Flux(source=_Source())
-    flux.ops.extend(
-        [RescaleOp(in_min=0.0, in_max=255.0), StandardizeOp(mean=0.5, std=0.5)]
-    )
+    flux.ops.extend([RescaleOp(in_min=0.0, in_max=255.0), StandardizeOp(mean=0.5, std=0.5)])
     return flux
 
 
