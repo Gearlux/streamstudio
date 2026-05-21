@@ -9,13 +9,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from fluxstudio.preferences import (
-    Preferences,
-    load_preferences,
-    preferences_path,
-    save_preferences,
-    update_preferences,
-)
+from fluxstudio.preferences import Preferences, load_preferences, preferences_path, save_preferences, update_preferences
 from fluxstudio.server import create_app
 
 
@@ -76,9 +70,7 @@ def test_update_theme_rejects_unknown_value() -> None:
 
 
 def test_update_rejects_unknown_field() -> None:
-    with pytest.raises(
-        Exception
-    ):  # Pydantic ValidationError; message validated at API level
+    with pytest.raises(Exception):  # Pydantic ValidationError; message validated at API level
         update_preferences({"not_a_real_pref": True})
 
 

@@ -5,10 +5,10 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from fastapi import APIRouter, HTTPException
+from logflow import get_logger
 from pydantic import ValidationError
 
 from fluxstudio.preferences import Preferences, load_preferences, update_preferences
-from logflow import get_logger
 
 logger = get_logger(__name__)
 
