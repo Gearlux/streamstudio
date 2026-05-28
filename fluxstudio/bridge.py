@@ -1,12 +1,11 @@
 """Dynamic runtime generation of ComfyUI nodes from DataFlux/HF operations."""
 
 import inspect
-from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
+from typing import Any, Callable, Dict, Optional, Tuple, Type
 
 import datasets
-from logflow import get_logger
-
 from dataflux.discovery import scan_module
+from logflow import get_logger
 
 logger = get_logger(__name__)
 
@@ -19,7 +18,7 @@ TYPE_MAP = {
     datasets.Dataset: "HF_DATASET",
 }
 
-DEFAULT_WIDGET_CONFIG = {
+DEFAULT_WIDGET_CONFIG: Dict[str, Dict[str, Any]] = {
     "INT": {"default": 0},
     "FLOAT": {"default": 0.0, "step": 0.01},
     "STRING": {"default": "", "multiline": False},
@@ -31,13 +30,13 @@ def _map_type(param_name: str, annotation: Any) -> str:
     """Map Python type annotation to ComfyUI type string."""
     if annotation == datasets.Dataset:
         return "HF_DATASET"
-        
+
     str_ann = str(annotation)
-    
+
     # Heuristic for directory/file paths
     if "pathlib.Path" in str_ann or any(x in param_name.lower() for x in ("path", "dir", "root", "folder")):
         return "PATH"
-        
+
     if annotation in TYPE_MAP:
         return TYPE_MAP[annotation]
     # Handle optional types and unions (simplistic)
@@ -54,23 +53,23 @@ def create_comfy_node(
 ) -> Type:
     """Dynamically construct a ComfyUI node class from a Python callable."""
     sig = inspect.signature(func)
-    inputs = {"required": {}}
+    inputs: Dict[str, Dict[str, Any]] = {"required": {}}
     return_types = []
 
     for param_name, param in sig.parameters.items():
         comfy_type = _map_type(param_name, param.annotation)
-        
+
         if comfy_type == "HF_DATASET":
             inputs["required"][param_name] = (comfy_type,)
         elif comfy_type == "PATH":
             # ComfyUI's STRING type can be hinted to be a directory selector
-            # by using an undocumented feature or extensions, but the most common 
-            # approach for absolute paths without extensions is a multiline string 
+            # by using an undocumented feature or extensions, but the most common
+            # approach for absolute paths without extensions is a multiline string
             # or a specific custom JS widget. We will use a standard string for now,
             # but provide a hook for a future JS extension by setting a custom class.
             config = {
                 "default": param.default if param.default is not inspect.Parameter.empty else "",
-                "taidal_widget": "DIRECTORY"
+                "taidal_widget": "DIRECTORY",
             }
             inputs["required"][param_name] = ("STRING", config)
             # In the future, we can inject a custom widget here if the frontend supports it.
@@ -87,7 +86,7 @@ def create_comfy_node(
     else:
         return_types.append("STRING")
 
-    def execute_wrapper(self, **kwargs: Any) -> Tuple[Any, ...]:
+    def execute_wrapper(self: Any, **kwargs: Any) -> Tuple[Any, ...]:
         result = func(**kwargs)
         if isinstance(result, tuple):
             return result
@@ -116,14 +115,14 @@ def register_module_nodes(
     """Scan a module and register all compatible callables as ComfyUI nodes."""
     logger.info(f"ComfyFlux: Scanning module {module_path} for nodes...")
     discovered = scan_module(module_path)
-    
+
     from dataflux.discovery import resolve_callable
 
     for item in discovered:
         target_func = resolve_callable(item["path"])
         if not callable(target_func):
             continue
-            
+
         node_name = f"Taidal_{item['name']}"
         node_class = create_comfy_node(
             func=target_func,
