@@ -88,6 +88,8 @@ class _FakeRoutes:
         self._existing = existing
         self.handler: Any = None
         self.registered_path: Optional[str] = None
+        self.get_handler: Any = None
+        self.get_path: Optional[str] = None
 
     def __iter__(self) -> Iterator[SimpleNamespace]:
         if self._existing:
@@ -97,6 +99,14 @@ class _FakeRoutes:
         def decorator(fn):  # type: ignore[no-untyped-def]
             self.registered_path = path
             self.handler = fn
+            return fn
+
+        return decorator
+
+    def get(self, path: str):  # type: ignore[no-untyped-def]
+        def decorator(fn):  # type: ignore[no-untyped-def]
+            self.get_path = path
+            self.get_handler = fn
             return fn
 
         return decorator
@@ -185,3 +195,18 @@ def test_route_not_re_registered_when_already_present() -> None:
     # must not define a second handler.
     with _fake_comfy(existing_route=True) as (routes, _web):
         assert routes.handler is None
+
+
+def test_node_specs_route_returns_declared_specs() -> None:
+    # The /taidal/node_specs GET handler surfaces each node's TAIDAL_ACCEPTS/PRODUCES so the
+    # canvas connection-validator can fetch them.
+    with _fake_comfy() as (routes, web):
+        assert routes.get_path == "/taidal/node_specs"
+        handler = routes.get_handler
+        assert handler is not None
+        fluxstudio.NODE_CLASS_MAPPINGS["Taidal_X"] = type(
+            "Taidal_X", (), {"TAIDAL_ACCEPTS": {"kind": "any"}, "TAIDAL_PRODUCES": None}
+        )
+        asyncio.run(handler(SimpleNamespace()))
+    data, _kwargs = web.calls[-1]
+    assert data["Taidal_X"] == {"accepts": {"kind": "any"}, "produces": None}

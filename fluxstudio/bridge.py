@@ -1,15 +1,48 @@
-"""Dynamic runtime generation of ComfyUI nodes from DataFlux/HF operations."""
+"""Dynamic runtime generation of ComfyUI nodes from DataFlux / Waivefront / HF callables.
+
+Discovered callables are classified into three node shapes so a real pipeline can be
+wired on the ComfyUI canvas — instead of every socket collapsing to ``STRING``:
+
+* **Source** — a class whose ``__getitem__`` / ``__iter__`` yields a
+  :class:`dataflux.sample.Sample` (e.g. ``HuggingFaceSource``). The node exposes the
+  constructor config as widgets and outputs a ``DATAFLUX_SOURCE`` (a
+  :class:`dataflux.core.Flux` wrapping the constructed source).
+* **Op** — a ``@configurable`` class with ``__call__(self, sample: Sample) ->
+  Optional[Sample]`` (e.g. ``RescaleOp``, ``RenderSpectrogramImageOp``). The node exposes
+  the constructor config as widgets PLUS one ``DATAFLUX_SAMPLE`` input socket; on execute it
+  constructs the op and applies it to the incoming sample, outputting a ``DATAFLUX_SAMPLE``.
+* **Generic** — any other callable (plain value functions): scalar widgets with a ``STRING``
+  fallback (the original behaviour, preserved).
+
+The custom socket type strings ``DATAFLUX_SOURCE`` / ``DATAFLUX_SAMPLE`` carry the live Python
+objects (``Flux`` / ``Sample``) between nodes — ComfyUI connects two sockets iff their type
+strings are equal — which is what lets ops chain into a pipeline.
+"""
 
 import inspect
 from typing import Any, Callable, Dict, Optional, Tuple, Type
 
 import datasets
-from dataflux.discovery import scan_module
+from dataflux.discovery import resolve_callable, scan_module
+from dataflux.typespec import infer_sample_type
 from logflow import get_logger
 
 logger = get_logger(__name__)
 
-# Mapping Python types to ComfyUI widget types
+
+def _spec_to_dict(cls: Any, attr: str) -> Optional[Dict[str, Any]]:
+    """JSON-serialize a callable's declared ``ACCEPTS`` / ``PRODUCES`` (:class:`SampleType`), or
+    ``None`` when undeclared — the form the ``/taidal/node_specs`` route and the JS validator consume."""
+    spec = getattr(cls, attr, None)
+    to_dict = getattr(spec, "to_dict", None)
+    return to_dict() if callable(to_dict) else None
+
+
+# Custom ComfyUI socket types for live DataFlux objects passed between nodes.
+SAMPLE_TYPE = "DATAFLUX_SAMPLE"
+SOURCE_TYPE = "DATAFLUX_SOURCE"
+
+# Mapping Python types to ComfyUI widget types.
 TYPE_MAP = {
     int: "INT",
     float: "FLOAT",
@@ -25,24 +58,271 @@ DEFAULT_WIDGET_CONFIG: Dict[str, Dict[str, Any]] = {
     "BOOLEAN": {"default": False},
 }
 
+# Types that ride a wire as input sockets (no inline widget config).
+_SOCKET_TYPES = {SAMPLE_TYPE, SOURCE_TYPE, "HF_DATASET"}
+
 
 def _map_type(param_name: str, annotation: Any) -> str:
-    """Map Python type annotation to ComfyUI type string."""
-    if annotation == datasets.Dataset:
+    """Map a Python type annotation to a ComfyUI socket/widget type string."""
+    if annotation is datasets.Dataset:
         return "HF_DATASET"
 
     str_ann = str(annotation)
+    if "Sample" in str_ann:
+        return SAMPLE_TYPE
 
-    # Heuristic for directory/file paths
+    # Heuristic for directory/file paths -> directory-picker widget (web/directory_chooser.js).
     if "pathlib.Path" in str_ann or any(x in param_name.lower() for x in ("path", "dir", "root", "folder")):
         return "PATH"
 
     if annotation in TYPE_MAP:
         return TYPE_MAP[annotation]
-    # Handle optional types and unions (simplistic)
+
+    # Unwrap Optional/Union by scanning the annotation string for a scalar type, so numeric/bool
+    # config still gets a real typed widget (not a STRING the constructor would choke on, e.g.
+    # ``count: Optional[int]``).
+    low = str_ann.lower()
+    if "bool" in low:
+        return "BOOLEAN"
+    if "int" in low and "float" not in low:
+        return "INT"
+    if "float" in low:
+        return "FLOAT"
     if "datasets.arrow_dataset.Dataset" in str_ann or "datasets.Dataset" in str_ann:
         return "HF_DATASET"
     return "STRING"  # Fallback
+
+
+def _widget_for(param: inspect.Parameter) -> Tuple[str, Dict[str, Any]]:
+    """Build the ``(comfy_type, config)`` pair for a single constructor parameter."""
+    comfy_type = _map_type(param.name, param.annotation)
+    has_default = param.default is not inspect.Parameter.empty
+
+    if comfy_type in _SOCKET_TYPES:
+        return comfy_type, {}
+    if comfy_type == "PATH":
+        default = param.default if has_default and isinstance(param.default, str) else ""
+        return "STRING", {"default": default, "taidal_widget": "DIRECTORY"}
+
+    # Nullable numeric (e.g. ``Optional[int] = None`` like ``HuggingFaceSource.count``):
+    # ComfyUI's INT/FLOAT widgets can't represent None, and their 0 default is a distinct,
+    # often-breaking value (``count=0`` means "no samples"). Use a blank STRING that
+    # _coerce_kwargs turns back into None when empty, or casts to the number when filled.
+    if param.default is None and comfy_type in ("INT", "FLOAT"):
+        return "STRING", {"default": "", "multiline": False}
+
+    config = DEFAULT_WIDGET_CONFIG.get(comfy_type, {}).copy()
+    if has_default and param.default is not None:
+        if comfy_type == "INT" and isinstance(param.default, int):
+            config["default"] = param.default
+        elif comfy_type == "FLOAT" and isinstance(param.default, (int, float)):
+            config["default"] = float(param.default)
+        elif comfy_type == "BOOLEAN" and isinstance(param.default, bool):
+            config["default"] = param.default
+        elif comfy_type == "STRING":
+            config["default"] = str(param.default)
+    return comfy_type, config
+
+
+def _build_config_inputs(func: Callable) -> Dict[str, Any]:
+    """Build the ``required`` inputs dict (constructor config widgets) for a callable."""
+    try:
+        sig = inspect.signature(func)
+    except (ValueError, TypeError):  # pragma: no cover - defensive: inspect rejects rare builtins
+        return {}
+    required: Dict[str, Any] = {}
+    for name, param in sig.parameters.items():
+        if name in ("self", "cls"):
+            continue
+        if param.kind in (inspect.Parameter.VAR_KEYWORD, inspect.Parameter.VAR_POSITIONAL):
+            continue
+        comfy_type, config = _widget_for(param)
+        required[name] = (comfy_type,) if not config else (comfy_type, config)
+    return required
+
+
+def _coerce_kwargs(func: Callable, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    """Coerce ComfyUI widget values into constructor-ready Python values.
+
+    Concrete numerics/bools already arrive correctly typed from INT/FLOAT/BOOLEAN widgets;
+    this handles STRING widgets standing in for ``Optional[...]`` / ``List[...]`` params:
+    ``""`` / ``"None"`` -> ``None`` (or fall back to the constructor default); a
+    comma-separated string -> ``list`` for ``List`` / ``Sequence``-typed params; and a
+    filled numeric string -> ``int`` / ``float`` for nullable-numeric params (rendered as
+    blank STRING widgets so they can express None).
+    """
+    try:
+        sig = inspect.signature(func)
+    except (ValueError, TypeError):  # pragma: no cover - defensive: inspect rejects rare builtins
+        return dict(kwargs)
+    out: Dict[str, Any] = {}
+    for key, value in kwargs.items():
+        param = sig.parameters.get(key)
+        if isinstance(value, str):
+            stripped = value.strip()
+            ann = str(param.annotation) if param is not None else ""
+            if stripped in ("", "None"):
+                if param is not None and param.default is None:
+                    out[key] = None
+                elif param is not None and param.default is inspect.Parameter.empty:
+                    out[key] = value  # required param — pass the literal through
+                # else: optional with a concrete default -> omit so the default applies
+                continue
+            ann_low = ann.lower()
+            if "list" in ann_low or "sequence" in ann_low:
+                out[key] = [item.strip() for item in stripped.split(",") if item.strip()]
+                continue
+            # Cast a filled nullable-numeric STRING widget back to its number.
+            if "int" in ann_low and "float" not in ann_low:
+                out[key] = int(stripped)
+                continue
+            if "float" in ann_low:
+                out[key] = float(stripped)
+                continue
+        out[key] = value
+    return out
+
+
+def _is_sample_annotation(annotation: Any) -> bool:
+    """True if an annotation refers to a DataFlux ``Sample`` (handles ``Iterator[Sample]`` etc.)."""
+    return "Sample" in str(annotation)
+
+
+def _op_call_signature(obj: Any) -> Optional[inspect.Signature]:
+    """Return ``obj.__call__``'s signature iff ``obj`` is a class whose call takes a ``Sample``."""
+    if not inspect.isclass(obj) or "__call__" not in vars(obj):
+        return None
+    try:
+        sig = inspect.signature(obj.__call__)
+    except (ValueError, TypeError):  # pragma: no cover - defensive: inspect rejects rare callables
+        return None
+    params = [p for n, p in sig.parameters.items() if n not in ("self", "cls")]
+    if params and _is_sample_annotation(params[0].annotation):
+        return sig
+    return None
+
+
+def _is_source(obj: Any) -> bool:
+    """True if ``obj`` is a class whose indexing/iteration yields ``Sample`` objects."""
+    if not inspect.isclass(obj):
+        return False
+    for meth_name in ("__getitem__", "__iter__"):
+        meth = getattr(obj, meth_name, None)
+        if meth is None:
+            continue
+        try:
+            ret = inspect.signature(meth).return_annotation
+        except (ValueError, TypeError):  # pragma: no cover - defensive: inspect rejects rare callables
+            continue
+        if _is_sample_annotation(ret):
+            return True
+    return bool(obj.__name__.endswith("Source"))
+
+
+def _node_class(
+    name: str,
+    category: str,
+    inputs: Dict[str, Any],
+    return_types: Tuple[str, ...],
+    execute: Callable,
+    return_names: Optional[Tuple[str, ...]] = None,
+    accepts: Optional[Dict[str, Any]] = None,
+    produces: Optional[Dict[str, Any]] = None,
+) -> Type:
+    """Assemble a ComfyUI node class from its parts.
+
+    Note: auto-generated nodes are never terminal/output nodes — the only OUTPUT_NODE
+    (the sample viewer) is hand-written in ``fluxstudio/nodes.py``.
+
+    ``accepts`` / ``produces`` are the source callable's declared ``SampleType.to_dict()`` (or
+    ``None``); they ride on the node class as ``TAIDAL_ACCEPTS`` / ``TAIDAL_PRODUCES`` so the
+    ``/taidal/node_specs`` route and the canvas connection-validator can read them. They do NOT change
+    the ComfyUI socket strings (every Sample wire stays ``DATAFLUX_SAMPLE`` so the pipeline still chains).
+    """
+    attrs: Dict[str, Any] = {
+        "INPUT_TYPES": classmethod(lambda cls: {"required": inputs}),
+        "RETURN_TYPES": return_types,
+        "FUNCTION": "execute",
+        "CATEGORY": category,
+        "execute": execute,
+        "TAIDAL_ACCEPTS": accepts,
+        "TAIDAL_PRODUCES": produces,
+    }
+    if return_names is not None:
+        attrs["RETURN_NAMES"] = return_names
+    return type(name, (object,), attrs)
+
+
+def _build_source_node(cls: Callable, name: str, category: str) -> Type:
+    inputs = _build_config_inputs(cls)
+
+    def execute(self: Any, **kwargs: Any) -> Tuple[Any, ...]:
+        from dataflux.core import Flux
+
+        obj = cls(**_coerce_kwargs(cls, kwargs))
+        flux = obj if isinstance(obj, Flux) else Flux.from_source(obj)
+        return (flux,)
+
+    return _node_class(
+        name,
+        category,
+        inputs,
+        (SOURCE_TYPE,),
+        execute,
+        return_names=("source",),
+        produces=_spec_to_dict(cls, "PRODUCES"),
+    )
+
+
+def _build_op_node(cls: Callable, name: str, category: str) -> Type:
+    inputs: Dict[str, Any] = {"sample": (SAMPLE_TYPE,)}
+    inputs.update(_build_config_inputs(cls))
+    accepts = getattr(cls, "ACCEPTS", None)
+
+    def execute(self: Any, sample: Any, **kwargs: Any) -> Tuple[Any, ...]:
+        # Runtime safety net: verify the actual incoming sample satisfies the op's declared ACCEPTS
+        # (authoritative; the canvas connection-validator is advisory and may be bypassed on graph load).
+        if accepts is not None:
+            got = infer_sample_type(sample)
+            if not accepts.accepts(got):
+                raise RuntimeError(
+                    f"{getattr(cls, '__name__', 'op')} cannot accept the upstream sample: "
+                    f"expects {accepts} but got {got}."
+                )
+        op = cls(**_coerce_kwargs(cls, kwargs))
+        result = op(sample)
+        if result is None:
+            raise RuntimeError(
+                f"{getattr(cls, '__name__', 'op')} filtered out the sample (returned None); "
+                "nothing to pass downstream."
+            )
+        return (result,)
+
+    return _node_class(
+        name,
+        category,
+        inputs,
+        (SAMPLE_TYPE,),
+        execute,
+        return_names=("sample",),
+        accepts=_spec_to_dict(cls, "ACCEPTS"),
+        produces=_spec_to_dict(cls, "PRODUCES"),
+    )
+
+
+def _build_generic_node(func: Callable, name: str, category: str) -> Type:
+    inputs = _build_config_inputs(func)
+    try:
+        ret_ann = inspect.signature(func).return_annotation
+    except (ValueError, TypeError):  # pragma: no cover - defensive: inspect rejects rare builtins
+        ret_ann = inspect.Signature.empty
+    return_type = "HF_DATASET" if _map_type("return", ret_ann) == "HF_DATASET" else "STRING"
+
+    def execute(self: Any, **kwargs: Any) -> Tuple[Any, ...]:
+        result = func(**_coerce_kwargs(func, kwargs))
+        return result if isinstance(result, tuple) else (result,)
+
+    return _node_class(name, category, inputs, (return_type,), execute)
 
 
 def create_comfy_node(
@@ -51,59 +331,17 @@ def create_comfy_node(
     category: str = "Taidal",
     display_name: Optional[str] = None,
 ) -> Type:
-    """Dynamically construct a ComfyUI node class from a Python callable."""
-    sig = inspect.signature(func)
-    inputs: Dict[str, Dict[str, Any]] = {"required": {}}
-    return_types = []
+    """Dynamically construct a ComfyUI node class from a Python callable.
 
-    for param_name, param in sig.parameters.items():
-        comfy_type = _map_type(param_name, param.annotation)
-
-        if comfy_type == "HF_DATASET":
-            inputs["required"][param_name] = (comfy_type,)
-        elif comfy_type == "PATH":
-            # ComfyUI's STRING type can be hinted to be a directory selector
-            # by using an undocumented feature or extensions, but the most common
-            # approach for absolute paths without extensions is a multiline string
-            # or a specific custom JS widget. We will use a standard string for now,
-            # but provide a hook for a future JS extension by setting a custom class.
-            config = {
-                "default": param.default if param.default is not inspect.Parameter.empty else "",
-                "taidal_widget": "DIRECTORY",
-            }
-            inputs["required"][param_name] = ("STRING", config)
-            # In the future, we can inject a custom widget here if the frontend supports it.
-        else:
-            config = DEFAULT_WIDGET_CONFIG.get(comfy_type, {}).copy()
-            if param.default is not inspect.Parameter.empty:
-                config["default"] = param.default
-            inputs["required"][param_name] = (comfy_type, config)
-
-    # Determine return type (simplistic: assume first output is HF_DATASET if annotated)
-    ret_ann = sig.return_annotation
-    if _map_type("return", ret_ann) == "HF_DATASET":
-        return_types.append("HF_DATASET")
-    else:
-        return_types.append("STRING")
-
-    def execute_wrapper(self: Any, **kwargs: Any) -> Tuple[Any, ...]:
-        result = func(**kwargs)
-        if isinstance(result, tuple):
-            return result
-        return (result,)
-
-    node_class = type(
-        name,
-        (object,),
-        {
-            "INPUT_TYPES": classmethod(lambda cls: inputs),
-            "RETURN_TYPES": tuple(return_types),
-            "FUNCTION": "execute",
-            "CATEGORY": category,
-            "execute": execute_wrapper,
-        },
-    )
-    return node_class
+    Dispatches on the callable's DataFlux role: ``Sample``-taking op classes become
+    ``SAMPLE -> SAMPLE`` nodes, ``Sample``-yielding source classes become ``-> SOURCE``
+    nodes, and everything else falls back to a generic scalar / STRING node.
+    """
+    if _op_call_signature(func) is not None:
+        return _build_op_node(func, name, category)
+    if _is_source(func):
+        return _build_source_node(func, name, category)
+    return _build_generic_node(func, name, category)
 
 
 def register_module_nodes(
@@ -115,8 +353,6 @@ def register_module_nodes(
     """Scan a module and register all compatible callables as ComfyUI nodes."""
     logger.info(f"ComfyFlux: Scanning module {module_path} for nodes...")
     discovered = scan_module(module_path)
-
-    from dataflux.discovery import resolve_callable
 
     for item in discovered:
         target_func = resolve_callable(item["path"])
