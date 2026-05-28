@@ -27,11 +27,6 @@ test-report.xml
 # Lightning training logs
 lightning_logs/
 
-# Frontend
-frontend/node_modules/
-frontend/dist/
-frontend/.vite/
-
 # Training/runtime artifacts
 logs/
 checkpoints/
