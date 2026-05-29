@@ -1,14 +1,16 @@
-"""Static ComfyUI adapter nodes for FluxStudio: walk a DataFlux source by index, and view a Sample.
+"""Static ComfyUI adapter nodes for FluxStudio: walk a DataFlux source by index, and extract a Sample.
 
 These are ComfyUI orchestration/adapter glue — NOT DataFlux data ops — so they live here rather
-than in dataflux / waivefront. The actual rendering is delegated to
-``waivefront.visualizers.sample_to_image`` (per the "no FluxStudio-only visualizers" mandate); this
-module only bridges a DataFlux ``Sample`` to ComfyUI's image-preview protocol and provides the
-index-walk stepper.
+than in dataflux / waivefront. ``SampleExtractorNode`` unpacks a ``Sample``'s ``input`` / ``target``
+onto statically-typed ComfyUI sockets (IMAGE / MASK / STRING / INT / FLOAT) so it wires into NATIVE
+ComfyUI viewers (Preview Image, a text node, …) instead of a bespoke in-canvas viewer — the relevant
+type is derived from the sample's declared/inferred features (``Sample.describe()``). The actual
+image rendering is delegated to ``waivefront.visualizers.value_to_image`` (per the "no
+FluxStudio-only visualizers" mandate); this module only bridges to ComfyUI's tensor protocols and
+provides the index-walk stepper.
 """
 
-import os
-from typing import Any, Dict, List, Tuple, Type
+from typing import Any, Dict, Optional, Tuple, Type
 
 import numpy as np
 import torch
@@ -65,81 +67,157 @@ class WalkDatasetNode:
         return (flux[resolved],)
 
 
-class SampleViewerNode:
-    """Render a ``DATAFLUX_SAMPLE`` in-canvas and pass through an IMAGE + info STRING.
+class SampleExtractorNode:
+    """Unpack a ``Sample``'s ``input`` or ``target`` onto typed ComfyUI sockets.
 
-    ``OUTPUT_NODE``: previews ``sample.input`` as an image (via
-    ``waivefront.visualizers.sample_to_image``) and surfaces ``sample.target`` /
-    ``sample.metadata`` as text. Also returns the rendered IMAGE (chainable to native ComfyUI image
-    nodes) and an ``info`` STRING.
+    Takes a ``DATAFLUX_SAMPLE`` and a ``field`` selector (``input`` / ``target``) and
+    exposes the selected value on several statically-typed outputs — ``IMAGE``,
+    ``MASK``, ``STRING``, ``INT``, ``FLOAT`` — so you wire the one your viewer /
+    consumer expects (Preview Image, a text node, a math node, …). ComfyUI types
+    sockets statically, so rather than retype one socket per run we surface every
+    plausible type; which one is meaningful is *derived from the sample's features*
+    (``Sample.describe()`` — stored ``__features__`` / ``__spec__`` when present,
+    else inferred from the live value):
+
+    * ``IMAGE`` — the field rendered via ``waivefront.visualizers.value_to_image``
+      (PIL / tensor / 2-D map → ``[1, H, W, 3]`` float in ``[0, 1]``). A non-visual
+      value renders as a small text image so the socket is always wireable.
+    * ``MASK`` — a 2-D field as ``[1, H, W]`` float in ``[0, 1]`` (segmentation
+      targets); a non-2-D field yields an empty ``1×1`` mask.
+    * ``STRING`` — a text view: a scalar/label (with ``label_name`` from metadata
+      when the target carries it), else a compact type summary.
+    * ``INT`` / ``FLOAT`` — the value as a number when it is a 0-D scalar (e.g. a
+      class id), else ``0`` / ``0.0``.
+
+    Unlike the removed ``SampleViewerNode`` this is NOT an ``OUTPUT_NODE``: it
+    produces typed values for native ComfyUI viewers, so previewing/rendering lives
+    in those nodes and only field extraction lives here.
     """
 
     CATEGORY = "Taidal/FluxStudio"
-    RETURN_TYPES = ("IMAGE", "STRING")
-    RETURN_NAMES = ("image", "info")
-    FUNCTION = "view"
-    OUTPUT_NODE = True
+    RETURN_TYPES = ("IMAGE", "MASK", "STRING", "INT", "FLOAT")
+    RETURN_NAMES = ("image", "mask", "text", "int", "float")
+    FUNCTION = "extract"
 
     @classmethod
     def INPUT_TYPES(cls) -> Dict[str, Any]:
         return {
             "required": {
                 "sample": (SAMPLE_TYPE,),
+                "field": (["input", "target"], {"default": "input"}),
                 "colormap": ("STRING", {"default": "viridis"}),
                 "max_size": ("INT", {"default": 512, "min": 32, "max": 4096}),
             }
         }
 
-    def view(self, sample: Any, colormap: str = "viridis", max_size: int = 512) -> Dict[str, Any]:
-        rgb = self._render(sample, colormap, max_size)
-        info = self._describe(sample)
-        image_tensor = torch.from_numpy(rgb.astype(np.float32) / 255.0)[None,]
-        ui_images = self._save_preview(rgb)
-        return {"ui": {"images": ui_images, "text": [info]}, "result": (image_tensor, info)}
+    def extract(
+        self, sample: Any, field: str = "input", colormap: str = "viridis", max_size: int = 512
+    ) -> Tuple[Any, ...]:
+        value = sample.input if field == "input" else sample.target
+        spec = self._field_spec(sample, field, value)
+        scalar = self._scalar(value)
+        image = self._to_image(value, colormap, max_size)
+        mask = self._to_mask(value)
+        text = self._to_text(value, spec, scalar, sample, field)
+        int_val = int(scalar) if scalar is not None else 0
+        float_val = float(scalar) if scalar is not None else 0.0
+        logger.debug(f"SampleExtractorNode: field={field} type={spec} scalar={scalar}")
+        return (image, mask, text, int_val, float_val)
 
+    # ------------------------------------------------------------------ #
     @staticmethod
-    def _render(sample: Any, colormap: str, max_size: int) -> np.ndarray:
+    def _field_spec(sample: Any, field: str, value: Any) -> Any:
+        """The selected field's TypeSpec — from declared features, else inferred from the value."""
+        from dataflux.typespec import infer_type
+
         try:
-            from waivefront.visualizers import sample_to_image
-        except ImportError as exc:  # pragma: no cover - exercised only without the extra installed
-            raise ImportError(
-                "SampleViewerNode needs waivefront to render samples. "
-                "Install the extra: pip install 'fluxstudio[waivefront]'."
-            ) from exc
-        return sample_to_image(sample, colormap=colormap, max_size=max_size)
+            described = sample.describe()
+            return described.input if field == "input" else described.target
+        except Exception:  # pragma: no cover - defensive: malformed stored type metadata
+            return infer_type(value)
 
     @staticmethod
-    def _describe(sample: Any) -> str:
-        target = getattr(sample, "target", None)
-        metadata = getattr(sample, "metadata", {}) or {}
-        meta_str = ", ".join(f"{k}={v}" for k, v in list(metadata.items())[:8])
-        return f"target={target!r}\nmetadata: {meta_str}"
+    def _scalar(value: Any) -> Optional[float]:
+        """``value`` as a Python number when it is a 0-D scalar, else ``None``."""
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, (int, float)):
+            return value
+        if isinstance(value, np.generic) or (isinstance(value, np.ndarray) and value.ndim == 0):
+            v = value.item()
+            return v if isinstance(v, (int, float)) else None
+        if torch.is_tensor(value) and value.dim() == 0:
+            v = value.item()
+            return v if isinstance(v, (int, float)) else None
+        return None
 
     @staticmethod
-    def _save_preview(rgb: np.ndarray) -> List[Dict[str, Any]]:
+    def _to_image(value: Any, colormap: str, max_size: int) -> torch.Tensor:
+        """Render ``value`` to a ComfyUI IMAGE tensor ``[1, H, W, 3]`` float in ``[0, 1]``."""
         try:
-            import folder_paths  # type: ignore[import-not-found]  # ComfyUI-only module
+            from waivefront.visualizers import value_to_image
         except ImportError:
-            # Not running inside ComfyUI (e.g. a headless test) — skip the on-disk preview.
-            return []
-        from PIL import Image
+            # waivefront extra absent — degrade to a 1×1 placeholder so the text/number outputs
+            # still work; install fluxstudio[waivefront] to render images.
+            logger.debug("SampleExtractorNode: waivefront not installed; IMAGE output is a placeholder.")
+            return torch.zeros((1, 1, 1, 3), dtype=torch.float32)
+        rgb = value_to_image(value, colormap=colormap, max_size=max_size)
+        return torch.from_numpy(rgb.astype(np.float32) / 255.0)[None,]
 
-        full_output_folder, filename, counter, subfolder, _ = folder_paths.get_save_image_path(
-            "fluxstudio_sample_temp_", folder_paths.get_temp_directory(), rgb.shape[1], rgb.shape[0]
-        )
-        os.makedirs(full_output_folder, exist_ok=True)
-        file = f"{filename}_{counter:05}_.png"
-        Image.fromarray(rgb).save(os.path.join(full_output_folder, file), compress_level=1)
-        return [{"filename": file, "subfolder": subfolder, "type": "temp"}]
+    @classmethod
+    def _to_mask(cls, value: Any) -> torch.Tensor:
+        """A 2-D field as a ComfyUI MASK tensor ``[1, H, W]`` float in ``[0, 1]``; else empty ``1×1``."""
+        arr = cls._as_2d(value)
+        if arr is None:
+            return torch.zeros((1, 1, 1), dtype=torch.float32)
+        arr = arr.astype(np.float32)
+        lo, hi = float(np.min(arr)), float(np.max(arr))
+        arr = (arr - lo) / (hi - lo) if hi > lo else np.clip(arr, 0.0, 1.0)
+        return torch.from_numpy(arr)[None,]
+
+    @staticmethod
+    def _as_2d(value: Any) -> Optional[np.ndarray]:
+        """Coerce ``value`` to a 2-D ndarray (squeezing singleton axes), or ``None`` if not 2-D-like."""
+        if torch.is_tensor(value):
+            value = value.detach().cpu().numpy()
+        elif hasattr(value, "convert"):  # PIL.Image.Image
+            value = np.array(value.convert("L"))
+        if not isinstance(value, np.ndarray):
+            return None
+        arr = np.squeeze(value)
+        return arr if arr.ndim == 2 else None
+
+    @staticmethod
+    def _to_text(value: Any, spec: Any, scalar: Optional[float], sample: Any, field: str) -> str:
+        """A concise text view of the field — a scalar/label value, else a compact type summary."""
+        if isinstance(value, str):
+            return value
+        if scalar is not None:
+            label = (sample.metadata or {}).get("label_name") if field == "target" else None
+            n: Any = int(scalar) if float(scalar).is_integer() else scalar
+            return f"{label} (id={n})" if label is not None else str(n)
+        shape = getattr(value, "shape", None)
+        shape_str = f" shape={tuple(shape)}" if shape is not None else ""
+        return f"{SampleExtractorNode._spec_summary(spec)}{shape_str}".strip()
+
+    @staticmethod
+    def _spec_summary(spec: Any) -> str:
+        """Compact, human-readable summary of a derived TypeSpec (avoids the verbose dataclass repr)."""
+        semantic = getattr(spec, "semantic", None)
+        dtype = getattr(spec, "dtype", None)
+        if semantic is not None or dtype is not None:
+            return " ".join(p for p in (semantic, dtype) if p) or "array"
+        name = getattr(spec, "qualname", None)  # PythonType.qualname (e.g. "list")
+        return name if isinstance(name, str) else type(spec).__name__
 
 
 # Statically-defined adapter nodes, merged into the auto-discovered set by fluxstudio/__init__.py.
 NODE_CLASS_MAPPINGS: Dict[str, Type] = {
     "Taidal_WalkDataset": WalkDatasetNode,
-    "Taidal_ShowSample": SampleViewerNode,
+    "Taidal_ExtractSample": SampleExtractorNode,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS: Dict[str, str] = {
     "Taidal_WalkDataset": "Walk Dataset (by index)",
-    "Taidal_ShowSample": "Show Sample",
+    "Taidal_ExtractSample": "Extract from Sample",
 }

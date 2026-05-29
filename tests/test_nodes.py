@@ -1,15 +1,14 @@
-"""Tests for ``fluxstudio.nodes`` — the WalkDataset stepper and SampleViewer adapter nodes.
+"""Tests for ``fluxstudio.nodes`` — the WalkDataset stepper and SampleExtractor adapter nodes.
 
-These are ComfyUI adapter glue, so the tests drive them headlessly: ``folder_paths`` (a
-ComfyUI-only module) is absent during the test run, so ``SampleViewerNode`` skips the on-disk
-preview while still returning the IMAGE tensor + info; one test injects a fake ``folder_paths``
-into ``sys.modules`` to exercise the PNG-save path.
+These are ComfyUI adapter glue, driven headlessly. ``SampleExtractorNode`` unpacks a Sample's
+``input`` / ``target`` onto typed ComfyUI sockets (IMAGE / MASK / STRING / INT / FLOAT) so it feeds
+NATIVE ComfyUI viewers; it is NOT an output node. Image rendering is delegated to
+``waivefront.visualizers.value_to_image`` (installed in the dev venv); one test forces that import to
+fail to exercise the graceful-degradation placeholder.
 """
 
 import sys
-import types
-from pathlib import Path
-from typing import Any, Tuple
+from types import ModuleType
 from unittest.mock import patch
 
 import numpy as np
@@ -17,7 +16,7 @@ import pytest
 import torch
 from dataflux.sample import Sample
 
-from fluxstudio.nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS, SampleViewerNode, WalkDatasetNode
+from fluxstudio.nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS, SampleExtractorNode, WalkDatasetNode
 
 
 class _ImgSource:
@@ -80,50 +79,114 @@ def test_walk_accepts_existing_flux() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# SampleViewerNode
+# SampleExtractorNode
 # --------------------------------------------------------------------------- #
 
 
-def test_viewer_input_types_take_a_sample_socket() -> None:
-    required = SampleViewerNode.INPUT_TYPES()["required"]
+def test_extractor_input_types_and_outputs() -> None:
+    required = SampleExtractorNode.INPUT_TYPES()["required"]
     assert required["sample"] == ("DATAFLUX_SAMPLE",)
+    assert required["field"][0] == ["input", "target"]
     assert required["colormap"][0] == "STRING"
     assert required["max_size"][0] == "INT"
-    assert SampleViewerNode.OUTPUT_NODE is True
+    assert SampleExtractorNode.RETURN_TYPES == ("IMAGE", "MASK", "STRING", "INT", "FLOAT")
+    assert SampleExtractorNode.RETURN_NAMES == ("image", "mask", "text", "int", "float")
+    # NOT an output node — it feeds native ComfyUI viewers.
+    assert getattr(SampleExtractorNode, "OUTPUT_NODE", False) is False
 
 
-def test_viewer_returns_image_tensor_and_info_headless() -> None:
-    # folder_paths is not importable here -> on-disk preview skipped, result still produced.
-    sample = Sample(input=np.zeros((8, 8, 3), dtype="uint8"), target=7, metadata={"k": "v"})
-    out = SampleViewerNode().view(sample=sample)
-    image, info = out["result"]
+def test_extract_input_image_yields_comfy_image() -> None:
+    sample = Sample(input=np.zeros((8, 8, 3), dtype="uint8"), target=3, metadata={})
+    image, mask, text, ival, fval = SampleExtractorNode().extract(sample, field="input")
+    # ComfyUI IMAGE: [B, H, W, 3] float32 in [0, 1].
     assert isinstance(image, torch.Tensor)
     assert image.shape[0] == 1 and image.shape[-1] == 3 and image.dtype == torch.float32
     assert 0.0 <= float(image.min()) and float(image.max()) <= 1.0
-    assert "target=7" in info and "k=v" in info
-    assert out["ui"]["images"] == []  # headless: no preview file written
-    assert out["ui"]["text"] == [info]
+    # A non-2-D, non-scalar field -> empty mask + zero numbers.
+    assert tuple(mask.shape) == (1, 1, 1)
+    assert ival == 0 and fval == 0.0
+    assert isinstance(text, str)
 
 
-def test_viewer_saves_preview_when_folder_paths_present(tmp_path: Path) -> None:
-    fake_fp = types.ModuleType("folder_paths")
+def test_extract_scalar_target_with_label_name() -> None:
+    sample = Sample(input=np.zeros((4, 4, 3), dtype="uint8"), target=7, metadata={"label_name": "drone_x"})
+    _image, _mask, text, ival, fval = SampleExtractorNode().extract(sample, field="target")
+    assert text == "drone_x (id=7)"
+    assert ival == 7 and fval == 7.0
 
-    def _temp_dir() -> str:
-        return str(tmp_path)
 
-    def _save_path(prefix: str, out_dir: str, width: int, height: int) -> Tuple[Any, ...]:
-        return str(tmp_path), "img", 1, "", prefix
+def test_extract_scalar_target_without_label_name() -> None:
+    sample = Sample(input=np.zeros((4, 4, 3), dtype="uint8"), target=2, metadata={})
+    _i, _m, text, ival, _f = SampleExtractorNode().extract(sample, field="target")
+    assert text == "2"
+    assert ival == 2
 
-    fake_fp.get_temp_directory = _temp_dir  # type: ignore[attr-defined]
-    fake_fp.get_save_image_path = _save_path  # type: ignore[attr-defined]
 
-    sample = Sample(input=np.zeros((8, 8, 3), dtype="uint8"), target=0)
-    with patch.dict(sys.modules, {"folder_paths": fake_fp}):
-        out = SampleViewerNode().view(sample=sample)
+def test_extract_2d_target_yields_comfy_mask() -> None:
+    sample = Sample(input=np.zeros((4, 4, 3), dtype="uint8"), target=np.eye(6, dtype=bool), metadata={})
+    _image, mask, _text, _i, _f = SampleExtractorNode().extract(sample, field="target")
+    # ComfyUI MASK: [B, H, W] float32 in [0, 1].
+    assert tuple(mask.shape) == (1, 6, 6) and mask.dtype == torch.float32
+    assert 0.0 <= float(mask.min()) and float(mask.max()) <= 1.0
 
-    imgs = out["ui"]["images"]
-    assert len(imgs) == 1 and imgs[0]["type"] == "temp"
-    assert (tmp_path / imgs[0]["filename"]).exists()
+
+def test_extract_torch_scalar_target_is_coerced() -> None:
+    sample = Sample(input=np.zeros((4, 4, 3), dtype="uint8"), target=torch.tensor(5, dtype=torch.int64))
+    _i, _m, text, ival, fval = SampleExtractorNode().extract(sample, field="target")
+    assert ival == 5 and fval == 5.0 and text == "5"
+
+
+def test_extract_text_summary_is_compact_for_arrays() -> None:
+    sample = Sample(input=torch.rand(3, 8, 8), target=0)
+    _i, _m, text, _iv, _fv = SampleExtractorNode().extract(sample, field="input")
+    # Compact summary, not the raw ArrayType dataclass repr.
+    assert "ArrayType(" not in text
+    assert "shape=(3, 8, 8)" in text and "float32" in text
+
+
+def test_extract_image_degrades_without_waivefront() -> None:
+    # Force `from waivefront.visualizers import value_to_image` to fail -> 1x1 placeholder image,
+    # while the text/number outputs still work.
+    empty = ModuleType("waivefront.visualizers")  # lacks value_to_image
+    sample = Sample(input=np.zeros((4, 4, 3), dtype="uint8"), target=9, metadata={"label_name": "x"})
+    with patch.dict(sys.modules, {"waivefront.visualizers": empty}):
+        image, _mask, text, ival, _f = SampleExtractorNode().extract(sample, field="target")
+    assert tuple(image.shape) == (1, 1, 1, 3)
+    assert text == "x (id=9)" and ival == 9
+
+
+def test_extract_bool_target_coerces_to_int() -> None:
+    sample = Sample(input=np.zeros((4, 4, 3), dtype="uint8"), target=True)
+    _i, _m, text, ival, fval = SampleExtractorNode().extract(sample, field="target")
+    assert ival == 1 and fval == 1.0 and text == "1"
+
+
+def test_extract_numpy_scalar_target() -> None:
+    sample = Sample(input=np.zeros((4, 4, 3), dtype="uint8"), target=np.int64(5))
+    _i, _m, text, ival, _f = SampleExtractorNode().extract(sample, field="target")
+    assert ival == 5 and text == "5"
+
+
+def test_extract_pil_target_yields_mask() -> None:
+    from PIL import Image
+
+    sample = Sample(input=np.zeros((4, 4, 3), dtype="uint8"), target=Image.new("L", (6, 6)))
+    _image, mask, _text, _i, _f = SampleExtractorNode().extract(sample, field="target")
+    assert tuple(mask.shape) == (1, 6, 6)
+
+
+def test_extract_string_field_passthrough() -> None:
+    sample = Sample(input="hello world", target=0)
+    _i, _m, text, _iv, _fv = SampleExtractorNode().extract(sample, field="input")
+    assert text == "hello world"
+
+
+def test_extract_text_summary_for_pythontype_and_anytype() -> None:
+    # list target -> PythonType("list") summary; None target -> AnyType fallback.
+    list_text = SampleExtractorNode().extract(Sample(input=0, target=[1, 2, 3]), field="target")[2]
+    assert list_text == "list"
+    none_text = SampleExtractorNode().extract(Sample(input=0, target=None), field="target")[2]
+    assert none_text == "AnyType"
 
 
 # --------------------------------------------------------------------------- #
@@ -133,6 +196,6 @@ def test_viewer_saves_preview_when_folder_paths_present(tmp_path: Path) -> None:
 
 def test_static_node_mappings_present() -> None:
     assert NODE_CLASS_MAPPINGS["Taidal_WalkDataset"] is WalkDatasetNode
-    assert NODE_CLASS_MAPPINGS["Taidal_ShowSample"] is SampleViewerNode
+    assert NODE_CLASS_MAPPINGS["Taidal_ExtractSample"] is SampleExtractorNode
     assert NODE_DISPLAY_NAME_MAPPINGS["Taidal_WalkDataset"] == "Walk Dataset (by index)"
-    assert NODE_DISPLAY_NAME_MAPPINGS["Taidal_ShowSample"] == "Show Sample"
+    assert NODE_DISPLAY_NAME_MAPPINGS["Taidal_ExtractSample"] == "Extract from Sample"
