@@ -23,6 +23,7 @@ import inspect
 from typing import Any, Callable, Dict, Optional, Tuple, Type
 
 import datasets
+from confluid import parse_param_docs
 from dataflux.discovery import resolve_callable, scan_module
 from dataflux.typespec import infer_sample_type
 from logflow import get_logger
@@ -61,6 +62,31 @@ DEFAULT_WIDGET_CONFIG: Dict[str, Dict[str, Any]] = {
 # Types that ride a wire as input sockets (no inline widget config).
 _SOCKET_TYPES = {SAMPLE_TYPE, SOURCE_TYPE, "HF_DATASET"}
 
+# Constructor params that name a HuggingFace dataset *identifier* (a hub repo id
+# like ``mnist`` / ``kitofrank/RFUAV``, or optionally a local imagefolder path) —
+# NOT a filesystem directory. Recognised only on HuggingFace dataset sources (see
+# ``_is_hf_dataset_id_param``); ``dataflux.sources.HuggingFaceSource`` calls it
+# ``path`` (the upstream ``datasets.load_dataset`` arg name) while sonair's
+# ``HuggingFaceClassificationDataset`` calls it ``repo_id``.
+_HF_DATASET_ID_PARAMS = {"path", "repo_id"}
+
+
+def _is_hf_dataset_id_param(param_name: str, owner: Optional[Callable]) -> bool:
+    """True when ``param_name`` is the dataset-id arg of a HuggingFace dataset source.
+
+    Gated on the ``HuggingFace`` class-name convention (a naming rule, not a
+    per-node special-case — it matches ``HuggingFaceSource``,
+    ``HuggingFaceClassificationDataset``, and any future ``HuggingFace*`` source)
+    so a plain ``path`` param on a non-HF source still resolves to the directory
+    picker via ``_map_type``.
+    """
+    return (
+        param_name in _HF_DATASET_ID_PARAMS
+        and owner is not None
+        and inspect.isclass(owner)
+        and owner.__name__.startswith("HuggingFace")
+    )
+
 
 def _map_type(param_name: str, annotation: Any) -> str:
     """Map a Python type annotation to a ComfyUI socket/widget type string."""
@@ -93,10 +119,23 @@ def _map_type(param_name: str, annotation: Any) -> str:
     return "STRING"  # Fallback
 
 
-def _widget_for(param: inspect.Parameter) -> Tuple[str, Dict[str, Any]]:
-    """Build the ``(comfy_type, config)`` pair for a single constructor parameter."""
-    comfy_type = _map_type(param.name, param.annotation)
+def _widget_for(param: inspect.Parameter, owner: Optional[Callable] = None) -> Tuple[str, Dict[str, Any]]:
+    """Build the ``(comfy_type, config)`` pair for a single constructor parameter.
+
+    ``owner`` is the callable the parameter belongs to — used to recognise a
+    HuggingFace dataset-id param (rendered as a free-text field with an optional
+    cached-dataset picker) so it does NOT fall into the directory-picker branch.
+    """
     has_default = param.default is not inspect.Parameter.empty
+
+    # HuggingFace dataset identifier: a free-text STRING (a hub repo id, or a local
+    # imagefolder path) tagged for the cached-dataset picker (web/hf_dataset_chooser.js)
+    # — NOT a directory picker, even though the param is named ``path``.
+    if _is_hf_dataset_id_param(param.name, owner):
+        default = param.default if has_default and isinstance(param.default, str) else ""
+        return "STRING", {"default": default, "taidal_widget": "HF_DATASET_ID"}
+
+    comfy_type = _map_type(param.name, param.annotation)
 
     if comfy_type in _SOCKET_TYPES:
         return comfy_type, {}
@@ -125,18 +164,29 @@ def _widget_for(param: inspect.Parameter) -> Tuple[str, Dict[str, Any]]:
 
 
 def _build_config_inputs(func: Callable) -> Dict[str, Any]:
-    """Build the ``required`` inputs dict (constructor config widgets) for a callable."""
+    """Build the ``required`` inputs dict (constructor config widgets) for a callable.
+
+    Each widget's ``tooltip`` is sourced from the callable's docstring ``Args:``
+    block (via :func:`confluid.parse_param_docs`) — the same per-parameter help
+    navigaitor surfaces in its form-spec. Document a parameter once in the class
+    docstring and it appears as a hover tooltip here; an undocumented parameter
+    simply gets no tooltip (fix it upstream, never hand-write one here).
+    """
     try:
         sig = inspect.signature(func)
     except (ValueError, TypeError):  # pragma: no cover - defensive: inspect rejects rare builtins
         return {}
+    param_docs = parse_param_docs(func)
     required: Dict[str, Any] = {}
     for name, param in sig.parameters.items():
         if name in ("self", "cls"):
             continue
         if param.kind in (inspect.Parameter.VAR_KEYWORD, inspect.Parameter.VAR_POSITIONAL):
             continue
-        comfy_type, config = _widget_for(param)
+        comfy_type, config = _widget_for(param, owner=func)
+        doc = param_docs.get(name)
+        if doc:
+            config = {**config, "tooltip": doc}
         required[name] = (comfy_type,) if not config else (comfy_type, config)
     return required
 
@@ -344,17 +394,38 @@ def create_comfy_node(
     return _build_generic_node(func, name, category)
 
 
+def _humanize_node_name(name: str) -> str:
+    """Palette label for a discovered callable: the identifier verbatim, ``_`` → space.
+
+    Deliberately does NOT use ``str.title()`` — that lowercases the tail of every
+    word and destroys the workspace's CamelCase class names (``HuggingFaceSource``
+    → ``Huggingfacesource``). Capitals are preserved as written: ``HuggingFaceSource``
+    stays ``HuggingFaceSource``; ``rescale_op`` becomes ``rescale op``.
+    """
+    return name.replace("_", " ")
+
+
 def register_module_nodes(
     module_path: str,
     target_mappings: Dict[str, Type],
     display_name_mappings: Dict[str, str],
     category: str = "Taidal",
 ) -> None:
-    """Scan a module and register all compatible callables as ComfyUI nodes."""
+    """Scan a module and register all compatible callables as ComfyUI nodes.
+
+    Private callables (names starting with ``_``) are skipped — ``scan_module``
+    returns every module-local callable, including internal helpers
+    (``_to_uint8``, ``_worker_task``, …) that are not user-facing nodes and would
+    otherwise clutter the palette as generic STRING nodes.
+    """
     logger.info(f"ComfyFlux: Scanning module {module_path} for nodes...")
     discovered = scan_module(module_path)
 
     for item in discovered:
+        if item["name"].startswith("_"):
+            logger.debug(f"ComfyFlux: Skipping private callable {item['path']}")
+            continue
+
         target_func = resolve_callable(item["path"])
         if not callable(target_func):
             continue
@@ -366,5 +437,5 @@ def register_module_nodes(
             category=category,
         )
         target_mappings[node_name] = node_class
-        display_name_mappings[node_name] = item["name"].replace("_", " ").title()
+        display_name_mappings[node_name] = _humanize_node_name(item["name"])
         logger.debug(f"ComfyFlux: Registered node {node_name} for {item['path']}")

@@ -32,6 +32,8 @@ from fluxstudio.bridge import (
     SAMPLE_TYPE,
     SOURCE_TYPE,
     _coerce_kwargs,
+    _humanize_node_name,
+    _is_hf_dataset_id_param,
     _map_type,
     create_comfy_node,
     register_module_nodes,
@@ -190,7 +192,38 @@ def test_register_module_nodes_registers_callable() -> None:
 
     assert "Taidal_sample_op" in mappings
     assert mappings["Taidal_sample_op"].CATEGORY == "Taidal/Fake"
-    assert display["Taidal_sample_op"] == "Sample Op"
+    # Verbatim identifier, ``_`` -> space, NO title-casing (capitals preserved).
+    assert display["Taidal_sample_op"] == "sample op"
+
+
+def test_register_module_nodes_preserves_camelcase_display_name() -> None:
+    """``.title()`` used to mangle CamelCase (HuggingFaceSource -> Huggingfacesource)."""
+    mappings: dict = {}
+    display: dict = {}
+    discovered = [{"path": "fake.mod:HuggingFaceSource", "name": "HuggingFaceSource"}]
+
+    with patch("fluxstudio.bridge.scan_module", return_value=discovered):
+        with patch("fluxstudio.bridge.resolve_callable", return_value=_sample_op):
+            register_module_nodes("fake.mod", mappings, display)
+
+    assert display["Taidal_HuggingFaceSource"] == "HuggingFaceSource"
+
+
+def test_register_module_nodes_skips_private_callables() -> None:
+    """Underscore-prefixed callables (internal helpers) must never become nodes."""
+    mappings: dict = {}
+    display: dict = {}
+    discovered = [
+        {"path": "fake.mod:_to_uint8", "name": "_to_uint8"},
+        {"path": "fake.mod:sample_op", "name": "sample_op"},
+    ]
+
+    with patch("fluxstudio.bridge.scan_module", return_value=discovered):
+        with patch("fluxstudio.bridge.resolve_callable", return_value=_sample_op):
+            register_module_nodes("fake.mod", mappings, display)
+
+    assert "Taidal__to_uint8" not in mappings
+    assert "Taidal_sample_op" in mappings
 
 
 def test_register_module_nodes_skips_non_callable() -> None:
@@ -424,6 +457,115 @@ def test_op_node_stashes_declared_specs() -> None:
     assert node.TAIDAL_PRODUCES == _TypedOp.PRODUCES.to_dict()
     # an un-annotated op carries None (so the canvas validator treats it as permissive)
     assert create_comfy_node(_FakeOp, "Taidal__FakeOp").TAIDAL_ACCEPTS is None
+
+
+# --------------------------------------------------------------------------- #
+# Display-name humanization (verbatim identifier, capitals preserved)
+# --------------------------------------------------------------------------- #
+
+
+def test_humanize_node_name_preserves_capitals() -> None:
+    # CamelCase stays verbatim (the .title() bug turned these to e.g. "Huggingfacesource").
+    assert _humanize_node_name("HuggingFaceSource") == "HuggingFaceSource"
+    assert _humanize_node_name("RenderSpectrogramImageOp") == "RenderSpectrogramImageOp"
+    # snake_case -> spaces, but no case change.
+    assert _humanize_node_name("rescale_op") == "rescale op"
+
+
+# --------------------------------------------------------------------------- #
+# HuggingFace dataset-id widget (free-text + optional cached picker, NOT a dir)
+# --------------------------------------------------------------------------- #
+
+
+class HuggingFaceFakeDataset:
+    """A HuggingFace* source so the dataset-id param resolves to the HF picker.
+
+    Args:
+        path: The HF dataset identifier (hub repo id or local path).
+        split: Which split to load.
+    """
+
+    def __init__(self, path: str, split: str = "train") -> None:
+        self.path = path
+        self.split = split
+
+    def __getitem__(self, i: int) -> Sample:
+        return Sample(input=i, target=None, metadata={})
+
+
+class PlainPathSource:
+    """A non-HuggingFace source whose ``path`` is a genuine directory.
+
+    Args:
+        path: A filesystem directory.
+    """
+
+    def __init__(self, path: str) -> None:
+        self.path = path
+
+    def __getitem__(self, i: int) -> Sample:
+        return Sample(input=i, target=None, metadata={})
+
+
+def test_is_hf_dataset_id_param_gating() -> None:
+    import inspect
+
+    p = inspect.Parameter("path", inspect.Parameter.POSITIONAL_OR_KEYWORD, annotation=str)
+    r = inspect.Parameter("repo_id", inspect.Parameter.POSITIONAL_OR_KEYWORD, annotation=str)
+    assert _is_hf_dataset_id_param("path", HuggingFaceFakeDataset) is True
+    assert _is_hf_dataset_id_param("repo_id", HuggingFaceFakeDataset) is True
+    # gated on the HuggingFace* class-name convention
+    assert _is_hf_dataset_id_param("path", PlainPathSource) is False
+    # only the id params, not e.g. cache_dir
+    assert _is_hf_dataset_id_param("cache_dir", HuggingFaceFakeDataset) is False
+    # parameters object signature is irrelevant — gating is name + owner
+    del p, r
+
+
+def test_hf_source_id_param_renders_as_hf_dataset_widget() -> None:
+    inputs = create_comfy_node(HuggingFaceFakeDataset, "Taidal__HFFake").INPUT_TYPES()["required"]
+    comfy_type, config = inputs["path"]
+    assert comfy_type == "STRING"
+    assert config["taidal_widget"] == "HF_DATASET_ID"  # NOT "DIRECTORY"
+    # and the docstring Args flows through as a tooltip
+    assert config.get("tooltip")
+
+
+def test_non_hf_path_param_stays_directory_picker() -> None:
+    inputs = create_comfy_node(PlainPathSource, "Taidal__PlainPath").INPUT_TYPES()["required"]
+    _, config = inputs["path"]
+    assert config["taidal_widget"] == "DIRECTORY"
+
+
+# --------------------------------------------------------------------------- #
+# Constructor-param tooltips sourced from the docstring Args: block
+# --------------------------------------------------------------------------- #
+
+
+def test_widget_tooltip_sourced_from_docstring() -> None:
+    class _DocumentedOp:
+        """An op.
+
+        Args:
+            bump: How much to add to the input.
+        """
+
+        def __init__(self, bump: int = 1) -> None:
+            self.bump = bump
+
+        def __call__(self, sample: Sample) -> Sample:
+            return sample._replace(input=sample.input + self.bump)
+
+    inputs = create_comfy_node(_DocumentedOp, "Taidal__Documented").INPUT_TYPES()["required"]
+    _, config = inputs["bump"]
+    assert config["tooltip"] == "How much to add to the input."
+
+
+def test_undocumented_param_has_no_tooltip() -> None:
+    def fn(blob: int = 0) -> None: ...
+
+    _, config = create_comfy_node(fn, "Taidal__Undoc").INPUT_TYPES()["required"]["blob"]
+    assert "tooltip" not in config
 
 
 def test_source_node_stashes_produces_none_when_undeclared() -> None:

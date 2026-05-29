@@ -44,9 +44,11 @@ Taidal nodes then appear in ComfyUI's *Add Node* menu under the `Taidal/…` cat
 
 Discovered callables are classified by their DataFlux role so they wire together by **type**, not opaque strings:
 
-- **Source** nodes (e.g. `Huggingfacesource`, under `Taidal/Dataflux/Sources`) construct a dataset and output a `DATAFLUX_SOURCE`.
-- **Op** nodes (e.g. `Rescale`, `Standardize`, `Render Spectrogram Image`) take a `DATAFLUX_SAMPLE` input **plus** their constructor config as widgets, apply the op, and output a `DATAFLUX_SAMPLE` — so ops chain.
+- **Source** nodes (e.g. `HuggingFaceSource`, under `Taidal/Dataflux/Sources`) construct a dataset and output a `DATAFLUX_SOURCE`.
+- **Op** nodes (e.g. `RescaleOp`, `StandardizeOp`, `RenderSpectrogramImageOp`) take a `DATAFLUX_SAMPLE` input **plus** their constructor config as widgets, apply the op, and output a `DATAFLUX_SAMPLE` — so ops chain.
 - **Generic** nodes (plain functions) keep scalar widgets with a `STRING` fallback.
+
+Node labels are the **verbatim** callable name (underscores become spaces; capitals are preserved — `HuggingFaceSource` stays `HuggingFaceSource`, not `Huggingfacesource`). Internal helpers (names starting with `_`) are not surfaced. Hovering any widget shows a **tooltip** sourced from the wrapped callable's docstring `Args:` block (see *Constructor-parameter tooltips* below).
 
 Two adapter nodes (under `Taidal/FluxStudio`) bridge a source to a viewer so you can walk a dataset and see samples:
 
@@ -56,13 +58,13 @@ Two adapter nodes (under `Taidal/FluxStudio`) bridge a source to a viewer so you
 A minimal "walk an image dataset" graph:
 
 ```
-Huggingfacesource  (path=ylecun/mnist, split=train, input_feature=image, target_feature=label)
-        │  DATAFLUX_SOURCE
+HuggingFaceSource  (path=ylecun/mnist, split=train, input_feature=image, target_feature=label)
+        │  DATAFLUX_SOURCE          # `path` is a free-text dataset-id field (+ cached-dataset picker), not a folder
         ▼
 Walk Dataset (by index)          # Queue Prompt repeatedly to step through samples
         │  DATAFLUX_SAMPLE
         ▼
-Rescale  (in_min=0, in_max=255)  # optional op chain — stack any Taidal op node here
+RescaleOp  (in_min=0, in_max=255)  # optional op chain — stack any Taidal op node here
         │  DATAFLUX_SAMPLE
         ▼
 Show Sample                      # renders the image + label in-canvas
@@ -92,12 +94,21 @@ Node sockets and widgets are derived from each callable's signature by `_map_typ
 | `dataflux.sample.Sample` (incl. `Iterator[Sample]`) | `DATAFLUX_SAMPLE` socket |
 | a `Sample`-yielding source class | `DATAFLUX_SOURCE` output socket |
 | `datasets.Dataset` | `HF_DATASET` socket |
+| the dataset-id param of a `HuggingFace*` source (`repo_id` / `path`) | free-text `STRING` + optional cached-dataset picker (`web/hf_dataset_chooser.js` → `/taidal/hf_datasets`), tagged `taidal_widget="HF_DATASET_ID"` |
 | `pathlib.Path`, or a param named `*path*` / `*dir*` / `*root*` / `*folder*` | directory-picker `STRING` (`web/directory_chooser.js` → `/taidal/choose_directory`) |
 | anything else | `STRING` fallback |
 
 `DATAFLUX_SOURCE` and `DATAFLUX_SAMPLE` are FluxStudio socket types that carry the live `Flux` / `Sample` objects between nodes (ComfyUI connects two sockets only when their type strings match), which is what lets ops chain into a pipeline.
 
 The directory picker calls the `/taidal/choose_directory` route registered in `fluxstudio/__init__.py`, currently a native **macOS** folder dialog (`osascript`). Extend `TYPE_MAP` / `_map_type` to support new types — never special-case an individual node.
+
+### HuggingFace dataset-id field
+
+A HuggingFace dataset source's identifier is a **name**, not a folder — `dataflux.sources.HuggingFaceSource` happens to call it `path` (mirroring `datasets.load_dataset`), and sonair's `HuggingFaceClassificationDataset` calls it `repo_id`. Either way FluxStudio renders it as a free-text `STRING` (so you can type any Hub repo id like `kitofrank/RFUAV`, or a local imagefolder path), **not** the directory picker. `web/hf_dataset_chooser.js` adds an optional “📚 cached dataset” combo populated from the `/taidal/hf_datasets` route (`huggingface_hub.scan_cache_dir()`, dataset repos only) — selecting one fills the text field, which stays editable. The field is detected by the `HuggingFace*` class-name convention, so any future `HuggingFace*` source inherits it automatically.
+
+### Constructor-parameter tooltips
+
+Each widget's hover tooltip is sourced from the wrapped callable's docstring `Args:` block (parsed by `confluid.parse_param_docs`) — the **same** per-parameter help [navigaitor](https://github.com/Gearlux/navigaitor) surfaces as JSON-Schema `description`s in its visual editor. Document a constructor parameter once in the upstream class's `Args:` and it shows up in both GUIs. A parameter with no `Args:` entry simply has no tooltip; the fix is to document it in dataflux / waivefront, never to hand-write a tooltip in FluxStudio.
 
 ## Connection filtering
 

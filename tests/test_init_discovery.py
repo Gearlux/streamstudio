@@ -90,6 +90,7 @@ class _FakeRoutes:
         self.registered_path: Optional[str] = None
         self.get_handler: Any = None
         self.get_path: Optional[str] = None
+        self.get_handlers: dict = {}
 
     def __iter__(self) -> Iterator[SimpleNamespace]:
         if self._existing:
@@ -107,6 +108,7 @@ class _FakeRoutes:
         def decorator(fn):  # type: ignore[no-untyped-def]
             self.get_path = path
             self.get_handler = fn
+            self.get_handlers[path] = fn
             return fn
 
         return decorator
@@ -195,6 +197,38 @@ def test_route_not_re_registered_when_already_present() -> None:
     # must not define a second handler.
     with _fake_comfy(existing_route=True) as (routes, _web):
         assert routes.handler is None
+
+
+def test_hf_datasets_route_lists_cached_datasets() -> None:
+    # The /taidal/hf_datasets GET handler returns whatever list_cached_hf_datasets() yields,
+    # which the HF dataset-id picker (web/hf_dataset_chooser.js) offers as options.
+    with _fake_comfy() as (routes, web):
+        handler = routes.get_handlers.get("/taidal/hf_datasets")
+        assert handler is not None
+        with patch.object(fluxstudio, "list_cached_hf_datasets", return_value=["cifar10", "mnist"]):
+            asyncio.run(handler(SimpleNamespace()))
+    data, _kwargs = web.calls[-1]
+    assert data == {"datasets": ["cifar10", "mnist"]}
+
+
+def test_list_cached_hf_datasets_filters_to_dataset_repos() -> None:
+    ds = SimpleNamespace(repo_id="mnist", repo_type="dataset")
+    model = SimpleNamespace(repo_id="bert-base", repo_type="model")
+    fake_hub = ModuleType("huggingface_hub")
+    fake_hub.scan_cache_dir = lambda: SimpleNamespace(repos=[model, ds])  # type: ignore[attr-defined]
+    with patch.dict(sys.modules, {"huggingface_hub": fake_hub}):
+        assert fluxstudio.list_cached_hf_datasets() == ["mnist"]
+
+
+def test_list_cached_hf_datasets_degrades_to_empty_on_error() -> None:
+    def _boom() -> Any:
+        raise RuntimeError("no cache dir")
+
+    fake_hub = ModuleType("huggingface_hub")
+    fake_hub.scan_cache_dir = _boom  # type: ignore[attr-defined]
+    with patch.dict(sys.modules, {"huggingface_hub": fake_hub}):
+        # Must never raise — the picker is a convenience over a free-text field.
+        assert fluxstudio.list_cached_hf_datasets() == []
 
 
 def test_node_specs_route_returns_declared_specs() -> None:

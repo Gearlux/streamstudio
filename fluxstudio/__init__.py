@@ -15,6 +15,26 @@ NODE_CLASS_MAPPINGS: Dict[str, Any] = {}
 NODE_DISPLAY_NAME_MAPPINGS: Dict[str, str] = {}
 
 
+def list_cached_hf_datasets() -> list:
+    """Return sorted repo ids of HuggingFace **datasets** already in the local cache.
+
+    Backs the ``/taidal/hf_datasets`` route + the HF dataset-id picker
+    (``web/hf_dataset_chooser.js``). Degrades to an empty list on ANY failure
+    (``huggingface_hub`` not installed, no cache dir, scan error) — the picker is
+    a convenience over a free-text field, so it must never break node discovery
+    or the editor.
+    """
+    try:
+        from huggingface_hub import scan_cache_dir
+
+        info = scan_cache_dir()
+        ids = {repo.repo_id for repo in info.repos if getattr(repo, "repo_type", None) == "dataset"}
+        return sorted(ids)
+    except Exception as e:
+        logger.debug(f"list_cached_hf_datasets: returning [] ({type(e).__name__}: {e})")
+        return []
+
+
 def _discover_and_register_nodes() -> None:
     """Dynamically discover and register ComfyUI nodes via entry points."""
     try:
@@ -77,6 +97,18 @@ try:
                 return web.json_response({"path": ""})
             except Exception as e:
                 return web.json_response({"error": str(e)}, status=500)
+
+    # List locally-cached HuggingFace datasets so the HF dataset-id field
+    # (web/hf_dataset_chooser.js) can offer them as an optional picker. Free-text entry
+    # is preserved on the widget itself; this only surfaces what's already downloaded.
+    hf_route_exists = any(
+        r.path == "/taidal/hf_datasets" and r.method == "GET" for r in server.PromptServer.instance.routes
+    )
+    if not hf_route_exists:
+
+        @server.PromptServer.instance.routes.get("/taidal/hf_datasets")
+        async def hf_datasets_handler(request: Any) -> Any:
+            return web.json_response({"datasets": list_cached_hf_datasets()})
 
     # Serve each node's declared input/output type spec so the canvas connection-validator
     # (web/connection_validator.js) can reject incompatible Sample wires live in the editor.
