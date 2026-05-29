@@ -50,10 +50,12 @@ Discovered callables are classified by their DataFlux role so they wire together
 
 Node labels are the **verbatim** callable name (underscores become spaces; capitals are preserved — `HuggingFaceSource` stays `HuggingFaceSource`, not `Huggingfacesource`). Internal helpers (names starting with `_`) are not surfaced. Hovering any widget shows a **tooltip** sourced from the wrapped callable's docstring `Args:` block (see *Constructor-parameter tooltips* below).
 
-Two adapter nodes (under `Taidal/FluxStudio`) bridge a source to a viewer so you can walk a dataset and see samples:
+Two adapter nodes (under `Taidal/FluxStudio`) let you step through a dataset and view samples with **native** ComfyUI viewers:
 
 - **Walk Dataset (by index)** — takes a `DATAFLUX_SOURCE` and an `index`, and outputs the `Sample` at that index (`source[index]`). The `index` widget uses ComfyUI's `control_after_generate`, so each **Queue Prompt** advances to the next sample — set the control to *fixed* (or `index` `0`) to reset. `wrap` cycles modulo the dataset length.
-- **Show Sample** — an `OUTPUT_NODE` that renders `sample.input` in-canvas (via `waivefront.visualizers.sample_to_image`, handling PIL / numpy / torch / boolean masks, with a text fallback) and surfaces `sample.target` + `sample.metadata`. It also outputs an `IMAGE` (chainable to native ComfyUI image nodes) and an `info` `STRING`.
+- **Extract from Sample** — takes a `DATAFLUX_SAMPLE` and a `field` selector (`input` / `target`) and unpacks the selected value onto **typed** sockets — `IMAGE`, `MASK`, `STRING`, `INT`, `FLOAT` — so you wire the one your viewer expects. ComfyUI types sockets statically, so instead of retyping one socket per run it surfaces every plausible type; *which* one is meaningful is derived from the sample's features (`Sample.describe()`). `IMAGE` is rendered via `waivefront.visualizers.value_to_image` (PIL / tensor / 2-D map → image; a non-visual value renders as a small text image); `MASK` carries a 2-D field (segmentation targets); `STRING` is a label/scalar (with `label_name` when the target has it) or a compact type summary; `INT` / `FLOAT` carry a scalar (e.g. a class id). Drop two of these next to each other (one set to `input`, one to `target`) to view both at once.
+
+This replaces the old all-in-one "Show Sample" output node: extraction lives here, **previewing lives in ComfyUI's own nodes** — wire `IMAGE` into *Preview Image*, `STRING` into a text node, etc.
 
 A minimal "walk an image dataset" graph:
 
@@ -67,10 +69,13 @@ Walk Dataset (by index)          # Queue Prompt repeatedly to step through sampl
 RescaleOp  (in_min=0, in_max=255)  # optional op chain — stack any Taidal op node here
         │  DATAFLUX_SAMPLE
         ▼
-Show Sample                      # renders the image + label in-canvas
+Extract from Sample (field=input)
+        │  IMAGE                    # also: MASK / STRING / INT / FLOAT
+        ▼
+Preview Image                    # ← native ComfyUI viewer
 ```
 
-`Show Sample` requires the `[waivefront]` extra (its renderer lives in waivefront).
+`Extract from Sample` needs the `[waivefront]` extra to render the `IMAGE` socket (the renderer lives in waivefront); the `STRING` / `INT` / `FLOAT` outputs work without it.
 
 ## How nodes are generated
 
