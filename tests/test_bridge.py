@@ -226,6 +226,42 @@ def test_register_module_nodes_skips_private_callables() -> None:
     assert "Taidal_sample_op" in mappings
 
 
+def test_register_module_nodes_skips_generic_dataset_engines() -> None:
+    """Flux / JointFlux (``@configurable(category="engine")``) are runtime engines, not nodes.
+
+    A source node already wraps itself in a Flux and ops are separate nodes, so the engine's
+    constructor args (source / ops / fluxes) can't be filled by widgets — it is not a buildable node.
+    A concrete source (no ``engine`` category) is still registered.
+    """
+
+    class _FakeFlux:
+        __confluid_category__ = "engine"
+
+        def __init__(self, source: object = None) -> None: ...
+
+        def __getitem__(self, i: int) -> Sample:
+            return Sample(input=i, target=None, metadata={})
+
+    class _FakeConcreteSource:  # uncategorised concrete source -> kept
+        def __getitem__(self, i: int) -> Sample:
+            return Sample(input=i, target=None, metadata={})
+
+    mappings: dict = {}
+    display: dict = {}
+    discovered = [
+        {"path": "fake.mod:FakeFlux", "name": "FakeFlux"},
+        {"path": "fake.mod:RealSource", "name": "RealSource"},
+    ]
+    resolved = {"fake.mod:FakeFlux": _FakeFlux, "fake.mod:RealSource": _FakeConcreteSource}
+
+    with patch("fluxstudio.bridge.scan_module", return_value=discovered):
+        with patch("fluxstudio.bridge.resolve_callable", side_effect=lambda p: resolved[p]):
+            register_module_nodes("fake.mod", mappings, display)
+
+    assert "Taidal_FakeFlux" not in mappings  # generic engine hidden
+    assert "Taidal_RealSource" in mappings  # concrete source kept
+
+
 def test_register_module_nodes_skips_non_callable() -> None:
     mappings: dict = {}
     display: dict = {}

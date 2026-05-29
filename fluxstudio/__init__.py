@@ -6,6 +6,7 @@ from typing import Any, Dict
 from logflow import get_logger
 
 from fluxstudio.bridge import register_module_nodes
+from fluxstudio.export import UnsupportedTopologyError, export_ops_yaml
 from fluxstudio.nodes import NODE_CLASS_MAPPINGS as _STATIC_NODE_CLASS_MAPPINGS
 from fluxstudio.nodes import NODE_DISPLAY_NAME_MAPPINGS as _STATIC_NODE_DISPLAY_NAME_MAPPINGS
 
@@ -127,6 +128,34 @@ try:
                 for node_name, node_cls in NODE_CLASS_MAPPINGS.items()
             }
             return web.json_response(specs)
+
+    # Compile the current canvas's ops into a Confluid YAML op-list (drops the source +
+    # Walk/Extract adapters) so it can be reattached to any source via
+    # ``Flux.from_ops_yaml`` / ``confluid.materialize(confluid.load(path)["ops"])``.
+    # Backs web/export_ops.js: the button POSTs ``{prompt: graphToPrompt(), path?: ...}``.
+    export_route_exists = any(
+        r.path == "/taidal/export_ops" and r.method == "POST" for r in server.PromptServer.instance.routes
+    )
+    if not export_route_exists:
+
+        @server.PromptServer.instance.routes.post("/taidal/export_ops")
+        async def export_ops_handler(request: Any) -> Any:
+            try:
+                body = await request.json()
+                prompt = body.get("prompt", body)  # accept a bare prompt or {prompt: ...}
+                yaml_doc = export_ops_yaml(prompt, NODE_CLASS_MAPPINGS)
+                out_path = body.get("path")
+                if out_path:
+                    with open(out_path, "w") as fh:
+                        fh.write(yaml_doc)
+                    return web.json_response({"yaml": yaml_doc, "path": out_path})
+                return web.json_response({"yaml": yaml_doc})
+            except UnsupportedTopologyError as e:
+                # 400: the graph is structurally not exportable (fan-in, multi-head, …) —
+                # an actionable user error, not a server fault.
+                return web.json_response({"error": str(e)}, status=400)
+            except Exception as e:
+                return web.json_response({"error": str(e)}, status=500)
 
 except ImportError:
     # Not running inside ComfyUI

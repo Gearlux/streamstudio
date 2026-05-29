@@ -88,18 +88,26 @@ class _FakeRoutes:
         self._existing = existing
         self.handler: Any = None
         self.registered_path: Optional[str] = None
+        self.post_handlers: dict = {}
         self.get_handler: Any = None
         self.get_path: Optional[str] = None
         self.get_handlers: dict = {}
 
     def __iter__(self) -> Iterator[SimpleNamespace]:
+        # When ``existing`` is True, report ALL taidal routes as already registered so the
+        # skip branch of every registration block is exercised (there are several POST/GET
+        # routes now — choose_directory, export_ops, hf_datasets, node_specs).
         if self._existing:
             yield SimpleNamespace(path="/taidal/choose_directory", method="POST")
+            yield SimpleNamespace(path="/taidal/export_ops", method="POST")
+            yield SimpleNamespace(path="/taidal/hf_datasets", method="GET")
+            yield SimpleNamespace(path="/taidal/node_specs", method="GET")
 
     def post(self, path: str):  # type: ignore[no-untyped-def]
         def decorator(fn):  # type: ignore[no-untyped-def]
             self.registered_path = path
             self.handler = fn
+            self.post_handlers[path] = fn
             return fn
 
         return decorator
@@ -160,8 +168,7 @@ def _fake_comfy(existing_route: bool = False) -> Iterator[tuple]:
 
 def test_route_registered_and_returns_selected_path() -> None:
     with _fake_comfy() as (routes, web):
-        assert routes.registered_path == "/taidal/choose_directory"
-        handler = routes.handler
+        handler = routes.post_handlers.get("/taidal/choose_directory")
         assert handler is not None
 
         with patch("subprocess.run", return_value=SimpleNamespace(stdout="/Users/me/data\n")) as run_mock:
@@ -175,7 +182,7 @@ def test_route_registered_and_returns_selected_path() -> None:
 
 def test_route_returns_empty_path_on_cancel() -> None:
     with _fake_comfy() as (routes, web):
-        handler = routes.handler
+        handler = routes.post_handlers["/taidal/choose_directory"]
         with patch("subprocess.run", side_effect=subprocess.CalledProcessError(1, "osascript")):
             asyncio.run(handler(SimpleNamespace()))
     # A CalledProcessError means the user clicked Cancel -> empty path, no error.
@@ -184,7 +191,7 @@ def test_route_returns_empty_path_on_cancel() -> None:
 
 def test_route_returns_500_on_generic_error() -> None:
     with _fake_comfy() as (routes, web):
-        handler = routes.handler
+        handler = routes.post_handlers["/taidal/choose_directory"]
         with patch("subprocess.run", side_effect=RuntimeError("kaboom")):
             asyncio.run(handler(SimpleNamespace()))
     data, kwargs = web.calls[-1]
@@ -193,10 +200,56 @@ def test_route_returns_500_on_generic_error() -> None:
 
 
 def test_route_not_re_registered_when_already_present() -> None:
-    # If ComfyUI (or a prior import) already registered the route, the block
-    # must not define a second handler.
+    # If ComfyUI (or a prior import) already registered the routes, the blocks
+    # must not define second handlers.
     with _fake_comfy(existing_route=True) as (routes, _web):
-        assert routes.handler is None
+        assert routes.post_handlers == {}
+
+
+def _json_request(body: Any) -> SimpleNamespace:
+    """A fake aiohttp request whose ``await request.json()`` yields ``body``."""
+
+    async def _json() -> Any:
+        return body
+
+    return SimpleNamespace(json=_json)
+
+
+def test_export_ops_route_returns_yaml() -> None:
+    # The /taidal/export_ops POST handler compiles the posted graph's ops into a Confluid
+    # YAML op-list using the live NODE_CLASS_MAPPINGS.
+    from dataflux.ops.torch import RescaleOp
+
+    from fluxstudio.bridge import create_comfy_node
+
+    with _fake_comfy() as (routes, web):
+        handler = routes.post_handlers.get("/taidal/export_ops")
+        assert handler is not None
+        fluxstudio.NODE_CLASS_MAPPINGS["Taidal_RescaleOp"] = create_comfy_node(RescaleOp, "Taidal_RescaleOp")
+        prompt = {"1": {"class_type": "Taidal_RescaleOp", "inputs": {"in_min": 0.0, "in_max": 255.0}}}
+        asyncio.run(handler(_json_request({"prompt": prompt})))
+    data, _kwargs = web.calls[-1]
+    assert "ops:" in data["yaml"]
+    assert "RescaleOp" in data["yaml"]
+
+
+def test_export_ops_route_400_on_bad_topology() -> None:
+    # A structurally-unexportable graph (two heads) -> UnsupportedTopologyError -> 400.
+    from dataflux.ops.torch import RescaleOp
+
+    from fluxstudio.bridge import create_comfy_node
+
+    with _fake_comfy() as (routes, web):
+        handler = routes.post_handlers["/taidal/export_ops"]
+        fluxstudio.NODE_CLASS_MAPPINGS["Taidal_RescaleOp"] = create_comfy_node(RescaleOp, "Taidal_RescaleOp")
+        prompt = {
+            "2": {"class_type": "Taidal_RescaleOp", "inputs": {"sample": ["x", 0], "in_min": 0.0, "in_max": 255.0}},
+            "3": {"class_type": "Taidal_RescaleOp", "inputs": {"sample": ["y", 0], "in_min": 0.0, "in_max": 1.0}},
+        }
+        asyncio.run(handler(_json_request({"prompt": prompt})))
+    data, kwargs = web.calls[-1]
+    assert "error" in data
+    assert kwargs == {"status": 400}
 
 
 def test_hf_datasets_route_lists_cached_datasets() -> None:

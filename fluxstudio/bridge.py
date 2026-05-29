@@ -24,7 +24,7 @@ from typing import Any, Callable, Dict, Optional, Tuple, Type
 
 import datasets
 from confluid import parse_param_docs
-from dataflux.discovery import resolve_callable, scan_module
+from dataflux.discovery import get_callable_path, resolve_callable, scan_module
 from dataflux.typespec import infer_sample_type
 from logflow import get_logger
 
@@ -69,6 +69,15 @@ _SOCKET_TYPES = {SAMPLE_TYPE, SOURCE_TYPE, "HF_DATASET"}
 # ``path`` (the upstream ``datasets.load_dataset`` arg name) while sonair's
 # ``HuggingFaceClassificationDataset`` calls it ``repo_id``.
 _HF_DATASET_ID_PARAMS = {"path", "repo_id"}
+
+# The generic, task-agnostic dataflux *engines* (``Flux`` / ``JointFlux`` / ``DatasetSplit``)
+# carry ``@configurable(category="engine")`` (see dataflux/confluid taxonomy). They are runtime
+# CONTAINERS the bridge builds implicitly — a source node already wraps itself via
+# ``Flux.from_source`` and ops are separate nodes — so their constructor args (``source`` /
+# ``ops`` / ``fluxes``) can't be filled by widgets and they make no sense as buildable palette
+# nodes. ``register_module_nodes`` skips them. Concrete data sources carry ``category="source"``
+# (or are task-scoped, ``classification_dataset`` …) and ARE surfaced as source nodes.
+_ENGINE_CATEGORY = "engine"
 
 
 def _is_hf_dataset_id_param(param_name: str, owner: Optional[Callable]) -> bool:
@@ -269,6 +278,22 @@ def _is_source(obj: Any) -> bool:
     return bool(obj.__name__.endswith("Source"))
 
 
+def _safe_callable_path(func: Callable) -> Optional[str]:
+    """Importable ``module:qualname`` for a discovered callable, or ``None``.
+
+    Used to stamp ``TAIDAL_CALLABLE_PATH`` so the ops-export compiler
+    (:mod:`fluxstudio.export`) can recover the wrapped class from a generated
+    node and re-emit it as a Confluid ``!class:`` marker. Anonymous callables
+    (lambdas, locals — only seen in tests) have no resolvable path; return
+    ``None`` rather than raise, since the path is metadata, not load-bearing
+    for normal canvas execution.
+    """
+    try:
+        return get_callable_path(func)
+    except (TypeError, ValueError):  # pragma: no cover - defensive: anonymous/odd callables
+        return None
+
+
 def _node_class(
     name: str,
     category: str,
@@ -278,6 +303,8 @@ def _node_class(
     return_names: Optional[Tuple[str, ...]] = None,
     accepts: Optional[Dict[str, Any]] = None,
     produces: Optional[Dict[str, Any]] = None,
+    kind: Optional[str] = None,
+    callable_path: Optional[str] = None,
 ) -> Type:
     """Assemble a ComfyUI node class from its parts.
 
@@ -288,6 +315,11 @@ def _node_class(
     ``None``); they ride on the node class as ``TAIDAL_ACCEPTS`` / ``TAIDAL_PRODUCES`` so the
     ``/taidal/node_specs`` route and the canvas connection-validator can read them. They do NOT change
     the ComfyUI socket strings (every Sample wire stays ``DATAFLUX_SAMPLE`` so the pipeline still chains).
+
+    ``kind`` (``"op"`` / ``"source"`` / ``"generic"``) and ``callable_path`` (importable
+    ``module:qualname``) ride on the class as ``TAIDAL_NODE_KIND`` / ``TAIDAL_CALLABLE_PATH`` so the
+    ops-export compiler (:mod:`fluxstudio.export`) can pick out the op nodes from a saved graph and
+    re-emit each as a Confluid ``!class:`` marker. They have no effect on canvas execution.
     """
     attrs: Dict[str, Any] = {
         "INPUT_TYPES": classmethod(lambda cls: {"required": inputs}),
@@ -297,6 +329,8 @@ def _node_class(
         "execute": execute,
         "TAIDAL_ACCEPTS": accepts,
         "TAIDAL_PRODUCES": produces,
+        "TAIDAL_NODE_KIND": kind,
+        "TAIDAL_CALLABLE_PATH": callable_path,
     }
     if return_names is not None:
         attrs["RETURN_NAMES"] = return_names
@@ -321,6 +355,8 @@ def _build_source_node(cls: Callable, name: str, category: str) -> Type:
         execute,
         return_names=("source",),
         produces=_spec_to_dict(cls, "PRODUCES"),
+        kind="source",
+        callable_path=_safe_callable_path(cls),
     )
 
 
@@ -357,6 +393,8 @@ def _build_op_node(cls: Callable, name: str, category: str) -> Type:
         return_names=("sample",),
         accepts=_spec_to_dict(cls, "ACCEPTS"),
         produces=_spec_to_dict(cls, "PRODUCES"),
+        kind="op",
+        callable_path=_safe_callable_path(cls),
     )
 
 
@@ -372,7 +410,15 @@ def _build_generic_node(func: Callable, name: str, category: str) -> Type:
         result = func(**_coerce_kwargs(func, kwargs))
         return result if isinstance(result, tuple) else (result,)
 
-    return _node_class(name, category, inputs, (return_type,), execute)
+    return _node_class(
+        name,
+        category,
+        inputs,
+        (return_type,),
+        execute,
+        kind="generic",
+        callable_path=_safe_callable_path(func),
+    )
 
 
 def create_comfy_node(
@@ -413,10 +459,14 @@ def register_module_nodes(
 ) -> None:
     """Scan a module and register all compatible callables as ComfyUI nodes.
 
-    Private callables (names starting with ``_``) are skipped — ``scan_module``
-    returns every module-local callable, including internal helpers
-    (``_to_uint8``, ``_worker_task``, …) that are not user-facing nodes and would
-    otherwise clutter the palette as generic STRING nodes.
+    Two classes of callable are skipped:
+
+    * Private callables (names starting with ``_``) — ``scan_module`` returns every
+      module-local callable, including internal helpers (``_to_uint8`` /
+      ``_worker_task`` …) that are not user-facing nodes.
+    * The generic dataflux engines (``@configurable(category="engine")`` →
+      ``Flux`` / ``JointFlux`` / ``DatasetSplit``) — runtime containers the bridge builds
+      implicitly, not buildable palette nodes (see ``_ENGINE_CATEGORY``).
     """
     logger.info(f"ComfyFlux: Scanning module {module_path} for nodes...")
     discovered = scan_module(module_path)
@@ -428,6 +478,10 @@ def register_module_nodes(
 
         target_func = resolve_callable(item["path"])
         if not callable(target_func):
+            continue
+
+        if getattr(target_func, "__confluid_category__", None) == _ENGINE_CATEGORY:
+            logger.debug(f"ComfyFlux: Skipping generic dataset engine {item['path']} (not a buildable node)")
             continue
 
         node_name = f"Taidal_{item['name']}"

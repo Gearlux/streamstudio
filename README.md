@@ -77,6 +77,51 @@ Preview Image                    # ← native ComfyUI viewer
 
 `Extract from Sample` needs the `[waivefront]` extra to render the `IMAGE` socket (the renderer lives in waivefront); the `STRING` / `INT` / `FLOAT` outputs work without it.
 
+## Exporting ops to a Flux
+
+The **op** half of a canvas graph (everything between the source and the viewer) can be exported back to a Confluid YAML op-list and reattached to *any* source in code — the inverse of how the canvas builds a pipeline. The source and the Walk/Extract adapter nodes are dropped; only the `DATAFLUX_SAMPLE → DATAFLUX_SAMPLE` op chain is emitted.
+
+Two equivalent entry points (both call the same compiler, `fluxstudio.export.export_ops_yaml`):
+
+- **On the canvas:** the **Taidal → "Export Taidal Ops → Confluid YAML"** menu command (`web/export_ops.js`) POSTs the current graph to the `/taidal/export_ops` route and downloads `ops.yaml`.
+- **Offline CLI:** export a saved **API-format** graph (ComfyUI dev-mode *Save (API Format)*):
+
+  ```bash
+  fluxstudio export graph.json -o ops.yaml      # omit -o to write YAML to stdout
+  ```
+
+  This works without a running ComfyUI — importing `fluxstudio` populates the node registry via entry-point discovery.
+
+The result is a `{ops: [...]}` document of `!class:…()` markers, e.g.:
+
+```yaml
+ops:
+- !class:dataflux.ops.torch.RescaleOp()
+  in_min: 0.0
+  in_max: 255.0
+- !class:dataflux.ops.torch.RescaleOp()
+  in_min: 0.0
+  in_max: 1.0
+  out_max: 10.0
+```
+
+Reattach it to your own source:
+
+```python
+from dataflux import Flux
+from dataflux.sources import HuggingFaceSource
+
+flux = Flux.from_ops_yaml("ops.yaml", source=HuggingFaceSource(path="ylecun/mnist"))
+# or, equivalently, the manual form:
+#   import confluid
+#   ops = confluid.materialize(confluid.load("ops.yaml")["ops"])
+#   flux = Flux(source=my_source, ops=ops)
+```
+
+> `Flux.from_ops_yaml` **materializes** the markers before attaching them: `confluid.load` leaves `!class:` markers nested under a mapping key deferred, and `Flux` refuses to iterate deferred markers by design — so a plain `load(...)["ops"]` is not enough. Use the helper (or `confluid.materialize`).
+
+**Scope.** v1 exports a single linear op chain, plus **fan-out** (one op output wired to ≥2 op nodes) compiled to a `dataflux.ops.tee.Tee`. The compiler is a faithful translator — it does **not** auto-insert `Copy`/`Stash` for branch isolation; place those op nodes explicitly. True multi-input merges (fan-in), multiple disconnected chains, and widget inputs driven by a link raise an `UnsupportedTopologyError` (HTTP 400 from the route) with an actionable message.
+
 ## How nodes are generated
 
 FluxStudio never hand-defines a node. At ComfyUI startup, `_discover_and_register_nodes()` (`fluxstudio/__init__.py`):
@@ -84,6 +129,8 @@ FluxStudio never hand-defines a node. At ComfyUI startup, `_discover_and_registe
 1. Enumerates the `confluid.configurables` entry-point group via `importlib.metadata`.
 2. For each module, `dataflux.discovery.scan_module` finds the compatible callables.
 3. `register_module_nodes` / `create_comfy_node` (`fluxstudio/bridge.py`) classify each callable (Source / Op / Generic — see *Building a pipeline*) and wrap it in a ComfyUI node class, keyed `Taidal_<callable>` and filed under a `Taidal/<Module/Path>` category.
+
+Two kinds of callable are deliberately **not** surfaced: private helpers (names starting with `_`), and the generic, task-agnostic dataflux **engines** `Flux` / `JointFlux` / `DatasetSplit` (tagged `@configurable(category="engine")`). The engines are runtime *containers* the canvas builds implicitly — a Source node already outputs a `Flux`, and ops are separate nodes — so there's nothing to configure on a `Flux` node (its `source` / `ops` args can't be filled by widgets). You build the dataset by wiring `Source → Op → …`, not by adding a `Flux` node. (Concrete data sources carry `category="source"` and DO appear.)
 
 A module that fails to import or scan is skipped at `debug` level, so one package's missing optional dependency never empties the palette.
 
