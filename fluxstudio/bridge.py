@@ -8,19 +8,23 @@ wired on the ComfyUI canvas — instead of every socket collapsing to ``STRING``
   constructor config as widgets and outputs a ``DATAFLUX_SOURCE`` (a
   :class:`dataflux.core.Flux` wrapping the constructed source).
 * **Op** — a ``@configurable`` class with ``__call__(self, sample: Sample) ->
-  Optional[Sample]`` (e.g. ``RescaleOp``, ``RenderSpectrogramImageOp``). The node exposes
-  the constructor config as widgets PLUS one ``DATAFLUX_SAMPLE`` input socket; on execute it
-  constructs the op and applies it to the incoming sample, outputting a ``DATAFLUX_SAMPLE``.
+  Optional[Sample]`` (e.g. ``RescaleOp``, ``RenderSpectrogramImageOp``). The node is **dual-mode**:
+  constructor config as widgets, an OPTIONAL ``DATAFLUX_SAMPLE`` input, and TWO outputs —
+  ``sample`` (the op applied to the input sample, for linear chaining) and ``op`` (the constructed
+  op as a ``DATAFLUX_OP`` value, so it can feed a higher-order op). A higher-order op whose
+  constructor takes an op-list (``Enable`` / ``Parallel`` / ``Tee``) gets dynamic ``DATAFLUX_OP``
+  inputs (``op_0`` …) instead of a STRING widget.
 * **Generic** — any other callable (plain value functions): scalar widgets with a ``STRING``
   fallback (the original behaviour, preserved).
 
-The custom socket type strings ``DATAFLUX_SOURCE`` / ``DATAFLUX_SAMPLE`` carry the live Python
-objects (``Flux`` / ``Sample``) between nodes — ComfyUI connects two sockets iff their type
-strings are equal — which is what lets ops chain into a pipeline.
+The custom socket type strings ``DATAFLUX_SOURCE`` / ``DATAFLUX_SAMPLE`` / ``DATAFLUX_OP`` carry the
+live Python objects (``Flux`` / ``Sample`` / a constructed op) between nodes — ComfyUI connects two
+sockets iff their type strings are equal — which is what lets ops chain (via ``DATAFLUX_SAMPLE``) and
+compose into higher-order ops (via ``DATAFLUX_OP``).
 """
 
 import inspect
-from typing import Any, Callable, Dict, Optional, Tuple, Type
+from typing import AbstractSet, Any, Callable, Dict, List, Optional, Tuple, Type
 
 import datasets
 from confluid import parse_param_docs
@@ -42,6 +46,10 @@ def _spec_to_dict(cls: Any, attr: str) -> Optional[Dict[str, Any]]:
 # Custom ComfyUI socket types for live DataFlux objects passed between nodes.
 SAMPLE_TYPE = "DATAFLUX_SAMPLE"
 SOURCE_TYPE = "DATAFLUX_SOURCE"
+# A constructed op instance (a callable ``Sample -> Optional[Sample]``) ridden as a wire, so an op
+# node's ``op`` output can feed a higher-order op (``Enable`` / ``Parallel`` / ``Tee``) that takes
+# ops as constructor input. Distinct from ``DATAFLUX_SAMPLE`` (data) — this carries the op itself.
+OP_TYPE = "DATAFLUX_OP"
 
 # Mapping Python types to ComfyUI widget types.
 TYPE_MAP = {
@@ -60,7 +68,13 @@ DEFAULT_WIDGET_CONFIG: Dict[str, Dict[str, Any]] = {
 }
 
 # Types that ride a wire as input sockets (no inline widget config).
-_SOCKET_TYPES = {SAMPLE_TYPE, SOURCE_TYPE, "HF_DATASET"}
+_SOCKET_TYPES = {SAMPLE_TYPE, SOURCE_TYPE, OP_TYPE, "HF_DATASET"}
+
+# Constructor params (on higher-order ops) that hold a LIST OF OPS — rendered as dynamic
+# ``DATAFLUX_OP`` multi-inputs (``op_0``, ``op_1``, … via ``web/op_list.js``) instead of a STRING
+# widget, so concrete op nodes wire into them. ``Enable``/``Parallel`` take ``ops``; ``Tee`` takes
+# ``branches`` (a list of op-lists — v1 wraps each connected op as its own single-op branch).
+_OP_LIST_PARAMS = {"ops", "branches"}
 
 # Constructor params that name a HuggingFace dataset *identifier* (a hub repo id
 # like ``mnist`` / ``kitofrank/RFUAV``, or optionally a local imagefolder path) —
@@ -70,14 +84,17 @@ _SOCKET_TYPES = {SAMPLE_TYPE, SOURCE_TYPE, "HF_DATASET"}
 # ``HuggingFaceClassificationDataset`` calls it ``repo_id``.
 _HF_DATASET_ID_PARAMS = {"path", "repo_id"}
 
-# The generic, task-agnostic dataflux *engines* (``Flux`` / ``JointFlux`` / ``DatasetSplit``)
-# carry ``@configurable(category="engine")`` (see dataflux/confluid taxonomy). They are runtime
-# CONTAINERS the bridge builds implicitly — a source node already wraps itself via
-# ``Flux.from_source`` and ops are separate nodes — so their constructor args (``source`` /
-# ``ops`` / ``fluxes``) can't be filled by widgets and they make no sense as buildable palette
-# nodes. ``register_module_nodes`` skips them. Concrete data sources carry ``category="source"``
-# (or are task-scoped, ``classification_dataset`` …) and ARE surfaced as source nodes.
-_ENGINE_CATEGORY = "engine"
+# FluxStudio surfaces a node ONLY when its ``@configurable`` discovery category is one of these
+# (a POSITIVE allowlist — see dataflux/confluid taxonomy). This is what a canvas can build:
+#   * ``op``      — concrete Sample→Sample ops (``RescaleOp``, ``ComputeSpectrogramOp`` …).
+#   * ``source``  — concrete data sources (``HuggingFaceSource``, ``RFUAVSource`` …).
+#   * ``dataset`` — task datasets (``HuggingFaceClassificationDataset`` …; the task taxonomy
+#                   uses ``category="dataset"`` + a ``task=`` tag).
+# Everything else is excluded by construction: the generic ENGINES (``Flux`` / ``JointFlux`` /
+# ``DatasetSplit`` = ``engine``) and the raw-callable op wrappers (``FilterOp`` / ``WrappedOp`` =
+# ``engine``) — composition primitives wired in code, not GUI nodes — plus uncategorised leaks
+# (module-level helper functions, raw sinks). Add a category here (e.g. ``"sink"``) to surface it.
+_NODE_CATEGORIES = {"op", "source", "dataset"}
 
 
 def _is_hf_dataset_id_param(param_name: str, owner: Optional[Callable]) -> bool:
@@ -172,7 +189,7 @@ def _widget_for(param: inspect.Parameter, owner: Optional[Callable] = None) -> T
     return comfy_type, config
 
 
-def _build_config_inputs(func: Callable) -> Dict[str, Any]:
+def _build_config_inputs(func: Callable, skip: Optional[AbstractSet[str]] = None) -> Dict[str, Any]:
     """Build the ``required`` inputs dict (constructor config widgets) for a callable.
 
     Each widget's ``tooltip`` is sourced from the callable's docstring ``Args:``
@@ -180,6 +197,9 @@ def _build_config_inputs(func: Callable) -> Dict[str, Any]:
     navigaitor surfaces in its form-spec. Document a parameter once in the class
     docstring and it appears as a hover tooltip here; an undocumented parameter
     simply gets no tooltip (fix it upstream, never hand-write one here).
+
+    ``skip`` names parameters to omit from the widget set — used by op nodes to
+    exclude the op-list param (it becomes a ``DATAFLUX_OP`` socket, not a widget).
     """
     try:
         sig = inspect.signature(func)
@@ -188,6 +208,8 @@ def _build_config_inputs(func: Callable) -> Dict[str, Any]:
     param_docs = parse_param_docs(func)
     required: Dict[str, Any] = {}
     for name, param in sig.parameters.items():
+        if skip and name in skip:
+            continue
         if name in ("self", "cls"):
             continue
         if param.kind in (inspect.Parameter.VAR_KEYWORD, inspect.Parameter.VAR_POSITIONAL):
@@ -294,6 +316,30 @@ def _safe_callable_path(func: Callable) -> Optional[str]:
         return None
 
 
+def _op_list_param(cls: Any) -> Optional[str]:
+    """Name of a higher-order op's op-list constructor param (``ops`` / ``branches``), or ``None``.
+
+    Detected by name (``_OP_LIST_PARAMS``) + a ``List``/``list`` annotation — e.g. ``Enable(ops:
+    list)``, ``Parallel(ops: List[Any], …)``, ``Tee(branches: List[List[Any]])``. Such a param holds
+    OTHER ops, so it rides ``DATAFLUX_OP`` sockets instead of becoming a STRING widget.
+    """
+    try:
+        sig = inspect.signature(cls)
+    except (ValueError, TypeError):  # pragma: no cover - defensive
+        return None
+    for pname, param in sig.parameters.items():
+        if pname in _OP_LIST_PARAMS and "list" in str(param.annotation).lower():
+            return pname
+    return None
+
+
+def _collect_ops(kwargs: Dict[str, Any]) -> List[Any]:
+    """Pull the dynamic ``op_0`` / ``op_1`` / … inputs out of ``kwargs``, in slot order, dropping
+    unconnected (``None``) ones. The connected op nodes' ``op`` outputs arrive here as kwargs."""
+    indexed = [(int(k[3:]), v) for k, v in kwargs.items() if k.startswith("op_") and k[3:].isdigit() and v is not None]
+    return [v for _, v in sorted(indexed)]
+
+
 def _node_class(
     name: str,
     category: str,
@@ -305,6 +351,7 @@ def _node_class(
     produces: Optional[Dict[str, Any]] = None,
     kind: Optional[str] = None,
     callable_path: Optional[str] = None,
+    optional_inputs: Optional[Dict[str, Any]] = None,
 ) -> Type:
     """Assemble a ComfyUI node class from its parts.
 
@@ -321,8 +368,11 @@ def _node_class(
     ops-export compiler (:mod:`fluxstudio.export`) can pick out the op nodes from a saved graph and
     re-emit each as a Confluid ``!class:`` marker. They have no effect on canvas execution.
     """
+    input_spec: Dict[str, Any] = {"required": inputs}
+    if optional_inputs:
+        input_spec["optional"] = optional_inputs
     attrs: Dict[str, Any] = {
-        "INPUT_TYPES": classmethod(lambda cls: {"required": inputs}),
+        "INPUT_TYPES": classmethod(lambda cls, _spec=input_spec: _spec),
         "RETURN_TYPES": return_types,
         "FUNCTION": "execute",
         "CATEGORY": category,
@@ -361,36 +411,54 @@ def _build_source_node(cls: Callable, name: str, category: str) -> Type:
 
 
 def _build_op_node(cls: Callable, name: str, category: str) -> Type:
-    inputs: Dict[str, Any] = {"sample": (SAMPLE_TYPE,)}
-    inputs.update(_build_config_inputs(cls))
-    accepts = getattr(cls, "ACCEPTS", None)
+    """Build a dual-mode op node: ``(SAMPLE?, op_*) -> (SAMPLE, OP)``.
 
-    def execute(self: Any, sample: Any, **kwargs: Any) -> Tuple[Any, ...]:
-        # Runtime safety net: verify the actual incoming sample satisfies the op's declared ACCEPTS
-        # (authoritative; the canvas connection-validator is advisory and may be bypassed on graph load).
-        if accepts is not None:
-            got = infer_sample_type(sample)
-            if not accepts.accepts(got):
-                raise RuntimeError(
-                    f"{getattr(cls, '__name__', 'op')} cannot accept the upstream sample: "
-                    f"expects {accepts} but got {got}."
-                )
+    The op node both APPLIES the op (the ``sample`` input chained to the ``sample`` output, today's
+    linear-pipeline UX) AND exposes the constructed op on the ``op`` output (``DATAFLUX_OP``), so it
+    can feed a higher-order op. ``sample`` is OPTIONAL: leave it unconnected to use the node purely
+    as an op-value. Higher-order ops (op-list constructor param) gain dynamic ``op_*`` inputs.
+    """
+    accepts = getattr(cls, "ACCEPTS", None)
+    op_list_param = _op_list_param(cls)
+    # Config widgets EXCLUDING the op-list param (it rides DATAFLUX_OP sockets, not a widget).
+    required = _build_config_inputs(cls, skip={op_list_param} if op_list_param else None)
+    optional: Dict[str, Any] = {"sample": (SAMPLE_TYPE,)}
+    if op_list_param is not None:
+        optional["op_0"] = (OP_TYPE,)  # seed; web/op_list.js grows op_1, op_2, … as they fill
+
+    def execute(self: Any, sample: Any = None, **kwargs: Any) -> Tuple[Any, ...]:
+        if op_list_param is not None:
+            ops = _collect_ops(kwargs)
+            kwargs = {k: v for k, v in kwargs.items() if not (k.startswith("op_") and k[3:].isdigit())}
+            # ``Tee.branches`` is a list of op-LISTS; v1 makes each connected op its own 1-op branch.
+            kwargs[op_list_param] = [[o] for o in ops] if op_list_param == "branches" else ops
         op = cls(**_coerce_kwargs(cls, kwargs))
-        result = op(sample)
-        if result is None:
-            raise RuntimeError(
-                f"{getattr(cls, '__name__', 'op')} filtered out the sample (returned None); "
-                "nothing to pass downstream."
-            )
-        return (result,)
+        applied: Any = None
+        if sample is not None:
+            # Runtime accept-check (authoritative) before applying — see the type-spec mandate.
+            if accepts is not None:
+                got = infer_sample_type(sample)
+                if not accepts.accepts(got):
+                    raise RuntimeError(
+                        f"{getattr(cls, '__name__', 'op')} cannot accept the upstream sample: "
+                        f"expects {accepts} but got {got}."
+                    )
+            applied = op(sample)
+            if applied is None:
+                raise RuntimeError(
+                    f"{getattr(cls, '__name__', 'op')} filtered out the sample (returned None); "
+                    "nothing to pass downstream."
+                )
+        return (applied, op)
 
     return _node_class(
         name,
         category,
-        inputs,
-        (SAMPLE_TYPE,),
+        required,
+        (SAMPLE_TYPE, OP_TYPE),
         execute,
-        return_names=("sample",),
+        return_names=("sample", "op"),
+        optional_inputs=optional,
         accepts=_spec_to_dict(cls, "ACCEPTS"),
         produces=_spec_to_dict(cls, "PRODUCES"),
         kind="op",
@@ -457,16 +525,16 @@ def register_module_nodes(
     display_name_mappings: Dict[str, str],
     category: str = "Taidal",
 ) -> None:
-    """Scan a module and register all compatible callables as ComfyUI nodes.
+    """Scan a module and register its buildable callables as ComfyUI nodes.
 
-    Two classes of callable are skipped:
-
-    * Private callables (names starting with ``_``) — ``scan_module`` returns every
-      module-local callable, including internal helpers (``_to_uint8`` /
-      ``_worker_task`` …) that are not user-facing nodes.
-    * The generic dataflux engines (``@configurable(category="engine")`` →
-      ``Flux`` / ``JointFlux`` / ``DatasetSplit``) — runtime containers the bridge builds
-      implicitly, not buildable palette nodes (see ``_ENGINE_CATEGORY``).
+    Registration is a POSITIVE allowlist: a discovered class becomes a node ONLY if its
+    ``@configurable`` discovery category is in :data:`_NODE_CATEGORIES` (``op`` / ``source`` /
+    ``dataset``). Everything else is excluded by construction — the generic engines
+    (``Flux`` / ``JointFlux`` / ``DatasetSplit``) and raw-callable op wrappers
+    (``FilterOp`` / ``WrappedOp``), both ``category="engine"``; uncategorised module-level
+    helper functions and raw sinks; and ``_``-private callables (skipped explicitly so a
+    private op that *was* tagged still never surfaces). So a class only appears once it is
+    deliberately tagged as a buildable op/source/dataset.
     """
     logger.info(f"ComfyFlux: Scanning module {module_path} for nodes...")
     discovered = scan_module(module_path)
@@ -480,8 +548,8 @@ def register_module_nodes(
         if not callable(target_func):
             continue
 
-        if getattr(target_func, "__confluid_category__", None) == _ENGINE_CATEGORY:
-            logger.debug(f"ComfyFlux: Skipping generic dataset engine {item['path']} (not a buildable node)")
+        if getattr(target_func, "__confluid_category__", None) not in _NODE_CATEGORIES:
+            logger.debug(f"ComfyFlux: Skipping {item['path']} (category not in {_NODE_CATEGORIES})")
             continue
 
         node_name = f"Taidal_{item['name']}"

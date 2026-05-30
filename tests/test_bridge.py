@@ -29,6 +29,7 @@ from dataflux.sample import Sample
 from dataflux.typespec import ArrayType, SampleType
 
 from fluxstudio.bridge import (
+    OP_TYPE,
     SAMPLE_TYPE,
     SOURCE_TYPE,
     _coerce_kwargs,
@@ -181,6 +182,11 @@ def _sample_op(x: int) -> str:
     return str(x)
 
 
+# Registration is a POSITIVE allowlist on the @configurable category (op/source/dataset), so the
+# fake callable must carry one to be registered at all.
+_sample_op.__confluid_category__ = "op"  # type: ignore[attr-defined]
+
+
 def test_register_module_nodes_registers_callable() -> None:
     mappings: dict = {}
     display: dict = {}
@@ -226,40 +232,51 @@ def test_register_module_nodes_skips_private_callables() -> None:
     assert "Taidal_sample_op" in mappings
 
 
-def test_register_module_nodes_skips_generic_dataset_engines() -> None:
-    """Flux / JointFlux (``@configurable(category="engine")``) are runtime engines, not nodes.
+def test_register_module_nodes_is_a_positive_category_allowlist() -> None:
+    """Only ``category in {op, source, dataset}`` registers; engines AND uncategorised are excluded.
 
-    A source node already wraps itself in a Flux and ops are separate nodes, so the engine's
-    constructor args (source / ops / fluxes) can't be filled by widgets — it is not a buildable node.
-    A concrete source (no ``engine`` category) is still registered.
+    The generic engines (``Flux``/``JointFlux``/``DatasetSplit`` and the raw-callable wrappers
+    ``FilterOp``/``WrappedOp``) are ``category="engine"``; uncategorised callables (helper functions,
+    raw sinks) carry no category. Both are NOT buildable nodes, so neither registers — a class only
+    appears once it is deliberately tagged op/source/dataset.
     """
 
-    class _FakeFlux:
+    class _FakeEngine:  # category="engine" -> excluded
         __confluid_category__ = "engine"
-
-        def __init__(self, source: object = None) -> None: ...
 
         def __getitem__(self, i: int) -> Sample:
             return Sample(input=i, target=None, metadata={})
 
-    class _FakeConcreteSource:  # uncategorised concrete source -> kept
+    class _FakeUncategorised:  # no category -> excluded (the key allowlist behaviour)
+        def __getitem__(self, i: int) -> Sample:
+            return Sample(input=i, target=None, metadata={})
+
+    class _FakeSource:  # category="source" -> kept
+        __confluid_category__ = "source"
+
         def __getitem__(self, i: int) -> Sample:
             return Sample(input=i, target=None, metadata={})
 
     mappings: dict = {}
     display: dict = {}
     discovered = [
-        {"path": "fake.mod:FakeFlux", "name": "FakeFlux"},
+        {"path": "fake.mod:Engine", "name": "Engine"},
+        {"path": "fake.mod:Uncat", "name": "Uncat"},
         {"path": "fake.mod:RealSource", "name": "RealSource"},
     ]
-    resolved = {"fake.mod:FakeFlux": _FakeFlux, "fake.mod:RealSource": _FakeConcreteSource}
+    resolved = {
+        "fake.mod:Engine": _FakeEngine,
+        "fake.mod:Uncat": _FakeUncategorised,
+        "fake.mod:RealSource": _FakeSource,
+    }
 
     with patch("fluxstudio.bridge.scan_module", return_value=discovered):
         with patch("fluxstudio.bridge.resolve_callable", side_effect=lambda p: resolved[p]):
             register_module_nodes("fake.mod", mappings, display)
 
-    assert "Taidal_FakeFlux" not in mappings  # generic engine hidden
-    assert "Taidal_RealSource" in mappings  # concrete source kept
+    assert "Taidal_Engine" not in mappings  # engine excluded
+    assert "Taidal_Uncat" not in mappings  # uncategorised excluded (positive allowlist)
+    assert "Taidal_RealSource" in mappings  # tagged source kept
 
 
 def test_register_module_nodes_skips_non_callable() -> None:
@@ -329,24 +346,61 @@ def test_source_node_execute_wraps_in_flux() -> None:
     assert len(out) == 2
 
 
-def test_op_class_becomes_sample_node() -> None:
+def test_op_class_becomes_dual_mode_sample_node() -> None:
     node = create_comfy_node(_FakeOp, "Taidal__FakeOp")
-    assert node.RETURN_TYPES == (SAMPLE_TYPE,)
-    inputs = node.INPUT_TYPES()["required"]
-    assert inputs["sample"] == (SAMPLE_TYPE,)
-    assert inputs["bump"][0] == "INT"
+    # Dual-mode: SAMPLE (applied) + OP (the constructed op) outputs.
+    assert node.RETURN_TYPES == (SAMPLE_TYPE, OP_TYPE)
+    assert node.RETURN_NAMES == ("sample", "op")
+    spec = node.INPUT_TYPES()
+    # ``bump`` config is a required widget; ``sample`` is OPTIONAL (so the node can be an op-value).
+    assert spec["required"]["bump"][0] == "INT"
+    assert spec["optional"]["sample"] == (SAMPLE_TYPE,)
 
 
 def test_op_node_constructs_and_applies() -> None:
     node = create_comfy_node(_FakeOp, "Taidal__FakeOp")()
-    (out,) = node.execute(sample=Sample(input=10), bump=5)
-    assert out.input == 15
+    applied, op = node.execute(sample=Sample(input=10), bump=5)
+    assert applied.input == 15
+    assert isinstance(op, _FakeOp)  # the constructed op is exposed on the second output
+
+
+def test_op_node_value_mode_without_sample() -> None:
+    # Leave ``sample`` unconnected -> applied is None, but the op is still constructed and exposed.
+    applied, op = create_comfy_node(_FakeOp, "Taidal__FakeOp")().execute(bump=3)
+    assert applied is None
+    assert isinstance(op, _FakeOp) and op.bump == 3
 
 
 def test_op_node_raises_when_op_filters_sample() -> None:
     node = create_comfy_node(_FilterishOp, "Taidal__Filterish")()
     with pytest.raises(RuntimeError, match="filtered out"):
         node.execute(sample=Sample(input=1))
+
+
+class _FakeHigherOrderOp:
+    """A higher-order op: its constructor takes a list of OPS and applies them in sequence."""
+
+    def __init__(self, ops: list) -> None:  # type: ignore[type-arg]
+        self.ops = ops
+
+    def __call__(self, sample: Sample) -> Sample:
+        for op in self.ops:
+            sample = op(sample)
+        return sample
+
+
+def test_higher_order_op_gets_op_list_inputs_and_composes() -> None:
+    node_cls = create_comfy_node(_FakeHigherOrderOp, "Taidal__HOO")
+    spec = node_cls.INPUT_TYPES()
+    # The ``ops`` list param is NOT a STRING widget — it's a dynamic DATAFLUX_OP input (seed op_0).
+    assert "ops" not in spec["required"]
+    assert spec["optional"]["op_0"] == (OP_TYPE,)
+    # Build two op-values (bump +1, +2) and compose them via the op-list inputs.
+    _, op1 = create_comfy_node(_FakeOp, "Taidal__FakeOp1")().execute(bump=1)
+    _, op2 = create_comfy_node(_FakeOp, "Taidal__FakeOp2")().execute(bump=2)
+    applied, hoo = node_cls().execute(sample=Sample(input=10), op_0=op1, op_1=op2)
+    assert applied.input == 13  # 10 +1 +2, in order
+    assert isinstance(hoo, _FakeHigherOrderOp) and len(hoo.ops) == 2
 
 
 def test_generic_function_with_sample_param_gets_sample_socket() -> None:
@@ -611,7 +665,7 @@ def test_source_node_stashes_produces_none_when_undeclared() -> None:
 
 def test_op_node_runtime_check_passes_matching_sample() -> None:
     node = create_comfy_node(_TypedOp, "Taidal__TypedOp")()
-    (out,) = node.execute(sample=Sample(input=np.zeros((4, 4), dtype=np.float32)))
+    out, _op = node.execute(sample=Sample(input=np.zeros((4, 4), dtype=np.float32)))
     assert out.input.dtype == bool
 
 

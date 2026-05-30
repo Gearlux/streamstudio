@@ -77,6 +77,24 @@ Preview Image                    # ← native ComfyUI viewer
 
 `Extract from Sample` needs the `[waivefront]` extra to render the `IMAGE` socket (the renderer lives in waivefront); the `STRING` / `INT` / `FLOAT` outputs work without it.
 
+## Composing ops (higher-order ops)
+
+Every op node is **dual-mode**. Besides the `sample` input (`DATAFLUX_SAMPLE`, now *optional*) and the applied `sample` output, it has a second **`op`** output (`DATAFLUX_OP`) carrying the *constructed op itself*. So you can either chain ops by `sample` (the linear pipeline above) **or** take the `op` output and feed a **higher-order op** — one whose constructor takes a list of ops (`Parallel`, `Tee`, …).
+
+Those higher-order nodes don't show a text widget for their op-list; they grow dynamic `op_0`, `op_1`, … `DATAFLUX_OP` inputs (a fresh empty slot appears whenever the last fills, via `web/op_list.js`). Wire each op node's `op` output into one:
+
+```
+RescaleOp      ──op──┐
+StandardizeOp  ──op──┤  (op_0, op_1)
+                     ▼
+                  Parallel  ─sample→ Extract → Preview
+Walk ──────────sample┘
+```
+
+`Parallel(ops=[RescaleOp, StandardizeOp])` applies both to the incoming sample. Leave a higher-order op's `sample` unconnected and take *its* `op` output to nest it inside another higher-order op.
+
+> **Scope.** Works for any op whose constructor takes an `ops`/`branches` list. `Tee` (a list of *branches*) v1 treats each connected op as its own single-op branch — multi-op branches mean pre-composing a branch into one op (future). `FilterOp`/`WrappedOp` wrap a *raw Python callable*, so they aren't canvas nodes at all (they're `category="engine"`).
+
 ## Exporting ops to a Flux
 
 The **op** half of a canvas graph (everything between the source and the viewer) can be exported back to a Confluid YAML op-list and reattached to *any* source in code — the inverse of how the canvas builds a pipeline. The source and the Walk/Extract adapter nodes are dropped; only the `DATAFLUX_SAMPLE → DATAFLUX_SAMPLE` op chain is emitted.
@@ -130,7 +148,7 @@ FluxStudio never hand-defines a node. At ComfyUI startup, `_discover_and_registe
 2. For each module, `dataflux.discovery.scan_module` finds the compatible callables.
 3. `register_module_nodes` / `create_comfy_node` (`fluxstudio/bridge.py`) classify each callable (Source / Op / Generic — see *Building a pipeline*) and wrap it in a ComfyUI node class, keyed `Taidal_<callable>` and filed under a `Taidal/<Module/Path>` category.
 
-Two kinds of callable are deliberately **not** surfaced: private helpers (names starting with `_`), and the generic, task-agnostic dataflux **engines** `Flux` / `JointFlux` / `DatasetSplit` (tagged `@configurable(category="engine")`). The engines are runtime *containers* the canvas builds implicitly — a Source node already outputs a `Flux`, and ops are separate nodes — so there's nothing to configure on a `Flux` node (its `source` / `ops` args can't be filled by widgets). You build the dataset by wiring `Source → Op → …`, not by adding a `Flux` node. (Concrete data sources carry `category="source"` and DO appear.)
+Registration is a **positive allowlist**: a class becomes a node only if its `@configurable` category is one of `{op, source, dataset}`. So the palette is exactly the deliberately-tagged ops, sources, and (task) datasets. Excluded *by construction*: the generic dataflux **engines** + raw-callable op wrappers (`Flux` / `JointFlux` / `DatasetSplit` / `FilterOp` / `WrappedOp`, all `category="engine"`) — composition primitives you wire in code, not on a canvas; uncategorised module-level helper functions; and raw sinks. You build a dataset by wiring `Source → Op → …`, not by adding a `Flux` node. (To surface another role — e.g. raw sinks — add its category to `_NODE_CATEGORIES` in `bridge.py` and tag the classes.)
 
 A module that fails to import or scan is skipped at `debug` level, so one package's missing optional dependency never empties the palette.
 
