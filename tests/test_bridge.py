@@ -616,9 +616,10 @@ def test_real_dataset_split_node_wires_source_and_splits() -> None:
 
     node_cls = create_comfy_node(DatasetSplit, "Taidal__DatasetSplit")
     spec = node_cls.INPUT_TYPES()
-    # ``source`` is required (no default) -> wired socket; split/val_fraction/seed stay widgets.
-    assert spec["required"]["source"] == (SOURCE_TYPE,)
-    assert "source" not in spec.get("optional", {})
+    # ``source`` is now defaulted (lazy / zero-arg convention) -> wired socket in the OPTIONAL
+    # bucket (required-when-no-default, else optional); split/val_fraction/seed stay widgets.
+    assert spec["optional"]["source"] == (SOURCE_TYPE,)
+    assert "source" not in spec.get("required", {})
 
     (src,) = create_comfy_node(_FakeSource, "Taidal__SplitUp")().execute(path="x", count=10)
     (out,) = node_cls().execute(source=src, split="val", val_fraction=0.2, seed=0)
@@ -632,8 +633,9 @@ def test_real_range_source_node_wires_source() -> None:
 
     node_cls = create_comfy_node(RangeSource, "Taidal__RangeSource")
     spec = node_cls.INPUT_TYPES()
-    # ``source`` is required (no default) -> wired DATAFLUX_SOURCE input; start/end stay widgets.
-    assert spec["required"]["source"] == (SOURCE_TYPE,)
+    # ``source`` is now defaulted (lazy / zero-arg convention) -> wired DATAFLUX_SOURCE input in the
+    # OPTIONAL bucket (required-when-no-default, else optional); start/end stay widgets.
+    assert spec["optional"]["source"] == (SOURCE_TYPE,)
     (src,) = create_comfy_node(_FakeSource, "Taidal__RangeUp")().execute(path="x", count=10)
     (out,) = node_cls().execute(source=src, start=2, end=5)
     assert isinstance(out, Flux)
