@@ -6,9 +6,14 @@ wired on the ComfyUI canvas — instead of every socket collapsing to ``STRING``
 * **Source** — a class whose ``__getitem__`` / ``__iter__`` yields a
   :class:`dataflux.sample.Sample` (e.g. ``HuggingFaceSource``). The node exposes the
   constructor config as widgets and outputs a ``DATAFLUX_SOURCE`` (a
-  :class:`dataflux.core.Flux` wrapping the constructed source).
+  :class:`dataflux.core.Flux` wrapping the constructed source). The engines / view-sources
+  (``DatasetSplit`` / ``Flux`` / ``JointFlux``) are the same shape, but their source-typed
+  constructor params ride WIRED sockets instead of widgets — a single ``source`` →
+  ``DATAFLUX_SOURCE`` input, a source-list (``fluxes``) → dynamic ``source_N`` inputs, an op-list
+  (``ops``) → dynamic ``op_N`` ``DATAFLUX_OP`` inputs — so they compose on the canvas from other
+  Source/Op nodes (which already output themselves as ``DATAFLUX_SOURCE`` / ``DATAFLUX_OP``).
 * **Op** — a ``@configurable`` class with ``__call__(self, sample: Sample) ->
-  Optional[Sample]`` (e.g. ``RescaleOp``, ``RenderSpectrogramImageOp``). The node is **dual-mode**:
+  Optional[Sample]`` (e.g. ``RescaleOp``, ``ConvertToImageOp``). The node is **dual-mode**:
   constructor config as widgets, an OPTIONAL ``DATAFLUX_SAMPLE`` input, and TWO outputs —
   ``sample`` (the op applied to the input sample, for linear chaining) and ``op`` (the constructed
   op as a ``DATAFLUX_OP`` value, so it can feed a higher-order op). A higher-order op whose
@@ -24,7 +29,7 @@ compose into higher-order ops (via ``DATAFLUX_OP``).
 """
 
 import inspect
-from typing import AbstractSet, Any, Callable, Dict, List, Optional, Tuple, Type
+from typing import AbstractSet, Any, Callable, Dict, List, Literal, Optional, Tuple, Type, Union, get_args, get_origin
 
 import datasets
 from confluid import parse_param_docs
@@ -76,6 +81,18 @@ _SOCKET_TYPES = {SAMPLE_TYPE, SOURCE_TYPE, OP_TYPE, "HF_DATASET"}
 # ``branches`` (a list of op-lists — v1 wraps each connected op as its own single-op branch).
 _OP_LIST_PARAMS = {"ops", "branches"}
 
+# Constructor params (on source/engine classes) that hold ANOTHER source — rendered as a single
+# wired ``DATAFLUX_SOURCE`` input socket instead of a STRING widget, so a Source/engine node's output
+# feeds them. ``DatasetSplit(source=…)`` and ``Flux(source=…)`` use ``source``. Detected by exact
+# name (the same name-convention as ``_OP_LIST_PARAMS``); safe because no concrete leaf source
+# (``HuggingFaceSource``/``RFUAVSource``/``RegionsJsonSource``) has a param literally named ``source``.
+_SOURCE_PARAM = "source"
+
+# Constructor params that hold a LIST OF SOURCES — rendered as dynamic ``DATAFLUX_SOURCE`` multi-inputs
+# (``source_0``, ``source_1``, … via ``web/source_list.js``), the source analogue of ``_OP_LIST_PARAMS``.
+# ``JointFlux(fluxes: List[Flux])`` uses ``fluxes``.
+_SOURCE_LIST_PARAMS = {"fluxes", "sources"}
+
 # Constructor params that name a HuggingFace dataset *identifier* (a hub repo id
 # like ``mnist`` / ``kitofrank/RFUAV``, or optionally a local imagefolder path) —
 # NOT a filesystem directory. Recognised only on HuggingFace dataset sources (see
@@ -84,17 +101,75 @@ _OP_LIST_PARAMS = {"ops", "branches"}
 # ``HuggingFaceClassificationDataset`` calls it ``repo_id``.
 _HF_DATASET_ID_PARAMS = {"path", "repo_id"}
 
+# Constructor params (on HuggingFace dataset sources) that name a dataset *feature/column* to map
+# onto a Sample field — ``HuggingFaceSource.input_feature`` / ``target_feature``. Rendered as a
+# free-text STRING (so any column name still types in) tagged ``taidal_widget="HF_FEATURE"``, which
+# ``web/hf_feature_chooser.js`` augments with a dropdown of the SELECTED dataset's actual columns
+# (fetched from ``/taidal/hf_dataset_features`` for the node's current dataset-id field). Recognised
+# only on ``HuggingFace*`` sources (see ``_is_hf_feature_param``).
+_HF_FEATURE_PARAMS = {"input_feature", "target_feature"}
+
+# Constructor param (on HuggingFace dataset sources) that names the dataset *split* —
+# ``HuggingFaceSource.split``. Kept a free-text STRING (HF supports slice syntax like
+# ``train[:90%]`` / ``train+test``) tagged ``taidal_widget="HF_SPLIT"``, which
+# ``web/hf_split_chooser.js`` augments with a dropdown of the SELECTED dataset's actual splits
+# (fetched from ``/taidal/hf_dataset_splits``). Recognised only on ``HuggingFace*`` sources (see
+# ``_is_hf_split_param``) — so ``DatasetSplit.split`` (a closed ``Literal["train","val","test"]``
+# fraction-view selector, a DIFFERENT concept, already a combo via ``_literal_options``) is untouched.
+_HF_SPLIT_PARAM = "split"
+
+# Constructor param (on HuggingFace dataset sources) holding the LIST of metadata columns —
+# ``HuggingFaceSource.metadata_features``. Kept a free-text (comma-separated) STRING tagged
+# ``taidal_widget="HF_METADATA"``; ``web/hf_metadata_chooser.js`` augments it with a MULTI-select
+# "add column" combo offering ``*`` (= every column except input/target — the ``METADATA_ALL_FEATURES``
+# sentinel resolved by ``dataflux.sources``) plus the SELECTED dataset's columns. Recognised only on
+# ``HuggingFace*`` sources (see ``_is_hf_metadata_param``).
+_HF_METADATA_PARAM = "metadata_features"
+
 # FluxStudio surfaces a node ONLY when its ``@configurable`` discovery category is one of these
 # (a POSITIVE allowlist — see dataflux/confluid taxonomy). This is what a canvas can build:
-#   * ``op``      — concrete Sample→Sample ops (``RescaleOp``, ``ComputeSpectrogramOp`` …).
-#   * ``source``  — concrete data sources (``HuggingFaceSource``, ``RFUAVSource`` …).
-#   * ``dataset`` — task datasets (``HuggingFaceClassificationDataset`` …; the task taxonomy
-#                   uses ``category="dataset"`` + a ``task=`` tag).
-# Everything else is excluded by construction: the generic ENGINES (``Flux`` / ``JointFlux`` /
-# ``DatasetSplit`` = ``engine``) and the raw-callable op wrappers (``FilterOp`` / ``WrappedOp`` =
-# ``engine``) — composition primitives wired in code, not GUI nodes — plus uncategorised leaks
-# (module-level helper functions, raw sinks). Add a category here (e.g. ``"sink"``) to surface it.
-_NODE_CATEGORIES = {"op", "source", "dataset"}
+#   * ``op``      — concrete Sample→Sample ops (``RescaleOp``, ``SpectrogramOp`` …).
+#   * ``source``  — concrete data sources (``HuggingFaceSource``, ``RFUAVSource`` …) AND
+#                   ``DatasetSplit`` (a source-view: it yields Samples and wraps another source).
+#   * ``engine``  — the generic composition primitives ``Flux`` / ``JointFlux``. They ARE buildable
+#                   on a canvas: their source-typed constructor params render as WIRED sockets
+#                   (``_build_source_node``) — ``Flux.source`` (single ``DATAFLUX_SOURCE`` input) +
+#                   ``Flux.ops`` (dynamic ``op_N`` ``DATAFLUX_OP`` inputs); ``JointFlux.fluxes``
+#                   (dynamic ``source_N`` ``DATAFLUX_SOURCE`` inputs). So a Source/Op node's output
+#                   (it already exposes itself as ``DATAFLUX_SOURCE`` / ``DATAFLUX_OP``) feeds them.
+# Everything else is excluded by construction:
+#   * the raw-callable op wrappers ``FilterOp`` / ``WrappedOp`` — bare ``@configurable``, so
+#     UNCATEGORISED (neither ``op`` nor ``engine``): their constructor takes a raw Python callable,
+#     nothing a widget can supply. Excluded as uncategorised, so even with ``"engine"`` allowed they
+#     stay out (correct — they're not buildable).
+#   * task ``dataset``s (``classification_dataset`` …) — a trainer/model-config concept (a
+#     task-scoped, model-ready dataset slot), meaningful for navigaitor's config composition but
+#     NOT for a per-sample DataFlux canvas, which only needs a ``source`` to yield Samples.
+#   * uncategorised module-level helper functions and raw sinks (no ``__confluid_category__``).
+# To surface another role (e.g. ``"sink"``) add it here AND tag the classes.
+_NODE_CATEGORIES = {"op", "source", "engine"}
+
+# Canonical palette display casing for workspace packages whose ``str.title()`` would mangle the
+# intended CamelCase (``dataflux`` → ``Dataflux`` not ``DataFlux``). The top-level package of each
+# discovered node's entry-point module is the palette's first level (``Taidal/<Package>/…``).
+# Unlisted packages fall back to ``str.title()``.
+_PACKAGE_DISPLAY_NAMES = {
+    "dataflux": "DataFlux",
+    "fluxstudio": "FluxStudio",
+    "logflow": "LogFlow",
+    "waivefront": "Waivefront",
+    "sonair": "Sonair",
+    "deltaid": "Deltaid",
+    "raidar": "Raidar",
+    "raidar_ultralytics": "Raidar Ultralytics",
+    "marainer": "Marainer",
+    "navigaitor": "Navigaitor",
+}
+
+
+def _package_display_name(package: str) -> str:
+    """Palette label for a top-level package — canonical casing if known, else ``str.title()``."""
+    return _PACKAGE_DISPLAY_NAMES.get(package, package.title())
 
 
 def _is_hf_dataset_id_param(param_name: str, owner: Optional[Callable]) -> bool:
@@ -112,6 +187,70 @@ def _is_hf_dataset_id_param(param_name: str, owner: Optional[Callable]) -> bool:
         and inspect.isclass(owner)
         and owner.__name__.startswith("HuggingFace")
     )
+
+
+def _is_hf_feature_param(param_name: str, owner: Optional[Callable]) -> bool:
+    """True when ``param_name`` is a feature-selector arg of a HuggingFace dataset source.
+
+    These (``input_feature`` / ``target_feature``) name a dataset *column* mapped onto a
+    ``Sample`` field. Gated on the SAME ``HuggingFace`` class-name convention as
+    :func:`_is_hf_dataset_id_param` (a naming rule, not a per-node special-case) so a
+    like-named param on a non-HF class is unaffected and stays a plain STRING widget.
+    """
+    return (
+        param_name in _HF_FEATURE_PARAMS
+        and owner is not None
+        and inspect.isclass(owner)
+        and owner.__name__.startswith("HuggingFace")
+    )
+
+
+def _is_hf_split_param(param_name: str, owner: Optional[Callable]) -> bool:
+    """True when ``param_name`` is the ``split`` arg of a HuggingFace dataset source.
+
+    Gated on the SAME ``HuggingFace`` class-name convention as :func:`_is_hf_dataset_id_param`
+    so ``DatasetSplit.split`` (a closed ``Literal`` fraction-view selector on a NON-HuggingFace
+    class — a different concept, already a combo via :func:`_literal_options`) is unaffected.
+    """
+    return (
+        param_name == _HF_SPLIT_PARAM
+        and owner is not None
+        and inspect.isclass(owner)
+        and owner.__name__.startswith("HuggingFace")
+    )
+
+
+def _is_hf_metadata_param(param_name: str, owner: Optional[Callable]) -> bool:
+    """True when ``param_name`` is the ``metadata_features`` list arg of a HuggingFace source.
+
+    Gated on the SAME ``HuggingFace`` class-name convention as :func:`_is_hf_dataset_id_param`.
+    Kept a comma-separated STRING (``_coerce_kwargs`` splits it into the ``List[str]`` the
+    constructor wants); the multi-select column picker (``web/hf_metadata_chooser.js``) only
+    appends to it.
+    """
+    return (
+        param_name == _HF_METADATA_PARAM
+        and owner is not None
+        and inspect.isclass(owner)
+        and owner.__name__.startswith("HuggingFace")
+    )
+
+
+def _literal_options(annotation: Any) -> Optional[List[Any]]:
+    """The members of a ``typing.Literal[...]`` annotation, or ``None`` if it is not a Literal.
+
+    Also unwraps ``Optional[Literal[...]]`` / ``Literal[...] | None``. The members back a ComfyUI
+    combo dropdown so a closed-``Literal`` constructor param (the workspace's preferred way to type a
+    fixed, short value set — e.g. waivefront's ``Colormap``) is offered as an enumeration in the GUI,
+    enumerated straight from the annotation via ``get_args`` (never a hand-maintained parallel list).
+    """
+    if get_origin(annotation) is Literal:
+        return list(get_args(annotation))
+    if get_origin(annotation) is Union:  # Optional[Literal[...]] / Literal[...] | None
+        for arg in get_args(annotation):
+            if get_origin(arg) is Literal:
+                return list(get_args(arg))
+    return None
 
 
 def _map_type(param_name: str, annotation: Any) -> str:
@@ -145,7 +284,7 @@ def _map_type(param_name: str, annotation: Any) -> str:
     return "STRING"  # Fallback
 
 
-def _widget_for(param: inspect.Parameter, owner: Optional[Callable] = None) -> Tuple[str, Dict[str, Any]]:
+def _widget_for(param: inspect.Parameter, owner: Optional[Callable] = None) -> Tuple[Any, Dict[str, Any]]:
     """Build the ``(comfy_type, config)`` pair for a single constructor parameter.
 
     ``owner`` is the callable the parameter belongs to — used to recognise a
@@ -160,6 +299,39 @@ def _widget_for(param: inspect.Parameter, owner: Optional[Callable] = None) -> T
     if _is_hf_dataset_id_param(param.name, owner):
         default = param.default if has_default and isinstance(param.default, str) else ""
         return "STRING", {"default": default, "taidal_widget": "HF_DATASET_ID"}
+
+    # HuggingFace feature/column selector (input_feature / target_feature): a free-text STRING
+    # (any column name still types in) tagged for the column picker (web/hf_feature_chooser.js),
+    # which fills it from the SELECTED dataset's actual feature columns.
+    if _is_hf_feature_param(param.name, owner):
+        default = param.default if has_default and isinstance(param.default, str) else ""
+        return "STRING", {"default": default, "taidal_widget": "HF_FEATURE"}
+
+    # HuggingFace split: a free-text STRING (kept editable for HF slice syntax like ``train[:90%]``)
+    # tagged for the split picker (web/hf_split_chooser.js), which fills it from the SELECTED
+    # dataset's actual splits. Resolved before the Literal/_map_type heuristics; ``split`` is a
+    # plain ``str`` on HuggingFaceSource so this only adds the picker hint.
+    if _is_hf_split_param(param.name, owner):
+        default = param.default if has_default and isinstance(param.default, str) else ""
+        return "STRING", {"default": default, "taidal_widget": "HF_SPLIT"}
+
+    # HuggingFace metadata_features (a List[str]): a comma-separated STRING (empty -> None -> no
+    # extra metadata; _coerce_kwargs splits it into a list) tagged for the multi-select column
+    # picker (web/hf_metadata_chooser.js), which appends ``*`` (= the rest) or selected columns.
+    if _is_hf_metadata_param(param.name, owner):
+        return "STRING", {"default": "", "taidal_widget": "HF_METADATA"}
+
+    # A closed ``Literal[...]`` → a ComfyUI combo dropdown whose options ARE the literal's members.
+    # ComfyUI represents a combo as ``(options_list, {...})``, so the LIST itself is the "type". An
+    # explicit enum is a stronger signal than the name-based PATH / scalar heuristics in ``_map_type``,
+    # so it is resolved first. The default is the param default when it is a member, else the first option.
+    literal_opts = _literal_options(param.annotation)
+    if literal_opts is not None:
+        options = [str(o) for o in literal_opts]
+        default = str(param.default) if has_default and param.default is not None else ""
+        if default not in options:  # no usable default (or an out-of-set one) → first option
+            default = options[0] if options else ""
+        return options, {"default": default}
 
     comfy_type = _map_type(param.name, param.annotation)
 
@@ -239,6 +411,12 @@ def _coerce_kwargs(func: Callable, kwargs: Dict[str, Any]) -> Dict[str, Any]:
     out: Dict[str, Any] = {}
     for key, value in kwargs.items():
         param = sig.parameters.get(key)
+        # A Literal/enum value (from a combo dropdown) is already the exact constructor value — pass it
+        # through verbatim, never through the STRING heuristics below (a member that happens to contain
+        # "int" / "float" / "list", e.g. a future colormap name, must not be cast or comma-split).
+        if param is not None and _literal_options(param.annotation) is not None:
+            out[key] = value
+            continue
         if isinstance(value, str):
             stripped = value.strip()
             ann = str(param.annotation) if param is not None else ""
@@ -340,6 +518,50 @@ def _collect_ops(kwargs: Dict[str, Any]) -> List[Any]:
     return [v for _, v in sorted(indexed)]
 
 
+def _has_param(cls: Any, name: str) -> bool:
+    """True if ``cls``'s constructor has a parameter literally named ``name``."""
+    try:
+        sig = inspect.signature(cls)
+    except (ValueError, TypeError):  # pragma: no cover - defensive
+        return False
+    return name in sig.parameters
+
+
+def _source_param(cls: Any) -> Optional[str]:
+    """Name of a single-source constructor param (``source``), or ``None``.
+
+    Such a param holds ANOTHER source/engine, so it rides a single ``DATAFLUX_SOURCE`` input socket
+    instead of becoming a STRING widget — e.g. ``DatasetSplit(source=…)`` / ``Flux(source=…)``.
+    """
+    return _SOURCE_PARAM if _has_param(cls, _SOURCE_PARAM) else None
+
+
+def _source_list_param(cls: Any) -> Optional[str]:
+    """Name of a source-list constructor param (``fluxes`` / ``sources``), or ``None``.
+
+    Detected by name (``_SOURCE_LIST_PARAMS``) + a ``List``/``list`` annotation — e.g.
+    ``JointFlux(fluxes: List[Flux])``. Such a param holds OTHER sources, so it rides dynamic
+    ``DATAFLUX_SOURCE`` sockets (``source_0`` / ``source_1`` / …) instead of a STRING widget.
+    """
+    try:
+        sig = inspect.signature(cls)
+    except (ValueError, TypeError):  # pragma: no cover - defensive
+        return None
+    for pname, param in sig.parameters.items():
+        if pname in _SOURCE_LIST_PARAMS and "list" in str(param.annotation).lower():
+            return pname
+    return None
+
+
+def _collect_sources(kwargs: Dict[str, Any]) -> List[Any]:
+    """Pull the dynamic ``source_0`` / ``source_1`` / … inputs out of ``kwargs``, in slot order,
+    dropping unconnected (``None``) ones. The source nodes' ``source`` outputs arrive here as kwargs."""
+    indexed = [
+        (int(k[7:]), v) for k, v in kwargs.items() if k.startswith("source_") and k[7:].isdigit() and v is not None
+    ]
+    return [v for _, v in sorted(indexed)]
+
+
 def _node_class(
     name: str,
     category: str,
@@ -388,11 +610,55 @@ def _node_class(
 
 
 def _build_source_node(cls: Callable, name: str, category: str) -> Type:
-    inputs = _build_config_inputs(cls)
+    """Build a source/engine node: constructor config -> a ``DATAFLUX_SOURCE`` output (a ``Flux``).
+
+    Source-typed constructor params ride WIRED sockets instead of STRING widgets, so the engine /
+    view sources (``DatasetSplit`` / ``Flux`` / ``JointFlux``) compose on the canvas from other
+    Source/Op nodes (which already expose themselves as ``DATAFLUX_SOURCE`` / ``DATAFLUX_OP``):
+      * a single ``source`` param   -> one ``DATAFLUX_SOURCE`` input (``DatasetSplit.source`` /
+        ``Flux.source``); a required socket when the ctor param has no default, else optional;
+      * a source-list param (``fluxes``) -> dynamic ``source_N`` ``DATAFLUX_SOURCE`` inputs grown by
+        ``web/source_list.js`` (``JointFlux.fluxes``);
+      * an op-list param (``ops``)        -> dynamic ``op_N`` ``DATAFLUX_OP`` inputs grown by
+        ``web/op_list.js`` (``Flux.ops``).
+    Everything else stays a constructor-config widget. A plain leaf source (``HuggingFaceSource`` …)
+    has none of these params, so it is unchanged (all-widget).
+    """
+    src_param = _source_param(cls)
+    src_list_param = _source_list_param(cls)
+    op_list_param = _op_list_param(cls)
+    wired = {p for p in (src_param, src_list_param, op_list_param) if p is not None}
+    required = _build_config_inputs(cls, skip=wired or None)
+
+    optional: Dict[str, Any] = {}
+    if src_param is not None:
+        try:
+            default = inspect.signature(cls).parameters[src_param].default
+        except (ValueError, TypeError, KeyError):  # pragma: no cover - defensive
+            default = inspect.Parameter.empty
+        # Required socket (must be wired to run) when the param has no default — e.g. DatasetSplit;
+        # optional when it does (Flux.source defaults to None -> an empty stream).
+        if default is inspect.Parameter.empty:
+            required[src_param] = (SOURCE_TYPE,)
+        else:
+            optional[src_param] = (SOURCE_TYPE,)
+    if src_list_param is not None:
+        optional["source_0"] = (SOURCE_TYPE,)  # seed; web/source_list.js grows source_1, source_2, …
+    if op_list_param is not None:
+        optional["op_0"] = (OP_TYPE,)  # seed; web/op_list.js grows op_1, op_2, …
 
     def execute(self: Any, **kwargs: Any) -> Tuple[Any, ...]:
         from dataflux.core import Flux
 
+        if src_list_param is not None:
+            sources = _collect_sources(kwargs)
+            kwargs = {k: v for k, v in kwargs.items() if not (k.startswith("source_") and k[7:].isdigit())}
+            kwargs[src_list_param] = sources
+        if op_list_param is not None:
+            ops = _collect_ops(kwargs)
+            kwargs = {k: v for k, v in kwargs.items() if not (k.startswith("op_") and k[3:].isdigit())}
+            # ``Tee.branches`` is a list of op-LISTS; v1 makes each connected op its own 1-op branch.
+            kwargs[op_list_param] = [[o] for o in ops] if op_list_param == "branches" else ops
         obj = cls(**_coerce_kwargs(cls, kwargs))
         flux = obj if isinstance(obj, Flux) else Flux.from_source(obj)
         return (flux,)
@@ -400,10 +666,11 @@ def _build_source_node(cls: Callable, name: str, category: str) -> Type:
     return _node_class(
         name,
         category,
-        inputs,
+        required,
         (SOURCE_TYPE,),
         execute,
         return_names=("source",),
+        optional_inputs=optional or None,
         produces=_spec_to_dict(cls, "PRODUCES"),
         kind="source",
         callable_path=_safe_callable_path(cls),
@@ -519,22 +786,67 @@ def _humanize_node_name(name: str) -> str:
     return name.replace("_", " ")
 
 
+def _node_category(module_path: str, confluid_category: str, group: Optional[str], root: str) -> str:
+    """Build a node's ComfyUI palette path: ``<root>/<Package>/<Category>[/<group>]``.
+
+    The first level is the entry-point module's TOP-LEVEL package (``dataflux.ops.numpy`` →
+    ``DataFlux``) so every op/source of a package collects under one palette folder regardless
+    of which submodule it lives in. Within that, nodes are split by ``@configurable`` category
+    (``Op`` / ``Source``) and then by the optional path-like ``group`` (``numpy`` / ``targets`` /
+    ``fft/numpy`` …). An untagged group leaves the node directly under ``<Package>/<Category>``.
+    """
+    package = _package_display_name(module_path.split(".")[0])
+    path = f"{root}/{package}/{confluid_category.title()}"
+    if group:
+        path = f"{path}/{group}"
+    return path
+
+
+def _node_key(module_path: str, confluid_category: str, group: Optional[str], name: str) -> str:
+    """Build the GLOBALLY-UNIQUE ComfyUI registration key for a discovered node.
+
+    ComfyUI identifies a node TYPE by its key in ``NODE_CLASS_MAPPINGS`` — NOT by its display
+    ``CATEGORY`` — so the key must be unique. A plain ``Taidal_<ClassName>`` collides whenever two
+    modules expose a same-named class (e.g. ``dataflux.ops.numpy:RescaleOp`` vs
+    ``dataflux.ops.torch:RescaleOp``): the second registration silently overwrites the first and
+    one node vanishes from the palette. We qualify the key with the top-level package + confluid
+    category + group, e.g. ``Taidal_dataflux_op_numpy_RescaleOp`` vs ``Taidal_dataflux_op_torch_RescaleOp``.
+
+    Built from RAW identifiers (the module's top-level package, the lowercase category, the literal
+    group segments) — NOT the display-cased palette path — so the key stays stable even if a
+    package's display casing (``_PACKAGE_DISPLAY_NAMES``) changes. The DISPLAY name is unchanged
+    (the verbatim class name via :func:`_humanize_node_name`), so both still read as "RescaleOp" in
+    their respective palette folders.
+    """
+    parts = ["Taidal", module_path.split(".")[0], confluid_category]
+    if group:
+        parts.extend(group.split("/"))
+    parts.append(name)
+    return "_".join(parts)
+
+
 def register_module_nodes(
     module_path: str,
     target_mappings: Dict[str, Type],
     display_name_mappings: Dict[str, str],
-    category: str = "Taidal",
+    root: str = "Taidal",
 ) -> None:
     """Scan a module and register its buildable callables as ComfyUI nodes.
 
     Registration is a POSITIVE allowlist: a discovered class becomes a node ONLY if its
     ``@configurable`` discovery category is in :data:`_NODE_CATEGORIES` (``op`` / ``source`` /
-    ``dataset``). Everything else is excluded by construction — the generic engines
-    (``Flux`` / ``JointFlux`` / ``DatasetSplit``) and raw-callable op wrappers
-    (``FilterOp`` / ``WrappedOp``), both ``category="engine"``; uncategorised module-level
-    helper functions and raw sinks; and ``_``-private callables (skipped explicitly so a
+    ``engine``). The engines ``Flux`` / ``JointFlux`` (``category="engine"``) and the source-view
+    ``DatasetSplit`` (``category="source"``) ARE buildable: their source-typed constructor params
+    render as wired ``DATAFLUX_SOURCE`` / ``DATAFLUX_OP`` sockets (see :func:`_build_source_node`).
+    Excluded by construction — the raw-callable op wrappers ``FilterOp`` / ``WrappedOp``
+    (UNcategorised — they take a raw callable, nothing to wire, so even with ``engine`` allowed they
+    stay out); task ``*_dataset`` classes (a trainer-config concept, not a canvas one); uncategorised
+    module-level helper functions and raw sinks; and ``_``-private callables (skipped explicitly so a
     private op that *was* tagged still never surfaces). So a class only appears once it is
-    deliberately tagged as a buildable op/source/dataset.
+    deliberately tagged as a buildable op/source/engine.
+
+    Each node's palette folder is ``<root>/<Package>/<Category>[/<group>]`` — see
+    :func:`_node_category`. ``root`` defaults to ``"Taidal"``.
     """
     logger.info(f"ComfyFlux: Scanning module {module_path} for nodes...")
     discovered = scan_module(module_path)
@@ -548,15 +860,17 @@ def register_module_nodes(
         if not callable(target_func):
             continue
 
-        if getattr(target_func, "__confluid_category__", None) not in _NODE_CATEGORIES:
+        confluid_category = getattr(target_func, "__confluid_category__", None)
+        if confluid_category not in _NODE_CATEGORIES:
             logger.debug(f"ComfyFlux: Skipping {item['path']} (category not in {_NODE_CATEGORIES})")
             continue
 
-        node_name = f"Taidal_{item['name']}"
+        group = getattr(target_func, "__confluid_group__", None)
+        node_name = _node_key(module_path, confluid_category, group, item["name"])
         node_class = create_comfy_node(
             func=target_func,
             name=node_name,
-            category=category,
+            category=_node_category(module_path, confluid_category, group, root),
         )
         target_mappings[node_name] = node_class
         display_name_mappings[node_name] = _humanize_node_name(item["name"])

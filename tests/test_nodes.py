@@ -16,7 +16,13 @@ import pytest
 import torch
 from dataflux.sample import Sample
 
-from fluxstudio.nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS, SampleExtractorNode, WalkDatasetNode
+from fluxstudio.nodes import (
+    NODE_CLASS_MAPPINGS,
+    NODE_DISPLAY_NAME_MAPPINGS,
+    SampleExtractorNode,
+    WalkDatasetNode,
+    _colormap_choices,
+)
 
 
 class _ImgSource:
@@ -41,7 +47,9 @@ class _ImgSource:
 def test_walk_index_widget_has_control_after_generate() -> None:
     idx = WalkDatasetNode.INPUT_TYPES()["required"]["index"]
     assert idx[0] == "INT"
-    assert idx[1]["control_after_generate"] is True
+    # A *string* default makes ComfyUI's control combo open on that mode; "increment" steps through
+    # the dataset one sample per Queue Prompt instead of randomizing (the bare-``True`` fallback).
+    assert idx[1]["control_after_generate"] == "increment"
 
 
 def test_walk_returns_sample_at_index() -> None:
@@ -87,12 +95,32 @@ def test_extractor_input_types_and_outputs() -> None:
     required = SampleExtractorNode.INPUT_TYPES()["required"]
     assert required["sample"] == ("DATAFLUX_SAMPLE",)
     assert required["field"][0] == ["input", "target"]
-    assert required["colormap"][0] == "STRING"
+    # colormap is a combo (enumeration), not free text — its options are the closed waivefront
+    # ``Colormap`` set, and the default ("viridis") is one of them.
+    colormap_options = required["colormap"][0]
+    assert isinstance(colormap_options, list)
+    assert "viridis" in colormap_options and "gray" in colormap_options
+    assert required["colormap"][1]["default"] == "viridis"
     assert required["max_size"][0] == "INT"
     assert SampleExtractorNode.RETURN_TYPES == ("IMAGE", "MASK", "STRING", "INT", "FLOAT")
     assert SampleExtractorNode.RETURN_NAMES == ("image", "mask", "text", "int", "float")
     # NOT an output node — it feeds native ComfyUI viewers.
     assert getattr(SampleExtractorNode, "OUTPUT_NODE", False) is False
+
+
+def test_colormap_choices_are_the_waivefront_literal_set() -> None:
+    # Single source of truth: the dropdown options ARE waivefront's closed Colormap set (get_args).
+    from waivefront.visualizers import COLORMAPS
+
+    assert _colormap_choices() == list(COLORMAPS)
+    assert "viridis" in _colormap_choices()
+
+
+def test_colormap_choices_fall_back_when_waivefront_absent() -> None:
+    # With the [waivefront] extra missing, the node still registers with a single safe option
+    # (the IMAGE output is a placeholder then anyway).
+    with patch.dict(sys.modules, {"waivefront.visualizers": None}):
+        assert _colormap_choices() == ["viridis"]
 
 
 def test_extract_input_image_yields_comfy_image() -> None:

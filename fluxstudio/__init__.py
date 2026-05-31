@@ -1,7 +1,7 @@
 """ComfyUI Entry Point for Taidal/Waivefront nodes."""
 
 import importlib.metadata
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 from logflow import get_logger
 
@@ -36,6 +36,69 @@ def list_cached_hf_datasets() -> list:
         return []
 
 
+def list_hf_dataset_features(path: str, name: Optional[str] = None, split: Optional[str] = None) -> List[str]:
+    """Return the feature/column names of a HuggingFace dataset (e.g. ``["image", "label"]``).
+
+    Backs the ``/taidal/hf_dataset_features`` route + the feature picker
+    (``web/hf_feature_chooser.js``), which lets a ``HuggingFace*`` source node's
+    ``input_feature`` / ``target_feature`` STRING fields be filled from a dropdown of
+    the *selected* dataset's actual columns instead of typed blind — the cached-dataset
+    picker one level down (the columns of the chosen dataset, not the list of datasets).
+
+    Tries the cheap metadata-only path first (``load_dataset_builder().info.features``,
+    no row download), then falls back to streaming a single example (handles datasets
+    whose ``info.features`` is unset until a split is prepared, e.g. local imagefolders).
+    Column order is preserved (more useful than alphabetical for picking input vs target).
+    Degrades to an empty list on ANY failure (``datasets`` missing, unknown id, offline) —
+    the picker is a convenience over a free-text field and must never break the editor.
+    """
+    if not path:
+        return []
+    # 1. Cheap path: the dataset builder's info carries the feature schema without
+    #    downloading any rows.
+    try:
+        from datasets import load_dataset_builder
+
+        builder = load_dataset_builder(path, name=name or None)
+        features = getattr(builder.info, "features", None)
+        if features:
+            return list(features.keys())
+    except Exception as e:
+        logger.debug(f"list_hf_dataset_features: builder path failed ({type(e).__name__}: {e})")
+    # 2. Fallback: stream one example and read its keys.
+    try:
+        from datasets import load_dataset
+
+        stream = load_dataset(path, name=name or None, split=split or "train", streaming=True)
+        first = next(iter(stream))
+        return list(first.keys())
+    except Exception as e:
+        logger.debug(f"list_hf_dataset_features: streaming fallback failed ({type(e).__name__}: {e})")
+        return []
+
+
+def list_hf_dataset_splits(path: str, name: Optional[str] = None) -> List[str]:
+    """Return the available split names of a HuggingFace dataset (e.g. ``["train", "test"]``).
+
+    Backs the ``/taidal/hf_dataset_splits`` route + the split picker
+    (``web/hf_split_chooser.js``), which fills a ``HuggingFace*`` source node's ``split`` STRING
+    field from a dropdown of the *selected* dataset's actual splits. The field stays free-text
+    (HF supports slice syntax like ``train[:90%]`` / ``train+test``); this only offers the
+    enumerated splits. Metadata-only (``datasets.get_dataset_split_names``, no row download).
+    Degrades to an empty list on ANY failure (``datasets`` missing, unknown id, offline) — the
+    picker is a convenience over a free-text field and must never break the editor.
+    """
+    if not path:
+        return []
+    try:
+        from datasets import get_dataset_split_names
+
+        return list(get_dataset_split_names(path, config_name=name or None))
+    except Exception as e:
+        logger.debug(f"list_hf_dataset_splits: returning [] ({type(e).__name__}: {e})")
+        return []
+
+
 def _discover_and_register_nodes() -> None:
     """Dynamically discover and register ComfyUI nodes via entry points."""
     try:
@@ -47,12 +110,11 @@ def _discover_and_register_nodes() -> None:
 
     for ep in eps:
         mod_path = ep.value
-        # Create a nested category based on the module path (e.g., "waivefront.sinks" -> "Taidal/Waivefront/Sinks")
-        parts = mod_path.split(".")
-        category = "Taidal/" + "/".join(p.title() for p in parts)
-
+        # The palette path per node is ``Taidal/<Package>/<Category>[/<group>]`` — built inside
+        # register_module_nodes from the module's top-level package + each class's confluid
+        # category/group (see bridge._node_category). We only pass the module to scan.
         try:
-            register_module_nodes(mod_path, NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS, category=category)
+            register_module_nodes(mod_path, NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS)
         except Exception as e:
             # We use debug instead of warning here because not all confluid modules
             # will have valid ComfyUI ops, and we don't want to spam the user's startup log.
@@ -110,6 +172,37 @@ try:
         @server.PromptServer.instance.routes.get("/taidal/hf_datasets")
         async def hf_datasets_handler(request: Any) -> Any:
             return web.json_response({"datasets": list_cached_hf_datasets()})
+
+    # List the feature/column names of the dataset named in a node's HF dataset-id field so the
+    # feature picker (web/hf_feature_chooser.js) can offer them for input_feature / target_feature
+    # instead of free-text. Query params: path (required), name (HF subset), split.
+    features_route_exists = any(
+        r.path == "/taidal/hf_dataset_features" and r.method == "GET" for r in server.PromptServer.instance.routes
+    )
+    if not features_route_exists:
+
+        @server.PromptServer.instance.routes.get("/taidal/hf_dataset_features")
+        async def hf_dataset_features_handler(request: Any) -> Any:
+            query = request.query
+            path = query.get("path", "")
+            name = query.get("name") or None
+            split = query.get("split") or None
+            return web.json_response({"features": list_hf_dataset_features(path, name=name, split=split)})
+
+    # List the available split names of the dataset named in a node's HF dataset-id field so the
+    # split picker (web/hf_split_chooser.js) can offer them for the `split` field. Query params:
+    # path (required), name (HF subset).
+    splits_route_exists = any(
+        r.path == "/taidal/hf_dataset_splits" and r.method == "GET" for r in server.PromptServer.instance.routes
+    )
+    if not splits_route_exists:
+
+        @server.PromptServer.instance.routes.get("/taidal/hf_dataset_splits")
+        async def hf_dataset_splits_handler(request: Any) -> Any:
+            query = request.query
+            path = query.get("path", "")
+            name = query.get("name") or None
+            return web.json_response({"splits": list_hf_dataset_splits(path, name=name)})
 
     # Serve each node's declared input/output type spec so the canvas connection-validator
     # (web/connection_validator.js) can reject incompatible Sample wires live in the editor.

@@ -19,7 +19,7 @@ fallback and silently defeat the very branches under test.
 """
 
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Literal, Optional
 from unittest.mock import patch
 
 import datasets
@@ -35,6 +35,10 @@ from fluxstudio.bridge import (
     _coerce_kwargs,
     _humanize_node_name,
     _is_hf_dataset_id_param,
+    _is_hf_feature_param,
+    _is_hf_metadata_param,
+    _is_hf_split_param,
+    _literal_options,
     _map_type,
     create_comfy_node,
     register_module_nodes,
@@ -160,6 +164,52 @@ def test_create_comfy_node_string_return_type() -> None:
     assert create_comfy_node(op, "StrReturnNode").RETURN_TYPES == ("STRING",)
 
 
+# --------------------------------------------------------------------------- #
+# Literal[...] -> combo dropdown (closed-Literal enumeration)
+# --------------------------------------------------------------------------- #
+
+
+def test_literal_options_extracts_members() -> None:
+    assert _literal_options(Literal["a", "b", "c"]) == ["a", "b", "c"]
+    # Unwrap Optional[Literal[...]].
+    assert _literal_options(Optional[Literal["x", "y"]]) == ["x", "y"]
+    # Non-Literal annotations return None (so the scalar/path heuristics still run).
+    assert _literal_options(str) is None
+    assert _literal_options(int) is None
+
+
+def test_literal_param_becomes_combo_with_default() -> None:
+    def op(colormap: Literal["viridis", "gray", "hot"] = "gray") -> str:
+        return colormap
+
+    required = create_comfy_node(op, "LiteralNode").INPUT_TYPES()["required"]
+    options, config = required["colormap"]
+    # The combo's options ARE the literal members (a list, ComfyUI's enumeration form), default honoured.
+    assert options == ["viridis", "gray", "hot"]
+    assert config["default"] == "gray"
+
+
+def test_literal_param_default_falls_back_to_first_option() -> None:
+    # A Literal param with no default uses the first member as the combo default.
+    def op(mode: Literal["fast", "slow"]) -> str:
+        return mode
+
+    required = create_comfy_node(op, "LiteralNoDefaultNode").INPUT_TYPES()["required"]
+    options, config = required["mode"]
+    assert options == ["fast", "slow"]
+    assert config["default"] == "fast"
+
+
+def test_coerce_kwargs_passes_literal_value_through() -> None:
+    # A combo value must NOT be run through the STRING list/int heuristics, even if a member
+    # contains "list"/"int" — it is the exact constructor value.
+    def op(mode: Literal["int8", "list_mode", "plain"] = "plain") -> str:
+        return mode
+
+    assert _coerce_kwargs(op, {"mode": "int8"}) == {"mode": "int8"}
+    assert _coerce_kwargs(op, {"mode": "list_mode"}) == {"mode": "list_mode"}
+
+
 def test_node_execution_tuple_return_passthrough() -> None:
     # When the wrapped callable already returns a tuple, execute_wrapper must
     # forward it verbatim rather than nesting it in another 1-tuple.
@@ -182,7 +232,7 @@ def _sample_op(x: int) -> str:
     return str(x)
 
 
-# Registration is a POSITIVE allowlist on the @configurable category (op/source/dataset), so the
+# Registration is a POSITIVE allowlist on the @configurable category (op/source), so the
 # fake callable must carry one to be registered at all.
 _sample_op.__confluid_category__ = "op"  # type: ignore[attr-defined]
 
@@ -194,12 +244,71 @@ def test_register_module_nodes_registers_callable() -> None:
 
     with patch("fluxstudio.bridge.scan_module", return_value=discovered):
         with patch("fluxstudio.bridge.resolve_callable", return_value=_sample_op):
-            register_module_nodes("fake.mod", mappings, display, category="Taidal/Fake")
+            register_module_nodes("fake.mod", mappings, display)
 
-    assert "Taidal_sample_op" in mappings
-    assert mappings["Taidal_sample_op"].CATEGORY == "Taidal/Fake"
+    # Key is qualified by package + category (module "fake.mod" -> "fake", category "op"), so it's
+    # globally unique; no group on _sample_op.
+    assert "Taidal_fake_op_sample_op" in mappings
+    # Palette path (display): <root>/<Package>/<Category> — package "Fake" (str.title() fallback),
+    # confluid category "op" -> "Op", no group.
+    assert mappings["Taidal_fake_op_sample_op"].CATEGORY == "Taidal/Fake/Op"
     # Verbatim identifier, ``_`` -> space, NO title-casing (capitals preserved).
-    assert display["Taidal_sample_op"] == "sample op"
+    assert display["Taidal_fake_op_sample_op"] == "sample op"
+
+
+def test_register_module_nodes_palette_path_with_group_and_casing() -> None:
+    """A grouped op nests as <root>/<Package>/<Category>/<group>; the package level uses the
+    canonical display casing (dataflux -> DataFlux) and the group is appended verbatim. The
+    registration KEY uses RAW identifiers (package + category + group), not the display casing."""
+
+    def _grouped_op(x: int) -> str:
+        return str(x)
+
+    _grouped_op.__confluid_category__ = "op"  # type: ignore[attr-defined]
+    _grouped_op.__confluid_group__ = "numpy"  # type: ignore[attr-defined]
+
+    mappings: dict = {}
+    display: dict = {}
+    discovered = [{"path": "dataflux.ops.numpy:grouped_op", "name": "grouped_op"}]
+
+    with patch("fluxstudio.bridge.scan_module", return_value=discovered):
+        with patch("fluxstudio.bridge.resolve_callable", return_value=_grouped_op):
+            register_module_nodes("dataflux.ops.numpy", mappings, display)
+
+    assert "Taidal_dataflux_op_numpy_grouped_op" in mappings
+    assert mappings["Taidal_dataflux_op_numpy_grouped_op"].CATEGORY == "Taidal/DataFlux/Op/numpy"
+
+
+def test_register_module_nodes_same_name_different_module_no_collision() -> None:
+    """Two same-named ops in different modules (e.g. numpy vs torch ``RescaleOp``) must BOTH
+    register — the package/category/group-qualified key keeps them distinct instead of the second
+    silently overwriting the first in NODE_CLASS_MAPPINGS."""
+
+    def _numpy_rescale(x: int) -> str:
+        return str(x)
+
+    def _torch_rescale(x: int) -> str:
+        return str(x)
+
+    for fn, grp in ((_numpy_rescale, "numpy"), (_torch_rescale, "torch")):
+        fn.__confluid_category__ = "op"  # type: ignore[attr-defined]
+        fn.__confluid_group__ = grp  # type: ignore[attr-defined]
+
+    mappings: dict = {}
+    display: dict = {}
+
+    for mod, fn in (("dataflux.ops.numpy", _numpy_rescale), ("dataflux.ops.torch", _torch_rescale)):
+        with patch("fluxstudio.bridge.scan_module", return_value=[{"path": f"{mod}:RescaleOp", "name": "RescaleOp"}]):
+            with patch("fluxstudio.bridge.resolve_callable", return_value=fn):
+                register_module_nodes(mod, mappings, display)
+
+    # Both survive under distinct keys, in distinct palette folders, with the SAME display name.
+    assert "Taidal_dataflux_op_numpy_RescaleOp" in mappings
+    assert "Taidal_dataflux_op_torch_RescaleOp" in mappings
+    assert mappings["Taidal_dataflux_op_numpy_RescaleOp"].CATEGORY == "Taidal/DataFlux/Op/numpy"
+    assert mappings["Taidal_dataflux_op_torch_RescaleOp"].CATEGORY == "Taidal/DataFlux/Op/torch"
+    assert display["Taidal_dataflux_op_numpy_RescaleOp"] == "RescaleOp"
+    assert display["Taidal_dataflux_op_torch_RescaleOp"] == "RescaleOp"
 
 
 def test_register_module_nodes_preserves_camelcase_display_name() -> None:
@@ -212,7 +321,7 @@ def test_register_module_nodes_preserves_camelcase_display_name() -> None:
         with patch("fluxstudio.bridge.resolve_callable", return_value=_sample_op):
             register_module_nodes("fake.mod", mappings, display)
 
-    assert display["Taidal_HuggingFaceSource"] == "HuggingFaceSource"
+    assert display["Taidal_fake_op_HuggingFaceSource"] == "HuggingFaceSource"
 
 
 def test_register_module_nodes_skips_private_callables() -> None:
@@ -228,21 +337,30 @@ def test_register_module_nodes_skips_private_callables() -> None:
         with patch("fluxstudio.bridge.resolve_callable", return_value=_sample_op):
             register_module_nodes("fake.mod", mappings, display)
 
-    assert "Taidal__to_uint8" not in mappings
-    assert "Taidal_sample_op" in mappings
+    assert not any("to_uint8" in key for key in mappings)
+    assert "Taidal_fake_op_sample_op" in mappings
 
 
 def test_register_module_nodes_is_a_positive_category_allowlist() -> None:
-    """Only ``category in {op, source, dataset}`` registers; engines AND uncategorised are excluded.
+    """Only ``category in {op, source, engine}`` registers; task datasets AND uncategorised
+    are excluded.
 
-    The generic engines (``Flux``/``JointFlux``/``DatasetSplit`` and the raw-callable wrappers
-    ``FilterOp``/``WrappedOp``) are ``category="engine"``; uncategorised callables (helper functions,
-    raw sinks) carry no category. Both are NOT buildable nodes, so neither registers — a class only
-    appears once it is deliberately tagged op/source/dataset.
+    The generic engines (``Flux``/``JointFlux``) are ``category="engine"`` and now DO register
+    (they compose on the canvas via wired source/op sockets). The raw-callable wrappers
+    ``FilterOp``/``WrappedOp`` are UNcategorised (neither op nor engine), so they stay out even with
+    ``engine`` allowed; task datasets are ``*_dataset`` (a trainer-config concept, not a canvas one);
+    uncategorised callables (helper functions, raw sinks) carry no category. A class appears only once
+    it is deliberately tagged op/source/engine.
     """
 
-    class _FakeEngine:  # category="engine" -> excluded
+    class _FakeEngine:  # category="engine" -> NOW kept (canvas-composable)
         __confluid_category__ = "engine"
+
+        def __getitem__(self, i: int) -> Sample:
+            return Sample(input=i, target=None, metadata={})
+
+    class _FakeDataset:  # task dataset -> excluded (dataset is an MCP/trainer concept)
+        __confluid_category__ = "classification_dataset"
 
         def __getitem__(self, i: int) -> Sample:
             return Sample(input=i, target=None, metadata={})
@@ -261,11 +379,13 @@ def test_register_module_nodes_is_a_positive_category_allowlist() -> None:
     display: dict = {}
     discovered = [
         {"path": "fake.mod:Engine", "name": "Engine"},
+        {"path": "fake.mod:Dataset", "name": "Dataset"},
         {"path": "fake.mod:Uncat", "name": "Uncat"},
         {"path": "fake.mod:RealSource", "name": "RealSource"},
     ]
     resolved = {
         "fake.mod:Engine": _FakeEngine,
+        "fake.mod:Dataset": _FakeDataset,
         "fake.mod:Uncat": _FakeUncategorised,
         "fake.mod:RealSource": _FakeSource,
     }
@@ -274,9 +394,10 @@ def test_register_module_nodes_is_a_positive_category_allowlist() -> None:
         with patch("fluxstudio.bridge.resolve_callable", side_effect=lambda p: resolved[p]):
             register_module_nodes("fake.mod", mappings, display)
 
-    assert "Taidal_Engine" not in mappings  # engine excluded
-    assert "Taidal_Uncat" not in mappings  # uncategorised excluded (positive allowlist)
-    assert "Taidal_RealSource" in mappings  # tagged source kept
+    assert "Taidal_fake_engine_Engine" in mappings  # engine now kept (canvas-composable)
+    assert not any("Dataset" in key for key in mappings)  # task dataset excluded
+    assert not any("Uncat" in key for key in mappings)  # uncategorised excluded (positive allowlist)
+    assert "Taidal_fake_source_RealSource" in mappings  # tagged source kept
 
 
 def test_register_module_nodes_skips_non_callable() -> None:
@@ -309,6 +430,12 @@ class _FakeSource:
         return self.count
 
     def __getitem__(self, index: int) -> Sample:
+        # Bound-checked so Python's sequence-protocol iteration (no __iter__) terminates at
+        # ``count`` — otherwise iterating a Flux wrapping this source loops forever.
+        if index < 0:
+            index += self.count
+        if not 0 <= index < self.count:
+            raise IndexError(index)
         return Sample(input=index, target=None, metadata={})
 
 
@@ -410,6 +537,123 @@ def test_generic_function_with_sample_param_gets_sample_socket() -> None:
     inputs = create_comfy_node(describe, "Taidal__Describe").INPUT_TYPES()["required"]
     assert inputs["sample"] == (SAMPLE_TYPE,)
     assert inputs["prefix"][0] == "STRING"
+
+
+# --------------------------------------------------------------------------- #
+# Engine composition: source / source-list / op-list ctor params -> wired sockets
+# (so DatasetSplit / Flux / JointFlux build on the canvas from other nodes' outputs)
+# --------------------------------------------------------------------------- #
+
+
+class _FakeView:
+    """A view-source requiring ANOTHER source (``source``, no default) + a scalar widget.
+
+    Mirrors ``DatasetSplit``'s shape so the source-input socket is tested without the real class."""
+
+    def __init__(self, source: object, start: int = 0) -> None:
+        self._items: List[Sample] = [source[i] for i in range(start, len(source))]  # type: ignore[index, arg-type]
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    def __getitem__(self, index: int) -> Sample:
+        return self._items[index]
+
+
+def test_required_source_param_is_a_wired_socket_not_widget() -> None:
+    spec = create_comfy_node(_FakeView, "Taidal__FakeView").INPUT_TYPES()
+    # ``source`` has no default -> REQUIRED DATAFLUX_SOURCE input (NOT a STRING widget).
+    assert spec["required"]["source"] == (SOURCE_TYPE,)
+    assert spec["required"]["start"][0] == "INT"  # plain scalar stays a widget
+
+
+def test_source_node_consumes_a_wired_source() -> None:
+    from dataflux.core import Flux
+
+    upstream = create_comfy_node(_FakeSource, "Taidal__Up")()
+    (src,) = upstream.execute(path="x", count=4)  # a Flux of 4 samples (inputs 0..3)
+    (out,) = create_comfy_node(_FakeView, "Taidal__View")().execute(source=src, start=1)
+    assert isinstance(out, Flux)
+    assert [s.input for s in out] == [1, 2, 3]  # index 0 dropped by start=1
+
+
+def test_flux_engine_node_wires_source_and_op_collection() -> None:
+    from dataflux.core import Flux
+
+    node_cls = create_comfy_node(Flux, "Taidal__Flux")
+    spec = node_cls.INPUT_TYPES()
+    # source defaults to None -> OPTIONAL socket; ops (List) -> dynamic op_0 seed; chunk_size widget.
+    assert spec["optional"]["source"] == (SOURCE_TYPE,)
+    assert spec["optional"]["op_0"] == (OP_TYPE,)
+    assert "ops" not in spec.get("required", {}) and "source" not in spec.get("required", {})
+
+    (src,) = create_comfy_node(_FakeSource, "Taidal__Up2")().execute(path="x", count=3)
+    _, op1 = create_comfy_node(_FakeOp, "Taidal__Op1")().execute(bump=1)
+    (out,) = node_cls().execute(source=src, op_0=op1)
+    assert isinstance(out, Flux)
+    assert [s.input for s in out] == [1, 2, 3]  # each of inputs 0,1,2 bumped +1
+
+
+def test_jointflux_engine_node_wires_source_list() -> None:
+    from dataflux.core import Flux, JointFlux
+
+    node_cls = create_comfy_node(JointFlux, "Taidal__JointFlux")
+    spec = node_cls.INPUT_TYPES()
+    # fluxes (List[Flux]) -> dynamic source_0 seed (DATAFLUX_SOURCE), NOT a STRING widget.
+    assert spec["optional"]["source_0"] == (SOURCE_TYPE,)
+    assert "fluxes" not in spec.get("required", {})
+
+    (a,) = create_comfy_node(_FakeSource, "Taidal__A")().execute(path="a", count=2)
+    (b,) = create_comfy_node(_FakeSource, "Taidal__B")().execute(path="b", count=3)
+    (out,) = node_cls().execute(source_0=a, source_1=b)
+    assert isinstance(out, Flux)
+    assert len(out) == 5  # 2 + 3 concatenated
+
+
+def test_real_dataset_split_node_wires_source_and_splits() -> None:
+    from dataflux.core import Flux
+    from dataflux.sources import DatasetSplit
+
+    node_cls = create_comfy_node(DatasetSplit, "Taidal__DatasetSplit")
+    spec = node_cls.INPUT_TYPES()
+    # ``source`` is required (no default) -> wired socket; split/val_fraction/seed stay widgets.
+    assert spec["required"]["source"] == (SOURCE_TYPE,)
+    assert "source" not in spec.get("optional", {})
+
+    (src,) = create_comfy_node(_FakeSource, "Taidal__SplitUp")().execute(path="x", count=10)
+    (out,) = node_cls().execute(source=src, split="val", val_fraction=0.2, seed=0)
+    assert isinstance(out, Flux)
+    assert len(out) == 2  # 20% of 10
+
+
+def test_real_range_source_node_wires_source() -> None:
+    from dataflux.core import Flux
+    from dataflux.sources import RangeSource
+
+    node_cls = create_comfy_node(RangeSource, "Taidal__RangeSource")
+    spec = node_cls.INPUT_TYPES()
+    # ``source`` is required (no default) -> wired DATAFLUX_SOURCE input; start/end stay widgets.
+    assert spec["required"]["source"] == (SOURCE_TYPE,)
+    (src,) = create_comfy_node(_FakeSource, "Taidal__RangeUp")().execute(path="x", count=10)
+    (out,) = node_cls().execute(source=src, start=2, end=5)
+    assert isinstance(out, Flux)
+    assert [s.input for s in out] == [2, 3, 4]
+
+
+def test_real_concat_source_node_wires_source_list() -> None:
+    from dataflux.core import Flux
+    from dataflux.sources import ConcatSource
+
+    node_cls = create_comfy_node(ConcatSource, "Taidal__ConcatSource")
+    spec = node_cls.INPUT_TYPES()
+    # ``sources`` (List) -> dynamic source_0 seed (DATAFLUX_SOURCE), not a STRING widget.
+    assert spec["optional"]["source_0"] == (SOURCE_TYPE,)
+    assert "sources" not in spec.get("required", {})
+    (a,) = create_comfy_node(_FakeSource, "Taidal__CA")().execute(path="a", count=2)
+    (b,) = create_comfy_node(_FakeSource, "Taidal__CB")().execute(path="b", count=3)
+    (out,) = node_cls().execute(source_0=a, source_1=b)
+    assert isinstance(out, Flux)
+    assert len(out) == 5  # 2 + 3 concatenated
 
 
 # --------------------------------------------------------------------------- #
@@ -557,7 +801,7 @@ def test_op_node_stashes_declared_specs() -> None:
 def test_humanize_node_name_preserves_capitals() -> None:
     # CamelCase stays verbatim (the .title() bug turned these to e.g. "Huggingfacesource").
     assert _humanize_node_name("HuggingFaceSource") == "HuggingFaceSource"
-    assert _humanize_node_name("RenderSpectrogramImageOp") == "RenderSpectrogramImageOp"
+    assert _humanize_node_name("ConvertToImageOp") == "ConvertToImageOp"
     # snake_case -> spaces, but no case change.
     assert _humanize_node_name("rescale_op") == "rescale op"
 
@@ -573,11 +817,24 @@ class HuggingFaceFakeDataset:
     Args:
         path: The HF dataset identifier (hub repo id or local path).
         split: Which split to load.
+        input_feature: Dataset column mapped onto Sample.input.
+        target_feature: Dataset column mapped onto Sample.target.
+        metadata_features: Columns to copy onto Sample.metadata.
     """
 
-    def __init__(self, path: str, split: str = "train") -> None:
+    def __init__(
+        self,
+        path: str,
+        split: str = "train",
+        input_feature: str = "image",
+        target_feature: str = "label",
+        metadata_features: Optional[List[str]] = None,
+    ) -> None:
         self.path = path
         self.split = split
+        self.input_feature = input_feature
+        self.target_feature = target_feature
+        self.metadata_features = metadata_features or []
 
     def __getitem__(self, i: int) -> Sample:
         return Sample(input=i, target=None, metadata={})
@@ -625,6 +882,95 @@ def test_non_hf_path_param_stays_directory_picker() -> None:
     inputs = create_comfy_node(PlainPathSource, "Taidal__PlainPath").INPUT_TYPES()["required"]
     _, config = inputs["path"]
     assert config["taidal_widget"] == "DIRECTORY"
+
+
+# --------------------------------------------------------------------------- #
+# HuggingFace feature-selector widget (free-text + optional column picker)
+# --------------------------------------------------------------------------- #
+
+
+def test_is_hf_feature_param_gating() -> None:
+    # input_feature / target_feature on a HuggingFace* source resolve to the column picker.
+    assert _is_hf_feature_param("input_feature", HuggingFaceFakeDataset) is True
+    assert _is_hf_feature_param("target_feature", HuggingFaceFakeDataset) is True
+    # gated on the HuggingFace* class-name convention
+    assert _is_hf_feature_param("input_feature", PlainPathSource) is False
+    # only the feature params, not e.g. split
+    assert _is_hf_feature_param("split", HuggingFaceFakeDataset) is False
+    # no owner -> not a feature param
+    assert _is_hf_feature_param("input_feature", None) is False
+
+
+def test_hf_source_feature_params_render_as_hf_feature_widget() -> None:
+    inputs = create_comfy_node(HuggingFaceFakeDataset, "Taidal__HFFeat").INPUT_TYPES()["required"]
+    for field, default in (("input_feature", "image"), ("target_feature", "label")):
+        comfy_type, config = inputs[field]
+        assert comfy_type == "STRING"
+        assert config["taidal_widget"] == "HF_FEATURE"  # NOT a directory or plain string
+        assert config["default"] == default  # the constructor default is preserved
+        # and the docstring Args flows through as a tooltip
+        assert config.get("tooltip")
+
+
+# --------------------------------------------------------------------------- #
+# HuggingFace split widget (free-text + optional split picker)
+# --------------------------------------------------------------------------- #
+
+
+def test_is_hf_split_param_gating() -> None:
+    # `split` on a HuggingFace* source resolves to the split picker.
+    assert _is_hf_split_param("split", HuggingFaceFakeDataset) is True
+    # gated on the HuggingFace* class-name convention -> DatasetSplit.split (a Literal on a
+    # non-HuggingFace class) is NOT caught and stays a combo via _literal_options.
+    assert _is_hf_split_param("split", PlainPathSource) is False
+    # only the split param, not e.g. input_feature
+    assert _is_hf_split_param("input_feature", HuggingFaceFakeDataset) is False
+    # no owner -> not a split param
+    assert _is_hf_split_param("split", None) is False
+
+
+def test_hf_source_split_param_renders_as_hf_split_widget() -> None:
+    inputs = create_comfy_node(HuggingFaceFakeDataset, "Taidal__HFSplit").INPUT_TYPES()["required"]
+    comfy_type, config = inputs["split"]
+    assert comfy_type == "STRING"  # free-text kept for HF slice syntax
+    assert config["taidal_widget"] == "HF_SPLIT"
+    assert config["default"] == "train"  # the constructor default is preserved
+    assert config.get("tooltip")  # docstring Args flows through
+
+
+# --------------------------------------------------------------------------- #
+# HuggingFace metadata_features widget (comma-separated STRING + multi-select picker)
+# --------------------------------------------------------------------------- #
+
+
+def test_is_hf_metadata_param_gating() -> None:
+    assert _is_hf_metadata_param("metadata_features", HuggingFaceFakeDataset) is True
+    # gated on the HuggingFace* class-name convention
+    assert _is_hf_metadata_param("metadata_features", PlainPathSource) is False
+    # only the metadata_features param, not e.g. input_feature
+    assert _is_hf_metadata_param("input_feature", HuggingFaceFakeDataset) is False
+    assert _is_hf_metadata_param("metadata_features", None) is False
+
+
+def test_hf_source_metadata_param_renders_as_hf_metadata_widget() -> None:
+    inputs = create_comfy_node(HuggingFaceFakeDataset, "Taidal__HFMeta").INPUT_TYPES()["required"]
+    comfy_type, config = inputs["metadata_features"]
+    assert comfy_type == "STRING"  # comma-separated free-text (NOT a STRING list fallback per-name)
+    assert config["taidal_widget"] == "HF_METADATA"
+    assert config["default"] == ""  # empty -> None -> no extra metadata (backward-compatible)
+    assert config.get("tooltip")  # docstring Args flows through
+
+
+def test_hf_metadata_string_coerces_to_list_and_star() -> None:
+    # The comma-separated STRING widget round-trips to the List[str] the constructor wants;
+    # "*" passes through as a single-element list (the dataflux sentinel for "the rest").
+    assert _coerce_kwargs(HuggingFaceFakeDataset, {"metadata_features": "id, src"})["metadata_features"] == [
+        "id",
+        "src",
+    ]
+    assert _coerce_kwargs(HuggingFaceFakeDataset, {"metadata_features": "*"})["metadata_features"] == ["*"]
+    # empty -> None (param default) -> source treats as "no extra metadata"
+    assert _coerce_kwargs(HuggingFaceFakeDataset, {"metadata_features": ""})["metadata_features"] is None
 
 
 # --------------------------------------------------------------------------- #

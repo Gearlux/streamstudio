@@ -58,6 +58,10 @@ app.registerExtension({
                         const target = this.widgets.find((w) => w.name === name);
                         if (target) {
                             target.value = value;
+                            // Fire the field's own callback so dependent UI reacts to the
+                            // programmatic change — notably the feature picker
+                            // (web/hf_feature_chooser.js) reloads the dataset's columns.
+                            if (typeof target.callback === "function") target.callback(value);
                             app.graph.setDirtyCanvas(true);
                         } else {
                             alert("Could not find the dataset text field to update.");

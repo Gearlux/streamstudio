@@ -10,7 +10,7 @@ FluxStudio-only visualizers" mandate); this module only bridges to ComfyUI's ten
 provides the index-walk stepper.
 """
 
-from typing import Any, Dict, Optional, Tuple, Type
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
 
 import numpy as np
 import torch
@@ -18,18 +18,45 @@ from logflow import get_logger
 
 from fluxstudio.bridge import SAMPLE_TYPE, SOURCE_TYPE
 
+if TYPE_CHECKING:
+    from waivefront.visualizers import Colormap
+
 logger = get_logger(__name__)
+
+
+def _colormap_choices() -> List[str]:
+    """The colormap dropdown options — the closed ``waivefront.visualizers.Colormap`` set.
+
+    Sourced from waivefront's ``COLORMAPS`` tuple (itself ``get_args(Colormap)``) so the dropdown,
+    ``value_to_image``'s annotation, and navigaitor's form-spec all enumerate ONE source of truth.
+    Falls back to a single ``"viridis"`` option when the ``[waivefront]`` extra is absent (the IMAGE
+    output is a placeholder then anyway), so the node still registers without waivefront installed.
+    """
+    try:
+        from waivefront.visualizers import COLORMAPS
+
+        return list(COLORMAPS)
+    except ImportError:  # waivefront extra not installed — see _to_image's placeholder path.
+        return ["viridis"]
+
 
 # Matches ComfyUI's seed-widget convention so the frontend renders a control_after_generate spinner.
 _MAX_INDEX = 0xFFFFFFFFFFFFFFFF
+
+# Default control-after-generate mode for the index widget. ComfyUI honours a *string* value here as
+# the combo's default (values: fixed/increment/decrement/randomize); passing the bare ``True`` instead
+# falls back to the frontend default (which for a seed-like INT can land on "randomize"). We want
+# stepping THROUGH the dataset, so default to "increment" — each Queue Prompt advances one sample.
+_INDEX_CONTROL_DEFAULT = "increment"
 
 
 class WalkDatasetNode:
     """Emit the ``Sample`` at ``index`` from a ``DATAFLUX_SOURCE``; ``index`` auto-increments each run.
 
-    The ``index`` widget uses ComfyUI's ``control_after_generate`` so every Queue Prompt advances to
-    the next sample (set the control to "fixed" / index 0 to reset). With ``wrap`` enabled the index
-    wraps modulo the source length; otherwise an out-of-range index raises.
+    The ``index`` widget uses ComfyUI's ``control_after_generate``, defaulting to **increment** so every
+    Queue Prompt advances to the next sample in order (set the control to "fixed" / index 0 to reset, or
+    "randomize" to sample at random). With ``wrap`` enabled the index wraps modulo the source length;
+    otherwise an out-of-range index raises.
     """
 
     CATEGORY = "Taidal/FluxStudio"
@@ -42,7 +69,10 @@ class WalkDatasetNode:
         return {
             "required": {
                 "source": (SOURCE_TYPE,),
-                "index": ("INT", {"default": 0, "min": 0, "max": _MAX_INDEX, "control_after_generate": True}),
+                "index": (
+                    "INT",
+                    {"default": 0, "min": 0, "max": _MAX_INDEX, "control_after_generate": _INDEX_CONTROL_DEFAULT},
+                ),
                 "wrap": ("BOOLEAN", {"default": True}),
             }
         }
@@ -105,13 +135,16 @@ class SampleExtractorNode:
             "required": {
                 "sample": (SAMPLE_TYPE,),
                 "field": (["input", "target"], {"default": "input"}),
-                "colormap": ("STRING", {"default": "viridis"}),
+                # A combo (enumeration), not free text — the closed waivefront ``Colormap`` set, so the
+                # dropdown can only offer colormaps ``value_to_image`` actually accepts. Single source of
+                # truth: the options come from ``COLORMAPS`` (== ``get_args(Colormap)``).
+                "colormap": (_colormap_choices(), {"default": "viridis"}),
                 "max_size": ("INT", {"default": 512, "min": 32, "max": 4096}),
             }
         }
 
     def extract(
-        self, sample: Any, field: str = "input", colormap: str = "viridis", max_size: int = 512
+        self, sample: Any, field: str = "input", colormap: "Colormap" = "viridis", max_size: int = 512
     ) -> Tuple[Any, ...]:
         value = sample.input if field == "input" else sample.target
         spec = self._field_spec(sample, field, value)
@@ -152,7 +185,7 @@ class SampleExtractorNode:
         return None
 
     @staticmethod
-    def _to_image(value: Any, colormap: str, max_size: int) -> torch.Tensor:
+    def _to_image(value: Any, colormap: "Colormap", max_size: int) -> torch.Tensor:
         """Render ``value`` to a ComfyUI IMAGE tensor ``[1, H, W, 3]`` float in ``[0, 1]``."""
         try:
             from waivefront.visualizers import value_to_image
