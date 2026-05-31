@@ -38,22 +38,22 @@ Reuse an existing ComfyUI checkout with `--comfy-dir`:
 fluxstudio --comfy-dir /path/to/ComfyUI
 ```
 
-Taidal nodes then appear in ComfyUI's *Add Node* menu under the `Taidal/…` categories (e.g. `Taidal/Waivefront/Sinks`), named for the callable they wrap.
+Taidal nodes then appear in ComfyUI's *Add Node* menu under a `Taidal/<Package>/<Category>[/<group>]` palette path — e.g. `Taidal/DataFlux/Op/numpy`, `Taidal/Waivefront/Op/targets`, `Taidal/DataFlux/Source` — named for the callable they wrap. The first level is the source package (canonical casing: `DataFlux`, `Waivefront`, `FluxStudio`), then the `@configurable` category (`Op` / `Source`), then the optional path-like `group` tag (an op with no `group` sits directly under `…/Op`).
 
 ## Building a pipeline
 
 Discovered callables are classified by their DataFlux role so they wire together by **type**, not opaque strings:
 
-- **Source** nodes (e.g. `HuggingFaceSource`, under `Taidal/Dataflux/Sources`) construct a dataset and output a `DATAFLUX_SOURCE`.
-- **Op** nodes (e.g. `RescaleOp`, `StandardizeOp`, `RenderSpectrogramImageOp`) take a `DATAFLUX_SAMPLE` input **plus** their constructor config as widgets, apply the op, and output a `DATAFLUX_SAMPLE` — so ops chain.
+- **Source** nodes (e.g. `HuggingFaceSource`, under `Taidal/DataFlux/Source`) construct a dataset and output a `DATAFLUX_SOURCE`.
+- **Op** nodes (e.g. `RescaleOp`, `StandardizeOp`, `ConvertToImageOp`) take a `DATAFLUX_SAMPLE` input **plus** their constructor config as widgets, apply the op, and output a `DATAFLUX_SAMPLE` — so ops chain.
 - **Generic** nodes (plain functions) keep scalar widgets with a `STRING` fallback.
 
 Node labels are the **verbatim** callable name (underscores become spaces; capitals are preserved — `HuggingFaceSource` stays `HuggingFaceSource`, not `Huggingfacesource`). Internal helpers (names starting with `_`) are not surfaced. Hovering any widget shows a **tooltip** sourced from the wrapped callable's docstring `Args:` block (see *Constructor-parameter tooltips* below).
 
 Two adapter nodes (under `Taidal/FluxStudio`) let you step through a dataset and view samples with **native** ComfyUI viewers:
 
-- **Walk Dataset (by index)** — takes a `DATAFLUX_SOURCE` and an `index`, and outputs the `Sample` at that index (`source[index]`). The `index` widget uses ComfyUI's `control_after_generate`, so each **Queue Prompt** advances to the next sample — set the control to *fixed* (or `index` `0`) to reset. `wrap` cycles modulo the dataset length.
-- **Extract from Sample** — takes a `DATAFLUX_SAMPLE` and a `field` selector (`input` / `target`) and unpacks the selected value onto **typed** sockets — `IMAGE`, `MASK`, `STRING`, `INT`, `FLOAT` — so you wire the one your viewer expects. ComfyUI types sockets statically, so instead of retyping one socket per run it surfaces every plausible type; *which* one is meaningful is derived from the sample's features (`Sample.describe()`). `IMAGE` is rendered via `waivefront.visualizers.value_to_image` (PIL / tensor / 2-D map → image; a non-visual value renders as a small text image); `MASK` carries a 2-D field (segmentation targets); `STRING` is a label/scalar (with `label_name` when the target has it) or a compact type summary; `INT` / `FLOAT` carry a scalar (e.g. a class id). Drop two of these next to each other (one set to `input`, one to `target`) to view both at once.
+- **Walk Dataset (by index)** — takes a `DATAFLUX_SOURCE` and an `index`, and outputs the `Sample` at that index (`source[index]`). The `index` widget uses ComfyUI's `control_after_generate`, **defaulting to *increment*** so each **Queue Prompt** advances to the next sample in order — set the control to *fixed* (or `index` `0`) to reset, or *randomize* to sample at random. `wrap` cycles modulo the dataset length.
+- **Extract from Sample** — takes a `DATAFLUX_SAMPLE` and a `field` selector (`input` / `target`) and unpacks the selected value onto **typed** sockets — `IMAGE`, `MASK`, `STRING`, `INT`, `FLOAT` — so you wire the one your viewer expects. ComfyUI types sockets statically, so instead of retyping one socket per run it surfaces every plausible type; *which* one is meaningful is derived from the sample's features (`Sample.describe()`). `IMAGE` is rendered via `waivefront.visualizers.value_to_image` (PIL / tensor / 2-D map → image; a non-visual value renders as a small text image); the `colormap` widget is a **dropdown** of the supported colormaps (the closed `waivefront.visualizers.Colormap` set — `viridis`, `magma`, `gray`, …) applied to 2-D maps, and `max_size` caps the longest side of the rendered image in pixels (default `512`, larger renders are downscaled, aspect ratio preserved). `MASK` carries a 2-D field (segmentation targets); `STRING` is a label/scalar (with `label_name` when the target has it) or a compact type summary; `INT` / `FLOAT` carry a scalar (e.g. a class id). Drop two of these next to each other (one set to `input`, one to `target`) to view both at once.
 
 This replaces the old all-in-one "Show Sample" output node: extraction lives here, **previewing lives in ComfyUI's own nodes** — wire `IMAGE` into *Preview Image*, `STRING` into a text node, etc.
 
@@ -93,7 +93,7 @@ Walk ──────────sample┘
 
 `Parallel(ops=[RescaleOp, StandardizeOp])` applies both to the incoming sample. Leave a higher-order op's `sample` unconnected and take *its* `op` output to nest it inside another higher-order op.
 
-> **Scope.** Works for any op whose constructor takes an `ops`/`branches` list. `Tee` (a list of *branches*) v1 treats each connected op as its own single-op branch — multi-op branches mean pre-composing a branch into one op (future). `FilterOp`/`WrappedOp` wrap a *raw Python callable*, so they aren't canvas nodes at all (they're `category="engine"`).
+> **Scope.** Works for any op whose constructor takes an `ops`/`branches` list. `Tee` (a list of *branches*) v1 treats each connected op as its own single-op branch — multi-op branches mean pre-composing a branch into one op (future). `FilterOp`/`WrappedOp` wrap a *raw Python callable*, so they aren't canvas nodes at all (bare `@configurable`, i.e. UNcategorised — neither `op` nor `engine`).
 
 ## Exporting ops to a Flux
 
@@ -146,9 +146,9 @@ FluxStudio never hand-defines a node. At ComfyUI startup, `_discover_and_registe
 
 1. Enumerates the `confluid.configurables` entry-point group via `importlib.metadata`.
 2. For each module, `dataflux.discovery.scan_module` finds the compatible callables.
-3. `register_module_nodes` / `create_comfy_node` (`fluxstudio/bridge.py`) classify each callable (Source / Op / Generic — see *Building a pipeline*) and wrap it in a ComfyUI node class, keyed `Taidal_<callable>` and filed under a `Taidal/<Module/Path>` category.
+3. `register_module_nodes` / `create_comfy_node` (`fluxstudio/bridge.py`) classify each callable (Source / Op / Generic — see *Building a pipeline*) and wrap it in a ComfyUI node class, keyed by `_node_key` as `Taidal_<package>_<category>[_<group>]_<callable>` (globally unique, so a same-named class in two modules — e.g. numpy's vs torch's `RescaleOp` — doesn't clobber its twin) and filed under a `Taidal/<Package>/<Category>[/<group>]` palette path (built by `_node_category`: top-level package via `_PACKAGE_DISPLAY_NAMES` for canonical casing, then the `@configurable` category, then the optional `group` tag). The displayed name stays the verbatim class name.
 
-Registration is a **positive allowlist**: a class becomes a node only if its `@configurable` category is one of `{op, source, dataset}`. So the palette is exactly the deliberately-tagged ops, sources, and (task) datasets. Excluded *by construction*: the generic dataflux **engines** + raw-callable op wrappers (`Flux` / `JointFlux` / `DatasetSplit` / `FilterOp` / `WrappedOp`, all `category="engine"`) — composition primitives you wire in code, not on a canvas; uncategorised module-level helper functions; and raw sinks. You build a dataset by wiring `Source → Op → …`, not by adding a `Flux` node. (To surface another role — e.g. raw sinks — add its category to `_NODE_CATEGORIES` in `bridge.py` and tag the classes.)
+Registration is a **positive allowlist**: a class becomes a node only if its `@configurable` category is one of `{op, source, engine}`. So the palette is exactly the deliberately-tagged ops, sources, and engines. The generic dataflux **engines** (`Flux` / `JointFlux`, `category="engine"`) and the source-view `DatasetSplit` (`category="source"`) **are** buildable on the canvas: their source-typed constructor params render as wired sockets — a single `source` → a `DATAFLUX_SOURCE` input, a source-list (`fluxes`) → dynamic `source_N` inputs, an op-list (`ops`) → dynamic `op_N` `DATAFLUX_OP` inputs — so a Source/Op node (which already outputs *itself* as `DATAFLUX_SOURCE` / `DATAFLUX_OP`) wires straight into them. Excluded *by construction*: the **raw-callable op wrappers** (`FilterOp` / `WrappedOp`) — UNcategorised (bare `@configurable`), since they take a raw Python callable nothing a widget or socket supplies (so they stay out even with `engine` allowed); **task datasets** (`*_dataset`, e.g. `classification_dataset`) — a trainer-config concept navigaitor cares about, but a canvas only needs a `source` to yield Samples; uncategorised module-level helper functions; and raw sinks. You can build a dataset by wiring `Source → Op → …` *or* by feeding a `Source`/`Op` into a `Flux` / `DatasetSplit` engine node. (To surface another role, add its category to `_NODE_CATEGORIES` in `bridge.py` and tag the classes. Note: ops-export still targets linear op chains — engine-node graphs aren't exportable yet.)
 
 A module that fails to import or scan is skipped at `debug` level, so one package's missing optional dependency never empties the palette.
 
@@ -165,6 +165,9 @@ Node sockets and widgets are derived from each callable's signature by `_map_typ
 | a `Sample`-yielding source class | `DATAFLUX_SOURCE` output socket |
 | `datasets.Dataset` | `HF_DATASET` socket |
 | the dataset-id param of a `HuggingFace*` source (`repo_id` / `path`) | free-text `STRING` + optional cached-dataset picker (`web/hf_dataset_chooser.js` → `/taidal/hf_datasets`), tagged `taidal_widget="HF_DATASET_ID"` |
+| a feature-selector param of a `HuggingFace*` source (`input_feature` / `target_feature`) | free-text `STRING` + optional column picker (`web/hf_feature_chooser.js` → `/taidal/hf_dataset_features`), tagged `taidal_widget="HF_FEATURE"` |
+| the `split` param of a `HuggingFace*` source | free-text `STRING` + optional split picker (`web/hf_split_chooser.js` → `/taidal/hf_dataset_splits`), tagged `taidal_widget="HF_SPLIT"` |
+| the `metadata_features` list param of a `HuggingFace*` source | comma-separated `STRING` + multi-select "add column" picker incl. `*` (`web/hf_metadata_chooser.js` → `/taidal/hf_dataset_features`), tagged `taidal_widget="HF_METADATA"` |
 | `pathlib.Path`, or a param named `*path*` / `*dir*` / `*root*` / `*folder*` | directory-picker `STRING` (`web/directory_chooser.js` → `/taidal/choose_directory`) |
 | anything else | `STRING` fallback |
 
@@ -175,6 +178,18 @@ The directory picker calls the `/taidal/choose_directory` route registered in `f
 ### HuggingFace dataset-id field
 
 A HuggingFace dataset source's identifier is a **name**, not a folder — `dataflux.sources.HuggingFaceSource` happens to call it `path` (mirroring `datasets.load_dataset`), and sonair's `HuggingFaceClassificationDataset` calls it `repo_id`. Either way FluxStudio renders it as a free-text `STRING` (so you can type any Hub repo id like `kitofrank/RFUAV`, or a local imagefolder path), **not** the directory picker. `web/hf_dataset_chooser.js` adds an optional “📚 cached dataset” combo populated from the `/taidal/hf_datasets` route (`huggingface_hub.scan_cache_dir()`, dataset repos only) — selecting one fills the text field, which stays editable. The field is detected by the `HuggingFace*` class-name convention, so any future `HuggingFace*` source inherits it automatically.
+
+### HuggingFace feature-selector fields
+
+`HuggingFaceSource`'s `input_feature` / `target_feature` name which dataset *column* maps onto `Sample.input` / `.target` (defaults `image` / `label`). They render as free-text `STRING`s — but typing column names blind is error-prone, so `web/hf_feature_chooser.js` adds an optional “🏷️ columns” combo next to each, populated from the **selected** dataset's actual columns. The columns come from the `/taidal/hf_dataset_features` route (`datasets.load_dataset_builder().info.features`, falling back to streaming one example), keyed off whatever is currently in the node's dataset-id field — so it's the cached-dataset picker one level down: there you pick *which dataset*, here *which of its columns*. The combo refreshes whenever the dataset id / `name` / `split` changes (including when you pick a cached dataset), and selecting a column fills the editable text field. Detected by the same `HuggingFace*` class-name convention, so any future `HuggingFace*` source inherits it.
+
+### HuggingFace split field
+
+`HuggingFaceSource`'s `split` stays a free-text `STRING` — HF accepts slice syntax like `train[:90%]` or `train+test`, which a closed dropdown couldn't express — but `web/hf_split_chooser.js` adds an optional “🪓 splits” combo populated from the **selected** dataset's actual splits via the `/taidal/hf_dataset_splits` route (`datasets.get_dataset_split_names`, metadata-only). Like the column picker it keys off the current dataset-id field and refreshes when the dataset id / `name` changes; selecting a split fills the editable field. This is distinct from `DatasetSplit.split`, which is a closed `Literal["train","val","test"]` fraction-view selector and renders as a plain combo (via `_literal_options`), not this picker.
+
+### HuggingFace metadata-columns field (multi-select)
+
+`HuggingFaceSource.metadata_features` is a **list** — which columns ride along on `Sample.metadata`. It renders as a comma-separated `STRING` (which `_coerce_kwargs` splits back into a list), and `web/hf_metadata_chooser.js` adds a “🗂️ add column” combo. ComfyUI has no native multi-select, so the combo **appends** the picked column each time (pick repeatedly to build the list); the field stays editable. The options are the **selected** dataset's columns (reusing the `/taidal/hf_dataset_features` route) **minus** whatever is currently mapped as `input_feature` / `target_feature`, plus a special **`*`** entry meaning *every column except input/target* (the `dataflux.sources.METADATA_ALL_FEATURES` sentinel — resolved against the real dataset at load; left empty ⇒ no extra metadata). Picking `*` is exclusive (it already means "the rest"). The list refreshes when the dataset id / `name` / `split` **or** the input/target feature changes.
 
 ### Constructor-parameter tooltips
 

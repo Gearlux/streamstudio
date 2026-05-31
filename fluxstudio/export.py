@@ -25,7 +25,7 @@ inputs raise :class:`UnsupportedTopologyError`.
 Input format — the ComfyUI prompt / API graph (what ``app.graphToPrompt()`` emits and ``/prompt``
 consumes), NOT the richer UI ``workflow.json``::
 
-    {"<node_id>": {"class_type": "Taidal_RescaleOp",
+    {"<node_id>": {"class_type": "Taidal_dataflux_op_numpy_RescaleOp",
                    "inputs": {"sample": ["3", 0], "factor": 2.0}}, ...}
 
 ``inputs`` values are either literals (widget values) or ``["<upstream_id>", <slot>]`` links.

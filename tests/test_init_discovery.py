@@ -5,11 +5,12 @@ Two surfaces live here, both awkward to reach because they run at *import*
 time:
 
 * ``_discover_and_register_nodes`` walks the ``confluid.configurables`` entry
-  points and is the sole place the ``Taidal/<Module/Path>`` category string is
-  derived. We call it directly with ``entry_points`` / ``register_module_nodes``
-  mocked so the category math and the deliberately-quiet (``debug``, not
-  ``warning``) skip-on-failure path are pinned down without depending on the
-  installed entry-point set.
+  points and forwards each module to ``register_module_nodes`` (which derives the
+  ``Taidal/<Package>/<Category>[/<group>]`` palette path — see bridge._node_category).
+  We call it directly with ``entry_points`` / ``register_module_nodes`` mocked so
+  the forwarding and the deliberately-quiet (``debug``, not ``warning``)
+  skip-on-failure path are pinned down without depending on the installed
+  entry-point set.
 * The ``/taidal/choose_directory`` POST handler is only defined when ``import
   server`` succeeds — i.e. inside ComfyUI. Outside ComfyUI (the dev/CI venv)
   that import fails and the whole block is skipped, so the only way to exercise
@@ -43,7 +44,9 @@ def test_discover_returns_quietly_when_entry_points_fail() -> None:
     fake_logger.error.assert_called_once()
 
 
-def test_discover_registers_with_derived_category() -> None:
+def test_discover_forwards_module_to_register() -> None:
+    """__init__ now only forwards the entry-point module + the shared mappings; the palette
+    path (Taidal/<Package>/<Category>/<group>) is derived per-node inside register_module_nodes."""
     fake_ep = SimpleNamespace(value="waivefront.sinks")
     fake_register = MagicMock()
     with patch("importlib.metadata.entry_points", return_value=[fake_ep]):
@@ -55,7 +58,9 @@ def test_discover_registers_with_derived_category() -> None:
     assert args[0] == "waivefront.sinks"
     assert args[1] is fluxstudio.NODE_CLASS_MAPPINGS
     assert args[2] is fluxstudio.NODE_DISPLAY_NAME_MAPPINGS
-    assert kwargs["category"] == "Taidal/Waivefront/Sinks"
+    # No category/root override — the bridge builds the path from the module + class tags.
+    assert "category" not in kwargs
+    assert "root" not in kwargs
 
 
 def test_discover_skips_failing_module_at_debug_level() -> None:
@@ -101,6 +106,8 @@ class _FakeRoutes:
             yield SimpleNamespace(path="/taidal/choose_directory", method="POST")
             yield SimpleNamespace(path="/taidal/export_ops", method="POST")
             yield SimpleNamespace(path="/taidal/hf_datasets", method="GET")
+            yield SimpleNamespace(path="/taidal/hf_dataset_features", method="GET")
+            yield SimpleNamespace(path="/taidal/hf_dataset_splits", method="GET")
             yield SimpleNamespace(path="/taidal/node_specs", method="GET")
 
     def post(self, path: str):  # type: ignore[no-untyped-def]
@@ -282,6 +289,105 @@ def test_list_cached_hf_datasets_degrades_to_empty_on_error() -> None:
     with patch.dict(sys.modules, {"huggingface_hub": fake_hub}):
         # Must never raise — the picker is a convenience over a free-text field.
         assert fluxstudio.list_cached_hf_datasets() == []
+
+
+def test_hf_dataset_features_route_lists_features() -> None:
+    # The /taidal/hf_dataset_features GET handler reads the path/name/split query params and
+    # returns whatever list_hf_dataset_features() yields (offered by web/hf_feature_chooser.js).
+    with _fake_comfy() as (routes, web):
+        handler = routes.get_handlers.get("/taidal/hf_dataset_features")
+        assert handler is not None
+        request = SimpleNamespace(query={"path": "mnist", "name": "", "split": "train"})
+        with patch.object(fluxstudio, "list_hf_dataset_features", return_value=["image", "label"]) as feat_mock:
+            asyncio.run(handler(request))
+        # path is forwarded; blank name -> None; split forwarded.
+        feat_mock.assert_called_once_with("mnist", name=None, split="train")
+    data, _kwargs = web.calls[-1]
+    assert data == {"features": ["image", "label"]}
+
+
+def _fake_datasets(builder_features: Any = None, stream_rows: Any = None) -> ModuleType:
+    """A fake ``datasets`` module for list_hf_dataset_features tests.
+
+    ``builder_features`` backs ``load_dataset_builder().info.features`` (a dict, or None to
+    force the streaming fallback); ``stream_rows`` backs the streaming ``load_dataset`` fallback.
+    """
+    mod = ModuleType("datasets")
+
+    def _load_builder(path: Any, name: Any = None) -> Any:
+        return SimpleNamespace(info=SimpleNamespace(features=builder_features))
+
+    def _load_dataset(path: Any, name: Any = None, split: Any = None, streaming: bool = False) -> Any:
+        if stream_rows is None:
+            raise RuntimeError("no streaming dataset")
+        return iter(stream_rows)
+
+    mod.load_dataset_builder = _load_builder  # type: ignore[attr-defined]
+    mod.load_dataset = _load_dataset  # type: ignore[attr-defined]
+    return mod
+
+
+def test_list_hf_dataset_features_empty_path_returns_empty() -> None:
+    # No dataset id -> nothing to introspect; never touches `datasets`.
+    assert fluxstudio.list_hf_dataset_features("") == []
+
+
+def test_list_hf_dataset_features_from_builder_metadata() -> None:
+    # The cheap path: builder.info.features carries the column schema (insertion order preserved).
+    fake = _fake_datasets(builder_features={"image": object(), "label": object()})
+    with patch.dict(sys.modules, {"datasets": fake}):
+        assert fluxstudio.list_hf_dataset_features("mnist") == ["image", "label"]
+
+
+def test_list_hf_dataset_features_streaming_fallback() -> None:
+    # builder.info.features is None (e.g. an imagefolder) -> stream one example and read its keys.
+    fake = _fake_datasets(builder_features=None, stream_rows=[{"img": 1, "lbl": 2}])
+    with patch.dict(sys.modules, {"datasets": fake}):
+        assert fluxstudio.list_hf_dataset_features("local/imgs", split="train") == ["img", "lbl"]
+
+
+def test_list_hf_dataset_features_degrades_to_empty_on_error() -> None:
+    # Both paths fail (no builder features, no streaming rows) -> [] and never raises.
+    fake = _fake_datasets(builder_features=None, stream_rows=None)
+    with patch.dict(sys.modules, {"datasets": fake}):
+        assert fluxstudio.list_hf_dataset_features("nonexistent/dataset") == []
+
+
+def test_hf_dataset_splits_route_lists_splits() -> None:
+    # The /taidal/hf_dataset_splits GET handler reads the path/name query params and returns
+    # whatever list_hf_dataset_splits() yields (offered by web/hf_split_chooser.js).
+    with _fake_comfy() as (routes, web):
+        handler = routes.get_handlers.get("/taidal/hf_dataset_splits")
+        assert handler is not None
+        request = SimpleNamespace(query={"path": "mnist", "name": ""})
+        with patch.object(fluxstudio, "list_hf_dataset_splits", return_value=["train", "test"]) as split_mock:
+            asyncio.run(handler(request))
+        split_mock.assert_called_once_with("mnist", name=None)  # blank name -> None
+    data, _kwargs = web.calls[-1]
+    assert data == {"splits": ["train", "test"]}
+
+
+def test_list_hf_dataset_splits_empty_path_returns_empty() -> None:
+    # No dataset id -> nothing to introspect; never touches `datasets`.
+    assert fluxstudio.list_hf_dataset_splits("") == []
+
+
+def test_list_hf_dataset_splits_from_datasets_api() -> None:
+    fake = ModuleType("datasets")
+    fake.get_dataset_split_names = lambda path, config_name=None: ["train", "test"]  # type: ignore[attr-defined]
+    with patch.dict(sys.modules, {"datasets": fake}):
+        assert fluxstudio.list_hf_dataset_splits("mnist") == ["train", "test"]
+
+
+def test_list_hf_dataset_splits_degrades_to_empty_on_error() -> None:
+    def _boom(path: Any, config_name: Any = None) -> Any:
+        raise RuntimeError("unknown dataset")
+
+    fake = ModuleType("datasets")
+    fake.get_dataset_split_names = _boom  # type: ignore[attr-defined]
+    with patch.dict(sys.modules, {"datasets": fake}):
+        # Must never raise — the picker is a convenience over a free-text field.
+        assert fluxstudio.list_hf_dataset_splits("nonexistent/dataset") == []
 
 
 def test_node_specs_route_returns_declared_specs() -> None:
