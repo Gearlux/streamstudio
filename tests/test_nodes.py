@@ -227,3 +227,33 @@ def test_static_node_mappings_present() -> None:
     assert NODE_CLASS_MAPPINGS["Taidal_ExtractSample"] is SampleExtractorNode
     assert NODE_DISPLAY_NAME_MAPPINGS["Taidal_WalkDataset"] == "Walk Dataset (by index)"
     assert NODE_DISPLAY_NAME_MAPPINGS["Taidal_ExtractSample"] == "Extract from Sample"
+
+
+# --------------------------------------------------------------------------- #
+# RunNode — terminal OUTPUT node that calls .run() on a built runnable
+# --------------------------------------------------------------------------- #
+
+
+def test_run_node_calls_run() -> None:
+    from fluxstudio.bridge import RUNNABLE_TYPE
+    from fluxstudio.nodes import RunNode
+
+    assert RunNode.OUTPUT_NODE is True
+    assert RunNode.INPUT_TYPES()["required"]["runnable"] == (RUNNABLE_TYPE,)
+
+    calls = []
+
+    class _Runnable:
+        def run(self) -> None:
+            calls.append(True)
+
+    status = RunNode().run(_Runnable())
+    assert calls == [True]
+    assert "_Runnable" in status[0] and "complete" in status[0]
+
+
+def test_run_node_rejects_non_runnable() -> None:
+    from fluxstudio.nodes import RunNode
+
+    with pytest.raises(RuntimeError, match="no callable run"):
+        RunNode().run(object())

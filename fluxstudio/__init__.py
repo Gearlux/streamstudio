@@ -1,6 +1,7 @@
 """ComfyUI Entry Point for Taidal/Waivefront nodes."""
 
 import importlib.metadata
+import sys
 from typing import Any, Dict, List, Optional
 
 from logflow import get_logger
@@ -100,7 +101,26 @@ def list_hf_dataset_splits(path: str, name: Optional[str] = None) -> List[str]:
 
 
 def _discover_and_register_nodes() -> None:
-    """Dynamically discover and register ComfyUI nodes via entry points."""
+    """Dynamically discover and register ComfyUI nodes via entry points — **once per process**.
+
+    FluxStudio is commonly imported under TWO module identities: editable-installed in the ``.venv``
+    as ``fluxstudio`` AND symlinked into ComfyUI's ``custom_nodes/`` (and the package's own
+    ``from fluxstudio.bridge import …`` triggers the top-level import from inside the custom-node
+    import). So this module's ``__init__`` runs twice, and a naive implementation re-scans every
+    entry-point module and double-logs "Scanning module …".
+
+    To stay correct AND quiet: scan ONCE (caching the discovered mappings on the ``sys`` singleton,
+    which is shared across module identities) and, on any subsequent call, just copy the cached
+    mappings into THIS identity's module globals — so whichever ``fluxstudio`` ComfyUI actually reads
+    still gets the full node set, while the scan + its logs happen a single time. The per-module
+    ``seen`` set additionally dedups any duplicate entry points.
+    """
+    cached = getattr(sys, "_fluxstudio_discovered_nodes", None)
+    if cached is not None:
+        NODE_CLASS_MAPPINGS.update(cached[0])
+        NODE_DISPLAY_NAME_MAPPINGS.update(cached[1])
+        return
+
     try:
         # Python 3.10+ entry_points API
         eps = importlib.metadata.entry_points(group="confluid.configurables")
@@ -108,8 +128,12 @@ def _discover_and_register_nodes() -> None:
         logger.error(f"Failed to load entry points: {e}")
         return
 
+    seen: set = set()
     for ep in eps:
         mod_path = ep.value
+        if mod_path in seen:  # belt-and-suspenders: skip a duplicate entry point
+            continue
+        seen.add(mod_path)
         # The palette path per node is ``Taidal/<Package>/<Category>[/<group>]`` — built inside
         # register_module_nodes from the module's top-level package + each class's confluid
         # category/group (see bridge._node_category). We only pass the module to scan.
@@ -119,6 +143,14 @@ def _discover_and_register_nodes() -> None:
             # We use debug instead of warning here because not all confluid modules
             # will have valid ComfyUI ops, and we don't want to spam the user's startup log.
             logger.debug(f"Skipped module {mod_path} during ComfyUI node generation: {e}")
+
+    # Cache the discovered (pre-static-merge) mappings so a second module identity reuses them
+    # without re-scanning. ``sys`` is a true process singleton shared across identities.
+    setattr(
+        sys,
+        "_fluxstudio_discovered_nodes",
+        (dict(NODE_CLASS_MAPPINGS), dict(NODE_DISPLAY_NAME_MAPPINGS)),
+    )
 
 
 _discover_and_register_nodes()
@@ -148,7 +180,11 @@ try:
             try:
                 # Pop up native macOS folder picker on the host machine
                 result = subprocess.run(
-                    ["osascript", "-e", 'POSIX path of (choose folder with prompt "Select a directory:")'],
+                    [
+                        "osascript",
+                        "-e",
+                        'POSIX path of (choose folder with prompt "Select a directory:")',
+                    ],
                     capture_output=True,
                     text=True,
                     check=True,

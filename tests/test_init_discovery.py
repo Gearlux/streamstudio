@@ -28,7 +28,25 @@ from types import ModuleType, SimpleNamespace
 from typing import Any, Iterator, Optional
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 import fluxstudio
+
+
+@pytest.fixture(autouse=True)
+def _reset_discovery_cache() -> Iterator[None]:
+    """Clear the process-shared one-shot discovery cache before/after each test.
+
+    ``_discover_and_register_nodes`` caches its result on the ``sys`` singleton so a
+    second module identity (editable install + ComfyUI custom_nodes symlink) reuses
+    it instead of re-scanning. That cache is populated during the real
+    ``import fluxstudio`` at collection time, so the direct-call tests below must
+    reset it to exercise a fresh scan.
+    """
+    sys.__dict__.pop("_fluxstudio_discovered_nodes", None)
+    yield
+    sys.__dict__.pop("_fluxstudio_discovered_nodes", None)
+
 
 # --------------------------------------------------------------------------- #
 # _discover_and_register_nodes
@@ -61,6 +79,36 @@ def test_discover_forwards_module_to_register() -> None:
     # No category/root override — the bridge builds the path from the module + class tags.
     assert "category" not in kwargs
     assert "root" not in kwargs
+
+
+def test_discover_is_one_shot_per_process() -> None:
+    """The second call reuses the ``sys``-cached mappings — it does NOT re-scan.
+
+    FluxStudio's ``__init__`` runs twice (editable install + ComfyUI custom_nodes symlink); the
+    scan/log must happen once while a second module identity still ends up with the full node set.
+    """
+    fake_ep = SimpleNamespace(value="waivefront.sinks")
+    fake_register = MagicMock(side_effect=lambda mod, cmap, dmap: cmap.update({"Taidal_X": object()}))
+    with patch("importlib.metadata.entry_points", return_value=[fake_ep]):
+        with patch.object(fluxstudio, "register_module_nodes", fake_register):
+            fluxstudio._discover_and_register_nodes()  # first call: scans
+            # Simulate the second module identity: its own (empty) mappings.
+            fluxstudio.NODE_CLASS_MAPPINGS.clear()
+            fluxstudio._discover_and_register_nodes()  # second call: must reuse cache, no re-scan
+
+    fake_register.assert_called_once()  # scanned exactly once
+    # ...yet the second identity's mappings were repopulated from the cache.
+    assert "Taidal_X" in fluxstudio.NODE_CLASS_MAPPINGS
+
+
+def test_discover_dedups_duplicate_entry_points() -> None:
+    """A duplicate entry point (stale metadata) is scanned only once."""
+    eps = [SimpleNamespace(value="waivefront.sinks"), SimpleNamespace(value="waivefront.sinks")]
+    fake_register = MagicMock()
+    with patch("importlib.metadata.entry_points", return_value=eps):
+        with patch.object(fluxstudio, "register_module_nodes", fake_register):
+            fluxstudio._discover_and_register_nodes()
+    fake_register.assert_called_once()
 
 
 def test_discover_skips_failing_module_at_debug_level() -> None:
