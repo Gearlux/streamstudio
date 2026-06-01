@@ -1021,3 +1021,153 @@ def test_op_node_runtime_check_rejects_mismatched_sample() -> None:
     node = create_comfy_node(_TypedOp, "Taidal__TypedOp")()
     with pytest.raises(RuntimeError, match="cannot accept the upstream sample"):
         node.execute(sample=Sample(input=5))  # a bare int is not a 2-D numpy array
+
+
+# --------------------------------------------------------------------------- #
+# Runnable + object nodes (trainers / evaluators / processors as canvas nodes)
+# --------------------------------------------------------------------------- #
+
+from typing import Any  # noqa: E402
+
+from confluid import LazyClass, configurable  # noqa: E402
+
+from fluxstudio.bridge import (  # noqa: E402
+    OBJECT_TYPE,
+    RUNNABLE_TYPE,
+    _build_object_node,
+    _build_runnable_node,
+    _is_runnable,
+)
+
+
+@configurable(task="faketask", role="trainer", validate=False)
+class _FakeTrainer:
+    """A minimal-ctor runnable: model/train_set required, deferred body slots, a run().
+
+    ``@configurable`` because ``to_pydantic``'s body-slot scan (which surfaces the deferred
+    ``optimizer`` / ``val_set`` members) walks only the ``@configurable`` MRO chain — exactly
+    like the real trainers (sonair / raidar / deltaid).
+    """
+
+    def __init__(self, model: Any, train_set: Any, num_classes: Optional[int] = None, run_name: str = "train") -> None:
+        self.model = model
+        self.train_set = train_set
+        self.num_classes = num_classes
+        self.run_name = run_name
+        self.optimizer: Any = LazyClass(int)  # deferred object body slot -> OBJECT socket
+        self.val_set: Any = None  # dataset body slot -> SOURCE socket
+        self.ran = False
+
+    def run(self) -> None:
+        self.ran = True
+
+
+def test_is_runnable() -> None:
+    assert _is_runnable(_FakeTrainer) is True
+
+    class _NotRunnable:
+        pass
+
+    assert _is_runnable(_NotRunnable) is False
+
+    class _RunNeedsArg:
+        def run(self, x: int) -> None: ...
+
+    # The run interface is parameterless — a run(self, x) is not a runnable.
+    assert _is_runnable(_RunNeedsArg) is False
+
+
+def test_build_runnable_node_member_sockets_and_widgets() -> None:
+    node = _build_runnable_node(_FakeTrainer, "Taidal_Fake", "Taidal/Fake")
+    spec = node.INPUT_TYPES()
+    req, opt = spec["required"], spec.get("optional", {})
+
+    assert node.RETURN_TYPES == (RUNNABLE_TYPE,)
+    assert node.TAIDAL_NODE_KIND == "runnable"
+    # Required ctor params with no default -> required wired sockets.
+    assert req["model"] == (OBJECT_TYPE,)
+    assert req["train_set"] == (SOURCE_TYPE,)
+    # Scalars stay WIDGETS (in `required`, but a scalar widget type — not a wired DataFlux socket).
+    # (``num_classes: Optional[int] = None`` is the nullable-numeric blank-STRING convention.)
+    assert req["num_classes"][0] not in (OBJECT_TYPE, SOURCE_TYPE, RUNNABLE_TYPE)
+    assert req["run_name"][0] == "STRING"
+    # Deferred / dataset body slots -> OPTIONAL sockets (unwired keeps the baked default).
+    assert opt["optimizer"] == (OBJECT_TYPE,)
+    assert opt["val_set"] == (SOURCE_TYPE,)
+
+
+def test_runnable_node_execute_builds_and_post_sets_members() -> None:
+    node = _build_runnable_node(_FakeTrainer, "Taidal_Fake", "Taidal/Fake")
+    model, train_set = object(), object()
+    custom_opt = LazyClass(float)
+    built = node().execute(model=model, train_set=train_set, num_classes=3, optimizer=custom_opt, val_set=None)[0]
+
+    assert isinstance(built, _FakeTrainer)
+    assert built.model is model  # ctor param
+    assert built.num_classes == 3
+    assert built.optimizer is custom_opt  # wired body slot set post-construction
+    assert built.val_set is None  # unwired optional -> keeps baked default
+    assert built.ran is False  # build-only: run() NOT called
+
+
+def test_create_comfy_node_dispatches_runnable() -> None:
+    node = create_comfy_node(_FakeTrainer, "Taidal_Fake", "Taidal/Fake")
+    assert node.TAIDAL_NODE_KIND == "runnable"
+    assert node.RETURN_TYPES == (RUNNABLE_TYPE,)
+
+
+class _EagerMember:
+    def __init__(self, channels: int = 3) -> None:
+        self.channels = channels
+
+
+class _LazyOptimizer:
+    """A lazy member whose required ``params`` is the runtime-injected slot."""
+
+    def __init__(self, params: Any, lr: float = 0.1) -> None:
+        self.params = params
+        self.lr = lr
+
+
+_LazyOptimizer.__confluid_lazy__ = True  # type: ignore[attr-defined]
+
+
+def test_object_node_non_lazy_returns_live_instance() -> None:
+    node = _build_object_node(_EagerMember, "Taidal_Eager", "Taidal/Obj")
+    assert node.RETURN_TYPES == (OBJECT_TYPE,)
+    out = node().execute(channels=5)[0]
+    assert isinstance(out, _EagerMember) and out.channels == 5
+
+
+def test_object_node_lazy_returns_lazyclass_and_skips_runtime_param() -> None:
+    node = _build_object_node(_LazyOptimizer, "Taidal_Opt", "Taidal/Obj")
+    spec = node.INPUT_TYPES()
+    # The runtime-injected required param is skipped; configurable knobs remain.
+    assert "params" not in spec["required"]
+    assert "lr" in spec["required"]
+    out = node().execute(lr=0.5)[0]
+    assert isinstance(out, LazyClass)  # deferred, not a live _LazyOptimizer
+    # The deferred kwargs carry the configured knob.
+    assert out.kwargs.get("lr") == 0.5
+
+
+def test_register_module_nodes_admits_runnable_and_member() -> None:
+    member = type("Model", (), {"__confluid_role__": "model", "__confluid_category__": "faketask_model"})
+    # ``item["name"]`` must NOT start with ``_`` (register_module_nodes skips private callables).
+    discovered = [
+        {"name": "FakeTrainer", "path": "fake.mod.FakeTrainer"},
+        {"name": "Model", "path": "fake.mod.Model"},
+    ]
+
+    def _resolve(path: str) -> Any:
+        return {"fake.mod.FakeTrainer": _FakeTrainer, "fake.mod.Model": member}[path]
+
+    mappings: dict = {}
+    names: dict = {}
+    with patch("fluxstudio.bridge.scan_module", return_value=discovered):
+        with patch("fluxstudio.bridge.resolve_callable", side_effect=_resolve):
+            register_module_nodes("fake.mod", mappings, names)
+
+    # The runnable (no op/source/engine category) AND the role="model" member are both admitted.
+    assert any(v.TAIDAL_NODE_KIND == "runnable" for v in mappings.values())
+    assert any(v.TAIDAL_NODE_KIND == "object" for v in mappings.values())

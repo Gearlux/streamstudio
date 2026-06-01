@@ -28,8 +28,23 @@ sockets iff their type strings are equal — which is what lets ops chain (via `
 compose into higher-order ops (via ``DATAFLUX_OP``).
 """
 
+import importlib
 import inspect
-from typing import AbstractSet, Any, Callable, Dict, List, Literal, Optional, Tuple, Type, Union, get_args, get_origin
+from typing import (
+    AbstractSet,
+    Any,
+    Callable,
+    Dict,
+    List,
+    Literal,
+    Optional,
+    Tuple,
+    Type,
+    Union,
+    cast,
+    get_args,
+    get_origin,
+)
 
 import datasets
 from confluid import parse_param_docs
@@ -42,7 +57,8 @@ logger = get_logger(__name__)
 
 def _spec_to_dict(cls: Any, attr: str) -> Optional[Dict[str, Any]]:
     """JSON-serialize a callable's declared ``ACCEPTS`` / ``PRODUCES`` (:class:`SampleType`), or
-    ``None`` when undeclared — the form the ``/taidal/node_specs`` route and the JS validator consume."""
+    ``None`` when undeclared — the form the ``/taidal/node_specs`` route and the JS validator consume.
+    """
     spec = getattr(cls, attr, None)
     to_dict = getattr(spec, "to_dict", None)
     return to_dict() if callable(to_dict) else None
@@ -55,6 +71,13 @@ SOURCE_TYPE = "DATAFLUX_SOURCE"
 # node's ``op`` output can feed a higher-order op (``Enable`` / ``Parallel`` / ``Tee``) that takes
 # ops as constructor input. Distinct from ``DATAFLUX_SAMPLE`` (data) — this carries the op itself.
 OP_TYPE = "DATAFLUX_OP"
+# A built "runnable" (a trainer / evaluator / processor — any class implementing ``run(self)``),
+# output by a runnable node and consumed by the ``Run`` node which calls ``.run()``.
+RUNNABLE_TYPE = "DATAFLUX_RUNNABLE"
+# A built configurable MEMBER object (model / loss / optimizer / loader / lightning / metrics) — or a
+# deferred ``LazyClass`` of one (when the member class is tagged ``lazy``) — ridden as a wire so an
+# object node feeds a runnable's member slot. Distinct from SOURCE (datasets ride DATAFLUX_SOURCE).
+OBJECT_TYPE = "DATAFLUX_OBJECT"
 
 # Mapping Python types to ComfyUI widget types.
 TYPE_MAP = {
@@ -73,7 +96,30 @@ DEFAULT_WIDGET_CONFIG: Dict[str, Dict[str, Any]] = {
 }
 
 # Types that ride a wire as input sockets (no inline widget config).
-_SOCKET_TYPES = {SAMPLE_TYPE, SOURCE_TYPE, OP_TYPE, "HF_DATASET"}
+_SOCKET_TYPES = {
+    SAMPLE_TYPE,
+    SOURCE_TYPE,
+    OP_TYPE,
+    RUNNABLE_TYPE,
+    OBJECT_TYPE,
+    "HF_DATASET",
+}
+
+# A runnable's constructor params / body slots that hold a DATASET / SOURCE — rendered as a wired
+# ``DATAFLUX_SOURCE`` socket (fed by a Source node) instead of a STRING widget. ``source`` (handled by
+# ``_SOURCE_PARAM`` too) covers ``DatasetProcessor``. Detected by name (same convention as the op/
+# source-list params); a runnable's other object members ride ``DATAFLUX_OBJECT`` sockets.
+_DATASET_MEMBER_PARAMS = {"train_set", "val_set", "test_set", "dataset"}
+
+# Discovery ROLES whose classes become OBJECT nodes (a trainer/runnable slot-filler producing a
+# ``DATAFLUX_OBJECT`` wire): a task-scoped model / loss / metric. Datasets are SOURCE nodes (role
+# ``"dataset"`` is routed to ``_build_source_node``), not object nodes. The role-less runtime members
+# (``torch.optim.*`` / ``DataLoader`` / ``pytorch_lightning.Trainer``, registered in
+# ``marainer.configurables``) are detected instead by the confluid **``lazy`` mark**
+# (``__confluid_lazy__``) — deliberately NOT a category, so they don't leak into navigaitor's
+# form-spec slot pickers (which resolve a picker FROM the slot's default-target category and would
+# then offer the raw ``params``-taking optimizer). See ``_is_object_member_class``.
+_MEMBER_ROLES = {"model", "loss", "metric"}
 
 # Constructor params (on higher-order ops) that hold a LIST OF OPS — rendered as dynamic
 # ``DATAFLUX_OP`` multi-inputs (``op_0``, ``op_1``, … via ``web/op_list.js``) instead of a STRING
@@ -375,7 +421,10 @@ def _build_config_inputs(func: Callable, skip: Optional[AbstractSet[str]] = None
     """
     try:
         sig = inspect.signature(func)
-    except (ValueError, TypeError):  # pragma: no cover - defensive: inspect rejects rare builtins
+    except (
+        ValueError,
+        TypeError,
+    ):  # pragma: no cover - defensive: inspect rejects rare builtins
         return {}
     param_docs = parse_param_docs(func)
     required: Dict[str, Any] = {}
@@ -384,7 +433,10 @@ def _build_config_inputs(func: Callable, skip: Optional[AbstractSet[str]] = None
             continue
         if name in ("self", "cls"):
             continue
-        if param.kind in (inspect.Parameter.VAR_KEYWORD, inspect.Parameter.VAR_POSITIONAL):
+        if param.kind in (
+            inspect.Parameter.VAR_KEYWORD,
+            inspect.Parameter.VAR_POSITIONAL,
+        ):
             continue
         comfy_type, config = _widget_for(param, owner=func)
         doc = param_docs.get(name)
@@ -406,7 +458,10 @@ def _coerce_kwargs(func: Callable, kwargs: Dict[str, Any]) -> Dict[str, Any]:
     """
     try:
         sig = inspect.signature(func)
-    except (ValueError, TypeError):  # pragma: no cover - defensive: inspect rejects rare builtins
+    except (
+        ValueError,
+        TypeError,
+    ):  # pragma: no cover - defensive: inspect rejects rare builtins
         return dict(kwargs)
     out: Dict[str, Any] = {}
     for key, value in kwargs.items():
@@ -453,7 +508,10 @@ def _op_call_signature(obj: Any) -> Optional[inspect.Signature]:
         return None
     try:
         sig = inspect.signature(obj.__call__)
-    except (ValueError, TypeError):  # pragma: no cover - defensive: inspect rejects rare callables
+    except (
+        ValueError,
+        TypeError,
+    ):  # pragma: no cover - defensive: inspect rejects rare callables
         return None
     params = [p for n, p in sig.parameters.items() if n not in ("self", "cls")]
     if params and _is_sample_annotation(params[0].annotation):
@@ -471,11 +529,58 @@ def _is_source(obj: Any) -> bool:
             continue
         try:
             ret = inspect.signature(meth).return_annotation
-        except (ValueError, TypeError):  # pragma: no cover - defensive: inspect rejects rare callables
+        except (
+            ValueError,
+            TypeError,
+        ):  # pragma: no cover - defensive: inspect rejects rare callables
             continue
         if _is_sample_annotation(ret):
             return True
     return bool(obj.__name__.endswith("Source"))
+
+
+def _is_runnable(obj: Any) -> bool:
+    """True if ``obj`` is a class implementing the run interface — a no-arg ``run(self)`` method.
+
+    This is the structural signal (mirroring :func:`_is_source` / :func:`_op_call_signature`) that a
+    class is a trainer / evaluator / processor: an orchestration entry point, not a per-sample op or a
+    Sample source. Such classes become buildable runnable nodes (members as wired sockets) regardless
+    of their ``@configurable`` category (e.g. ``classification_trainer``).
+    """
+    if not inspect.isclass(obj):
+        return False
+    run = getattr(obj, "run", None)
+    if not callable(run):
+        return False
+    try:
+        params = [n for n in inspect.signature(run).parameters if n not in ("self", "cls")]
+    except (ValueError, TypeError):  # pragma: no cover - defensive
+        return False
+    # The run interface is parameterless (everything is configured beforehand).
+    return len(params) == 0
+
+
+def _is_dataset_member_class(obj: Any) -> bool:
+    """True if ``obj`` is a task ``role="dataset"`` class (a model-ready dataset Source).
+
+    Task datasets are normally NOT canvas nodes, but a runnable's ``train_set`` / ``dataset`` slot
+    needs a Source producer — so when a runnable is buildable we also surface these as Source nodes.
+    """
+    return inspect.isclass(obj) and getattr(obj, "__confluid_role__", None) == "dataset"
+
+
+def _is_object_member_class(obj: Any) -> bool:
+    """True if ``obj`` is a runnable MEMBER class that should become a ``DATAFLUX_OBJECT`` node.
+
+    A task-scoped model / loss / metric (``__confluid_role__`` in :data:`_MEMBER_ROLES`), OR a class
+    tagged confluid ``lazy`` (``__confluid_lazy__`` — the role-less registered runtime members:
+    ``torch.optim.*`` / ``DataLoader`` / ``pytorch_lightning.Trainer``). The ``lazy`` mark — not a
+    category — is the signal for the runtime members so they stay out of navigaitor's category-driven
+    form-spec pickers.
+    """
+    if not inspect.isclass(obj):
+        return False
+    return getattr(obj, "__confluid_role__", None) in _MEMBER_ROLES or bool(getattr(obj, "__confluid_lazy__", False))
 
 
 def _safe_callable_path(func: Callable) -> Optional[str]:
@@ -490,7 +595,10 @@ def _safe_callable_path(func: Callable) -> Optional[str]:
     """
     try:
         return get_callable_path(func)
-    except (TypeError, ValueError):  # pragma: no cover - defensive: anonymous/odd callables
+    except (
+        TypeError,
+        ValueError,
+    ):  # pragma: no cover - defensive: anonymous/odd callables
         return None
 
 
@@ -513,7 +621,8 @@ def _op_list_param(cls: Any) -> Optional[str]:
 
 def _collect_ops(kwargs: Dict[str, Any]) -> List[Any]:
     """Pull the dynamic ``op_0`` / ``op_1`` / … inputs out of ``kwargs``, in slot order, dropping
-    unconnected (``None``) ones. The connected op nodes' ``op`` outputs arrive here as kwargs."""
+    unconnected (``None``) ones. The connected op nodes' ``op`` outputs arrive here as kwargs.
+    """
     indexed = [(int(k[3:]), v) for k, v in kwargs.items() if k.startswith("op_") and k[3:].isdigit() and v is not None]
     return [v for _, v in sorted(indexed)]
 
@@ -555,7 +664,8 @@ def _source_list_param(cls: Any) -> Optional[str]:
 
 def _collect_sources(kwargs: Dict[str, Any]) -> List[Any]:
     """Pull the dynamic ``source_0`` / ``source_1`` / … inputs out of ``kwargs``, in slot order,
-    dropping unconnected (``None``) ones. The source nodes' ``source`` outputs arrive here as kwargs."""
+    dropping unconnected (``None``) ones. The source nodes' ``source`` outputs arrive here as kwargs.
+    """
     indexed = [
         (int(k[7:]), v) for k, v in kwargs.items() if k.startswith("source_") and k[7:].isdigit() and v is not None
     ]
@@ -737,7 +847,10 @@ def _build_generic_node(func: Callable, name: str, category: str) -> Type:
     inputs = _build_config_inputs(func)
     try:
         ret_ann = inspect.signature(func).return_annotation
-    except (ValueError, TypeError):  # pragma: no cover - defensive: inspect rejects rare builtins
+    except (
+        ValueError,
+        TypeError,
+    ):  # pragma: no cover - defensive: inspect rejects rare builtins
         ret_ann = inspect.Signature.empty
     return_type = "HF_DATASET" if _map_type("return", ret_ann) == "HF_DATASET" else "STRING"
 
@@ -756,6 +869,154 @@ def _build_generic_node(func: Callable, name: str, category: str) -> Type:
     )
 
 
+def _is_scalar_anno(anno: Any) -> bool:
+    """True when ``anno`` is a concrete scalar (int / float / str / bool, or ``Optional`` thereof).
+
+    Used by :func:`_build_runnable_node` to decide a member's surface: a scalar stays a WIDGET
+    (the user picks `num_classes` / `max_epochs` on the node), while ``Any`` / object / dataset
+    annotations become wired sockets. ``Any`` and un-annotated slots are deliberately NOT scalar —
+    a trainer's body slots (``optimizer`` / ``model`` / …) are typed ``Any`` and must ride sockets.
+    """
+    if anno in (Any, inspect.Parameter.empty, None, type(None)):
+        return False
+    origin = get_origin(anno)
+    if origin is Union or str(type(anno)) == "<class 'types.UnionType'>":
+        args = [a for a in get_args(anno) if a is not type(None)]
+        return bool(args) and all(_is_scalar_anno(a) for a in args)
+    return anno in (int, float, str, bool)
+
+
+def _build_object_node(cls: Callable, name: str, category: str) -> Type:
+    """Build an OBJECT node: constructor config widgets -> a ``DATAFLUX_OBJECT`` output.
+
+    The output is the constructed member (model / loss / metric), OR a deferred ``LazyClass`` when the
+    class is tagged ``lazy`` (``__confluid_lazy__`` — the registered ``torch.optim.*`` / ``DataLoader``
+    / ``pytorch_lightning.Trainer`` runtime members). The runnable node ``setattr``s this onto its
+    member slot; the runnable's ``run()`` flows a ``LazyClass`` with the runtime kwarg it needs
+    (``params=`` / ``dataset=``), so a deferred member never has to be built here with missing args.
+    """
+    is_lazy = bool(getattr(cls, "__confluid_lazy__", False))
+    # A lazy member's REQUIRED (no-default) ctor params are the runtime-injected slot the runnable
+    # fills at ``run()`` (``torch.optim.*.params`` / ``DataLoader.dataset``) — never a widget. Skip
+    # them so the object node only exposes the configurable knobs (lr / batch_size / …).
+    skip: Optional[AbstractSet[str]] = None
+    if is_lazy:
+        try:
+            skip = {
+                p
+                for p, par in inspect.signature(cls).parameters.items()
+                if p not in ("self", "cls")
+                and par.default is inspect.Parameter.empty
+                and par.kind not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+            }
+        except (ValueError, TypeError):  # pragma: no cover - defensive
+            skip = None
+    inputs = _build_config_inputs(cls, skip=skip or None)
+
+    def execute(self: Any, **kwargs: Any) -> Tuple[Any, ...]:
+        coerced = _coerce_kwargs(cls, kwargs)
+        if is_lazy:
+            from confluid import LazyClass
+
+            return (LazyClass(cast(Type[Any], cls), **coerced),)
+        return (cls(**coerced),)
+
+    return _node_class(
+        name,
+        category,
+        inputs,
+        (OBJECT_TYPE,),
+        execute,
+        return_names=("object",),
+        kind="object",
+        callable_path=_safe_callable_path(cls),
+    )
+
+
+def _build_runnable_node(cls: Callable, name: str, category: str) -> Type:
+    """Build a runnable (trainer / evaluator / processor) node: members as wired INPUT sockets.
+
+    Every configurable member is enumerated from ``to_pydantic(cls)`` (which surfaces both ctor params
+    AND ``__init__``-body slots, and skips ``@ignore_config`` members). Each member is rendered as:
+
+    * a ``DATAFLUX_SOURCE`` socket — dataset/source members (:data:`_DATASET_MEMBER_PARAMS` + the
+      ``source`` param), fed by Source/dataset nodes;
+    * a ``DATAFLUX_OBJECT`` socket — any other non-scalar member (model / loss / optimizer / loaders /
+      lightning / metrics), fed by object nodes;
+    * a WIDGET — scalar members (``num_classes`` / ``max_epochs`` / ``experiment_name`` …) via the
+      shared :func:`_build_config_inputs` (ComfyUI lets the user "convert to input" when they want a
+      wire).
+
+    A member that is a constructor param with NO default is a REQUIRED socket (``model`` / ``train_set``
+    / ``dataset``); everything else is OPTIONAL — unwired ⇒ the runnable keeps its baked default
+    ("true optional"). The node is **build-only**: ``execute`` constructs the runnable (ctor params to
+    ``__init__``, body slots via post-construction ``setattr`` of the wired members) and outputs it on
+    a ``DATAFLUX_RUNNABLE`` wire; a separate ``Run`` node calls ``.run()``.
+    """
+    from confluid import to_pydantic
+
+    try:
+        fields = dict(to_pydantic(cls).model_fields)
+    except Exception:  # pragma: no cover - defensive: a class to_pydantic can't introspect
+        fields = {}
+    try:
+        ctor_params = {p for p in inspect.signature(cls).parameters if p not in ("self", "cls")}
+        ctor_required = {
+            p
+            for p, par in inspect.signature(cls).parameters.items()
+            if p not in ("self", "cls") and par.default is inspect.Parameter.empty
+        }
+    except (ValueError, TypeError):  # pragma: no cover - defensive
+        ctor_params, ctor_required = set(), set()
+
+    socket_members: Dict[str, str] = {}  # member name -> SOURCE_TYPE | OBJECT_TYPE
+    for fname, finfo in fields.items():
+        anno = getattr(finfo, "annotation", Any)
+        if fname in _DATASET_MEMBER_PARAMS or fname == _SOURCE_PARAM:
+            socket_members[fname] = SOURCE_TYPE
+        elif _is_scalar_anno(anno):
+            continue  # scalar -> widget (handled by _build_config_inputs below)
+        else:
+            socket_members[fname] = OBJECT_TYPE
+
+    # Scalars stay widgets; skip the socket members (and any non-ctor body slot, which
+    # _build_config_inputs wouldn't see anyway).
+    required: Dict[str, Any] = _build_config_inputs(cls, skip=set(socket_members) or None)
+    optional: Dict[str, Any] = {}
+    for member, socket in socket_members.items():
+        if member in ctor_required:
+            required[member] = (socket,)
+        else:
+            optional[member] = (socket,)
+
+    def execute(self: Any, **kwargs: Any) -> Tuple[Any, ...]:
+        ctor_kwargs: Dict[str, Any] = {}
+        post: Dict[str, Any] = {}
+        for k, v in kwargs.items():
+            if v is None:
+                continue  # unwired optional socket -> keep the runnable's baked default
+            if k in ctor_params:
+                ctor_kwargs[k] = v
+            else:
+                post[k] = v
+        obj = cls(**_coerce_kwargs(cls, ctor_kwargs))
+        for k, v in post.items():
+            setattr(obj, k, v)
+        return (obj,)
+
+    return _node_class(
+        name,
+        category,
+        required,
+        (RUNNABLE_TYPE,),
+        execute,
+        return_names=("runnable",),
+        optional_inputs=optional or None,
+        kind="runnable",
+        callable_path=_safe_callable_path(cls),
+    )
+
+
 def create_comfy_node(
     func: Callable,
     name: str,
@@ -764,14 +1025,20 @@ def create_comfy_node(
 ) -> Type:
     """Dynamically construct a ComfyUI node class from a Python callable.
 
-    Dispatches on the callable's DataFlux role: ``Sample``-taking op classes become
-    ``SAMPLE -> SAMPLE`` nodes, ``Sample``-yielding source classes become ``-> SOURCE``
-    nodes, and everything else falls back to a generic scalar / STRING node.
+    Dispatches on the callable's DataFlux role: a ``run()``-implementing class (trainer / evaluator /
+    processor) becomes a buildable RUNNABLE node (members as wired sockets); ``Sample``-taking op
+    classes become ``SAMPLE -> SAMPLE`` nodes; ``Sample``-yielding sources (and task ``role="dataset"``
+    classes) become ``-> SOURCE`` nodes; runnable MEMBER classes (model / loss / metric / optimizer /
+    loader / lightning) become ``-> OBJECT`` nodes; everything else falls back to a generic node.
     """
+    if _is_runnable(func):
+        return _build_runnable_node(func, name, category)
     if _op_call_signature(func) is not None:
         return _build_op_node(func, name, category)
-    if _is_source(func):
+    if _is_source(func) or _is_dataset_member_class(func):
         return _build_source_node(func, name, category)
+    if _is_object_member_class(func):
+        return _build_object_node(func, name, category)
     return _build_generic_node(func, name, category)
 
 
@@ -847,31 +1114,78 @@ def register_module_nodes(
 
     Each node's palette folder is ``<root>/<Package>/<Category>[/<group>]`` — see
     :func:`_node_category`. ``root`` defaults to ``"Taidal"``.
+
+    Discovery has TWO passes (``scan_module`` filters to callables whose ``__module__`` IS this
+    module, which misses classes a package exposes from a SUBMODULE or registers from a third-party
+    library):
+
+    1. ``scan_module(module_path)`` — module-local callables (functions + locally-defined classes).
+    2. ``@configurable`` classes listed in the module's ``__all__`` — its deliberate public exports,
+       regardless of ``__module__``. This surfaces a package's re-exported runnables / models /
+       datasets (``sonair`` re-exports ``LightningClassificationTrainer`` from ``sonair.trainer``)
+       AND registered third-party members (``marainer.configurables``'s ``torch`` optimizers /
+       ``DataLoader`` / ``pl.Trainer``). Gated on ``__all__`` so a module's imported-for-use
+       configurables (not re-exported) don't leak into the palette.
+
+    Both feed the same admission filter.
     """
     logger.info(f"ComfyFlux: Scanning module {module_path} for nodes...")
-    discovered = scan_module(module_path)
 
-    for item in discovered:
+    # Pass 1: module-local callables (name -> target). ``setdefault`` so pass 2 never overrides.
+    candidates: Dict[str, Any] = {}
+    for item in scan_module(module_path):
         if item["name"].startswith("_"):
             logger.debug(f"ComfyFlux: Skipping private callable {item['path']}")
             continue
-
         target_func = resolve_callable(item["path"])
-        if not callable(target_func):
-            continue
+        if callable(target_func):
+            candidates.setdefault(item["name"], target_func)
 
+    # Pass 2: @configurable classes the module re-exports via __all__ (submodule re-exports +
+    # registered third-party members) — invisible to scan_module's __module__ filter.
+    try:
+        mod = importlib.import_module(module_path)
+    except Exception:  # pragma: no cover - scan_module already imported it; defensive
+        mod = None
+    for name in getattr(mod, "__all__", None) or []:
+        if name.startswith("_") or name in candidates:
+            continue
+        member = getattr(mod, name, None)
+        if inspect.isclass(member) and getattr(member, "__confluid_configurable__", False):
+            candidates[name] = member
+
+    for name, target_func in candidates.items():
         confluid_category = getattr(target_func, "__confluid_category__", None)
-        if confluid_category not in _NODE_CATEGORIES:
-            logger.debug(f"ComfyFlux: Skipping {item['path']} (category not in {_NODE_CATEGORIES})")
+        # Admit a class if it is a deliberately-tagged op/source/engine, OR it implements the run
+        # interface (a buildable runnable node), OR it is a runnable MEMBER class (a task dataset →
+        # Source node, or a model/loss/metric/optimizer/loader/lightning → OBJECT node) whose node
+        # feeds a runnable's wired member sockets.
+        admitted = (
+            confluid_category in _NODE_CATEGORIES
+            or _is_runnable(target_func)
+            or _is_dataset_member_class(target_func)
+            or _is_object_member_class(target_func)
+        )
+        if not admitted:
+            logger.debug(f"ComfyFlux: Skipping {module_path}.{name} (not an op/source/engine/runnable/member)")
             continue
 
         group = getattr(target_func, "__confluid_group__", None)
-        node_name = _node_key(module_path, confluid_category, group, item["name"])
+        # Runnables / members may be category-less (a runnable's category is e.g.
+        # ``classification_trainer``; a ``lazy`` optimizer has no category) — fall back to the
+        # discovery role, then a literal kind (``runnable`` vs ``object``), so the unique key +
+        # palette path stay well-formed.
+        key_category = (
+            confluid_category
+            or getattr(target_func, "__confluid_role__", None)
+            or ("runnable" if _is_runnable(target_func) else "object")
+        )
+        node_name = _node_key(module_path, key_category, group, name)
         node_class = create_comfy_node(
             func=target_func,
             name=node_name,
-            category=_node_category(module_path, confluid_category, group, root),
+            category=_node_category(module_path, key_category, group, root),
         )
         target_mappings[node_name] = node_class
-        display_name_mappings[node_name] = _humanize_node_name(item["name"])
-        logger.debug(f"ComfyFlux: Registered node {node_name} for {item['path']}")
+        display_name_mappings[node_name] = _humanize_node_name(name)
+        logger.debug(f"ComfyFlux: Registered node {node_name} for {module_path}.{name}")

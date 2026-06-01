@@ -32,12 +32,24 @@ def _run(args: argparse.Namespace) -> None:
         logger.info(f"ComfyUI not found at {comfy_dir}. Cloning...")
         comfy_dir.parent.mkdir(parents=True, exist_ok=True)
         subprocess.run(
-            ["git", "clone", "https://github.com/comfyanonymous/ComfyUI.git", str(comfy_dir)],
+            [
+                "git",
+                "clone",
+                "https://github.com/comfyanonymous/ComfyUI.git",
+                str(comfy_dir),
+            ],
             check=True,
         )
         logger.info("Installing ComfyUI dependencies into current environment...")
         subprocess.run(
-            [sys.executable, "-m", "pip", "install", "-r", str(comfy_dir / "requirements.txt")],
+            [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "-r",
+                str(comfy_dir / "requirements.txt"),
+            ],
             check=True,
         )
     else:
@@ -111,7 +123,13 @@ def main() -> None:
 
     export_parser = sub.add_parser("export", help="Compile a saved graph's ops to a Confluid YAML op-list.")
     export_parser.add_argument("graph", type=Path, help="ComfyUI API-format graph JSON.")
-    export_parser.add_argument("-o", "--output", type=Path, default=None, help="Write the YAML here (default: stdout).")
+    export_parser.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        default=None,
+        help="Write the YAML here (default: stdout).",
+    )
 
     args = parser.parse_args()
 
