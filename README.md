@@ -77,6 +77,10 @@ Preview Image                    # ← native ComfyUI viewer
 
 `Extract from Sample` needs the `[waivefront]` extra to render the `IMAGE` socket (the renderer lives in waivefront); the `STRING` / `INT` / `FLOAT` outputs work without it.
 
+### Running a trainer / evaluator / processor
+
+Trainer / evaluator / processor nodes are **build-only** — they construct the runnable and output it on a `DATAFLUX_RUNNABLE` wire so the graph stays cheap to inspect. Wire that into the terminal **Run (train / evaluate / process)** node (`Taidal/FluxStudio`) and **Queue Prompt** to actually execute the (potentially long) `.run()`. The Run node honours ComfyUI's **interrupt button**: it runs the work on a background thread and, when you press interrupt, injects a `KeyboardInterrupt` so the run stops cleanly at the next batch / sample boundary (PyTorch Lightning shuts down gracefully). A single long-running C kernel can't be interrupted mid-call, so cancellation lands between steps, not instantly.
+
 ## Composing ops (higher-order ops)
 
 Every op node is **dual-mode**. Besides the `sample` input (`DATAFLUX_SAMPLE`, now *optional*) and the applied `sample` output, it has a second **`op`** output (`DATAFLUX_OP`) carrying the *constructed op itself*. So you can either chain ops by `sample` (the linear pipeline above) **or** take the `op` output and feed a **higher-order op** — one whose constructor takes a list of ops (`Parallel`, `Tee`, …).
