@@ -887,13 +887,23 @@ def _is_scalar_anno(anno: Any) -> bool:
 
 
 def _build_object_node(cls: Callable, name: str, category: str) -> Type:
-    """Build an OBJECT node: constructor config widgets -> a ``DATAFLUX_OBJECT`` output.
+    """Build an OBJECT node: constructor config widgets -> TWO ``DATAFLUX_OBJECT`` outputs.
 
-    The output is the constructed member (model / loss / metric), OR a deferred ``LazyClass`` when the
-    class is tagged ``lazy`` (``__confluid_lazy__`` — the registered ``torch.optim.*`` / ``DataLoader``
-    / ``pytorch_lightning.Trainer`` runtime members). The runnable node ``setattr``s this onto its
-    member slot; the runnable's ``run()`` flows a ``LazyClass`` with the runtime kwarg it needs
-    (``params=`` / ``dataset=``), so a deferred member never has to be built here with missing args.
+    Both outputs carry the configured member (model / loss / metric / lazy runtime member); a runnable
+    accepts either on its member slot (``confluid.flow`` is idempotent on a live instance):
+
+    * ``instance`` — the **flowed, live** object, built right here from the widget values. Useful for
+      standalone / inspection wiring where every required value is already set on the node.
+    * ``lazy`` — a deferred :class:`confluid.LazyClass`. Wire THIS into a runnable when a value is only
+      known at ``run()`` (``torch.optim.*.params`` / ``DataLoader.dataset``, or a model's
+      dataset-derived ``num_classes``): the runnable flows it with the runtime kwarg.
+
+    When the live ``instance`` cannot be built — a genuinely deferred member whose required ctor param
+    is runtime-injected (logged at ``debug``: that is by-design, not an error), or a configuration that
+    is simply incomplete/invalid (e.g. a model node left without ``num_classes`` — logged at
+    ``warning`` so the user can fix it) — the ``instance`` output is ``None`` and only ``lazy`` is
+    usable. ComfyUI tolerates a ``None`` socket value; downstream nodes that require the instance fail
+    legibly on use.
     """
     is_lazy = bool(getattr(cls, "__confluid_lazy__", False))
     # A lazy member's REQUIRED (no-default) ctor params are the runtime-injected slot the runnable
@@ -912,22 +922,42 @@ def _build_object_node(cls: Callable, name: str, category: str) -> Type:
         except (ValueError, TypeError):  # pragma: no cover - defensive
             skip = None
     inputs = _build_config_inputs(cls, skip=skip or None)
+    # A member with runtime-injected required params (the skipped set) is deferred BY DESIGN — there
+    # is no standalone live instance to build, so don't attempt it (and don't warn — that's expected).
+    deferred_required = bool(skip)
 
     def execute(self: Any, **kwargs: Any) -> Tuple[Any, ...]:
-        coerced = _coerce_kwargs(cls, kwargs)
-        if is_lazy:
-            from confluid import LazyClass
+        from confluid import LazyClass, flow
 
-            return (LazyClass(cast(Type[Any], cls), **coerced),)
-        return (cls(**coerced),)
+        coerced = _coerce_kwargs(cls, kwargs)
+        lazy = LazyClass(cast(Type[Any], cls), **coerced)
+        instance: Any = None
+        if deferred_required:
+            logger.debug(
+                f"{name}: deferred member with runtime-injected param(s) {sorted(skip or [])}; "
+                "no standalone instance — wire the 'lazy' output into a runnable."
+            )
+        else:
+            try:
+                # flow() builds the instance from a fresh LazyClass (and solidifies it) so the pristine
+                # ``lazy`` output is never consumed/mutated by the build attempt.
+                instance = flow(LazyClass(cast(Type[Any], cls), **coerced))
+            except Exception as exc:  # noqa: BLE001 - surface ANY build failure as an actionable warning
+                logger.warning(
+                    f"{name}: could not build a live instance ({type(exc).__name__}: {exc}); "
+                    "the 'instance' output is None — set the missing parameter(s) on this node, or "
+                    "wire the 'lazy' output into a runnable that injects them at run()."
+                )
+                instance = None
+        return (instance, lazy)
 
     return _node_class(
         name,
         category,
         inputs,
-        (OBJECT_TYPE,),
+        (OBJECT_TYPE, OBJECT_TYPE),
         execute,
-        return_names=("object",),
+        return_names=("instance", "lazy"),
         kind="object",
         callable_path=_safe_callable_path(cls),
     )

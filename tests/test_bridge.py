@@ -20,7 +20,7 @@ fallback and silently defeat the very branches under test.
 
 from pathlib import Path
 from typing import List, Literal, Optional
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import datasets
 import numpy as np
@@ -1132,23 +1132,56 @@ class _LazyOptimizer:
 _LazyOptimizer.__confluid_lazy__ = True  # type: ignore[attr-defined]
 
 
-def test_object_node_non_lazy_returns_live_instance() -> None:
+def test_object_node_non_lazy_returns_instance_and_lazy() -> None:
+    # Dual output: a flowed live instance AND a deferred LazyClass of the same config.
     node = _build_object_node(_EagerMember, "Taidal_Eager", "Taidal/Obj")
-    assert node.RETURN_TYPES == (OBJECT_TYPE,)
-    out = node().execute(channels=5)[0]
-    assert isinstance(out, _EagerMember) and out.channels == 5
+    assert node.RETURN_TYPES == (OBJECT_TYPE, OBJECT_TYPE)
+    assert node.RETURN_NAMES == ("instance", "lazy")
+    instance, lazy = node().execute(channels=5)
+    assert isinstance(instance, _EagerMember) and instance.channels == 5
+    assert isinstance(lazy, LazyClass) and lazy.kwargs.get("channels") == 5
 
 
-def test_object_node_lazy_returns_lazyclass_and_skips_runtime_param() -> None:
+def test_object_node_lazy_defers_instance_and_skips_runtime_param() -> None:
     node = _build_object_node(_LazyOptimizer, "Taidal_Opt", "Taidal/Obj")
     spec = node.INPUT_TYPES()
     # The runtime-injected required param is skipped; configurable knobs remain.
     assert "params" not in spec["required"]
     assert "lr" in spec["required"]
-    out = node().execute(lr=0.5)[0]
-    assert isinstance(out, LazyClass)  # deferred, not a live _LazyOptimizer
-    # The deferred kwargs carry the configured knob.
-    assert out.kwargs.get("lr") == 0.5
+    instance, lazy = node().execute(lr=0.5)
+    # A runtime-injected required param (``params``) -> no standalone instance, only the LazyClass.
+    assert instance is None
+    assert isinstance(lazy, LazyClass) and lazy.kwargs.get("lr") == 0.5
+
+
+class _PickyMember:
+    """A non-lazy member that rejects an incomplete config at construction (like a model needing a
+    positive ``num_classes``)."""
+
+    def __init__(self, size: int = 0) -> None:
+        if size < 1:
+            raise ValueError("size must be >= 1")
+        self.size = size
+
+
+def test_object_node_warns_when_instance_cannot_be_built(monkeypatch: pytest.MonkeyPatch) -> None:
+    import fluxstudio.bridge as bridge
+
+    log = MagicMock()
+    monkeypatch.setattr(bridge, "logger", log)
+
+    node = _build_object_node(_PickyMember, "Taidal_Picky", "Taidal/Obj")
+    instance, lazy = node().execute(size=0)  # invalid -> build fails
+    assert instance is None  # could not build -> None
+    assert isinstance(lazy, LazyClass)  # lazy is always available
+    assert log.warning.called  # actionable warning emitted
+    assert "could not build a live instance" in log.warning.call_args[0][0]
+
+    # A complete config builds the live instance and emits no warning.
+    log.reset_mock()
+    instance2, _ = node().execute(size=4)
+    assert isinstance(instance2, _PickyMember) and instance2.size == 4
+    assert not log.warning.called
 
 
 def test_register_module_nodes_admits_runnable_and_member() -> None:
