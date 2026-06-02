@@ -10,6 +10,8 @@ FluxStudio-only visualizers" mandate); this module only bridges to ComfyUI's ten
 provides the index-walk stepper.
 """
 
+import ctypes
+import threading
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
 
 import numpy as np
@@ -253,6 +255,60 @@ class SampleExtractorNode:
         return name if isinstance(name, str) else type(spec).__name__
 
 
+def _processing_interrupted() -> bool:
+    """Whether the user pressed ComfyUI's interrupt button.
+
+    Lazy + guarded: ``comfy`` only exists when running INSIDE ComfyUI, not in
+    fluxstudio's own test/dev environment — so absent comfy ⇒ no interrupt
+    source ⇒ ``False`` (the run proceeds to completion exactly as before). Kept
+    as a tiny standalone function so the interrupt path is trivially
+    monkeypatchable in tests. Mirrors the "degrade gracefully when an optional
+    dependency is absent" pattern used by ``_colormap_choices`` above.
+    """
+    try:
+        from comfy import model_management
+    except Exception:  # comfy not importable outside a running ComfyUI
+        return False
+    return bool(model_management.processing_interrupted())
+
+
+def _interrupt_exception_type() -> Type[BaseException]:
+    """ComfyUI's ``InterruptProcessingException`` if available, else ``KeyboardInterrupt``.
+
+    ComfyUI's executor recognises ``InterruptProcessingException`` as a clean
+    user-interrupt (it resets the UI instead of surfacing a traceback). Outside
+    ComfyUI the type doesn't exist, so we fall back to ``KeyboardInterrupt`` —
+    enough for tests to observe that the run was cancelled.
+    """
+    try:
+        from comfy.model_management import InterruptProcessingException
+
+        exc_type: Type[BaseException] = InterruptProcessingException
+        return exc_type
+    except Exception:  # comfy not importable outside a running ComfyUI
+        return KeyboardInterrupt
+
+
+def _raise_interrupt_in_thread(thread_id: int, exc_type: Type[BaseException] = KeyboardInterrupt) -> None:
+    """Asynchronously raise ``exc_type`` in another thread (cooperative cancel).
+
+    ComfyUI checks its interrupt flag only BETWEEN nodes, but :class:`RunNode`'s
+    ``runnable.run()`` is one long blocking call — so we run it on a worker
+    thread and, when the user hits interrupt, inject an exception into that
+    worker via CPython's ``PyThreadState_SetAsyncExc``. This is the sanctioned
+    mechanism for cancelling an otherwise-uncooperative thread; the exception is
+    delivered at the next Python bytecode boundary (between training batches /
+    pipeline samples), so it cannot break into a single long-running C kernel —
+    an acceptable limitation for our per-batch / per-sample loops.
+    """
+    res = ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_long(thread_id), ctypes.py_object(exc_type))
+    if res > 1:
+        # Should only ever affect the one target thread; undo if it hit more so
+        # we don't leave a pending async exception dangling on another thread.
+        ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_long(thread_id), None)
+        raise SystemError("PyThreadState_SetAsyncExc affected more than one thread")
+
+
 class RunNode:
     """Execute a built runnable: call ``.run()`` on a ``DATAFLUX_RUNNABLE`` input.
 
@@ -262,6 +318,16 @@ class RunNode:
     can inspect/serialize the config. This terminal ``OUTPUT_NODE`` is what actually triggers the
     (potentially very long) ``run()`` — training / evaluation / a processing sweep — when the canvas
     is queued. Returns a short status string for display.
+
+    **Interruptible:** ComfyUI checks its interrupt flag only BETWEEN nodes, but this single
+    ``run()`` call can run for minutes/hours — so the pressed "interrupt" button would otherwise be
+    ignored until the whole sweep finished. To honour it, ``run()`` executes the runnable on a
+    worker thread and polls :func:`_processing_interrupted` from the calling (ComfyUI) thread; when
+    the flag goes high it injects a ``KeyboardInterrupt`` into the worker
+    (:func:`_raise_interrupt_in_thread`) and then re-raises ComfyUI's ``InterruptProcessingException``
+    for a clean stop. PyTorch Lightning catches ``KeyboardInterrupt`` for a graceful shutdown; the
+    ``DatasetProcessor`` / Flux iteration loops simply unwind. The injection lands at Python
+    statement boundaries (between batches / samples), so a single long C kernel is not interruptible.
     """
 
     CATEGORY = "Taidal/FluxStudio"
@@ -282,7 +348,53 @@ class RunNode:
                 "(expected a trainer / evaluator / processor)."
             )
         logger.info(f"RunNode: running {type(runnable).__name__}…")
-        run()
+
+        torch_runner = bool(getattr(runnable, "__torch_runner__", False))
+        # torch's grad/inference mode is THREAD-LOCAL, so the worker thread does NOT inherit the
+        # torch.inference_mode() ComfyUI wraps graph execution in — capture it here and re-establish
+        # the correct context inside the worker (see the grad rationale below).
+        was_inference = torch.is_inference_mode_enabled()
+        holder: Dict[str, BaseException] = {}
+
+        def _target() -> None:
+            # ComfyUI evaluates the whole graph under torch.inference_mode() (execution.py) for
+            # cheap, grad-free node runs. That is fatal for gradient-based TRAINING: model
+            # parameters (model nodes are lazy, so the backbone is built HERE inside run()), forward
+            # activations, and the loss all become inference tensors with no autograd graph, so
+            # loss.backward() dies with "element 0 of tensors does not require grad and does not have
+            # a grad_fn". A runnable that declares itself a marainer.TorchRunner (trainers) gets
+            # normal autograd restored for the duration of run(); inference-only runnables
+            # (evaluators, DatasetProcessor) run as-is under ComfyUI's inference mode — which the
+            # worker must re-enter explicitly since the flag did not cross the thread boundary.
+            try:
+                if torch_runner:
+                    with torch.inference_mode(False), torch.enable_grad():
+                        run()
+                elif was_inference:
+                    with torch.inference_mode():
+                        run()
+                else:
+                    run()
+            except BaseException as exc:  # noqa: BLE001 — surfaced to the caller thread below
+                holder["exc"] = exc
+
+        worker = threading.Thread(target=_target, name=f"RunNode-{type(runnable).__name__}", daemon=True)
+        worker.start()
+        interrupted = False
+        while worker.is_alive():
+            worker.join(0.1)
+            if not interrupted and _processing_interrupted():
+                logger.info(f"RunNode: interrupt requested — stopping {type(runnable).__name__}…")
+                interrupted = True
+                if worker.ident is not None:
+                    _raise_interrupt_in_thread(worker.ident, KeyboardInterrupt)
+
+        exc = holder.get("exc")
+        if interrupted or isinstance(exc, (KeyboardInterrupt, _interrupt_exception_type())):
+            # Surface ComfyUI's clean-interrupt signal (resets the UI, no traceback).
+            raise _interrupt_exception_type()()
+        if exc is not None:
+            raise exc
         return (f"{type(runnable).__name__}.run() complete",)
 
 

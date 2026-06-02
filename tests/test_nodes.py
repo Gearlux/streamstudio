@@ -8,6 +8,8 @@ fail to exercise the graceful-degradation placeholder.
 """
 
 import sys
+import threading
+import time
 from types import ModuleType
 from unittest.mock import patch
 
@@ -257,3 +259,110 @@ def test_run_node_rejects_non_runnable() -> None:
 
     with pytest.raises(RuntimeError, match="no callable run"):
         RunNode().run(object())
+
+
+def test_run_node_restores_autograd_for_torch_runner_under_inference_mode() -> None:
+    # ComfyUI wraps graph execution in torch.inference_mode(); a TorchRunner (training) must get
+    # normal autograd restored inside run() or loss.backward() fails. Simulate the wrapping and
+    # assert a tensor built inside run() carries a grad graph.
+    from fluxstudio.nodes import RunNode
+
+    observed = {}
+
+    class _TorchRunnable:
+        __torch_runner__ = True
+
+        def run(self) -> None:
+            observed["grad_enabled"] = torch.is_grad_enabled()
+            observed["inference"] = torch.is_inference_mode_enabled()
+            lin = torch.nn.Linear(4, 2)  # built HERE, like a lazy backbone
+            loss = lin(torch.randn(3, 4)).sum()
+            loss.backward()  # would raise without the grad restore
+            observed["has_grad"] = lin.weight.grad is not None
+
+    with torch.inference_mode():
+        RunNode().run(_TorchRunnable())
+
+    assert observed == {"grad_enabled": True, "inference": False, "has_grad": True}
+
+
+def test_run_node_leaves_inference_mode_for_plain_runnable() -> None:
+    # An inference-only runnable (no __torch_runner__) runs as-is under ComfyUI's inference mode.
+    from fluxstudio.nodes import RunNode
+
+    observed = {}
+
+    class _PlainRunnable:
+        def run(self) -> None:
+            observed["inference"] = torch.is_inference_mode_enabled()
+
+    with torch.inference_mode():
+        RunNode().run(_PlainRunnable())
+
+    assert observed["inference"] is True
+
+
+def test_run_node_interrupt_stops_running_runnable() -> None:
+    # The user pressed ComfyUI's interrupt button mid-run: RunNode polls the flag, injects a
+    # KeyboardInterrupt into the worker thread, and re-raises the interrupt signal for a clean stop.
+    import fluxstudio.nodes as nodes
+    from fluxstudio.nodes import RunNode, _interrupt_exception_type
+
+    started = threading.Event()
+    ran_to_completion = {"value": False}
+
+    class _SlowRunnable:
+        def run(self) -> None:
+            started.set()
+            # A cooperative loop standing in for a training / sample-iteration loop: it unwinds at a
+            # statement boundary when the injected KeyboardInterrupt arrives, before completing.
+            for _ in range(10_000):
+                time.sleep(0.005)
+            ran_to_completion["value"] = True
+
+    # Flip the interrupt flag True only once the worker is actually running.
+    def _interrupted() -> bool:
+        return started.is_set()
+
+    with patch.object(nodes, "_processing_interrupted", _interrupted):
+        with pytest.raises(_interrupt_exception_type()):
+            RunNode().run(_SlowRunnable())
+
+    assert ran_to_completion["value"] is False
+
+
+def test_run_node_propagates_genuine_worker_exception() -> None:
+    # A real error inside run() (not an interrupt) is surfaced to the caller, unchanged.
+    from fluxstudio.nodes import RunNode
+
+    class _Boom:
+        def run(self) -> None:
+            raise ValueError("kaboom")
+
+    with pytest.raises(ValueError, match="kaboom"):
+        RunNode().run(_Boom())
+
+
+def test_run_node_grad_context_is_active_inside_worker_thread() -> None:
+    # The grad restore for a TorchRunner must happen ON the worker thread (torch grad mode is
+    # thread-local), and the work must run on a DIFFERENT thread than the caller.
+    from fluxstudio.nodes import RunNode
+
+    main_thread = threading.get_ident()
+    observed = {}
+
+    class _TorchRunnable:
+        __torch_runner__ = True
+
+        def run(self) -> None:
+            observed["thread"] = threading.get_ident()
+            observed["grad_enabled"] = torch.is_grad_enabled()
+            observed["inference"] = torch.is_inference_mode_enabled()
+
+    with torch.inference_mode():
+        status = RunNode().run(_TorchRunnable())
+
+    assert observed["thread"] != main_thread
+    assert observed["grad_enabled"] is True
+    assert observed["inference"] is False
+    assert "_TorchRunnable" in status[0] and "complete" in status[0]
