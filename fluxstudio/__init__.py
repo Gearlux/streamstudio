@@ -286,6 +286,43 @@ try:
             except Exception as e:
                 return web.json_response({"error": str(e)}, status=500)
 
+    # Convert a Confluid YAML config → a whole ComfyUI workflow.json (nodes + links + groups +
+    # subgraphs). Backs web/import_yaml.js ("Import Taidal YAML" menu commands). The POST body is
+    # ``{yaml: "<text>", as: "graph"|"group"|"subgraph", name?: "<title>"}``.
+    import_route_exists = any(
+        r.path == "/taidal/import_yaml" and r.method == "POST" for r in server.PromptServer.instance.routes
+    )
+    if not import_route_exists:
+        from fluxstudio.graphio import workflow_to_yaml, yaml_to_workflow
+
+        @server.PromptServer.instance.routes.post("/taidal/import_yaml")
+        async def import_yaml_handler(request: Any) -> Any:
+            try:
+                body = await request.json()
+                yaml_text = body.get("yaml", "")
+                workflow = yaml_to_workflow(
+                    yaml_text,
+                    NODE_CLASS_MAPPINGS,
+                    as_=body.get("as", "graph"),
+                    name=body.get("name", "Imported"),
+                )
+                return web.json_response({"workflow": workflow})
+            except Exception as e:
+                return web.json_response({"error": str(e)}, status=400)
+
+        # Convert a WHOLE workflow.json (UI form) → a hoisted-!ref: Confluid YAML. Backs
+        # web/export_workflow.js ("Export Graph → Taidal YAML"). Body: ``{workflow: {...}}``.
+        @server.PromptServer.instance.routes.post("/taidal/export_workflow")
+        async def export_workflow_handler(request: Any) -> Any:
+            try:
+                body = await request.json()
+                graph = body.get("workflow", body)
+                return web.json_response({"yaml": workflow_to_yaml(graph, NODE_CLASS_MAPPINGS)})
+            except UnsupportedTopologyError as e:
+                return web.json_response({"error": str(e)}, status=400)
+            except Exception as e:
+                return web.json_response({"error": str(e)}, status=500)
+
 except ImportError:
     # Not running inside ComfyUI
     pass

@@ -153,6 +153,8 @@ class _FakeRoutes:
         if self._existing:
             yield SimpleNamespace(path="/taidal/choose_directory", method="POST")
             yield SimpleNamespace(path="/taidal/export_ops", method="POST")
+            yield SimpleNamespace(path="/taidal/import_yaml", method="POST")
+            yield SimpleNamespace(path="/taidal/export_workflow", method="POST")
             yield SimpleNamespace(path="/taidal/hf_datasets", method="GET")
             yield SimpleNamespace(path="/taidal/hf_dataset_features", method="GET")
             yield SimpleNamespace(path="/taidal/hf_dataset_splits", method="GET")
@@ -286,6 +288,43 @@ def test_export_ops_route_returns_yaml() -> None:
     data, _kwargs = web.calls[-1]
     assert "ops:" in data["yaml"]
     assert "RescaleOp" in data["yaml"]
+
+
+def test_import_yaml_route_returns_workflow() -> None:
+    # The /taidal/import_yaml POST handler converts a posted YAML config into a workflow.json.
+    from dataflux.ops.torch import RescaleOp
+    from dataflux.sources import HuggingFaceSource
+
+    from fluxstudio.bridge import create_comfy_node
+
+    with _fake_comfy() as (routes, web):
+        handler = routes.post_handlers.get("/taidal/import_yaml")
+        assert handler is not None
+        fluxstudio.NODE_CLASS_MAPPINGS["src"] = create_comfy_node(HuggingFaceSource, "src")
+        fluxstudio.NODE_CLASS_MAPPINGS["rescale"] = create_comfy_node(RescaleOp, "rescale")
+        yaml = "raw: !class:dataflux.sources.HuggingFaceSource()\n  path: mnist\n"
+        asyncio.run(handler(_json_request({"yaml": yaml, "as": "graph"})))
+    data, _kwargs = web.calls[-1]
+    assert "workflow" in data
+    assert any(n["type"] == "src" for n in data["workflow"]["nodes"])
+
+
+def test_export_workflow_route_returns_yaml() -> None:
+    # The /taidal/export_workflow POST handler converts a whole workflow.json into hoisted YAML.
+    from dataflux.sources import HuggingFaceSource
+
+    from fluxstudio.bridge import create_comfy_node
+    from fluxstudio.graphio import yaml_to_workflow
+
+    with _fake_comfy() as (routes, web):
+        handler = routes.post_handlers.get("/taidal/export_workflow")
+        assert handler is not None
+        nm = {"src": create_comfy_node(HuggingFaceSource, "src")}
+        fluxstudio.NODE_CLASS_MAPPINGS["src"] = nm["src"]
+        workflow = yaml_to_workflow({"raw": __import__("confluid").Instance(HuggingFaceSource, path="mnist")}, nm)
+        asyncio.run(handler(_json_request({"workflow": workflow})))
+    data, _kwargs = web.calls[-1]
+    assert "HuggingFaceSource" in data["yaml"]
 
 
 def test_export_ops_route_400_on_bad_topology() -> None:

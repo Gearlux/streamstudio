@@ -112,14 +112,17 @@ _SOCKET_TYPES = {
 _DATASET_MEMBER_PARAMS = {"train_set", "val_set", "test_set", "dataset"}
 
 # Discovery ROLES whose classes become OBJECT nodes (a trainer/runnable slot-filler producing a
-# ``DATAFLUX_OBJECT`` wire): a task-scoped model / loss / metric. Datasets are SOURCE nodes (role
+# ``DATAFLUX_OBJECT`` wire): a task-scoped model / loss / metric, plus ``logger`` (a Lightning logger
+# fed into the ``pytorch_lightning.Trainer`` ``logger`` slot). Datasets are SOURCE nodes (role
 # ``"dataset"`` is routed to ``_build_source_node``), not object nodes. The role-less runtime members
 # (``torch.optim.*`` / ``DataLoader`` / ``pytorch_lightning.Trainer``, registered in
 # ``marainer.configurables``) are detected instead by the confluid **``lazy`` mark**
 # (``__confluid_lazy__``) — deliberately NOT a category, so they don't leak into navigaitor's
 # form-spec slot pickers (which resolve a picker FROM the slot's default-target category and would
-# then offer the raw ``params``-taking optimizer). See ``_is_object_member_class``.
-_MEMBER_ROLES = {"model", "loss", "metric"}
+# then offer the raw ``params``-taking optimizer). Loggers carry ``role="logger"`` (NOT ``lazy``) so
+# they build EAGERLY — a logger's required ``save_dir`` must stay a configurable widget, not be
+# skipped as a runtime-injected slot. See ``_is_object_member_class``.
+_MEMBER_ROLES = {"model", "loss", "metric", "logger"}
 
 # Constructor params (on higher-order ops) that hold a LIST OF OPS — rendered as dynamic
 # ``DATAFLUX_OP`` multi-inputs (``op_0``, ``op_1``, … via ``web/op_list.js``) instead of a STRING
