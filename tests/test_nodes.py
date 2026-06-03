@@ -249,9 +249,36 @@ def test_run_node_calls_run() -> None:
         def run(self) -> None:
             calls.append(True)
 
-    status = RunNode().run(_Runnable())
+    result = RunNode().run(_Runnable())
     assert calls == [True]
+    # run() returns the {"ui": {"text": [...]}, "result": (text,)} display form.
+    status = result["result"]
     assert "_Runnable" in status[0] and "complete" in status[0]
+    assert result["ui"]["text"] == [status[0]]
+
+
+def test_run_node_captures_runner_output() -> None:
+    # The runner's stdout/stderr is captured and returned on both the output socket and ui.text.
+    from fluxstudio.nodes import RunNode
+
+    class _Printy:
+        def run(self) -> None:
+            print("epoch 1: loss=0.5")
+            print("done", file=sys.stderr)
+
+    result = RunNode().run(_Printy())
+    text = result["ui"]["text"][0]
+    assert "epoch 1: loss=0.5" in text
+    assert "done" in text
+    assert result["result"][0] == text
+
+
+def test_collapse_carriage_returns_keeps_final_frame() -> None:
+    from fluxstudio.nodes import _collapse_carriage_returns
+
+    # tqdm/Lightning repaint a line with \r; only the final frame per line survives.
+    assert _collapse_carriage_returns("a\rb\rc\nx\ry") == "c\ny"
+    assert _collapse_carriage_returns("plain\nlines") == "plain\nlines"
 
 
 def test_run_node_rejects_non_runnable() -> None:
@@ -365,4 +392,4 @@ def test_run_node_grad_context_is_active_inside_worker_thread() -> None:
     assert observed["thread"] != main_thread
     assert observed["grad_enabled"] is True
     assert observed["inference"] is False
-    assert "_TorchRunnable" in status[0] and "complete" in status[0]
+    assert "_TorchRunnable" in status["result"][0] and "complete" in status["result"][0]
