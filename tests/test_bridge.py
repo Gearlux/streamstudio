@@ -1136,7 +1136,7 @@ def test_object_node_non_lazy_returns_instance_and_lazy() -> None:
     # Dual output: a flowed live instance AND a deferred LazyClass of the same config.
     node = _build_object_node(_EagerMember, "Taidal_Eager", "Taidal/Obj")
     assert node.RETURN_TYPES == (OBJECT_TYPE, OBJECT_TYPE)
-    assert node.RETURN_NAMES == ("instance", "lazy")
+    assert node.RETURN_NAMES == ("instance", "class")
     instance, lazy = node().execute(channels=5)
     assert isinstance(instance, _EagerMember) and instance.channels == 5
     assert isinstance(lazy, LazyClass) and lazy.kwargs.get("channels") == 5

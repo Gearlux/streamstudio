@@ -897,14 +897,17 @@ def _build_object_node(cls: Callable, name: str, category: str) -> Type:
 
     * ``instance`` — the **flowed, live** object, built right here from the widget values. Useful for
       standalone / inspection wiring where every required value is already set on the node.
-    * ``lazy`` — a deferred :class:`confluid.LazyClass`. Wire THIS into a runnable when a value is only
-      known at ``run()`` (``torch.optim.*.params`` / ``DataLoader.dataset``, or a model's
-      dataset-derived ``num_classes``): the runnable flows it with the runtime kwarg.
+    * ``class`` — the configured-but-deferred class (a :class:`confluid.LazyClass`). Wire THIS into a
+      runnable when a value is only known at ``run()`` (``torch.optim.*.params`` / ``DataLoader.dataset``,
+      or a model's dataset-derived ``num_classes``): the runnable flows it with the runtime kwarg. (The
+      output is named ``class`` — the user-facing "the configured class, not yet built" — while the value
+      it carries is a confluid ``LazyClass``; graphio's whole-graph export keys eager/lazy off the WIRED
+      output slot, not this label, so a member wired from here serialises as a deferred ``!lazy:``.)
 
     When the live ``instance`` cannot be built — a genuinely deferred member whose required ctor param
     is runtime-injected (logged at ``debug``: that is by-design, not an error), or a configuration that
     is simply incomplete/invalid (e.g. a model node left without ``num_classes`` — logged at
-    ``warning`` so the user can fix it) — the ``instance`` output is ``None`` and only ``lazy`` is
+    ``warning`` so the user can fix it) — the ``instance`` output is ``None`` and only ``class`` is
     usable. ComfyUI tolerates a ``None`` socket value; downstream nodes that require the instance fail
     legibly on use.
     """
@@ -938,7 +941,7 @@ def _build_object_node(cls: Callable, name: str, category: str) -> Type:
         if deferred_required:
             logger.debug(
                 f"{name}: deferred member with runtime-injected param(s) {sorted(skip or [])}; "
-                "no standalone instance — wire the 'lazy' output into a runnable."
+                "no standalone instance — wire the 'class' output into a runnable."
             )
         else:
             try:
@@ -960,7 +963,7 @@ def _build_object_node(cls: Callable, name: str, category: str) -> Type:
         inputs,
         (OBJECT_TYPE, OBJECT_TYPE),
         execute,
-        return_names=("instance", "lazy"),
+        return_names=("instance", "class"),
         kind="object",
         callable_path=_safe_callable_path(cls),
     )

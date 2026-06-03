@@ -11,6 +11,8 @@ provides the index-walk stepper.
 """
 
 import ctypes
+import io
+import sys
 import threading
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
 
@@ -309,6 +311,52 @@ def _raise_interrupt_in_thread(thread_id: int, exc_type: Type[BaseException] = K
         raise SystemError("PyThreadState_SetAsyncExc affected more than one thread")
 
 
+# How much captured run output to keep in the node's display widget (the TAIL — final metrics /
+# any error are the most relevant). The full stream still reaches the live ComfyUI console (the tee).
+_MAX_OUTPUT_CHARS = 50_000
+
+
+class _TeeStream:
+    """A text stream that mirrors writes to an ``original`` stream AND accumulates them in ``buffer``.
+
+    Installed as ``sys.stdout`` / ``sys.stderr`` only while the RunNode worker runs, so the live
+    ComfyUI console still shows training output AS IT HAPPENS while we also capture it for the node's
+    output widget. Attribute access (``isatty`` / ``fileno`` / ``encoding`` — tqdm probes these)
+    delegates to the original stream so a real progress bar still renders in the console.
+    """
+
+    def __init__(self, original: Any, buffer: "io.StringIO") -> None:
+        self._original = original
+        self._buffer = buffer
+
+    def write(self, text: str) -> int:
+        try:
+            self._original.write(text)
+        except Exception:  # noqa: BLE001 - a broken console must never abort the run
+            pass
+        self._buffer.write(text)
+        return len(text)
+
+    def flush(self) -> None:
+        try:
+            self._original.flush()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._original, name)
+
+
+def _collapse_carriage_returns(text: str) -> str:
+    """Render ``\\r`` overwrites like a terminal would — keep only the final segment per line.
+
+    Progress bars (tqdm / Lightning) repaint a line with ``\\r`` rather than a newline; raw-captured
+    that floods the widget with hundreds of partial frames. Keeping the text after the last ``\\r`` on
+    each line collapses each bar to its final state.
+    """
+    return "\n".join(line.rsplit("\r", 1)[-1] if "\r" in line else line for line in text.split("\n"))
+
+
 class RunNode:
     """Execute a built runnable: call ``.run()`` on a ``DATAFLUX_RUNNABLE`` input.
 
@@ -317,7 +365,13 @@ class RunNode:
     and output it on a ``DATAFLUX_RUNNABLE`` wire without running it, so the graph stays cheap and you
     can inspect/serialize the config. This terminal ``OUTPUT_NODE`` is what actually triggers the
     (potentially very long) ``run()`` — training / evaluation / a processing sweep — when the canvas
-    is queued. Returns a short status string for display.
+    is queued.
+
+    **Captured output:** the runnable's stdout / stderr (training progress, metrics, logflow lines)
+    is captured via a :class:`_TeeStream` (mirrored live to the ComfyUI console) and returned both on
+    the ``output`` STRING socket AND as ``{"ui": {"text": [...]}}`` so ``web/run_output.js`` shows it
+    in a read-only multiline widget on the node. The worker runs on a thread, so installing the tee on
+    ``sys.stdout`` / ``sys.stderr`` for the run window captures everything the worker prints.
 
     **Interruptible:** ComfyUI checks its interrupt flag only BETWEEN nodes, but this single
     ``run()`` call can run for minutes/hours — so the pressed "interrupt" button would otherwise be
@@ -332,7 +386,7 @@ class RunNode:
 
     CATEGORY = "Taidal/FluxStudio"
     RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("status",)
+    RETURN_NAMES = ("output",)
     FUNCTION = "run"
     OUTPUT_NODE = True
 
@@ -340,7 +394,7 @@ class RunNode:
     def INPUT_TYPES(cls) -> Dict[str, Any]:
         return {"required": {"runnable": (RUNNABLE_TYPE,)}}
 
-    def run(self, runnable: Any) -> Tuple[Any, ...]:
+    def run(self, runnable: Any) -> Dict[str, Any]:
         run = getattr(runnable, "run", None)
         if not callable(run):
             raise RuntimeError(
@@ -379,15 +433,28 @@ class RunNode:
                 holder["exc"] = exc
 
         worker = threading.Thread(target=_target, name=f"RunNode-{type(runnable).__name__}", daemon=True)
-        worker.start()
+        # Tee stdout/stderr for the run window: the worker's prints/progress/logflow lines mirror to
+        # the live console AND accumulate in `buffer` for the node's output widget. Restored in finally
+        # BEFORE any interrupt/error re-raise so a failure never leaves the streams swapped.
+        buffer = io.StringIO()
+        old_out, old_err = sys.stdout, sys.stderr
+        sys.stdout, sys.stderr = _TeeStream(old_out, buffer), _TeeStream(old_err, buffer)
         interrupted = False
-        while worker.is_alive():
-            worker.join(0.1)
-            if not interrupted and _processing_interrupted():
-                logger.info(f"RunNode: interrupt requested — stopping {type(runnable).__name__}…")
-                interrupted = True
-                if worker.ident is not None:
-                    _raise_interrupt_in_thread(worker.ident, KeyboardInterrupt)
+        try:
+            worker.start()
+            while worker.is_alive():
+                worker.join(0.1)
+                if not interrupted and _processing_interrupted():
+                    logger.info(f"RunNode: interrupt requested — stopping {type(runnable).__name__}…")
+                    interrupted = True
+                    if worker.ident is not None:
+                        _raise_interrupt_in_thread(worker.ident, KeyboardInterrupt)
+        finally:
+            sys.stdout, sys.stderr = old_out, old_err
+
+        captured = _collapse_carriage_returns(buffer.getvalue())
+        if len(captured) > _MAX_OUTPUT_CHARS:
+            captured = "… (output truncated — see the console for the full log)\n" + captured[-_MAX_OUTPUT_CHARS:]
 
         exc = holder.get("exc")
         if interrupted or isinstance(exc, (KeyboardInterrupt, _interrupt_exception_type())):
@@ -395,7 +462,10 @@ class RunNode:
             raise _interrupt_exception_type()()
         if exc is not None:
             raise exc
-        return (f"{type(runnable).__name__}.run() complete",)
+        text = captured.strip() or f"{type(runnable).__name__}.run() complete"
+        # The {"ui": {"text": [...]}} half feeds web/run_output.js's display widget; "result" is the
+        # value on the STRING output socket (wireable into other nodes).
+        return {"ui": {"text": [text]}, "result": (text,)}
 
 
 # Statically-defined adapter nodes, merged into the auto-discovered set by fluxstudio/__init__.py.
