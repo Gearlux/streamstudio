@@ -144,6 +144,59 @@ flux = Flux.from_ops_yaml("ops.yaml", source=HuggingFaceSource(path="ylecun/mnis
 
 **Scope.** v1 exports a single linear op chain, plus **fan-out** (one op output wired to ≥2 op nodes) compiled to a `dataflux.ops.tee.Tee`. The compiler is a faithful translator — it does **not** auto-insert `Copy`/`Stash` for branch isolation; place those op nodes explicitly. True multi-input merges (fan-in), multiple disconnected chains, and widget inputs driven by a link raise an `UnsupportedTopologyError` (HTTP 400 from the route) with an actionable message.
 
+## Importing & exporting whole pipelines (Taidal YAML ↔ canvas)
+
+Beyond the ops-only export above, FluxStudio round-trips a **whole** Confluid config — sources, ops, object members (model / loss / optimizer / loaders / logger / Lightning Trainer), and the runnable that ties them together — between a Confluid YAML and a full ComfyUI `workflow.json`. So you can load an existing training config (e.g. [`sonair/examples/train_efficientvit_b0_mnist.yaml`](../sonair/examples/train_efficientvit_b0_mnist.yaml)) onto the canvas, edit it visually, and save it back to YAML that runs with `marainer train -c config.yaml`.
+
+The converter lives in `fluxstudio.graphio` (`yaml_to_workflow` / `workflow_to_yaml`); the **Fluid graph is the shared intermediate representation** (confluid owns YAML↔Fluid via `resolve`/`dump`, FluxStudio owns Fluid↔`workflow.json`). It works **without a running ComfyUI**.
+
+### On the canvas — the **Taidal** menu
+
+| Command | What it does |
+|---|---|
+| **Import Taidal YAML → Graph** | Pick a `.yaml`; its nodes + wiring are laid out on the active canvas. |
+| **Import Taidal YAML → Subgraph** | Same, but packaged as a reusable `definitions.subgraphs[]` blueprint + an instance node. |
+| **Import Taidal YAML → Group** | Same as Graph, wrapped in one visual group box (titled by the file). |
+| **Export Graph → Taidal YAML** | Serialize the whole active graph and download the hoisted-`!ref:` YAML. |
+| **Export Taidal Ops → Confluid YAML** | (above) the ops-only op-list. |
+
+The import commands operate on the **active** graph, so they work inside a subgraph too. Backed by the `/taidal/import_yaml` and `/taidal/export_workflow` routes (`web/import_yaml.js`, `web/export_workflow.js`).
+
+### Offline CLI
+
+```bash
+fluxstudio import config.yaml -o workflow.json          # YAML → canvas workflow
+fluxstudio import config.yaml --as subgraph -o sub.json # … as a reusable subgraph blueprint
+fluxstudio export-workflow workflow.json -o config.yaml # whole canvas → hoisted-!ref: YAML
+```
+
+### The exported shape (hoisted `!ref:`)
+
+Every node becomes a **top-level key** named by the socket it feeds (path-prefixed on collision); a wire becomes a `!ref:`; shared scalar dimensions (`num_classes` / `image_size`) are hoisted. A deferred member (optimizer / loaders / Lightning Trainer) emits `!lazy:`, an eager one `!class:`. This matches the navigaitor / hand-written reference configs (e.g. [`waivefront-rfuav/config/train_efficientvit_b0.yaml`](../waivefront-rfuav/config/train_efficientvit_b0.yaml)):
+
+```yaml
+num_classes: 37
+model: !class:sonair.timm_classifier.TimmModel
+  model_name: efficientvit_b0
+  num_classes: !ref:num_classes
+optimizer: !lazy:torch.optim.AdamW
+  lr: 0.0001
+trainer: !class:marainer.trainer.LightningTrainer
+  model: !ref:model
+  optimizer: !ref:optimizer
+```
+
+### How import works
+
+`yaml_to_workflow` broadcast-resolves the config to a Fluid **marker** graph with `confluid.resolve` (no instantiation — fast, side-effect-free) and walks it. Pass `--instantiate` (CLI) / `instantiate=True` (API) to instead walk *live-but-inert* objects from `confluid.load(..., solidify=False)` — same result, with the expensive `solidify()` (e.g. building a model backbone) suppressed.
+
+### v1 scope & limitations
+
+- A config member with **no FluxStudio node** (a class not tagged op/source/engine/member — e.g. a torchmetrics `MetricCollection`) is **dropped from the canvas with a warning** on import; the runnable falls back to its default. To surface such a class, tag/register it (loggers and the base `LightningTrainer`/`LightningEvaluator` are registered in `marainer.configurables`).
+- A `List`-valued member (a trainer's `logger:`) is a single object socket today, so only the first is wired (the **single-socket list-gap**); dynamic `logger_N` sockets are a follow-up.
+- **Subgraphs** are self-contained in the `workflow.json` (`definitions.subgraphs`); on export they're **inlined** back into the flat YAML. Standalone reusable `include:` files are a follow-up.
+- Round-trip is **semantic** (topology + kwargs + kinds), not byte-exact: node positions are re-derived by a deterministic layered layout (sources left → runnable right), and only non-default widget values are emitted.
+
 ## How nodes are generated
 
 FluxStudio never hand-defines a node. At ComfyUI startup, `_discover_and_register_nodes()` (`fluxstudio/__init__.py`):
