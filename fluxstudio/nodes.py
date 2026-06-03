@@ -20,12 +20,18 @@ import numpy as np
 import torch
 from logflow import get_logger
 
-from fluxstudio.bridge import RUNNABLE_TYPE, SAMPLE_TYPE, SOURCE_TYPE
+from fluxstudio.bridge import RUNNABLE_TYPE, SAMPLE_TYPE, SOURCE_TYPE, node_root
 
 if TYPE_CHECKING:
     from waivefront.visualizers import Colormap
 
 logger = get_logger(__name__)
+
+# Palette folder for the hand-written adapter nodes. Mirrors the auto-discovered nodes' root: nested
+# under ``Taidal/`` by default, or at the palette root (``FluxStudio``) when the CLI's
+# ``--no-default-nodes`` flag is active (see bridge.node_root). Computed at import — the CLI exports
+# the env var before launching ComfyUI, so it is set by the time this module is imported.
+_FLUXSTUDIO_CATEGORY = "/".join(p for p in (node_root(), "FluxStudio") if p)
 
 
 def _colormap_choices() -> List[str]:
@@ -63,7 +69,7 @@ class WalkDatasetNode:
     otherwise an out-of-range index raises.
     """
 
-    CATEGORY = "Taidal/FluxStudio"
+    CATEGORY = _FLUXSTUDIO_CATEGORY
     RETURN_TYPES = (SAMPLE_TYPE,)
     RETURN_NAMES = ("sample",)
     FUNCTION = "walk"
@@ -133,7 +139,7 @@ class SampleExtractorNode:
     in those nodes and only field extraction lives here.
     """
 
-    CATEGORY = "Taidal/FluxStudio"
+    CATEGORY = _FLUXSTUDIO_CATEGORY
     RETURN_TYPES = ("IMAGE", "MASK", "STRING", "INT", "FLOAT")
     RETURN_NAMES = ("image", "mask", "text", "int", "float")
     FUNCTION = "extract"
@@ -357,6 +363,26 @@ def _collapse_carriage_returns(text: str) -> str:
     return "\n".join(line.rsplit("\r", 1)[-1] if "\r" in line else line for line in text.split("\n"))
 
 
+def _send_run_output(unique_id: Optional[str], text: str) -> None:
+    """Push a live snapshot of the run's captured output to the node's widget (``web/run_output.js``).
+
+    Lazy + guarded like :func:`_processing_interrupted`: ComfyUI's ``server`` module only exists
+    INSIDE a running ComfyUI, so an absent ``server`` (fluxstudio's own test/dev env) or a missing
+    ``unique_id`` ⇒ a silent no-op — the run still completes and the final ``{"ui": {"text": [...]}}``
+    return populates the widget. Uses ComfyUI's websocket push (``PromptServer.instance.send_sync``)
+    so the widget updates DURING the run: the streamed snapshot is already ``\\r``-collapsed to each
+    progress bar's latest frame, so a tqdm / Lightning bar updates IN PLACE in the node, live.
+    """
+    if unique_id is None:
+        return
+    try:
+        import server  # type: ignore[import-not-found]
+
+        server.PromptServer.instance.send_sync("taidal.run_output", {"node": unique_id, "text": text})
+    except Exception:  # noqa: BLE001 - a UI push must never abort or slow the run
+        pass
+
+
 class RunNode:
     """Execute a built runnable: call ``.run()`` on a ``DATAFLUX_RUNNABLE`` input.
 
@@ -367,11 +393,16 @@ class RunNode:
     (potentially very long) ``run()`` — training / evaluation / a processing sweep — when the canvas
     is queued.
 
-    **Captured output:** the runnable's stdout / stderr (training progress, metrics, logflow lines)
-    is captured via a :class:`_TeeStream` (mirrored live to the ComfyUI console) and returned both on
-    the ``output`` STRING socket AND as ``{"ui": {"text": [...]}}`` so ``web/run_output.js`` shows it
-    in a read-only multiline widget on the node. The worker runs on a thread, so installing the tee on
-    ``sys.stdout`` / ``sys.stderr`` for the run window captures everything the worker prints.
+    **Captured output (live + collapsible):** the runnable's stdout / stderr (training progress,
+    metrics, logflow lines) is captured via a :class:`_TeeStream` (mirrored live to the ComfyUI
+    console) and shown in a read-only multiline widget on the node. It is **streamed DURING the run**:
+    the worker-join poll loop pushes the latest ``\\r``-collapsed snapshot via
+    :func:`_send_run_output` (the ``taidal.run_output`` websocket event), so ``web/run_output.js``
+    updates the widget live — a tqdm / Lightning progress bar updates in place — and the user can fold
+    the section away. The final text is also returned on the ``output`` STRING socket AND as
+    ``{"ui": {"text": [...]}}`` (the persisted state ``onExecuted`` restores on re-open). The worker
+    runs on a thread, so installing the tee on ``sys.stdout`` / ``sys.stderr`` for the run window
+    captures everything the worker prints.
 
     **Interruptible:** ComfyUI checks its interrupt flag only BETWEEN nodes, but this single
     ``run()`` call can run for minutes/hours — so the pressed "interrupt" button would otherwise be
@@ -384,7 +415,7 @@ class RunNode:
     statement boundaries (between batches / samples), so a single long C kernel is not interruptible.
     """
 
-    CATEGORY = "Taidal/FluxStudio"
+    CATEGORY = _FLUXSTUDIO_CATEGORY
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("output",)
     FUNCTION = "run"
@@ -392,9 +423,11 @@ class RunNode:
 
     @classmethod
     def INPUT_TYPES(cls) -> Dict[str, Any]:
-        return {"required": {"runnable": (RUNNABLE_TYPE,)}}
+        # hidden UNIQUE_ID: ComfyUI injects the node id so run() can address its OWN widget for the
+        # live output stream (web/run_output.js listens on the "taidal.run_output" event).
+        return {"required": {"runnable": (RUNNABLE_TYPE,)}, "hidden": {"unique_id": "UNIQUE_ID"}}
 
-    def run(self, runnable: Any) -> Dict[str, Any]:
+    def run(self, runnable: Any, unique_id: Optional[str] = None) -> Dict[str, Any]:
         run = getattr(runnable, "run", None)
         if not callable(run):
             raise RuntimeError(
@@ -439,7 +472,15 @@ class RunNode:
         buffer = io.StringIO()
         old_out, old_err = sys.stdout, sys.stderr
         sys.stdout, sys.stderr = _TeeStream(old_out, buffer), _TeeStream(old_err, buffer)
+
+        def _snapshot() -> str:
+            snap = _collapse_carriage_returns(buffer.getvalue())
+            if len(snap) > _MAX_OUTPUT_CHARS:
+                snap = "… (output truncated — see the console for the full log)\n" + snap[-_MAX_OUTPUT_CHARS:]
+            return snap
+
         interrupted = False
+        last_sent = ""
         try:
             worker.start()
             while worker.is_alive():
@@ -449,12 +490,16 @@ class RunNode:
                     interrupted = True
                     if worker.ident is not None:
                         _raise_interrupt_in_thread(worker.ident, KeyboardInterrupt)
+                # Stream the latest output to the node's widget so progress bars update LIVE. Push only
+                # when the collapsed snapshot changed, so an idle/quiet worker costs nothing.
+                snapshot = _snapshot()
+                if snapshot != last_sent:
+                    last_sent = snapshot
+                    _send_run_output(unique_id, snapshot)
         finally:
             sys.stdout, sys.stderr = old_out, old_err
 
-        captured = _collapse_carriage_returns(buffer.getvalue())
-        if len(captured) > _MAX_OUTPUT_CHARS:
-            captured = "… (output truncated — see the console for the full log)\n" + captured[-_MAX_OUTPUT_CHARS:]
+        captured = _snapshot()
 
         exc = holder.get("exc")
         if interrupted or isinstance(exc, (KeyboardInterrupt, _interrupt_exception_type())):
@@ -463,9 +508,109 @@ class RunNode:
         if exc is not None:
             raise exc
         text = captured.strip() or f"{type(runnable).__name__}.run() complete"
-        # The {"ui": {"text": [...]}} half feeds web/run_output.js's display widget; "result" is the
-        # value on the STRING output socket (wireable into other nodes).
+        # Final live push (covers any output produced after the last poll), then the persisted return:
+        # the {"ui": {"text": [...]}} half feeds web/run_output.js's display widget (restored onExecuted),
+        # and "result" is the value on the STRING output socket (wireable into other nodes).
+        _send_run_output(unique_id, text)
         return {"ui": {"text": [text]}, "result": (text,)}
+
+
+class AnyType(str):
+    """A ComfyUI socket type that compares equal to EVERY other type (litegraph wildcard).
+
+    ComfyUI gates a connection on socket-type equality; the established custom-node idiom for a
+    "connect to anything" socket is a ``str`` subclass whose ``__ne__`` is always ``False`` (so the
+    server-side ``any_type != other`` check passes) carrying the literal ``"*"`` (which the litegraph
+    frontend treats as a wildcard). Used by :class:`RetagObjectNode` for its INPUT (accept any object
+    output) and its initial OUTPUT (``web/retag.js`` narrows the output to the chosen category at
+    edit time).
+    """
+
+    def __ne__(self, other: object) -> bool:  # noqa: D105 - wildcard equality
+        return False
+
+    def __eq__(self, other: object) -> bool:  # noqa: D105
+        return True
+
+    def __hash__(self) -> int:  # noqa: D105 - str subclass stays hashable
+        return hash(str(self))
+
+
+ANY = AnyType("*")
+
+# Sentinels for the Retag combos: keep the object's existing tag, or clear it.
+_RETAG_KEEP = "(keep)"
+_RETAG_NONE = "(none)"
+
+
+def _retag_options(kind: str) -> List[str]:
+    """Combo options for the Retag node: ``(keep)`` / ``(none)`` + every registered task/role.
+
+    Read from the confluid registry at ``INPUT_TYPES`` call time (ComfyUI queries ``/object_info``
+    AFTER entry-point discovery has populated the registry), so the picker reflects whatever is
+    installed. ``kind`` is ``"task"`` or ``"role"``.
+    """
+    try:
+        from confluid import get_registry
+
+        reg = get_registry()
+        values = sorted(reg.list_tasks() if kind == "task" else reg.list_roles())
+    except Exception:  # pragma: no cover - registry must always be importable; defensive
+        values = []
+    return [_RETAG_KEEP, _RETAG_NONE, *values]
+
+
+class RetagObjectNode:
+    """Re-tag a DataFlux object's ROLE (and task guidance) so it docks into a different role slot.
+
+    Object-member sockets are ROLE-qualified and TASK-AGNOSTIC (``DATAFLUX_OBJECT:model`` — see
+    ``bridge._object_socket_for_class``), so a node connects where its ROLE matches regardless of
+    task. This is the deliberate, visible ESCAPE HATCH: wire any object in, pick a ``target_role``,
+    and the object passes through re-stamped — ``web/retag.js`` retypes the OUTPUT socket to the
+    chosen ``DATAFLUX_OBJECT:<role>`` so it docks into that role's slots (a generic object made to
+    fit a ``model`` slot, or a model re-cast as a ``loss``). ``target_task`` re-stamps only the
+    guidance tag (palette / navigaitor ranking) — it no longer affects the socket. ``(keep)`` leaves
+    the existing tag; ``(none)`` clears it (generic ``DATAFLUX_OBJECT``). Per-INSTANCE (never mutates
+    the class).
+
+    Round-trip caveat: graphio's whole-graph YAML export does not yet handle Retag nodes (no
+    ``TAIDAL_CALLABLE_PATH``) — it raises ``UnsupportedTopologyError`` like the other canvas-only
+    adapters. The Retag node is a canvas convenience; hand-written YAML controls types directly.
+    """
+
+    CATEGORY = _FLUXSTUDIO_CATEGORY
+    RETURN_TYPES = (ANY,)
+    RETURN_NAMES = ("object",)
+    FUNCTION = "retag"
+
+    @classmethod
+    def INPUT_TYPES(cls) -> Dict[str, Any]:
+        return {
+            "required": {
+                "object": (ANY,),
+                "target_role": (_retag_options("role"), {"default": _RETAG_KEEP}),
+                "target_task": (_retag_options("task"), {"default": _RETAG_KEEP}),
+            }
+        }
+
+    @staticmethod
+    def _apply(obj: Any, attr: str, value: str) -> None:
+        """Per-instance set/clear of a ``__confluid_*`` tag (``(keep)`` is a no-op)."""
+        if value == _RETAG_KEEP:
+            return
+        try:
+            setattr(obj, attr, None if value == _RETAG_NONE else value)
+        except Exception as exc:  # noqa: BLE001 - some objects forbid attr-set; surface, don't crash
+            logger.debug(f"Retag: could not set {attr} on {type(obj).__name__}: {exc}")
+
+    def retag(self, object: Any, target_role: str = _RETAG_KEEP, target_task: str = _RETAG_KEEP) -> Tuple[Any, ...]:
+        # ``object`` is a live member instance OR a confluid ``LazyClass`` marker — both accept a
+        # per-instance attribute that shadows the class-level ``@configurable`` tag for downstream
+        # consumers. ``role`` drives the wire type (the actual docking); ``task`` is guidance only.
+        # The wire-level retype (what lets it dock elsewhere) is done by retag.js off ``target_role``.
+        self._apply(object, "__confluid_role__", target_role)
+        self._apply(object, "__confluid_task__", target_task)
+        return (object,)
 
 
 # Statically-defined adapter nodes, merged into the auto-discovered set by fluxstudio/__init__.py.
@@ -473,10 +618,12 @@ NODE_CLASS_MAPPINGS: Dict[str, Type] = {
     "Taidal_WalkDataset": WalkDatasetNode,
     "Taidal_ExtractSample": SampleExtractorNode,
     "Taidal_Run": RunNode,
+    "Taidal_Retag": RetagObjectNode,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS: Dict[str, str] = {
     "Taidal_WalkDataset": "Walk Dataset (by index)",
     "Taidal_ExtractSample": "Extract from Sample",
     "Taidal_Run": "Run (train / evaluate / process)",
+    "Taidal_Retag": "Retag (role / task)",
 }

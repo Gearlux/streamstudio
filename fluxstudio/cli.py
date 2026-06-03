@@ -79,9 +79,16 @@ def _run(args: argparse.Namespace) -> None:
         os.symlink(source_module_dir, link_path)
 
     # 3. Launch ComfyUI
+    # Pass the default-nodes choice to the launched ComfyUI via an env var (it's a subprocess, so an
+    # env var is the channel). fluxstudio's import inside ComfyUI reads FLUXSTUDIO_HIDE_DEFAULT_NODES
+    # to (a) prune ComfyUI's built-in nodes and (b) surface the Taidal nodes at the palette root.
+    # Set explicitly ("0" / "1") so the flag wins over any ambient shell export of the var.
+    env = {**os.environ, "FLUXSTUDIO_HIDE_DEFAULT_NODES": "0" if args.default_nodes else "1"}
     logger.info("🚀 Launching FluxStudio (ComfyUI) 🚀")
+    if not args.default_nodes:
+        logger.info("Hiding ComfyUI's built-in nodes — only Taidal nodes will appear (at the palette root).")
     try:
-        subprocess.run([sys.executable, "main.py"], cwd=comfy_dir)
+        subprocess.run([sys.executable, "main.py"], cwd=comfy_dir, env=env)
     except KeyboardInterrupt:
         logger.info("FluxStudio stopped.")
 
@@ -164,6 +171,16 @@ def main() -> None:
         type=Path,
         default=Path.home() / ".fluxstudio" / "ComfyUI",
         help="Path to ComfyUI installation. Will be cloned if it doesn't exist.",
+    )
+    parser.add_argument(
+        "--default-nodes",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Show ComfyUI's built-in nodes alongside the Taidal nodes (default). "
+            "Use --no-default-nodes to hide them so only Taidal nodes appear, surfaced at the "
+            "palette root rather than under a Taidal/ folder."
+        ),
     )
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("run", help="Launch ComfyUI with Taidal nodes (default).")

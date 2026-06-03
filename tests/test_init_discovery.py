@@ -125,6 +125,106 @@ def test_discover_skips_failing_module_at_debug_level() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# _prune_default_comfy_nodes (the --no-default-nodes hide path)
+# --------------------------------------------------------------------------- #
+
+
+def _fake_comfy_nodes(mappings: dict, displays: dict) -> ModuleType:
+    """A stand-in for ComfyUI's global ``nodes`` module carrying the two registry dicts."""
+    mod = ModuleType("nodes")
+    mod.NODE_CLASS_MAPPINGS = mappings  # type: ignore[attr-defined]
+    mod.NODE_DISPLAY_NAME_MAPPINGS = displays  # type: ignore[attr-defined]
+    return mod
+
+
+def test_prune_default_comfy_nodes_keeps_only_custom_nodes() -> None:
+    # A default node is told apart from a custom one by RELATIVE_PYTHON_MODULE (server.py defaults a
+    # missing attr to "nodes"): built-in/extra/api nodes are pruned, custom_nodes (other extensions
+    # + our own, merged in afterwards) survive.
+    base = type("KSampler", (), {})  # no RELATIVE_PYTHON_MODULE -> treated as "nodes" (a built-in)
+    extra = type("SaveImage", (), {"RELATIVE_PYTHON_MODULE": "comfy_extras.nodes_images"})
+    api = type("ApiNode", (), {"RELATIVE_PYTHON_MODULE": "comfy_api_nodes.nodes_x"})
+    other = type("ThirdParty", (), {"RELATIVE_PYTHON_MODULE": "custom_nodes.someext"})
+    mappings = {"KSampler": base, "SaveImage": extra, "ApiNode": api, "ThirdParty": other}
+    displays = {"KSampler": "KSampler", "SaveImage": "Save Image", "ApiNode": "Api", "ThirdParty": "Third"}
+
+    fake_nodes = _fake_comfy_nodes(mappings, displays)
+    with patch.dict(sys.modules, {"nodes": fake_nodes}):
+        removed = fluxstudio._prune_default_comfy_nodes()
+        # Idempotent: a second call (the other module identity) removes nothing.
+        again = fluxstudio._prune_default_comfy_nodes()
+
+    assert removed == 3
+    assert again == 0
+    assert set(mappings) == {"ThirdParty"}  # only the custom-node survives
+    assert set(displays) == {"ThirdParty"}
+
+
+def test_import_block_prunes_when_hide_env_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With FLUXSTUDIO_HIDE_DEFAULT_NODES set, the in-ComfyUI import block prunes the default nodes."""
+    monkeypatch.setenv("FLUXSTUDIO_HIDE_DEFAULT_NODES", "1")
+    base = type("KSampler", (), {})
+    custom = type("Taidal_X", (), {"RELATIVE_PYTHON_MODULE": "custom_nodes.fluxstudio"})
+    mappings = {"KSampler": base, "Taidal_X": custom}
+    displays = {"KSampler": "KSampler", "Taidal_X": "X"}
+
+    saved = {k: sys.modules.get(k) for k in ("server", "aiohttp", "nodes")}
+    routes = _FakeRoutes(existing=False)
+    fake_server = ModuleType("server")
+    fake_server.PromptServer = SimpleNamespace(instance=SimpleNamespace(routes=routes))  # type: ignore[attr-defined]
+    fake_aiohttp = ModuleType("aiohttp")
+    fake_aiohttp.web = _FakeWeb()  # type: ignore[attr-defined]
+    sys.modules["server"] = fake_server
+    sys.modules["aiohttp"] = fake_aiohttp
+    sys.modules["nodes"] = _fake_comfy_nodes(mappings, displays)
+    try:
+        with patch("importlib.metadata.entry_points", return_value=[]):
+            importlib.reload(fluxstudio)
+    finally:
+        for key, mod in saved.items():
+            if mod is None:
+                sys.modules.pop(key, None)
+            else:
+                sys.modules[key] = mod
+        with patch("importlib.metadata.entry_points", return_value=[]):
+            importlib.reload(fluxstudio)
+
+    # The built-in KSampler was pruned from ComfyUI's global registry; the custom node stayed.
+    assert set(mappings) == {"Taidal_X"}
+
+
+def test_import_block_skips_prune_when_hide_env_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default (flag not set): the import block leaves ComfyUI's global node registry untouched."""
+    monkeypatch.delenv("FLUXSTUDIO_HIDE_DEFAULT_NODES", raising=False)
+    base = type("KSampler", (), {})
+    mappings = {"KSampler": base}
+    displays = {"KSampler": "KSampler"}
+
+    saved = {k: sys.modules.get(k) for k in ("server", "aiohttp", "nodes")}
+    routes = _FakeRoutes(existing=False)
+    fake_server = ModuleType("server")
+    fake_server.PromptServer = SimpleNamespace(instance=SimpleNamespace(routes=routes))  # type: ignore[attr-defined]
+    fake_aiohttp = ModuleType("aiohttp")
+    fake_aiohttp.web = _FakeWeb()  # type: ignore[attr-defined]
+    sys.modules["server"] = fake_server
+    sys.modules["aiohttp"] = fake_aiohttp
+    sys.modules["nodes"] = _fake_comfy_nodes(mappings, displays)
+    try:
+        with patch("importlib.metadata.entry_points", return_value=[]):
+            importlib.reload(fluxstudio)
+    finally:
+        for key, mod in saved.items():
+            if mod is None:
+                sys.modules.pop(key, None)
+            else:
+                sys.modules[key] = mod
+        with patch("importlib.metadata.entry_points", return_value=[]):
+            importlib.reload(fluxstudio)
+
+    assert set(mappings) == {"KSampler"}  # nothing pruned — defaults stay visible
+
+
+# --------------------------------------------------------------------------- #
 # /taidal/choose_directory route handler
 # --------------------------------------------------------------------------- #
 

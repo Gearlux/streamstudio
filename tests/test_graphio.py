@@ -21,7 +21,14 @@ from dataflux.ops.torch import RescaleOp
 from dataflux.sources import HuggingFaceSource
 
 from fluxstudio.bridge import create_comfy_node
-from fluxstudio.graphio import _kwarg_to_widget, _node_key_for_class, _output_slot, workflow_to_yaml, yaml_to_workflow
+from fluxstudio.graphio import (
+    _kwarg_to_widget,
+    _node_key_for_class,
+    _output_slot,
+    _strip_index,
+    workflow_to_yaml,
+    yaml_to_workflow,
+)
 
 _WORKSPACE = Path(__file__).resolve().parents[2]
 _MNIST_CFG = _WORKSPACE / "sonair" / "examples" / "train_efficientvit_b0_mnist.yaml"
@@ -110,12 +117,97 @@ def test_engine_pipeline_round_trips_to_yaml() -> None:
     assert isinstance(flux.kwargs.get("ops"), list) and len(flux.kwargs["ops"]) == 1
 
 
+def test_strip_index_maps_list_sockets_to_param() -> None:
+    # op/source sockets map to their (differently-named) list param; object-list sockets (logger_0,
+    # callbacks_2) strip the trailing _<digit> to the param name; non-indexed sockets are unchanged.
+    assert _strip_index("op_0") == "ops"
+    assert _strip_index("source_3") == "fluxes"
+    assert _strip_index("logger_0") == "logger"
+    assert _strip_index("callbacks_2") == "callbacks"
+    assert _strip_index("model") == "model"
+    assert _strip_index("train_set") == "train_set"
+
+
+def test_object_list_member_round_trips_as_logger_n() -> None:
+    # A list-valued OBJECT member (a Trainer's `logger`) imports into the node's dynamic logger_0 /
+    # logger_1 sockets (its _admits_object_list family) and exports back into one `logger:` list —
+    # the importer/exporter respect how the node handles lists, instead of a single by-name socket.
+    import pytorch_lightning as pl
+    from pytorch_lightning.loggers import CSVLogger, TensorBoardLogger
+
+    nm = {
+        "trainer": create_comfy_node(pl.Trainer, "trainer"),
+        "tb": create_comfy_node(TensorBoardLogger, "tb"),
+        "csv": create_comfy_node(CSVLogger, "csv"),
+    }
+    doc = {
+        "lightning": LazyClass(
+            pl.Trainer,
+            max_epochs=5,
+            logger=[
+                Instance(TensorBoardLogger, save_dir="./l", name="a"),
+                Instance(CSVLogger, save_dir="./l", name="b"),
+            ],
+        ),
+    }
+    wf = yaml_to_workflow(doc, nm)
+
+    # IMPORT: both loggers wire into logger_0 / logger_1 — NOT a single bare `logger` socket.
+    trainer_node = next(n for n in wf["nodes"] if n["type"] == "trainer")
+    logger_links = {
+        i["name"]: i.get("link") is not None for i in trainer_node["inputs"] if i["name"].startswith("logger")
+    }
+    assert logger_links.get("logger_0") is True
+    assert logger_links.get("logger_1") is True
+    assert "logger" not in logger_links
+
+    # EXPORT: logger_0 / logger_1 collapse back into one `logger:` list of two refs.
+    yaml_text = workflow_to_yaml(wf, nm)
+    graph = confluid.resolve(yaml_text)
+    trainer_markers = [
+        v for v in graph.values() if isinstance(v, (Class, Instance, LazyClass)) and "Trainer" in str(v.target)
+    ]
+    assert len(trainer_markers) == 1
+    logger_val = trainer_markers[0].kwargs.get("logger")
+    assert isinstance(logger_val, list) and len(logger_val) == 2
+
+
 def test_unmapped_node_is_skipped_not_fatal() -> None:
     """A child class with no FluxStudio node is dropped (logged), not a hard failure."""
     nm = {"src": create_comfy_node(HuggingFaceSource, "src")}  # no node for `dict`
     doc = {"raw": Instance(HuggingFaceSource, path="mnist")}
     wf = yaml_to_workflow(doc, nm)
     assert len(wf["nodes"]) == 1  # just the source; nothing crashes
+
+
+def test_dropped_member_warning_is_interpolated() -> None:
+    """The 'no FluxStudio node' drop warning must interpolate the class name.
+
+    logflow is loguru-backed, so the message MUST use ``{}`` brace fields — a stdlib
+    ``%s`` template is left verbatim and the args are silently ignored, so the operator
+    sees a useless ``Skipping %s.%s`` line. Regression pin for that formatting bug.
+    """
+    from loguru import logger as _loguru
+
+    # `RescaleOp` is a real op but has no node in this mapping, so its child Instance is
+    # dropped-with-warning while the engine + source still emit.
+    nm = {"flux": create_comfy_node(Flux, "flux"), "src": create_comfy_node(HuggingFaceSource, "src")}
+    doc = {
+        "pipeline": Class(Flux, source=Reference("raw"), ops=[Instance(RescaleOp, in_min=0.0, in_max=1.0)]),
+        "raw": Instance(HuggingFaceSource, path="mnist"),
+    }
+    messages: list = []
+    sink_id = _loguru.add(lambda m: messages.append(m.record["message"]), level="WARNING", format="{message}")
+    try:
+        wf = yaml_to_workflow(doc, nm)
+    finally:
+        _loguru.remove(sink_id)
+
+    assert sorted(n["type"] for n in wf["nodes"]) == ["flux", "src"]  # RescaleOp dropped
+    dropped = [m for m in messages if "no FluxStudio node" in m]
+    assert dropped, "expected a drop warning for the unmapped RescaleOp member"
+    assert "dataflux.ops.torch.RescaleOp" in dropped[0]  # the args were interpolated …
+    assert "%s" not in dropped[0]  # … not left as a literal stdlib template
 
 
 # --- end-to-end on the real MNIST config -----------------------------------------------

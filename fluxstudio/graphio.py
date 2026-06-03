@@ -154,7 +154,7 @@ def _widget_and_socket_params(node_cls: Any) -> Tuple[List[str], Dict[str, str]]
     wire type (``DATAFLUX_*`` / ``HF_DATASET``); everything else (scalars, ``Literal`` combos) is
     a widget.
     """
-    from fluxstudio.bridge import _SOCKET_TYPES
+    from fluxstudio.bridge import _is_socket_type
 
     spec = node_cls.INPUT_TYPES()
     widgets: List[str] = []
@@ -164,7 +164,10 @@ def _widget_and_socket_params(node_cls: Any) -> Tuple[List[str], Dict[str, str]]
             socket_type = decl[0] if isinstance(decl, (tuple, list)) else decl
             if isinstance(socket_type, list):  # a Literal combo (options list as the "type") → widget
                 widgets.append(name)
-            elif isinstance(socket_type, str) and socket_type in _SOCKET_TYPES:
+            # ``_is_socket_type`` is BASE-type aware so a category-qualified object socket
+            # (``DATAFLUX_OBJECT:classification_model``) is still recognised as a wired socket,
+            # not mistaken for a widget. The full qualified string is preserved in ``sockets``.
+            elif isinstance(socket_type, str) and _is_socket_type(socket_type):
                 sockets[name] = socket_type
             else:
                 widgets.append(name)
@@ -255,7 +258,7 @@ class _WorkflowBuilder:
         node_key = _node_key_for_class(cls, self.node_mappings)
         if node_key is None:
             logger.warning(
-                "Skipping %s.%s — no FluxStudio node (not tagged op/source/engine/member, e.g. a "
+                "Skipping {}.{} — no FluxStudio node (not tagged op/source/engine/member, e.g. a "
                 "logger/callback). It is dropped from the canvas; wire it back by hand or register it.",
                 cls.__module__,
                 cls.__qualname__,
@@ -330,10 +333,24 @@ class _WorkflowBuilder:
                     if _wire_into(f"{base}_{idx}", stype, child):
                         idx += 1
                 continue
+            if f"{pname}_0" in socket_names:
+                # Object-LIST member (``logger`` / ``callbacks``): the node declares a ``<pname>_0``
+                # seed socket (the bridge's ``_admits_object_list`` family — ``web/object_list.js``
+                # grows the rest), so wire each child into ``<pname>_0`` / ``<pname>_1`` / … like
+                # op_N/source_N — NOT a single by-name socket. Handles a list OR a single object value.
+                stype = socket_names[f"{pname}_0"]
+                children = _node_list_value(value)
+                if children is None and _is_node_value(value):
+                    children = [value]
+                idx = 0
+                for child in children or []:
+                    if _wire_into(f"{pname}_{idx}", stype, child):
+                        idx += 1
+                continue
             child_nodes = _node_list_value(value)
             if child_nodes is not None:
-                # A list-valued single member (e.g. a runnable's `logger: List` → one DATAFLUX_OBJECT
-                # socket, the list-gap): wire only the first, warn on the rest.
+                # A list-valued member on a node WITHOUT a ``<pname>_0`` seed (a single object socket,
+                # e.g. a runnable's own ``logger`` slot): wire only the first, warn on the rest.
                 stype = socket_names.get(pname, OBJECT_TYPE)
                 if child_nodes:
                     _wire_into(pname, stype, child_nodes[0])
@@ -853,11 +870,21 @@ def _hoist_document(
 
 
 def _strip_index(name: str) -> str:
-    """``op_0`` / ``source_3`` → ``ops`` / ``fluxes`` (the underlying list param), else ``name``."""
+    """Map a dynamic list-socket name back to its underlying list PARAM name.
+
+    ``op_0`` → ``ops`` / ``source_3`` → ``fluxes`` (the socket prefix differs from the param name);
+    a generic ``<name>_<digit>`` (object-list members ``logger_0`` / ``callbacks_0``, where the socket
+    prefix IS the param name) → ``<name>``; a non-indexed socket (``model`` / ``train_set``) is
+    returned unchanged. So the exporter collapses ``logger_0`` / ``logger_1`` back into one ``logger``
+    list member (the inverse of the importer's object-list wiring).
+    """
     if name.startswith("op_") and name[3:].isdigit():
         return "ops"
     if name.startswith("source_") and name[7:].isdigit():
         return "fluxes"
+    head, _, tail = name.rpartition("_")
+    if head and tail.isdigit():
+        return head
     return name
 
 

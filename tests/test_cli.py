@@ -135,6 +135,45 @@ def test_main_handles_keyboard_interrupt(
     assert any("stopped" in i.lower() for i in infos)
 
 
+def test_main_default_nodes_shown_exports_env_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, logger_mock: MagicMock
+) -> None:
+    # Default (no flag): ComfyUI's built-in nodes stay visible -> the launched ComfyUI gets
+    # FLUXSTUDIO_HIDE_DEFAULT_NODES="0" (explicit, so the flag wins over any ambient shell export).
+    comfy = tmp_path / "ComfyUI"
+    comfy.mkdir()
+    monkeypatch.setattr(sys, "argv", ["fluxstudio", "--comfy-dir", str(comfy)])
+    # An ambient export of the var must NOT leak through when the flag defaults to shown.
+    monkeypatch.setenv("FLUXSTUDIO_HIDE_DEFAULT_NODES", "1")
+
+    with patch("subprocess.run") as run_mock:
+        cli.main()
+
+    launch = run_mock.call_args
+    assert launch.args[0] == [sys.executable, "main.py"]
+    assert launch.kwargs["env"]["FLUXSTUDIO_HIDE_DEFAULT_NODES"] == "0"
+
+
+def test_main_no_default_nodes_exports_env_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, logger_mock: MagicMock
+) -> None:
+    # --no-default-nodes hides ComfyUI's built-ins -> FLUXSTUDIO_HIDE_DEFAULT_NODES="1" so the
+    # fluxstudio import inside ComfyUI prunes the defaults and surfaces Taidal nodes at the root.
+    comfy = tmp_path / "ComfyUI"
+    comfy.mkdir()
+    monkeypatch.setattr(sys, "argv", ["fluxstudio", "--comfy-dir", str(comfy), "--no-default-nodes"])
+
+    with patch("subprocess.run") as run_mock:
+        cli.main()
+
+    launch = run_mock.call_args
+    assert launch.kwargs["env"]["FLUXSTUDIO_HIDE_DEFAULT_NODES"] == "1"
+    # The rest of the parent environment is forwarded, not replaced.
+    assert "PATH" in launch.kwargs["env"]
+    infos = [str(c.args[0]) for c in logger_mock.info.call_args_list]
+    assert any("Hiding ComfyUI's built-in nodes" in i for i in infos)
+
+
 def test_module_run_as_script_invokes_main(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # Exercise the ``if __name__ == "__main__": main()`` entry guard.
     comfy = tmp_path / "ComfyUI"

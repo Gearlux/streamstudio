@@ -4,9 +4,20 @@ import importlib.metadata
 import sys
 from typing import Any, Dict, List, Optional
 
-from logflow import get_logger
+import logflow
 
-from fluxstudio.bridge import register_module_nodes
+# FluxStudio runs inside ComfyUI: its logs land in ComfyUI's own console/log
+# capture, where ANSI color escapes are noise. force_no_color() sets
+# LOGFLOW_COLORIZE=false AND reloads logflow if some earlier ComfyUI import
+# already configured it (inheriting/copying the env is NOT enough once a coloring
+# decision is baked into the console sink). Must run before the get_logger() /
+# fluxstudio.* imports below that pull logflow in. Overridable: export
+# LOGFLOW_COLORIZE=true. See logflow's force_no_color.
+logflow.force_no_color()
+
+from logflow import get_logger  # (import follows force_no_color above)
+
+from fluxstudio.bridge import hide_default_comfy_nodes, register_module_nodes
 from fluxstudio.export import UnsupportedTopologyError, export_ops_yaml
 from fluxstudio.nodes import NODE_CLASS_MAPPINGS as _STATIC_NODE_CLASS_MAPPINGS
 from fluxstudio.nodes import NODE_DISPLAY_NAME_MAPPINGS as _STATIC_NODE_DISPLAY_NAME_MAPPINGS
@@ -100,6 +111,39 @@ def list_hf_dataset_splits(path: str, name: Optional[str] = None) -> List[str]:
         return []
 
 
+def _prune_default_comfy_nodes() -> int:
+    """Remove ComfyUI's built-in nodes from the GLOBAL registry, leaving only custom (Taidal) nodes.
+
+    Called at import time (inside ComfyUI) when the CLI's ``--no-default-nodes`` flag is active
+    (``hide_default_comfy_nodes()``). ComfyUI loads its built-in (``nodes``) + ``comfy_extras`` +
+    ``comfy_api_nodes`` node sets BEFORE it imports ``custom_nodes/`` — so by the time THIS fluxstudio
+    import runs, ComfyUI's global ``nodes.NODE_CLASS_MAPPINGS`` holds exactly those defaults (our own
+    Taidal nodes are merged in AFTER this import returns, so they are untouched here).
+
+    A default node is told apart from a custom one by ``RELATIVE_PYTHON_MODULE`` — the attribute
+    ComfyUI stamps on every loaded node class (``server.py`` defaults a missing one to ``"nodes"``):
+    a built-in/extra node's top-level module is one of ``{nodes, comfy_extras, comfy_api_nodes}``; a
+    custom node's is ``custom_nodes``. We keep the latter so OTHER third-party extensions loaded
+    before us survive. Returns the number of nodes removed (0 on a second call — idempotent).
+
+    NOTE: hiding the defaults also removes ComfyUI's native viewers (Preview Image, …) that the
+    Sample-extractor adapter normally feeds, so this is opt-in via the CLI flag, never the default.
+    """
+    # ComfyUI's GLOBAL node registry — NOT fluxstudio.nodes (absolute import). Only importable inside
+    # ComfyUI, like ``server`` below, so ignore the type-check-time missing-stub error.
+    import nodes as comfy_nodes  # type: ignore[import-not-found]
+
+    default_roots = {"nodes", "comfy_extras", "comfy_api_nodes"}
+    removed = 0
+    for key, cls in list(comfy_nodes.NODE_CLASS_MAPPINGS.items()):
+        module = getattr(cls, "RELATIVE_PYTHON_MODULE", "nodes")
+        if module.split(".")[0] in default_roots:
+            del comfy_nodes.NODE_CLASS_MAPPINGS[key]
+            comfy_nodes.NODE_DISPLAY_NAME_MAPPINGS.pop(key, None)
+            removed += 1
+    return removed
+
+
 def _discover_and_register_nodes() -> None:
     """Dynamically discover and register ComfyUI nodes via entry points — **once per process**.
 
@@ -168,6 +212,14 @@ try:
 
     import server  # type: ignore[import-not-found]
     from aiohttp import web
+
+    # Hide ComfyUI's built-in nodes when the CLI's --no-default-nodes flag is active, so only the
+    # Taidal nodes remain in the palette. Idempotent across the two fluxstudio module identities
+    # (editable install + custom_nodes symlink), so only log when something was actually removed.
+    if hide_default_comfy_nodes():
+        _pruned = _prune_default_comfy_nodes()
+        if _pruned:
+            logger.info(f"FluxStudio: hid {_pruned} default ComfyUI nodes (--no-default-nodes).")
 
     route_exists = any(
         r.path == "/taidal/choose_directory" and r.method == "POST" for r in server.PromptServer.instance.routes
