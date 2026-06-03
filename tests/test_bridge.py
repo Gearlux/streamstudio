@@ -40,7 +40,10 @@ from fluxstudio.bridge import (
     _is_hf_split_param,
     _literal_options,
     _map_type,
+    _node_category,
     create_comfy_node,
+    hide_default_comfy_nodes,
+    node_root,
     register_module_nodes,
 )
 
@@ -210,6 +213,68 @@ def test_coerce_kwargs_passes_literal_value_through() -> None:
     assert _coerce_kwargs(op, {"mode": "list_mode"}) == {"mode": "list_mode"}
 
 
+def test_optional_literal_none_default_offers_blank_use_default() -> None:
+    # An Optional[Literal[...]] that defaults to None (e.g. pl.Trainer.precision) renders a combo with a
+    # leading blank "(use default)" entry SELECTED by default — NOT the first member (the precision=64 →
+    # float64-on-MPS footgun). The blank coerces to OMIT so the constructor's own default applies.
+    def op(precision: Optional[Literal[64, 32, 16]] = None, mode: Literal["a", "b"] = "a") -> str:
+        return str(precision)
+
+    required = create_comfy_node(op, "OptLiteralNode").INPUT_TYPES()["required"]
+    opts, config = required["precision"]
+    assert opts[0] == "" and config["default"] == ""  # blank leads + is the default
+    assert "64" in opts  # members still selectable
+    # blank -> omitted (ctor default None applies); an explicit pick is kept verbatim.
+    assert _coerce_kwargs(op, {"precision": ""}) == {}
+    assert _coerce_kwargs(op, {"precision": "16"}) == {"precision": "16"}
+    # a concrete-default Literal (mode="a") is unaffected: no blank, default stays "a".
+    m_opts, m_config = required["mode"]
+    assert "" not in m_opts and m_config["default"] == "a"
+
+
+def test_real_lightning_trainer_precision_defaults_to_blank() -> None:
+    # Regression on the actual pl.Trainer: precision (Optional[Literal[64,32,16],…]=None) no longer
+    # defaults to 64 — it defaults blank/omitted, so an imported Trainer uses Lightning's 32-bit default
+    # (float32) instead of forcing float64 (which crashes on MPS).
+    import marainer.configurables  # noqa: F401
+    import pytorch_lightning as pl
+
+    required = create_comfy_node(pl.Trainer, "PLTrainerPrec").INPUT_TYPES()["required"]
+    opts, config = required["precision"]
+    assert config["default"] == ""
+    assert _coerce_kwargs(pl.Trainer, {"precision": ""}) == {}
+
+
+def test_optional_bool_none_default_is_tristate_combo() -> None:
+    # Optional[bool] = None (e.g. pl.Trainer.enable_progress_bar) renders a 3-state combo
+    # ["", "true", "false"] defaulting BLANK — not a checkbox forced to False (which would silently
+    # disable a feature the library enables by default). Blank → None (ctor default); true/false → bool.
+    def op(flag: Optional[bool] = None, hard: bool = True) -> str:
+        return str(flag)
+
+    required = create_comfy_node(op, "OptBoolNode").INPUT_TYPES()["required"]
+    opts, config = required["flag"]
+    assert opts == ["", "true", "false"] and config["default"] == ""
+    assert _coerce_kwargs(op, {"flag": ""}) == {"flag": None}
+    assert _coerce_kwargs(op, {"flag": "true"}) == {"flag": True}
+    assert _coerce_kwargs(op, {"flag": "false"}) == {"flag": False}
+    # A concrete-default bool stays a plain BOOLEAN checkbox.
+    assert required["hard"][0] == "BOOLEAN" and required["hard"][1]["default"] is True
+
+
+def test_real_lightning_trainer_enable_flags_default_blank() -> None:
+    # Regression: pl.Trainer's Optional[bool]=None flags no longer force False (which disabled the
+    # progress bar / checkpointing in an imported eval) — they default blank → Lightning's own default.
+    import marainer.configurables  # noqa: F401
+    import pytorch_lightning as pl
+
+    required = create_comfy_node(pl.Trainer, "PLTrainerFlags").INPUT_TYPES()["required"]
+    for flag in ("enable_progress_bar", "enable_checkpointing", "enable_model_summary"):
+        opts, config = required[flag]
+        assert opts == ["", "true", "false"] and config["default"] == ""
+    assert _coerce_kwargs(pl.Trainer, {"enable_progress_bar": ""}) == {"enable_progress_bar": None}
+
+
 def test_node_execution_tuple_return_passthrough() -> None:
     # When the wrapped callable already returns a tuple, execute_wrapper must
     # forward it verbatim rather than nesting it in another 1-tuple.
@@ -249,17 +314,16 @@ def test_register_module_nodes_registers_callable() -> None:
     # Key is qualified by package + category (module "fake.mod" -> "fake", category "op"), so it's
     # globally unique; no group on _sample_op.
     assert "Taidal_fake_op_sample_op" in mappings
-    # Palette path (display): <root>/<Package>/<Category> — package "Fake" (str.title() fallback),
-    # confluid category "op" -> "Op", no group.
-    assert mappings["Taidal_fake_op_sample_op"].CATEGORY == "Taidal/Fake/Op"
-    # Verbatim identifier, ``_`` -> space, NO title-casing (capitals preserved).
-    assert display["Taidal_fake_op_sample_op"] == "sample op"
+    # Palette path is grouped by CATEGORY (not package): an op with no role/group -> Taidal/Op.
+    assert mappings["Taidal_fake_op_sample_op"].CATEGORY == "Taidal/Op"
+    # Label = [PKG] tag + verbatim identifier (``_`` -> space, NO title-casing).
+    assert display["Taidal_fake_op_sample_op"] == "[FAKE] sample op"
 
 
-def test_register_module_nodes_palette_path_with_group_and_casing() -> None:
-    """A grouped op nests as <root>/<Package>/<Category>/<group>; the package level uses the
-    canonical display casing (dataflux -> DataFlux) and the group is appended verbatim. The
-    registration KEY uses RAW identifiers (package + category + group), not the display casing."""
+def test_register_module_nodes_palette_path_with_group_and_tag() -> None:
+    """A grouped op nests as <root>/<Category>/<group> (NOT under the package), and its label carries
+    the canonical-cased package tag (dataflux -> [DATAFLUX]). The registration KEY still uses RAW
+    package+category+group identifiers (globally unique)."""
 
     def _grouped_op(x: int) -> str:
         return str(x)
@@ -276,7 +340,8 @@ def test_register_module_nodes_palette_path_with_group_and_casing() -> None:
             register_module_nodes("dataflux.ops.numpy", mappings, display)
 
     assert "Taidal_dataflux_op_numpy_grouped_op" in mappings
-    assert mappings["Taidal_dataflux_op_numpy_grouped_op"].CATEGORY == "Taidal/DataFlux/Op/numpy"
+    assert mappings["Taidal_dataflux_op_numpy_grouped_op"].CATEGORY == "Taidal/Op/numpy"
+    assert display["Taidal_dataflux_op_numpy_grouped_op"] == "[DATAFLUX] grouped op"
 
 
 def test_register_module_nodes_same_name_different_module_no_collision() -> None:
@@ -302,13 +367,67 @@ def test_register_module_nodes_same_name_different_module_no_collision() -> None
             with patch("fluxstudio.bridge.resolve_callable", return_value=fn):
                 register_module_nodes(mod, mappings, display)
 
-    # Both survive under distinct keys, in distinct palette folders, with the SAME display name.
+    # Both survive under distinct keys, in distinct palette folders, with the SAME [PKG]-tagged label.
     assert "Taidal_dataflux_op_numpy_RescaleOp" in mappings
     assert "Taidal_dataflux_op_torch_RescaleOp" in mappings
-    assert mappings["Taidal_dataflux_op_numpy_RescaleOp"].CATEGORY == "Taidal/DataFlux/Op/numpy"
-    assert mappings["Taidal_dataflux_op_torch_RescaleOp"].CATEGORY == "Taidal/DataFlux/Op/torch"
-    assert display["Taidal_dataflux_op_numpy_RescaleOp"] == "RescaleOp"
-    assert display["Taidal_dataflux_op_torch_RescaleOp"] == "RescaleOp"
+    assert mappings["Taidal_dataflux_op_numpy_RescaleOp"].CATEGORY == "Taidal/Op/numpy"
+    assert mappings["Taidal_dataflux_op_torch_RescaleOp"].CATEGORY == "Taidal/Op/torch"
+    assert display["Taidal_dataflux_op_numpy_RescaleOp"] == "[DATAFLUX] RescaleOp"
+    assert display["Taidal_dataflux_op_torch_RescaleOp"] == "[DATAFLUX] RescaleOp"
+
+
+def test_hide_default_comfy_nodes_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Drives both the default-node prune and the palette root. Truthy spellings are accepted.
+    monkeypatch.delenv("FLUXSTUDIO_HIDE_DEFAULT_NODES", raising=False)
+    assert hide_default_comfy_nodes() is False
+    assert node_root() == "Taidal"
+    for truthy in ("1", "true", "YES", "on"):
+        monkeypatch.setenv("FLUXSTUDIO_HIDE_DEFAULT_NODES", truthy)
+        assert hide_default_comfy_nodes() is True
+        assert node_root() == ""  # root-level palette when defaults are hidden
+    for falsy in ("0", "", "no", "off"):
+        monkeypatch.setenv("FLUXSTUDIO_HIDE_DEFAULT_NODES", falsy)
+        assert hide_default_comfy_nodes() is False
+        assert node_root() == "Taidal"
+
+
+def test_node_category_groups_by_category_or_role_task() -> None:
+    # Ops/sources (no role) group by CATEGORY then group; a role-bearing class by ROLE then TASK.
+    # The package is NOT in the path (it's the [PKG] label tag).
+    assert _node_category("op", "numpy", "Taidal") == "Taidal/Op/numpy"
+    assert _node_category("op", None, "Taidal") == "Taidal/Op"
+    assert _node_category("source", None, "Taidal") == "Taidal/Source"
+    # Role-first, then task; a task-agnostic role (logger) has no task level.
+    assert _node_category("classification_model", None, "Taidal", role="model", task="classification") == (
+        "Taidal/Model/Classification"
+    )
+    assert _node_category(None, None, "Taidal", role="logger", task=None) == "Taidal/Logger"
+
+
+def test_node_category_empty_root_drops_taidal_folder() -> None:
+    # An empty root (--no-default-nodes) drops the leading Taidal/ WITHOUT emitting a leading slash.
+    assert _node_category("op", "numpy", "") == "Op/numpy"
+    assert _node_category("classification_model", None, "", role="model", task="classification") == (
+        "Model/Classification"
+    )
+
+
+def test_register_module_nodes_root_level_when_defaults_hidden(monkeypatch: pytest.MonkeyPatch) -> None:
+    # When --no-default-nodes is active (env set), register_module_nodes defaults root to "" so the
+    # node sits at the palette root (DataFlux/Op) rather than under a Taidal/ folder.
+    monkeypatch.setenv("FLUXSTUDIO_HIDE_DEFAULT_NODES", "1")
+    mappings: dict = {}
+    display: dict = {}
+    discovered = [{"path": "fake.mod:sample_op", "name": "sample_op"}]
+
+    with patch("fluxstudio.bridge.scan_module", return_value=discovered):
+        with patch("fluxstudio.bridge.resolve_callable", return_value=_sample_op):
+            register_module_nodes("fake.mod", mappings, display)
+
+    # Key is unchanged (raw identifiers, not the display path) so saved workflows still resolve.
+    assert "Taidal_fake_op_sample_op" in mappings
+    # ...but the palette path no longer has the Taidal/ root.
+    assert mappings["Taidal_fake_op_sample_op"].CATEGORY == "Op"
 
 
 def test_register_module_nodes_preserves_camelcase_display_name() -> None:
@@ -321,7 +440,7 @@ def test_register_module_nodes_preserves_camelcase_display_name() -> None:
         with patch("fluxstudio.bridge.resolve_callable", return_value=_sample_op):
             register_module_nodes("fake.mod", mappings, display)
 
-    assert display["Taidal_fake_op_HuggingFaceSource"] == "HuggingFaceSource"
+    assert display["Taidal_fake_op_HuggingFaceSource"] == "[FAKE] HuggingFaceSource"
 
 
 def test_register_module_nodes_skips_private_callables() -> None:
@@ -1029,14 +1148,17 @@ def test_op_node_runtime_check_rejects_mismatched_sample() -> None:
 
 from typing import Any  # noqa: E402
 
-from confluid import LazyClass, configurable  # noqa: E402
+from confluid import LazyClass, Mandatory, configurable, output  # noqa: E402
 
 from fluxstudio.bridge import (  # noqa: E402
     OBJECT_TYPE,
     RUNNABLE_TYPE,
+    _admits_object_list,
     _build_object_node,
     _build_runnable_node,
     _is_runnable,
+    _is_wireable_object_param,
+    _object_socket,
 )
 
 
@@ -1084,14 +1206,16 @@ def test_build_runnable_node_member_sockets_and_widgets() -> None:
 
     assert node.RETURN_TYPES == (RUNNABLE_TYPE,)
     assert node.TAIDAL_NODE_KIND == "runnable"
-    # Required ctor params with no default -> required wired sockets.
-    assert req["model"] == (OBJECT_TYPE,)
+    # The ``model`` slot is ROLE-qualified and TASK-AGNOSTIC — it accepts ``DATAFLUX_OBJECT:model``
+    # from ANY model (any task), so a loss can't dock but a cross-task model can.
+    assert req["model"] == (_object_socket("model"),)
     assert req["train_set"] == (SOURCE_TYPE,)
     # Scalars stay WIDGETS (in `required`, but a scalar widget type — not a wired DataFlux socket).
     # (``num_classes: Optional[int] = None`` is the nullable-numeric blank-STRING convention.)
     assert req["num_classes"][0] not in (OBJECT_TYPE, SOURCE_TYPE, RUNNABLE_TYPE)
     assert req["run_name"][0] == "STRING"
     # Deferred / dataset body slots -> OPTIONAL sockets (unwired keeps the baked default).
+    # ``optimizer`` is role-less (not in _STRICT_SLOT_ROLES) -> generic OBJECT_TYPE, not qualified.
     assert opt["optimizer"] == (OBJECT_TYPE,)
     assert opt["val_set"] == (SOURCE_TYPE,)
 
@@ -1114,6 +1238,60 @@ def test_create_comfy_node_dispatches_runnable() -> None:
     node = create_comfy_node(_FakeTrainer, "Taidal_Fake", "Taidal/Fake")
     assert node.TAIDAL_NODE_KIND == "runnable"
     assert node.RETURN_TYPES == (RUNNABLE_TYPE,)
+
+
+@configurable(task="faketask", role="trainer", validate=False)
+class _FakeTrainerWithOutput:
+    """A runnable that declares a confluid ``@output`` — its trained model artifact."""
+
+    def __init__(self, model: Any, train_set: Any) -> None:
+        self.model = model
+        self.train_set = train_set
+        self._ran = False
+
+    def run(self) -> None:
+        self._ran = True
+
+    @property
+    @output
+    def trained_model(self) -> Any:
+        """The produced model — only available after run()."""
+        if not self._ran:
+            raise RuntimeError("trained_model is only available after run()")
+        return self.model
+
+
+def test_runnable_node_appends_declared_outputs() -> None:
+    node = _build_runnable_node(_FakeTrainerWithOutput, "Taidal_FakeOut", "Taidal/Fake")
+    # The declared @output rides alongside the runnable wire, ROLE-qualified (``model`` keyword ->
+    # ``DATAFLUX_OBJECT:model``, task-agnostic) so it docks into a downstream evaluator's model slot.
+    assert node.RETURN_NAMES == ("runnable", "trained_model")
+    assert node.RETURN_TYPES == (RUNNABLE_TYPE, _object_socket("model"))
+
+
+def test_runnable_node_execute_emits_outputs_guarded_pre_run() -> None:
+    node = _build_runnable_node(_FakeTrainerWithOutput, "Taidal_FakeOut", "Taidal/Fake")
+    model = object()
+    out = node().execute(model=model, train_set=object())
+    # Build-only node: the runnable plus one slot per declared output; the run-output getter raises
+    # pre-run, so it is emitted as None (no exception escapes execute).
+    assert len(out) == 2
+    assert isinstance(out[0], _FakeTrainerWithOutput)
+    assert out[1] is None
+
+
+def test_runnable_node_required_inputs_include_mandatory_marked() -> None:
+    # A Mandatory-marked slot is a REQUIRED socket even when it carries a default (zero-arg build).
+    @configurable(task="faketask", role="trainer", validate=False)
+    class _MandatoryDefault:
+        def __init__(self, model: Mandatory[Any] = None, lr: float = 0.1) -> None:
+            self.model = model
+            self.lr = lr
+
+        def run(self) -> None: ...
+
+    req = _build_runnable_node(_MandatoryDefault, "Taidal_Mand", "Taidal/Fake").INPUT_TYPES()["required"]
+    assert "model" in req  # required despite the ``= None`` default, via the Mandatory marker
 
 
 class _EagerMember:
@@ -1152,6 +1330,230 @@ def test_object_node_lazy_defers_instance_and_skips_runtime_param() -> None:
     # A runtime-injected required param (``params``) -> no standalone instance, only the LazyClass.
     assert instance is None
     assert isinstance(lazy, LazyClass) and lazy.kwargs.get("lr") == 0.5
+
+
+# --------------------------------------------------------------------------- #
+# Object-typed ctor params (logger / callbacks) -> wired DATAFLUX_OBJECT sockets
+# --------------------------------------------------------------------------- #
+class _FakeLogger:
+    def __init__(self, save_dir: str = "logs") -> None:
+        self.save_dir = save_dir
+
+
+class _FakeAccel:
+    pass
+
+
+def test_is_wireable_object_param_shape_rule() -> None:
+    from typing import List, Literal, Optional, Union
+
+    # Object-class arm + only a bool/None scalar arm -> wireable (the logger / callbacks case).
+    assert _is_wireable_object_param(Union[_FakeLogger, bool]) is True
+    assert _is_wireable_object_param(Optional[List[_FakeLogger]]) is True
+    assert _is_wireable_object_param(Optional[_FakeLogger]) is True
+    # A real str/int/float config arm disqualifies (accelerator="gpu", precision=16) -> stays a widget.
+    assert _is_wireable_object_param(Union[str, _FakeAccel]) is False
+    assert _is_wireable_object_param(Union[int, _FakeAccel]) is False
+    # Plain scalars / Literals are never wireable.
+    assert _is_wireable_object_param(int) is False
+    assert _is_wireable_object_param(Optional[int]) is False
+    assert _is_wireable_object_param(str) is False
+    assert _is_wireable_object_param(Literal["a", "b"]) is False
+
+
+class _ObjConfig:
+    """An object node with a logger-like object param (bool-poisoned) and a str-config param.
+
+    Real (non-stringized) annotations — this module deliberately avoids ``from __future__ import
+    annotations`` so the bridge sees live type objects (see the module docstring).
+    """
+
+    def __init__(
+        self,
+        logger: _FakeLogger | bool = True,
+        accel: str | _FakeAccel = "auto",
+        max_epochs: int = 1,
+    ) -> None:
+        self.logger = logger
+        self.accel = accel
+        self.max_epochs = max_epochs
+
+
+def test_object_node_object_param_is_a_socket_not_a_widget() -> None:
+    node = _build_object_node(_ObjConfig, "Taidal_ObjCfg", "Taidal/Obj")
+    spec = node.INPUT_TYPES()
+    required, optional = spec["required"], spec.get("optional", {})
+    # logger (object arm, only a bool scalar arm) -> a wired DATAFLUX_OBJECT OPTIONAL socket, NOT BOOLEAN.
+    assert optional.get("logger") == (OBJECT_TYPE,)
+    assert "logger" not in required
+    # accel (has a str arm) stays a STRING widget; max_epochs stays a scalar widget.
+    assert required["accel"][0] == "STRING"
+    assert "accel" not in optional
+    assert required["max_epochs"][0] in ("INT", "STRING")
+
+
+def test_object_node_wires_object_into_kwargs_and_omits_unwired() -> None:
+    node = _build_object_node(_ObjConfig, "Taidal_ObjCfg", "Taidal/Obj")
+    wired = _FakeLogger(save_dir="run1")
+    instance, lazy = node().execute(logger=wired, accel="gpu", max_epochs=2)
+    # The wired live object is passed through verbatim into the built instance + LazyClass kwargs.
+    assert isinstance(instance, _ObjConfig) and instance.logger is wired
+    assert lazy.kwargs.get("logger") is wired and lazy.kwargs.get("accel") == "gpu"
+    # An unwired (None) object socket is omitted so the ctor default (True) applies.
+    instance2, lazy2 = node().execute(logger=None, accel="cpu", max_epochs=1)
+    assert "logger" not in lazy2.kwargs and instance2.logger is True
+
+
+def test_admits_object_list_shape_rule() -> None:
+    from typing import Iterable, List, Optional, Union
+
+    # A list / Iterable arm whose element is an object class -> admits a list (dynamic <name>_N).
+    assert _admits_object_list(Union[_FakeLogger, Iterable[_FakeLogger], bool]) is True
+    assert _admits_object_list(Optional[List[_FakeLogger]]) is True
+    # A single-object param (no list arm) is NOT a list.
+    assert _admits_object_list(Union[_FakeLogger, bool]) is False
+    assert _admits_object_list(Optional[_FakeLogger]) is False
+    # Scalars / list-of-scalars are never object-lists.
+    assert _admits_object_list(int) is False
+    assert _admits_object_list(List[str]) is False
+
+
+class _ObjListConfig:
+    """An object node with a list-capable logger param -> dynamic logger_N sockets."""
+
+    def __init__(self, logger: _FakeLogger | list[_FakeLogger] | bool = True, max_epochs: int = 1) -> None:
+        self.logger = logger
+        self.max_epochs = max_epochs
+
+
+def test_object_node_list_param_seeds_indexed_socket() -> None:
+    node = _build_object_node(_ObjListConfig, "Taidal_ObjList", "Taidal/Obj")
+    spec = node.INPUT_TYPES()
+    optional = spec.get("optional", {})
+    # A list-capable logger -> a dynamic ``logger_0`` seed socket (web/object_list.js grows logger_1, …),
+    # NOT a single ``logger`` socket.
+    assert optional.get("logger_0") == (OBJECT_TYPE,)
+    assert "logger" not in optional and "logger" not in spec["required"]
+
+
+def test_object_node_collects_indexed_objects_into_list() -> None:
+    node = _build_object_node(_ObjListConfig, "Taidal_ObjList", "Taidal/Obj")
+    a, b = _FakeLogger("a"), _FakeLogger("b")
+    # Two wired loggers (index-ordered) -> a list; the single socket key never appears.
+    instance, lazy = node().execute(logger_0=a, logger_1=b, max_epochs=2)
+    assert lazy.kwargs.get("logger") == [a, b]
+    assert isinstance(instance, _ObjListConfig) and instance.logger == [a, b]
+    # One wired -> a list of one; none wired -> omitted so the ctor default (True) applies.
+    _, lazy_one = node().execute(logger_0=a)
+    assert lazy_one.kwargs.get("logger") == [a]
+    inst_none, lazy_none = node().execute(logger_0=None, logger_1=None)
+    assert "logger" not in lazy_none.kwargs and inst_none.logger is True
+
+
+def test_real_lightning_trainer_logger_is_a_dynamic_list_socket() -> None:
+    # Regression on the actual pl.Trainer: logger/callbacks accept a LIST of objects, so they become
+    # dynamic ``logger_0`` / ``callbacks_0`` seed sockets; the string-settable accelerator stays a widget.
+    import marainer.configurables  # noqa: F401 - registers the logger nodes
+    import pytorch_lightning as pl
+    from pytorch_lightning.loggers import CSVLogger
+
+    node = _build_object_node(pl.Trainer, "Taidal_PLTrainer", "Taidal/Obj")
+    spec = node.INPUT_TYPES()
+    allin = {**spec.get("required", {}), **spec.get("optional", {})}
+    assert allin["logger_0"] == (OBJECT_TYPE,)
+    assert allin["callbacks_0"] == (OBJECT_TYPE,)
+    assert "logger" not in allin  # replaced by the indexed seed
+    assert allin["accelerator"][0] == "STRING"
+    # Two loggers collect into a list passed to the Trainer.
+    _, lazy = node().execute(logger_0=CSVLogger("a"), logger_1=CSVLogger("b"))
+    assert isinstance(lazy.kwargs.get("logger"), list) and len(lazy.kwargs["logger"]) == 2
+
+
+@configurable(task="faketask", role="model", validate=False)
+class _FakeModel:
+    def __init__(self, num_classes: int = 0) -> None:
+        self.num_classes = num_classes
+
+
+@configurable(task="faketask", role="loss", validate=False)
+class _FakeLoss:
+    def __init__(self, weight: float = 1.0) -> None:
+        self.weight = weight
+
+
+def test_object_node_output_socket_is_role_qualified() -> None:
+    """A role-tagged object node outputs a ROLE-QUALIFIED socket (both instance + class) — TASK-
+    AGNOSTIC, so ComfyUI lets it dock into ANY trainer's same-ROLE slot regardless of task."""
+    node = _build_object_node(_FakeModel, "Taidal_FakeModel", "Taidal/Obj")
+    assert node.RETURN_TYPES == (_object_socket("model"), _object_socket("model"))
+    # And it MATCHES the trainer's role slot — the contract that makes them dock.
+    trainer = _build_runnable_node(_FakeTrainer, "Taidal_Fake", "Taidal/Fake")
+    assert trainer.INPUT_TYPES()["required"]["model"] == (node.RETURN_TYPES[0],)
+
+
+def test_object_node_output_socket_generic_when_uncategorised() -> None:
+    """A role-less member (no ``@configurable`` role — the lazy infra members / loggers)
+    keeps the bare ``DATAFLUX_OBJECT`` so it stays interchangeable on generic slots."""
+    node = _build_object_node(_EagerMember, "Taidal_Eager", "Taidal/Obj")
+    assert node.RETURN_TYPES == (OBJECT_TYPE, OBJECT_TYPE)
+
+
+def test_role_for_class_explicit_tag_wins_over_type() -> None:
+    """An explicit ``@configurable(role=…)`` tag is authoritative (it is the ONLY thing that can
+    tell a model from a loss — both are ``nn.Module``)."""
+    from fluxstudio.bridge import _role_for_class
+
+    assert _role_for_class(_FakeModel) == "model"  # tagged role="model" (task dropped)
+    assert _role_for_class(_FakeLoss) == "loss"
+
+
+def test_role_for_class_infers_from_type_when_untagged() -> None:
+    """A role can be ASSIGNED from the Python type: an UNtagged class whose base qualname matches a
+    known kind (Metric/Optimizer/DataLoader/Logger) gets that role — so even third-party objects
+    socket correctly without a tag. Model vs loss is deliberately NOT inferable (both nn.Module)."""
+    from fluxstudio.bridge import _role_for_class
+
+    class _SomeMetric:  # stands in for a torchmetrics.Metric subclass (matched by base qualname)
+        pass
+
+    class _Sub(_SomeMetric):
+        pass
+
+    # Rename the base's qualname so the MRO scan sees "Metric" (mirrors torchmetrics.metric.Metric).
+    _SomeMetric.__qualname__ = "Metric"
+    assert _role_for_class(_Sub) == "metric"
+
+    class _Plain:  # no tag, no recognised base -> generic (None)
+        pass
+
+    assert _role_for_class(_Plain) is None
+
+
+def test_object_node_socket_role_inferred_from_type() -> None:
+    """An untagged metric-typed object node sockets as ``DATAFLUX_OBJECT:metric`` via type inference,
+    so it docks into a trainer's metric slot without an explicit tag."""
+
+    class _Metric:
+        pass
+
+    _Metric.__qualname__ = "Metric"
+
+    class _MyMetric(_Metric):
+        def __init__(self, k: int = 1) -> None:
+            self.k = k
+
+    node = _build_object_node(_MyMetric, "Taidal_MyMetric", "Taidal/Obj")
+    assert node.RETURN_TYPES == (_object_socket("metric"), _object_socket("metric"))
+
+
+def test_strict_sockets_reject_cross_role() -> None:
+    """The role guarantee: a loss node's output type differs from the model slot's type, so
+    ComfyUI's string-equality connection rule refuses to wire a loss into a model slot — while a
+    model of ANY task still docks (the socket carries the role, not the task)."""
+    loss_out = _build_object_node(_FakeLoss, "Taidal_FakeLoss", "Taidal/Obj").RETURN_TYPES[0]
+    model_slot = _build_runnable_node(_FakeTrainer, "Taidal_Fake", "Taidal/Fake").INPUT_TYPES()["required"]["model"][0]
+    assert loss_out == _object_socket("loss")
+    assert loss_out != model_slot  # cross-role wire is rejected by ComfyUI
 
 
 class _PickyMember:

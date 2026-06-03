@@ -28,10 +28,14 @@ sockets iff their type strings are equal — which is what lets ops chain (via `
 compose into higher-order ops (via ``DATAFLUX_OP``).
 """
 
+import collections.abc as cabc
 import importlib
 import inspect
+import os
+import types as _types
 from typing import (
     AbstractSet,
+    Annotated,
     Any,
     Callable,
     Dict,
@@ -44,10 +48,11 @@ from typing import (
     cast,
     get_args,
     get_origin,
+    get_type_hints,
 )
 
 import datasets
-from confluid import parse_param_docs
+from confluid import mandatory_param_names, output_specs, parse_param_docs
 from dataflux.discovery import get_callable_path, resolve_callable, scan_module
 from dataflux.typespec import infer_sample_type
 from logflow import get_logger
@@ -105,6 +110,39 @@ _SOCKET_TYPES = {
     "HF_DATASET",
 }
 
+
+def _object_socket(category: Optional[str]) -> str:
+    """The object-member socket type for a class's ``@configurable`` category.
+
+    Object members (model / loss / metric) ride a CATEGORY-QUALIFIED socket —
+    ``DATAFLUX_OBJECT:classification_model`` — so ComfyUI's string-equality
+    connection rule enforces compatibility (a ``classification_model`` node docks
+    only into a ``classification_model`` slot, never a loss/segmentation slot).
+    Category-less members (the role-less ``lazy`` infra members optimizer/loader/
+    lightning, and task-agnostic loggers) keep the bare ``DATAFLUX_OBJECT`` type.
+    The ``Retag`` adapter node (``nodes.py``) is the deliberate escape hatch that
+    re-types an object to a chosen category.
+    """
+    return f"{OBJECT_TYPE}:{category}" if category else OBJECT_TYPE
+
+
+def _base_socket_type(socket_type: Any) -> Any:
+    """Strip a ``:category`` suffix to the base socket type (``DATAFLUX_OBJECT``).
+
+    Object sockets are category-qualified (see :func:`_object_socket`); consumers
+    that only need to know "is this a wired socket vs a widget" (graphio's
+    socket-vs-widget split) test the BASE type, not the qualified string.
+    """
+    if isinstance(socket_type, str) and ":" in socket_type:
+        return socket_type.split(":", 1)[0]
+    return socket_type
+
+
+def _is_socket_type(socket_type: Any) -> bool:
+    """True if ``socket_type`` is one of the live-object wire types (base-aware)."""
+    return _base_socket_type(socket_type) in _SOCKET_TYPES
+
+
 # A runnable's constructor params / body slots that hold a DATASET / SOURCE — rendered as a wired
 # ``DATAFLUX_SOURCE`` socket (fed by a Source node) instead of a STRING widget. ``source`` (handled by
 # ``_SOURCE_PARAM`` too) covers ``DatasetProcessor``. Detected by name (same convention as the op/
@@ -123,6 +161,94 @@ _DATASET_MEMBER_PARAMS = {"train_set", "val_set", "test_set", "dataset"}
 # they build EAGERLY — a logger's required ``save_dir`` must stay a configurable widget, not be
 # skipped as a runtime-injected slot. See ``_is_object_member_class``.
 _MEMBER_ROLES = {"model", "loss", "metric", "logger"}
+
+# A runnable's object-member PARAM NAME → the ROLE its slot accepts. The slot socket is then
+# ROLE-qualified (``_object_socket(role)`` → ``DATAFLUX_OBJECT:model``) — TASK-AGNOSTIC: a
+# classification model and a segmentation model BOTH produce ``DATAFLUX_OBJECT:model`` and dock
+# into ANY trainer's ``model`` slot. The role still guards kind (a loss can't dock into a model
+# slot). Task survives only as GUIDANCE (navigaitor slot ranking + the FluxStudio palette
+# label/grouping), never on the socket. Mirrors navigaitor's ``configs.generate.PARAM_NAME_TO_ROLE``
+# (fluxstudio must NOT import navigaitor — the convention is small and stable). ``logger`` is
+# deliberately ABSENT, as are the infra members (optimizer/loader/lightning): those stay generic
+# ``DATAFLUX_OBJECT`` (no meaningful role-kind distinction to enforce).
+_STRICT_SLOT_ROLES = {
+    "model": "model",
+    "loss_fn": "loss",
+    "metrics": "metric",
+    "train_metrics": "metric",
+    "val_metrics": "metric",
+    "test_metrics": "metric",
+}
+
+# The roles whose object sockets are ROLE-qualified (``DATAFLUX_OBJECT:<role>``). Everything else
+# (logger / optimizer / loader / lightning, and untagged objects) rides the bare ``DATAFLUX_OBJECT``.
+# This is the value-set of :data:`_STRICT_SLOT_ROLES`, kept as a name so the object-NODE output side
+# and the runnable-SLOT input side agree on which roles qualify (else a socket mismatch silently
+# refuses an otherwise-valid wire — the original "can't connect" footgun).
+_QUALIFIED_OBJECT_ROLES = frozenset(_STRICT_SLOT_ROLES.values())
+
+# Type → role inference, so a role can be ASSIGNED from a class's Python type when it carries no
+# explicit ``@configurable(role=…)`` tag. Matched by a base-class qualname substring (a duck-typed
+# MRO scan — NO heavy ``torch`` / ``torchmetrics`` / ``pytorch_lightning`` import at module load).
+# NOTE model vs loss are BOTH ``torch.nn.Module`` so the TYPE cannot tell them apart — only the
+# explicit ``role=`` tag can (it always wins over inference). So model/loss are deliberately absent.
+_TYPE_ROLE_BY_BASE = (
+    ("Metric", "metric"),  # torchmetrics.metric.Metric
+    ("Optimizer", "optimizer"),  # torch.optim.optimizer.Optimizer
+    ("DataLoader", "loader"),  # torch.utils.data.DataLoader
+    ("Logger", "logger"),  # pytorch_lightning.loggers.logger.Logger
+)
+
+
+def _role_for_class(cls: Any) -> Optional[str]:
+    """The object role of ``cls`` — explicit ``@configurable(role=…)`` tag, else inferred from type.
+
+    The explicit ``__confluid_role__`` tag ALWAYS wins (it is the only thing that can disambiguate a
+    model from a loss — both are ``nn.Module``). When a class is untagged, infer the role from its
+    Python type (a base-class qualname substring scan via :data:`_TYPE_ROLE_BY_BASE`), so e.g. an
+    untagged ``torchmetrics`` metric still sockets as a ``metric``. Returns ``None`` when neither a
+    tag nor a recognised base applies → the object rides the generic ``DATAFLUX_OBJECT``.
+    """
+    role = getattr(cls, "__confluid_role__", None)
+    if role:
+        return str(role)
+    try:
+        mro_names = " ".join(getattr(base, "__qualname__", base.__name__) for base in inspect.getmro(cls))
+    except (AttributeError, TypeError):  # pragma: no cover - defensive: non-class callables
+        return None
+    for needle, inferred in _TYPE_ROLE_BY_BASE:
+        if needle in mro_names:
+            return inferred
+    return None
+
+
+def _object_socket_for_class(cls: Any) -> str:
+    """The object-output socket type for a class: ROLE-qualified for a strict role, else generic.
+
+    ``DATAFLUX_OBJECT:model`` for a model / loss / metric (task-agnostic — see
+    :data:`_QUALIFIED_OBJECT_ROLES`), bare ``DATAFLUX_OBJECT`` for everything else (logger / infra /
+    untagged). Mirrors the runnable-SLOT side so an object node docks into the matching slot.
+    """
+    role = _role_for_class(cls)
+    return _object_socket(role) if role in _QUALIFIED_OBJECT_ROLES else OBJECT_TYPE
+
+
+def _infer_member_role(name: str) -> Optional[str]:
+    """The role (model / loss / metric) a member NAME implies, else ``None``.
+
+    Exact INPUT param names resolve via :data:`_STRICT_SLOT_ROLES`; a runnable ``@output`` name
+    (e.g. ``trained_model``) is freer, so fall back to a keyword scan — this keeps a trainer's
+    ``trained_model`` output ROLE-qualified (``DATAFLUX_OBJECT:model``, task-agnostic) so it docks
+    into a downstream evaluator's likewise-qualified ``model`` slot. Returns ``None`` for role-less
+    members (optimizer / loader / lightning / logger) → generic ``DATAFLUX_OBJECT``.
+    """
+    if name in _STRICT_SLOT_ROLES:
+        return _STRICT_SLOT_ROLES[name]
+    for keyword, role in (("model", "model"), ("loss", "loss"), ("metric", "metric")):
+        if keyword in name:
+            return role
+    return None
+
 
 # Constructor params (on higher-order ops) that hold a LIST OF OPS — rendered as dynamic
 # ``DATAFLUX_OP`` multi-inputs (``op_0``, ``op_1``, … via ``web/op_list.js``) instead of a STRING
@@ -219,6 +345,35 @@ _PACKAGE_DISPLAY_NAMES = {
 def _package_display_name(package: str) -> str:
     """Palette label for a top-level package — canonical casing if known, else ``str.title()``."""
     return _PACKAGE_DISPLAY_NAMES.get(package, package.title())
+
+
+# The CLI's ``--no-default-nodes`` flag exports this so the fluxstudio import inside ComfyUI knows
+# to (a) prune ComfyUI's built-in nodes from the palette and (b) surface the Taidal nodes at the
+# palette root instead of nested under a ``Taidal/`` folder. Set explicitly to ``"0"`` by
+# ``--default-nodes`` so the flag is authoritative over any ambient shell export.
+_HIDE_DEFAULT_NODES_ENV = "FLUXSTUDIO_HIDE_DEFAULT_NODES"
+_TRUTHY = {"1", "true", "yes", "on"}
+
+
+def hide_default_comfy_nodes() -> bool:
+    """True when the CLI asked (via ``--no-default-nodes``) to hide ComfyUI's built-in nodes.
+
+    Read from the :data:`_HIDE_DEFAULT_NODES_ENV` environment variable that ``fluxstudio.cli``
+    exports before launching ComfyUI (the launched ComfyUI process is a subprocess, so an env var
+    is the channel). Drives both the default-node prune (``fluxstudio.__init__``) and the palette
+    root (:func:`node_root`).
+    """
+    return os.environ.get(_HIDE_DEFAULT_NODES_ENV, "").strip().lower() in _TRUTHY
+
+
+def node_root() -> str:
+    """The Taidal palette root prefix: ``""`` (root-level) when default nodes are hidden, else ``"Taidal"``.
+
+    When ComfyUI's own nodes are hidden there is nothing to disambiguate the Taidal nodes from, so
+    they read more naturally at the palette root (``DataFlux/Op`` rather than ``Taidal/DataFlux/Op``).
+    When the defaults are shown the ``Taidal/`` folder keeps the workspace nodes grouped together.
+    """
+    return "" if hide_default_comfy_nodes() else "Taidal"
 
 
 def _is_hf_dataset_id_param(param_name: str, owner: Optional[Callable]) -> bool:
@@ -377,6 +532,13 @@ def _widget_for(param: inspect.Parameter, owner: Optional[Callable] = None) -> T
     literal_opts = _literal_options(param.annotation)
     if literal_opts is not None:
         options = [str(o) for o in literal_opts]
+        if has_default and param.default is None:
+            # An OPTIONAL Literal that defaults to ``None`` (e.g. ``pl.Trainer.precision``): the combo
+            # can't BE None, so do NOT force the first member — that silently overrides the constructor
+            # default (the precision=64 → float64-on-MPS footgun). Offer a leading blank "(use default)"
+            # entry, selected by default; ``_coerce_kwargs`` omits ``""`` so ``None`` (→ the library's
+            # own default) applies. The user can still pick a concrete value from the dropdown.
+            return [""] + options, {"default": ""}
         default = str(param.default) if has_default and param.default is not None else ""
         if default not in options:  # no usable default (or an out-of-set one) → first option
             default = options[0] if options else ""
@@ -396,6 +558,15 @@ def _widget_for(param: inspect.Parameter, owner: Optional[Callable] = None) -> T
     # _coerce_kwargs turns back into None when empty, or casts to the number when filled.
     if param.default is None and comfy_type in ("INT", "FLOAT"):
         return "STRING", {"default": "", "multiline": False}
+
+    # Nullable bool (e.g. ``Optional[bool] = None`` like ``pl.Trainer.enable_progress_bar`` /
+    # ``enable_checkpointing`` / ``enable_model_summary``): a ComfyUI BOOLEAN checkbox can't BE None, and
+    # its ``False`` default would silently OVERRIDE the constructor's ``None`` — which the library
+    # resolves to ITS own default (Lightning enables the progress bar / checkpointing by default). Render
+    # a 3-state combo whose leading blank = "use the constructor default"; ``_coerce_kwargs`` maps blank
+    # → omit (None applies) and ``true``/``false`` → the real bool. Same principle as nullable numerics.
+    if param.default is None and comfy_type == "BOOLEAN":
+        return ["", "true", "false"], {"default": ""}
 
     config = DEFAULT_WIDGET_CONFIG.get(comfy_type, {}).copy()
     if has_default and param.default is not None:
@@ -473,6 +644,11 @@ def _coerce_kwargs(func: Callable, kwargs: Dict[str, Any]) -> Dict[str, Any]:
         # through verbatim, never through the STRING heuristics below (a member that happens to contain
         # "int" / "float" / "list", e.g. a future colormap name, must not be cast or comma-split).
         if param is not None and _literal_options(param.annotation) is not None:
+            # The blank "(use default)" entry of an Optional Literal (default ``None``) → OMIT the kwarg
+            # so the constructor's own default applies (e.g. omit ``precision`` → Lightning's 32-bit
+            # default, never a forced ``precision=64`` that crashes float64-less backends like MPS).
+            if value == "" and param.default is None:
+                continue
             out[key] = value
             continue
         if isinstance(value, str):
@@ -488,6 +664,10 @@ def _coerce_kwargs(func: Callable, kwargs: Dict[str, Any]) -> Dict[str, Any]:
             ann_low = ann.lower()
             if "list" in ann_low or "sequence" in ann_low:
                 out[key] = [item.strip() for item in stripped.split(",") if item.strip()]
+                continue
+            # Cast a filled nullable-bool 3-state combo value (``true``/``false``) back to a real bool.
+            if "bool" in ann_low:
+                out[key] = stripped.lower() in ("true", "1", "yes", "on")
                 continue
             # Cast a filled nullable-numeric STRING widget back to its number.
             if "int" in ann_low and "float" not in ann_low:
@@ -628,6 +808,24 @@ def _collect_ops(kwargs: Dict[str, Any]) -> List[Any]:
     """
     indexed = [(int(k[3:]), v) for k, v in kwargs.items() if k.startswith("op_") and k[3:].isdigit() and v is not None]
     return [v for _, v in sorted(indexed)]
+
+
+def _collect_indexed(kwargs: Dict[str, Any], prefix: str) -> List[Any]:
+    """Gather dynamic ``<prefix>_0`` / ``<prefix>_1`` / … inputs in slot order, dropping unconnected
+    (``None``) ones — the generic collector behind object-list members (``logger_N`` / ``callbacks_N``).
+    """
+    start = len(prefix) + 1
+    indexed = [
+        (int(k[start:]), v)
+        for k, v in kwargs.items()
+        if k.startswith(prefix + "_") and k[start:].isdigit() and v is not None
+    ]
+    return [v for _, v in sorted(indexed)]
+
+
+def _is_indexed_key(key: str, prefixes: AbstractSet[str]) -> bool:
+    """True if ``key`` is a dynamic ``<prefix>_<digit>`` slot for one of ``prefixes``."""
+    return any(key.startswith(p + "_") and key[len(p) + 1 :].isdigit() for p in prefixes)
 
 
 def _has_param(cls: Any, name: str) -> bool:
@@ -889,6 +1087,123 @@ def _is_scalar_anno(anno: Any) -> bool:
     return anno in (int, float, str, bool)
 
 
+def _flatten_union(anno: Any) -> List[Any]:
+    """Flatten ``Union``/``X | Y`` arms (recursively), dropping ``NoneType``; a non-Union is one arm."""
+    if get_origin(anno) is Union or get_origin(anno) is getattr(_types, "UnionType", ()):
+        out: List[Any] = []
+        for a in get_args(anno):
+            if a is type(None):
+                continue
+            out.extend(_flatten_union(a))
+        return out
+    return [anno]
+
+
+def _container_element(anno: Any) -> Any:
+    """The element type of a list/set/tuple/``Iterable``/``Sequence`` (peeled recursively), else ``anno``.
+
+    ``str``/``bytes`` are NOT treated as containers (they are scalars handled elsewhere).
+    """
+    origin = get_origin(anno)
+    if origin is None or origin in (str, bytes):
+        return anno
+    if origin in (list, set, frozenset, tuple) or (isinstance(origin, type) and issubclass(origin, cabc.Iterable)):
+        args = [a for a in get_args(anno) if a is not Ellipsis and a is not type(None)]
+        if args:
+            return _container_element(args[0])
+    return anno
+
+
+def _is_wireable_object_param(anno: Any) -> bool:
+    """True when a constructor param should be a wired ``DATAFLUX_OBJECT`` socket (not a widget).
+
+    A param is wireable iff its annotation has a concrete OBJECT-class arm (a ``Logger`` / ``Callback`` /
+    ``nn.Module`` — something a producer node builds) and NO real scalar-config arm. The rule, over the
+    ``Annotated``-stripped, ``Union``-flattened, container-peeled arms:
+
+    * a ``str`` / ``int`` / ``float`` arm ⇒ ``False`` — that is real configuration the user TYPES
+      (``accelerator="gpu"``, ``precision=16``), so the param stays a widget;
+    * a ``bool`` / ``NoneType`` arm ⇒ ignored — a True/False toggle / optionality, NOT the real value
+      (this is the ``logger: Union[Logger, …, bool]`` case the old ``_map_type`` mis-rendered as BOOLEAN);
+    * a concrete object **class** arm ⇒ marks it wireable;
+    * ``Any`` / typevars / unparametrised generics ⇒ ignored (too broad to socket).
+
+    Detection is by annotation SHAPE — never a per-class list. So ``logger`` / ``callbacks`` on a
+    ``pytorch_lightning.Trainer`` become sockets while ``accelerator`` / ``strategy`` / ``devices`` /
+    ``precision`` / ``profiler`` stay widgets.
+    """
+    inner = anno
+    while get_origin(inner) is Annotated:
+        inner = get_args(inner)[0]
+    saw_object = False
+    for arm in _flatten_union(inner):
+        base = _container_element(arm)
+        if base in (str, int, float):
+            return False
+        if base is bool or base is type(None):
+            continue
+        if isinstance(base, type):
+            saw_object = True
+    return saw_object
+
+
+def _admits_object_list(anno: Any) -> bool:
+    """True when an annotation has a ``list``/``Iterable``/``Sequence``/``tuple``/``set`` arm whose
+    element is an OBJECT class — so the param accepts MANY objects and should render as a DYNAMIC
+    ``<name>_N`` socket family (collected into a list), not a single socket.
+
+    Paired with :func:`_is_wireable_object_param`. Covers ``logger: Union[Logger, Iterable[Logger], bool]``
+    and ``callbacks: Union[List[Callback], Callback, None]`` (a single-or-list arm still admits a list).
+    """
+    inner = anno
+    while get_origin(inner) is Annotated:
+        inner = get_args(inner)[0]
+    for arm in _flatten_union(inner):
+        origin = get_origin(arm)
+        is_container = origin in (list, set, frozenset, tuple) or (
+            isinstance(origin, type) and issubclass(origin, cabc.Iterable) and origin not in (str, bytes)
+        )
+        if is_container:
+            elem = _container_element(arm)
+            if isinstance(elem, type) and elem not in (str, int, float, bool):
+                return True
+    return False
+
+
+def _output_return_anno(cls: Any, prop_name: str) -> Any:
+    """Resolve a declared ``@output`` property's return annotation WITHOUT invoking the getter.
+
+    Uses :func:`inspect.getattr_static` (walks the MRO but never triggers the descriptor — a
+    runnable's output getter raises pre-run by design) to reach the ``property`` object, then reads
+    its ``fget`` return hint. Falls back to ``Any`` for an unresolvable / un-annotated getter.
+    """
+    member = inspect.getattr_static(cls, prop_name, None)
+    fget = getattr(member, "fget", None)
+    if fget is None:
+        return Any
+    try:
+        return get_type_hints(fget).get("return", Any)
+    except Exception:  # pragma: no cover - defensive: un-importable return annotation
+        return Any
+
+
+def _output_socket_type(prop_name: str, anno: Any) -> str:
+    """ComfyUI socket type for a runnable's declared ``@output`` — mirrors the INPUT member mapping.
+
+    A dataset-named output rides ``DATAFLUX_SOURCE``; a scalar output a typed widget string (via
+    :func:`_map_type`); a role-bearing object output (``trained_model`` for a trainer) rides the
+    ROLE-QUALIFIED ``DATAFLUX_OBJECT:<role>`` (task-agnostic) so it docks straight into a downstream
+    runnable's likewise-qualified object slot (an evaluator's ``model``); any other object rides the
+    bare ``DATAFLUX_OBJECT``.
+    """
+    if prop_name in _DATASET_MEMBER_PARAMS:
+        return SOURCE_TYPE
+    if _is_scalar_anno(anno):
+        return _map_type(prop_name, anno)
+    role = _infer_member_role(prop_name)
+    return _object_socket(role) if role in _QUALIFIED_OBJECT_ROLES else OBJECT_TYPE
+
+
 def _build_object_node(cls: Callable, name: str, category: str) -> Type:
     """Build an OBJECT node: constructor config widgets -> TWO ``DATAFLUX_OBJECT`` outputs.
 
@@ -927,15 +1242,68 @@ def _build_object_node(cls: Callable, name: str, category: str) -> Type:
             }
         except (ValueError, TypeError):  # pragma: no cover - defensive
             skip = None
-    inputs = _build_config_inputs(cls, skip=skip or None)
+    # An OBJECT-typed ctor param (``logger`` / ``callbacks`` — a non-scalar class arm with no
+    # str/int/float config arm; see :func:`_is_wireable_object_param`) rides a WIRED ``DATAFLUX_OBJECT``
+    # socket so a producer node docks in — instead of the bool-poisoned BOOLEAN widget ``_map_type``
+    # would emit. A param that also admits a LIST/Iterable of objects (``_admits_object_list`` —
+    # ``logger`` / ``callbacks`` / ``plugins``) gets a DYNAMIC ``<name>_N`` socket family (seed
+    # ``<name>_0``; ``web/object_list.js`` grows the rest), collected into a list in ``execute``; a
+    # single-object param gets ONE socket. Bare ``OBJECT_TYPE`` (role-less) matches the producer output.
+    object_single_params: set = set()  # single-object sockets
+    object_list_params: set = set()  # dynamic <name>_N list sockets
+    object_required: Dict[str, Any] = {}
+    object_optional: Dict[str, Any] = {}
+    try:
+        for p, par in inspect.signature(cls).parameters.items():
+            if p in ("self", "cls") or (skip and p in skip):
+                continue
+            if par.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
+                continue
+            if not _is_wireable_object_param(par.annotation):
+                continue
+            if _admits_object_list(par.annotation):
+                object_list_params.add(p)
+                object_optional[f"{p}_0"] = (OBJECT_TYPE,)  # seed; web/object_list.js grows <p>_1, <p>_2, …
+            else:
+                object_single_params.add(p)
+                bucket = object_required if par.default is inspect.Parameter.empty else object_optional
+                bucket[p] = (OBJECT_TYPE,)
+    except (ValueError, TypeError):  # pragma: no cover - defensive
+        pass
+
+    inputs = _build_config_inputs(
+        cls, skip=(set(skip) if skip else set()) | object_single_params | object_list_params or None
+    )
+    inputs.update(object_required)
     # A member with runtime-injected required params (the skipped set) is deferred BY DESIGN — there
     # is no standalone live instance to build, so don't attempt it (and don't warn — that's expected).
     deferred_required = bool(skip)
 
     def execute(self: Any, **kwargs: Any) -> Tuple[Any, ...]:
-        from confluid import LazyClass, flow
+        from confluid import Fluid, LazyClass, flow
 
-        coerced = _coerce_kwargs(cls, kwargs)
+        def _resolve(v: Any) -> Any:
+            # A wired object is passed through as-is — flow()-ed first if it's still a Fluid, so wiring
+            # the producer's ``instance`` OR ``class`` output both work.
+            return flow(v) if isinstance(v, Fluid) else v
+
+        # Split wired OBJECT-socket inputs (live objects from upstream nodes) from widget inputs.
+        widget_kwargs: Dict[str, Any] = {}
+        object_kwargs: Dict[str, Any] = {}
+        # Object-LIST params: collect their dynamic <name>_N sockets into a list (empty -> omit -> default).
+        for lp in object_list_params:
+            vals = [_resolve(v) for v in _collect_indexed(kwargs, lp)]
+            if vals:
+                object_kwargs[lp] = vals
+        for k, v in kwargs.items():
+            if _is_indexed_key(k, object_list_params):
+                continue  # handled by the object-list collection above
+            if k in object_single_params:
+                if v is not None:  # unwired single object socket -> omit so the ctor default applies
+                    object_kwargs[k] = _resolve(v)
+            else:
+                widget_kwargs[k] = v
+        coerced = {**_coerce_kwargs(cls, widget_kwargs), **object_kwargs}
         lazy = LazyClass(cast(Type[Any], cls), **coerced)
         instance: Any = None
         if deferred_required:
@@ -957,13 +1325,21 @@ def _build_object_node(cls: Callable, name: str, category: str) -> Type:
                 instance = None
         return (instance, lazy)
 
+    # ROLE-qualify BOTH outputs (instance + class) so they dock only into a matching-ROLE slot
+    # (a ``model`` node → a ``model`` slot), TASK-AGNOSTIC: a classification model and a segmentation
+    # model both ride ``DATAFLUX_OBJECT:model``. The role is the explicit ``role=`` tag or inferred
+    # from the type (``_role_for_class``); a role-less member (logger / lazy infra) keeps the bare
+    # ``DATAFLUX_OBJECT``. Mirrors the runnable-SLOT side. See :func:`_object_socket_for_class`.
+    obj_socket = _object_socket_for_class(cls)
+
     return _node_class(
         name,
         category,
         inputs,
-        (OBJECT_TYPE, OBJECT_TYPE),
+        (obj_socket, obj_socket),
         execute,
         return_names=("instance", "class"),
+        optional_inputs=object_optional or None,
         kind="object",
         callable_path=_safe_callable_path(cls),
     )
@@ -983,11 +1359,19 @@ def _build_runnable_node(cls: Callable, name: str, category: str) -> Type:
       shared :func:`_build_config_inputs` (ComfyUI lets the user "convert to input" when they want a
       wire).
 
-    A member that is a constructor param with NO default is a REQUIRED socket (``model`` / ``train_set``
-    / ``dataset``); everything else is OPTIONAL — unwired ⇒ the runnable keeps its baked default
-    ("true optional"). The node is **build-only**: ``execute`` constructs the runnable (ctor params to
-    ``__init__``, body slots via post-construction ``setattr`` of the wired members) and outputs it on
-    a ``DATAFLUX_RUNNABLE`` wire; a separate ``Run`` node calls ``.run()``.
+    A member that is a constructor param with NO default — OR one declared :data:`confluid.Mandatory`
+    (read via :func:`confluid.mandatory_param_names`, so a defaulted-for-zero-arg slot can still be
+    flagged mandatory) — is a REQUIRED socket (``model`` / ``train_set`` / ``dataset``); everything else
+    is OPTIONAL — unwired ⇒ the runnable keeps its baked default ("true optional").
+
+    OUTPUTS: beyond the ``DATAFLUX_RUNNABLE`` wire, the runnable's declared ``@output`` properties
+    (:func:`confluid.output_specs`) are appended as extra output sockets — a trainer's ``trained_model``
+    rides ``DATAFLUX_OBJECT`` straight into a downstream evaluator's ``model`` slot. The node is
+    **build-only**: ``execute`` constructs the runnable (ctor params to ``__init__``, body slots via
+    post-construction ``setattr`` of the wired members) and outputs it on a ``DATAFLUX_RUNNABLE`` wire;
+    a separate ``Run`` node calls ``.run()``. Each declared output is read via ``getattr`` AFTER the
+    build and emitted alongside — guarded, since a run-output getter (e.g. ``trained_model``) raises
+    pre-run by design, so it is emitted as ``None`` until a ``Run`` node has executed.
     """
     from confluid import to_pydantic
 
@@ -1005,7 +1389,18 @@ def _build_runnable_node(cls: Callable, name: str, category: str) -> Type:
     except (ValueError, TypeError):  # pragma: no cover - defensive
         ctor_params, ctor_required = set(), set()
 
-    socket_members: Dict[str, str] = {}  # member name -> SOURCE_TYPE | OBJECT_TYPE
+    # A REQUIRED socket is a ctor param with no default OR one explicitly declared Mandatory[...]
+    # (the I/O contract marker — routes the decision through confluid, not just default-presence).
+    runnable_cls = cast(type, cls)  # _build_runnable_node is only called with classes
+    required_params = ctor_required | mandatory_param_names(runnable_cls)
+
+    # An object slot for a role (model / loss / metric) is ROLE-qualified — e.g. ANY trainer's
+    # ``model`` slot accepts ``DATAFLUX_OBJECT:model`` — so ComfyUI rejects a loss wire but a
+    # classification model docks into a segmentation trainer's model slot just the same (TASK-
+    # AGNOSTIC; task survives only as palette/navigaitor guidance). Role-less slots (optimizer /
+    # loader / lightning / logger) stay generic ``DATAFLUX_OBJECT``. See :data:`_STRICT_SLOT_ROLES`
+    # / :func:`_object_socket`. Mirrors the object-NODE output side (:func:`_object_socket_for_class`).
+    socket_members: Dict[str, str] = {}  # member name -> SOURCE_TYPE | OBJECT_TYPE[:role]
     for fname, finfo in fields.items():
         anno = getattr(finfo, "annotation", Any)
         if fname in _DATASET_MEMBER_PARAMS or fname == _SOURCE_PARAM:
@@ -1013,17 +1408,23 @@ def _build_runnable_node(cls: Callable, name: str, category: str) -> Type:
         elif _is_scalar_anno(anno):
             continue  # scalar -> widget (handled by _build_config_inputs below)
         else:
-            socket_members[fname] = OBJECT_TYPE
+            role = _STRICT_SLOT_ROLES.get(fname)
+            socket_members[fname] = _object_socket(role) if role else OBJECT_TYPE
 
     # Scalars stay widgets; skip the socket members (and any non-ctor body slot, which
     # _build_config_inputs wouldn't see anyway).
     required: Dict[str, Any] = _build_config_inputs(cls, skip=set(socket_members) or None)
     optional: Dict[str, Any] = {}
     for member, socket in socket_members.items():
-        if member in ctor_required:
+        if member in required_params:
             required[member] = (socket,)
         else:
             optional[member] = (socket,)
+
+    # Declared @output properties -> extra output sockets (mapped like input members).
+    out_specs = output_specs(runnable_cls)
+    extra_types = tuple(_output_socket_type(s["name"], _output_return_anno(cls, s["name"])) for s in out_specs)
+    extra_names = tuple(s["name"] for s in out_specs)
 
     def execute(self: Any, **kwargs: Any) -> Tuple[Any, ...]:
         ctor_kwargs: Dict[str, Any] = {}
@@ -1038,15 +1439,24 @@ def _build_runnable_node(cls: Callable, name: str, category: str) -> Type:
         obj = cls(**_coerce_kwargs(cls, ctor_kwargs))
         for k, v in post.items():
             setattr(obj, k, v)
-        return (obj,)
+        # The node is build-only: read each declared output, guarding the getters that raise
+        # pre-run (e.g. trained_model while the model is still a deferred Fluid) -> emit None.
+        outs: List[Any] = []
+        for spec in out_specs:
+            try:
+                outs.append(getattr(obj, spec["name"]))
+            except Exception as exc:  # pragma: no cover - expected pre-run for run-output getters
+                logger.debug("{}: output {!r} not available pre-run ({}); emitting None.", name, spec["name"], exc)
+                outs.append(None)
+        return (obj, *outs)
 
     return _node_class(
         name,
         category,
         required,
-        (RUNNABLE_TYPE,),
+        (RUNNABLE_TYPE, *extra_types),
         execute,
-        return_names=("runnable",),
+        return_names=("runnable", *extra_names),
         optional_inputs=optional or None,
         kind="runnable",
         callable_path=_safe_callable_path(cls),
@@ -1089,19 +1499,47 @@ def _humanize_node_name(name: str) -> str:
     return name.replace("_", " ")
 
 
-def _node_category(module_path: str, confluid_category: str, group: Optional[str], root: str) -> str:
-    """Build a node's ComfyUI palette path: ``<root>/<Package>/<Category>[/<group>]``.
+def _package_tag(module_path: str) -> str:
+    """The bracketed package tag shown in a node's LABEL (``[SONAIR]`` / ``[DATAFLUX]``).
 
-    The first level is the entry-point module's TOP-LEVEL package (``dataflux.ops.numpy`` →
-    ``DataFlux``) so every op/source of a package collects under one palette folder regardless
-    of which submodule it lives in. Within that, nodes are split by ``@configurable`` category
-    (``Op`` / ``Source``) and then by the optional path-like ``group`` (``numpy`` / ``targets`` /
-    ``fft/numpy`` …). An untagged group leaves the node directly under ``<Package>/<Category>``.
+    The palette is grouped by ROLE/TASK (or category) — NOT by package (see :func:`_node_category`) —
+    so the producing package is surfaced in the node label instead. Uppercased canonical casing via
+    :data:`_PACKAGE_DISPLAY_NAMES` (``dataflux`` → ``DATAFLUX``, ``sonair`` → ``SONAIR``).
     """
-    package = _package_display_name(module_path.split(".")[0])
-    path = f"{root}/{package}/{confluid_category.title()}"
+    return _package_display_name(module_path.split(".")[0]).upper()
+
+
+def _node_category(
+    confluid_category: Optional[str],
+    group: Optional[str],
+    root: str,
+    role: Optional[str] = None,
+    task: Optional[str] = None,
+) -> str:
+    """Build a node's ComfyUI palette path — grouped by ROLE/TASK or by category, NOT by package.
+
+    The producing package moves to the node LABEL (a ``[SONAIR]`` tag — see :func:`_package_tag`);
+    the palette folder reuses the discovery taxonomy instead:
+
+    * a ROLE-bearing class (model / loss / metric / trainer / evaluator / dataset / logger) →
+      ``<root>/<Role>[/<Task>]`` (ROLE-first, then the optional task) — so e.g. all models of every
+      task collect under ``Taidal/Model/``: ``Taidal/Model/Classification``, ``Taidal/Trainer/Detection``,
+      ``Taidal/Logger`` (task-agnostic → no task level). Mirrors the task-agnostic socket model.
+    * a task-agnostic class (op / source / engine, and the role-less lazy infra) → its ``@configurable``
+      ``<Category>`` then the optional path-like ``<group>``: ``Taidal/Op/numpy``, ``Taidal/Source``.
+
+    An empty ``root`` (the ``--no-default-nodes`` mode — see :func:`node_root`) drops the leading
+    ``Taidal/`` folder so the node sits at the palette root (``Model/Classification`` not
+    ``/Model/Classification``).
+    """
+    if role:
+        parts = [root, role.title()]
+        if task:
+            parts.append(task.title())
+        return "/".join(p for p in parts if p)
+    path = "/".join(p for p in (root, (confluid_category or "").title()) if p)
     if group:
-        path = f"{path}/{group}"
+        path = f"{path}/{group}" if path else group
     return path
 
 
@@ -1132,7 +1570,7 @@ def register_module_nodes(
     module_path: str,
     target_mappings: Dict[str, Type],
     display_name_mappings: Dict[str, str],
-    root: str = "Taidal",
+    root: Optional[str] = None,
 ) -> None:
     """Scan a module and register its buildable callables as ComfyUI nodes.
 
@@ -1149,7 +1587,8 @@ def register_module_nodes(
     deliberately tagged as a buildable op/source/engine.
 
     Each node's palette folder is ``<root>/<Package>/<Category>[/<group>]`` — see
-    :func:`_node_category`. ``root`` defaults to ``"Taidal"``.
+    :func:`_node_category`. ``root`` defaults to :func:`node_root` (``"Taidal"``, or ``""`` —
+    root-level — when the CLI's ``--no-default-nodes`` flag is active).
 
     Discovery has TWO passes (``scan_module`` filters to callables whose ``__module__`` IS this
     module, which misses classes a package exposes from a SUBMODULE or registers from a third-party
@@ -1165,6 +1604,8 @@ def register_module_nodes(
 
     Both feed the same admission filter.
     """
+    if root is None:
+        root = node_root()
     logger.info(f"ComfyFlux: Scanning module {module_path} for nodes...")
 
     # Pass 1: module-local callables (name -> target). ``setdefault`` so pass 2 never overrides.
@@ -1217,11 +1658,19 @@ def register_module_nodes(
             or ("runnable" if _is_runnable(target_func) else "object")
         )
         node_name = _node_key(module_path, key_category, group, name)
+        # Palette folder reuses ROLE/TASK (or category) — never the package; the package rides the
+        # node LABEL as a ``[PKG]`` tag instead (see _node_category / _package_tag).
         node_class = create_comfy_node(
             func=target_func,
             name=node_name,
-            category=_node_category(module_path, key_category, group, root),
+            category=_node_category(
+                key_category,
+                group,
+                root,
+                role=getattr(target_func, "__confluid_role__", None),
+                task=getattr(target_func, "__confluid_task__", None),
+            ),
         )
         target_mappings[node_name] = node_class
-        display_name_mappings[node_name] = _humanize_node_name(name)
+        display_name_mappings[node_name] = f"[{_package_tag(module_path)}] {_humanize_node_name(name)}"
         logger.debug(f"ComfyFlux: Registered node {node_name} for {module_path}.{name}")

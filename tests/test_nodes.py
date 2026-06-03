@@ -19,8 +19,12 @@ import torch
 from dataflux.sample import Sample
 
 from fluxstudio.nodes import (
+    _RETAG_KEEP,
+    _RETAG_NONE,
+    ANY,
     NODE_CLASS_MAPPINGS,
     NODE_DISPLAY_NAME_MAPPINGS,
+    RetagObjectNode,
     SampleExtractorNode,
     WalkDatasetNode,
     _colormap_choices,
@@ -281,6 +285,44 @@ def test_collapse_carriage_returns_keeps_final_frame() -> None:
     assert _collapse_carriage_returns("plain\nlines") == "plain\nlines"
 
 
+def test_run_node_streams_output_live(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The runner's output is pushed to the node's widget DURING the run (so progress bars update live),
+    # not only at the end. We record each _send_run_output call and assert >1 push (live + final).
+    import time
+
+    from fluxstudio import nodes as nodes_mod
+    from fluxstudio.nodes import RunNode
+
+    pushes: list = []
+    monkeypatch.setattr(nodes_mod, "_send_run_output", lambda uid, text: pushes.append((uid, text)))
+
+    class _Progress:
+        def run(self) -> None:
+            for i in range(3):
+                # A \r-repainted progress bar (tqdm/Lightning style) on a single line.
+                sys.stdout.write(f"\rstep {i} {(i + 1) * 33}%")
+                sys.stdout.flush()
+                time.sleep(0.12)  # span several 0.1s poll ticks so the loop streams mid-run
+            print("\rdone 100%")
+
+    result = RunNode().run(_Progress(), unique_id="7")
+
+    # Streaming fired more than once (at least one live push before the final one), all addressed to
+    # this node, and the \r-collapsed final frame is what lands on the socket / last push.
+    assert len(pushes) >= 2
+    assert all(uid == "7" for uid, _ in pushes)
+    assert result["result"][0] == "done 100%"
+    assert pushes[-1][1] == "done 100%"
+
+
+def test_send_run_output_is_a_safe_noop_without_comfyui() -> None:
+    # No unique_id (and no ComfyUI `server` module in the dev env) -> a silent no-op, never raising.
+    from fluxstudio.nodes import _send_run_output
+
+    _send_run_output(None, "anything")  # unique_id None: returns immediately
+    _send_run_output("1", "anything")  # server absent: guarded try/except swallows the import error
+
+
 def test_run_node_rejects_non_runnable() -> None:
     from fluxstudio.nodes import RunNode
 
@@ -393,3 +435,58 @@ def test_run_node_grad_context_is_active_inside_worker_thread() -> None:
     assert observed["grad_enabled"] is True
     assert observed["inference"] is False
     assert "_TorchRunnable" in status["result"][0] and "complete" in status["result"][0]
+
+
+# ---------------------------------------------------------------------------
+# RetagObjectNode — the strict-socket escape hatch
+# ---------------------------------------------------------------------------
+
+
+def test_retag_node_registered() -> None:
+    assert NODE_CLASS_MAPPINGS["Taidal_Retag"] is RetagObjectNode
+    assert NODE_DISPLAY_NAME_MAPPINGS["Taidal_Retag"] == "Retag (role / task)"
+
+
+def test_retag_node_io_is_wildcard() -> None:
+    """Input + initial output are the litegraph wildcard ``*`` so the node accepts any object and
+    (until web/retag.js narrows the output to the chosen role) docks anywhere."""
+    assert RetagObjectNode.RETURN_TYPES == (ANY,)
+    assert RetagObjectNode.RETURN_NAMES == ("object",)
+    spec = RetagObjectNode.INPUT_TYPES()
+    assert spec["required"]["object"] == (ANY,)
+    # The wildcard compares equal to every concrete socket type (the AnyType contract).
+    assert ANY == "DATAFLUX_OBJECT:model"
+    assert not (ANY != "DATAFLUX_SOURCE")
+    # Combos carry the keep / none sentinels.
+    for field in ("target_role", "target_task"):
+        options = spec["required"][field][0]
+        assert options[:2] == [_RETAG_KEEP, _RETAG_NONE]
+
+
+def test_retag_restamps_and_passes_through() -> None:
+    """Picking a target re-stamps the object's per-instance tag and returns the SAME object."""
+
+    class _Obj:
+        pass
+
+    obj = _Obj()
+    # ``role`` drives the socket (task-agnostic); ``task`` is guidance only.
+    out = RetagObjectNode().retag(obj, target_role="model", target_task="classification")
+    assert out == (obj,)  # same object, passed through
+    assert obj.__confluid_role__ == "model"  # type: ignore[attr-defined]
+    assert obj.__confluid_task__ == "classification"  # type: ignore[attr-defined]
+
+
+def test_retag_keep_is_noop_and_none_clears() -> None:
+    class _Obj:
+        __confluid_role__ = "model"
+        __confluid_task__ = "classification"
+
+    obj = _Obj()
+    # (keep) leaves the existing class-level tags untouched (no instance shadow).
+    RetagObjectNode().retag(obj, target_role=_RETAG_KEEP, target_task=_RETAG_KEEP)
+    assert "__confluid_role__" not in vars(obj)
+    # (none) clears via a per-instance None shadow.
+    RetagObjectNode().retag(obj, target_role=_RETAG_NONE, target_task=_RETAG_NONE)
+    assert obj.__confluid_role__ is None
+    assert obj.__confluid_task__ is None
