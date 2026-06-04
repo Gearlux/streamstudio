@@ -31,3 +31,4 @@ lightning_logs/
 logs/
 checkpoints/
 runs/
+frontend/
