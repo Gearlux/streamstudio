@@ -285,6 +285,40 @@ def test_collapse_carriage_returns_keeps_final_frame() -> None:
     assert _collapse_carriage_returns("plain\nlines") == "plain\nlines"
 
 
+def test_strip_ansi_removes_csi_sequences() -> None:
+    from fluxstudio.nodes import _strip_ansi
+
+    esc = "\x1b"
+    # A Rich/Lightning progress frame: erase-line + dim + reset + dim/underline SGR codes.
+    raw = f"{esc}[2KTesting 10000/10000 {esc}[2m0:00:40{esc}[0m {esc}[2;4m249.83it/s{esc}[0m"
+    cleaned = _strip_ansi(raw)
+    assert cleaned == "Testing 10000/10000 0:00:40 249.83it/s"
+    assert esc not in cleaned
+    # Plain text is untouched (incl. the box-drawing bar glyphs).
+    assert _strip_ansi("plain ━━━ 50%") == "plain ━━━ 50%"
+
+
+def test_run_node_strips_ansi_progress_codes() -> None:
+    # A Rich-style bar emits cursor/erase + dim/underline ANSI codes that a plain text widget can't
+    # render. The captured widget copy (result socket + pushes) must be stripped clean; the live
+    # console tee keeps them (so the bar still animates in the terminal) — not asserted here.
+    from fluxstudio.nodes import RunNode
+
+    esc = "\x1b"
+
+    class _RichBar:
+        def run(self) -> None:
+            sys.stdout.write(f"\r{esc}[2KTesting 1/10000")
+            sys.stdout.write(f"\r{esc}[2KTesting 10000/10000 {esc}[2m0:00:40{esc}[0m {esc}[2;4m249.83it/s{esc}[0m\n")
+            sys.stdout.flush()
+
+    result = RunNode().run(_RichBar(), unique_id=None)
+    text = result["result"][0]
+    assert esc not in text
+    assert "[2K" not in text and "[0m" not in text
+    assert "Testing 10000/10000 0:00:40 249.83it/s" in text
+
+
 def test_run_node_streams_output_live(monkeypatch: pytest.MonkeyPatch) -> None:
     # The runner's output is pushed to the node's widget DURING the run (so progress bars update live),
     # not only at the end. We record each _send_run_output call and assert >1 push (live + final).

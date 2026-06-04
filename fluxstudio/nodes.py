@@ -12,6 +12,7 @@ provides the index-walk stepper.
 
 import ctypes
 import io
+import re
 import sys
 import threading
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
@@ -363,6 +364,19 @@ def _collapse_carriage_returns(text: str) -> str:
     return "\n".join(line.rsplit("\r", 1)[-1] if "\r" in line else line for line in text.split("\n"))
 
 
+# ANSI CSI escape sequences (ECMA-48): ESC '[' params intermediates final-byte. Rich / tqdm progress
+# bars emit these for color, dim/underline (\x1b[2m / \x1b[2;4m), erase-line (\x1b[2K) and cursor
+# moves — none of which a plain ComfyUI text widget can render, so they show up as literal "[2K"/"[0m"
+# garbage. NO_COLOR strips the *color* SGR codes but not dim/underline/erase, so we strip the lot for
+# the WIDGET copy only; the live console tee keeps them so the bar still animates in the terminal.
+_ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+def _strip_ansi(text: str) -> str:
+    """Remove ANSI CSI escape sequences so captured progress-bar output reads as plain text."""
+    return _ANSI_RE.sub("", text)
+
+
 def _send_run_output(unique_id: Optional[str], text: str) -> None:
     """Push a live snapshot of the run's captured output to the node's widget (``web/run_output.js``).
 
@@ -474,7 +488,7 @@ class RunNode:
         sys.stdout, sys.stderr = _TeeStream(old_out, buffer), _TeeStream(old_err, buffer)
 
         def _snapshot() -> str:
-            snap = _collapse_carriage_returns(buffer.getvalue())
+            snap = _strip_ansi(_collapse_carriage_returns(buffer.getvalue()))
             if len(snap) > _MAX_OUTPUT_CHARS:
                 snap = "… (output truncated — see the console for the full log)\n" + snap[-_MAX_OUTPUT_CHARS:]
             return snap
