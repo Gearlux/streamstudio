@@ -2,10 +2,10 @@
 configured (with colors) before fluxstudio was imported.
 
 `fluxstudio/__init__.py` calls ``logflow.force_no_color()`` at import, which sets
-``LOGFLOW_COLORIZE=false`` AND reloads logflow when it is already configured.
+the standard ``NO_COLOR=1`` AND reloads logflow when it is already configured.
 Merely inheriting/copying the env var is NOT enough once a coloring decision is
-baked into the live console sink — these tests pin the reload, and that an
-explicit user override still wins.
+baked into the live console sink — these tests pin the reload, and that a pre-set
+``NO_COLOR=`` (empty) still re-allows colors.
 
 Each check runs in a SUBPROCESS (isolated logflow state) with ``cwd`` set to a
 throwaway dir so ``import fluxstudio`` resolves to the installed package (not the
@@ -47,15 +47,13 @@ def _stream_colorize(env: dict, cwd: Path) -> str:
 
 def test_fluxstudio_forces_colorless_even_if_preconfigured(tmp_path: Path) -> None:
     env = dict(os.environ)
-    env.pop("LOGFLOW_COLORIZE", None)
     env.pop("NO_COLOR", None)
     env["PYCHARM_HOSTED"] = "1"  # auto-detect would say "colorize" — but we forced off
     assert _stream_colorize(env, tmp_path) == "False"
 
 
-def test_fluxstudio_respects_user_colorize_override(tmp_path: Path) -> None:
+def test_fluxstudio_empty_no_color_re_allows_colors(tmp_path: Path) -> None:
     env = dict(os.environ)
-    env["LOGFLOW_COLORIZE"] = "true"
-    env.pop("NO_COLOR", None)
+    env["NO_COLOR"] = ""  # explicit "allow colors" — force_no_color must not clobber it
     env["PYCHARM_HOSTED"] = "1"
     assert _stream_colorize(env, tmp_path) == "True"
