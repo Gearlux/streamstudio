@@ -30,7 +30,7 @@ inlines any saved subgraph back into the flat hoisted YAML.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union, cast
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union, cast
 
 from confluid import Class, Instance, LazyClass, Reference
 from confluid import dump as _confluid_dump
@@ -63,21 +63,23 @@ _HOISTED_VARS: Tuple[str, ...] = ("num_classes", "image_size")
 # Shared: class ↔ node-key index, node introspection, value coercion
 # =======================================================================================
 
-_NODE_INDEX_CACHE: Dict[int, Dict[type, str]] = {}
+_NODE_INDEX_CACHE: Dict[int, Dict[Callable[..., Any], str]] = {}
 
 
-def _node_index(node_mappings: Dict[str, Any]) -> Dict[type, str]:
-    """Reverse index ``{configurable class -> ComfyUI node_key}`` built from the node mappings.
+def _node_index(node_mappings: Dict[str, Any]) -> Dict[Callable[..., Any], str]:
+    """Reverse index ``{configurable target -> ComfyUI node_key}`` built from the node mappings.
 
     Each generated node class stamps ``TAIDAL_CALLABLE_PATH`` (an importable ``module:qualname``);
-    ``resolve_callable`` turns it back into the class, giving us the class→key direction needed to
-    emit a workflow node for a Fluid marker. Cached per ``node_mappings`` identity.
+    ``resolve_callable`` turns it back into the target, giving us the target→key direction needed to
+    emit a workflow node for a Fluid marker. The target may be a class OR a builder FUNCTION (a
+    registered ``role="model"`` torchvision detection builder), so the index keys any callable —
+    matching the bridge's callable-aware object nodes. Cached per ``node_mappings`` identity.
     """
     cache_key = id(node_mappings)
     cached = _NODE_INDEX_CACHE.get(cache_key)
     if cached is not None:
         return cached
-    index: Dict[type, str] = {}
+    index: Dict[Callable[..., Any], str] = {}
     for key, node_cls in node_mappings.items():
         path = getattr(node_cls, "TAIDAL_CALLABLE_PATH", None)
         if not path:
@@ -86,18 +88,18 @@ def _node_index(node_mappings: Dict[str, Any]) -> Dict[type, str]:
             target = resolve_callable(path)
         except (ImportError, AttributeError, ValueError):  # pragma: no cover - defensive
             continue
-        if isinstance(target, type):
+        if callable(target):
             index[target] = key
     _NODE_INDEX_CACHE[cache_key] = index
     return index
 
 
-def _node_key_for_class(cls: type, node_mappings: Dict[str, Any]) -> Optional[str]:
-    """The ComfyUI node_key registered for ``cls``, or ``None`` if it has no FluxStudio node."""
+def _node_key_for_class(cls: Callable[..., Any], node_mappings: Dict[str, Any]) -> Optional[str]:
+    """The ComfyUI node_key registered for ``cls`` (a class OR builder function), or ``None``."""
     return _node_index(node_mappings).get(cls)
 
 
-def _target_and_kwargs(obj: Any) -> Optional[Tuple[type, bool, Dict[str, Any]]]:
+def _target_and_kwargs(obj: Any) -> Optional[Tuple[Callable[..., Any], bool, Dict[str, Any]]]:
     """``(class, is_lazy, kwargs)`` for a Fluid marker OR a live ``@configurable`` instance.
 
     Returns ``None`` for anything that is not a node (scalars, ``None``, plain lists/dicts).
