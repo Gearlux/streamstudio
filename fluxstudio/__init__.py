@@ -7,12 +7,12 @@ from typing import Any, Dict, List, Optional
 import logflow
 
 # FluxStudio runs inside ComfyUI: its logs land in ComfyUI's own console/log
-# capture, where ANSI color escapes are noise. force_no_color() sets
-# LOGFLOW_COLORIZE=false AND reloads logflow if some earlier ComfyUI import
-# already configured it (inheriting/copying the env is NOT enough once a coloring
-# decision is baked into the console sink). Must run before the get_logger() /
-# fluxstudio.* imports below that pull logflow in. Overridable: export
-# LOGFLOW_COLORIZE=true. See logflow's force_no_color.
+# capture, where ANSI color escapes are noise. force_no_color() sets the standard
+# NO_COLOR=1 AND reloads logflow if some earlier ComfyUI import already configured
+# it (inheriting/copying the env is NOT enough once a coloring decision is baked
+# into the console sink). Must run before the get_logger() / fluxstudio.* imports
+# below that pull logflow in. To re-allow colors, pre-set NO_COLOR= (empty).
+# See logflow's force_no_color.
 logflow.force_no_color()
 
 from logflow import get_logger  # (import follows force_no_color above)
