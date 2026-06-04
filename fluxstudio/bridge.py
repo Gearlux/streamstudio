@@ -31,6 +31,7 @@ compose into higher-order ops (via ``DATAFLUX_OP``).
 import collections.abc as cabc
 import importlib
 import inspect
+import json
 import os
 import types as _types
 from typing import (
@@ -753,15 +754,20 @@ def _is_dataset_member_class(obj: Any) -> bool:
 
 
 def _is_object_member_class(obj: Any) -> bool:
-    """True if ``obj`` is a runnable MEMBER class that should become a ``DATAFLUX_OBJECT`` node.
+    """True if ``obj`` is a runnable MEMBER that should become a ``DATAFLUX_OBJECT`` node.
 
-    A task-scoped model / loss / metric (``__confluid_role__`` in :data:`_MEMBER_ROLES`), OR a class
+    A task-scoped model / loss / metric (``__confluid_role__`` in :data:`_MEMBER_ROLES`), OR a target
     tagged confluid ``lazy`` (``__confluid_lazy__`` — the role-less registered runtime members:
     ``torch.optim.*`` / ``DataLoader`` / ``pytorch_lightning.Trainer``). The ``lazy`` mark — not a
-    category — is the signal for the runtime members so they stay out of navigaitor's category-driven
-    form-spec pickers.
+    category — is the signal for the role-less runtime members so they stay out of navigaitor's
+    category-driven form-spec pickers.
+
+    The target may be a class OR a plain builder/factory FUNCTION — confluid ``register`` stamps the
+    same markers on a function (e.g. ``raidar.configurables`` registers the torchvision detection
+    builders ``fasterrcnn_*`` with ``role="model"``), and ``_build_object_node`` introspects either
+    via ``inspect.signature``. So the gate is "callable + marked", not "class + marked".
     """
-    if not inspect.isclass(obj):
+    if not callable(obj):
         return False
     return getattr(obj, "__confluid_role__", None) in _MEMBER_ROLES or bool(getattr(obj, "__confluid_lazy__", False))
 
@@ -885,11 +891,15 @@ def _node_class(
     kind: Optional[str] = None,
     callable_path: Optional[str] = None,
     optional_inputs: Optional[Dict[str, Any]] = None,
+    output_node: bool = False,
+    hidden: Optional[Dict[str, Any]] = None,
 ) -> Type:
     """Assemble a ComfyUI node class from its parts.
 
-    Note: auto-generated nodes are never terminal/output nodes — the only OUTPUT_NODE
-    (the sample viewer) is hand-written in ``fluxstudio/nodes.py``.
+    ``output_node=True`` marks the node a terminal ``OUTPUT_NODE`` (ComfyUI always executes it on
+    Queue) — used by runnable nodes, which RUN on execute (:func:`_build_runnable_node`). ``hidden``
+    is folded into ``INPUT_TYPES`` (e.g. ``{"unique_id": "UNIQUE_ID"}`` so a runnable node can address
+    its own live-output widget). Most generated nodes pass neither.
 
     ``accepts`` / ``produces`` are the source callable's declared ``SampleType.to_dict()`` (or
     ``None``); they ride on the node class as ``TAIDAL_ACCEPTS`` / ``TAIDAL_PRODUCES`` so the
@@ -904,6 +914,8 @@ def _node_class(
     input_spec: Dict[str, Any] = {"required": inputs}
     if optional_inputs:
         input_spec["optional"] = optional_inputs
+    if hidden:
+        input_spec["hidden"] = hidden
     attrs: Dict[str, Any] = {
         "INPUT_TYPES": classmethod(lambda cls, _spec=input_spec: _spec),
         "RETURN_TYPES": return_types,
@@ -915,6 +927,8 @@ def _node_class(
         "TAIDAL_NODE_KIND": kind,
         "TAIDAL_CALLABLE_PATH": callable_path,
     }
+    if output_node:
+        attrs["OUTPUT_NODE"] = True
     if return_names is not None:
         attrs["RETURN_NAMES"] = return_names
     return type(name, (object,), attrs)
@@ -1188,20 +1202,50 @@ def _output_return_anno(cls: Any, prop_name: str) -> Any:
 
 
 def _output_socket_type(prop_name: str, anno: Any) -> str:
-    """ComfyUI socket type for a runnable's declared ``@output`` — mirrors the INPUT member mapping.
+    """ComfyUI socket type for a runnable's declared ``@output`` (every output becomes a wireable socket).
 
-    A dataset-named output rides ``DATAFLUX_SOURCE``; a scalar output a typed widget string (via
-    :func:`_map_type`); a role-bearing object output (``trained_model`` for a trainer) rides the
-    ROLE-QUALIFIED ``DATAFLUX_OBJECT:<role>`` (task-agnostic) so it docks straight into a downstream
-    runnable's likewise-qualified object slot (an evaluator's ``model``); any other object rides the
-    bare ``DATAFLUX_OBJECT``.
+    Since a runnable node RUNS on execute (:func:`_build_runnable_node`), its ``@output`` sockets carry
+    LIVE post-run values. The mapping:
+
+    * a dataset-named output rides ``DATAFLUX_SOURCE``;
+    * a scalar output a typed widget string (via :func:`_map_type` — ``INT`` / ``FLOAT`` / ``STRING`` / ``BOOLEAN``);
+    * a **container** output (``Dict`` / ``List`` / ``Set`` / ``Tuple`` — e.g. ``computed_metrics`` a
+      ``Dict[str, float]``, ``label_names`` a ``List[str]``) rides a plain ``STRING`` socket (the runnable
+      node JSON-encodes the value), so it wires straight into ComfyUI's native *Show Text* node. This branch
+      is BEFORE the role inference on purpose: it stops ``computed_metrics`` from mis-mapping to a bogus
+      ``DATAFLUX_OBJECT:metric`` via the ``"metric"`` substring in :func:`_infer_member_role`;
+    * a role-bearing object output (``trained_model`` → ``DATAFLUX_OBJECT:model``, task-agnostic) docks
+      straight into a downstream runnable's likewise-qualified object slot (an evaluator's ``model``);
+    * any other object rides the bare ``DATAFLUX_OBJECT``.
     """
     if prop_name in _DATASET_MEMBER_PARAMS:
         return SOURCE_TYPE
     if _is_scalar_anno(anno):
         return _map_type(prop_name, anno)
+    if get_origin(anno) in (dict, list, set, tuple):
+        return "STRING"  # container -> JSON STRING socket (wire into a native Show Text node)
     role = _infer_member_role(prop_name)
     return _object_socket(role) if role in _QUALIFIED_OBJECT_ROLES else OBJECT_TYPE
+
+
+def _coerce_output_value(value: Any, socket_type: str) -> Any:
+    """Coerce a runnable's LIVE ``@output`` value to its output socket (:func:`_build_runnable_node`).
+
+    A ``STRING`` socket (a container ``@output`` like ``computed_metrics`` / ``label_names``, or a ``str``
+    scalar) carries a string: containers are JSON-encoded (``default=str`` so a stray non-JSON leaf like a
+    numpy scalar still serialises), ``None`` → ``""``, anything else → ``str()``. Object / source / numeric
+    sockets pass the value through unchanged (the live model / flux / number).
+    """
+    if socket_type != "STRING":
+        return value
+    if value is None:
+        return ""
+    if isinstance(value, (dict, list, tuple, set)):
+        try:
+            return json.dumps(value, default=str, sort_keys=True)
+        except (TypeError, ValueError):  # pragma: no cover - defensive: unserialisable nested object
+            return str(value)
+    return str(value)
 
 
 def _build_object_node(cls: Callable, name: str, category: str) -> Type:
@@ -1364,14 +1408,18 @@ def _build_runnable_node(cls: Callable, name: str, category: str) -> Type:
     flagged mandatory) — is a REQUIRED socket (``model`` / ``train_set`` / ``dataset``); everything else
     is OPTIONAL — unwired ⇒ the runnable keeps its baked default ("true optional").
 
-    OUTPUTS: beyond the ``DATAFLUX_RUNNABLE`` wire, the runnable's declared ``@output`` properties
-    (:func:`confluid.output_specs`) are appended as extra output sockets — a trainer's ``trained_model``
-    rides ``DATAFLUX_OBJECT`` straight into a downstream evaluator's ``model`` slot. The node is
-    **build-only**: ``execute`` constructs the runnable (ctor params to ``__init__``, body slots via
-    post-construction ``setattr`` of the wired members) and outputs it on a ``DATAFLUX_RUNNABLE`` wire;
-    a separate ``Run`` node calls ``.run()``. Each declared output is read via ``getattr`` AFTER the
-    build and emitted alongside — guarded, since a run-output getter (e.g. ``trained_model``) raises
-    pre-run by design, so it is emitted as ``None`` until a ``Run`` node has executed.
+    The node **RUNS on execute** (it is the terminal ``OUTPUT_NODE`` — there is no separate Run node):
+    ``execute`` constructs the runnable (ctor params to ``__init__``, body slots via post-construction
+    ``setattr`` of the wired members), calls :func:`fluxstudio.nodes.run_runnable` (autograd-restore for
+    ``__torch_runner__`` trainers, ComfyUI-interrupt handling, live stdout streaming to the node's log
+    widget), then reads each declared ``@output`` (now LIVE, post-run) and emits it on a typed socket.
+
+    OUTPUTS: slot 0 is the (post-run) runnable on a ``DATAFLUX_RUNNABLE`` wire; then EVERY declared
+    ``@output`` property (:func:`confluid.output_specs`) becomes a wireable socket via
+    :func:`_output_socket_type` — ``trained_model`` rides ``DATAFLUX_OBJECT:model`` into a downstream
+    evaluator's ``model`` slot, and container outputs (``computed_metrics`` / ``label_names``) ride a
+    ``STRING`` (JSON) socket you wire into ComfyUI's native *Show Text*. Because the node runs first,
+    these carry real values (not ``None``).
     """
     from confluid import to_pydantic
 
@@ -1421,12 +1469,16 @@ def _build_runnable_node(cls: Callable, name: str, category: str) -> Type:
         else:
             optional[member] = (socket,)
 
-    # Declared @output properties -> extra output sockets (mapped like input members).
-    out_specs = output_specs(runnable_cls)
-    extra_types = tuple(_output_socket_type(s["name"], _output_return_anno(cls, s["name"])) for s in out_specs)
+    # EVERY declared @output -> a typed output socket (mapped by _output_socket_type; containers ride a
+    # STRING/JSON socket). The node runs before reading them, so they carry live values.
+    out_specs = list(output_specs(runnable_cls))
+    out_sockets = [_output_socket_type(s["name"], _output_return_anno(cls, s["name"])) for s in out_specs]
+    extra_types = tuple(out_sockets)
     extra_names = tuple(s["name"] for s in out_specs)
 
-    def execute(self: Any, **kwargs: Any) -> Tuple[Any, ...]:
+    def execute(self: Any, unique_id: Optional[str] = None, **kwargs: Any) -> Dict[str, Any]:
+        from fluxstudio.nodes import run_runnable  # lazy: nodes.py imports bridge (avoid an import cycle)
+
         ctor_kwargs: Dict[str, Any] = {}
         post: Dict[str, Any] = {}
         for k, v in kwargs.items():
@@ -1439,16 +1491,21 @@ def _build_runnable_node(cls: Callable, name: str, category: str) -> Type:
         obj = cls(**_coerce_kwargs(cls, ctor_kwargs))
         for k, v in post.items():
             setattr(obj, k, v)
-        # The node is build-only: read each declared output, guarding the getters that raise
-        # pre-run (e.g. trained_model while the model is still a deferred Fluid) -> emit None.
+        # RUN it (this node is the OUTPUT_NODE — there is no separate Run node). run_runnable restores
+        # autograd for TorchRunner trainers, honours ComfyUI's interrupt, and live-streams stdout to the
+        # node's log widget; it returns the captured text.
+        text = run_runnable(obj, unique_id)
+        # Read each declared @output (now LIVE, post-run) and coerce to its socket type — a STRING socket
+        # carries the JSON-encoded value (wire into Show Text); object/source/scalar sockets pass through.
         outs: List[Any] = []
-        for spec in out_specs:
+        for spec, socket in zip(out_specs, out_sockets):
             try:
-                outs.append(getattr(obj, spec["name"]))
-            except Exception as exc:  # pragma: no cover - expected pre-run for run-output getters
-                logger.debug("{}: output {!r} not available pre-run ({}); emitting None.", name, spec["name"], exc)
-                outs.append(None)
-        return (obj, *outs)
+                value = getattr(obj, spec["name"])
+            except Exception as exc:  # pragma: no cover - a getter that raises post-run (shouldn't happen)
+                logger.debug("{}: output {!r} unavailable ({}); emitting None.", name, spec["name"], exc)
+                value = None
+            outs.append(_coerce_output_value(value, socket))
+        return {"ui": {"text": [text]}, "result": (obj, *outs)}
 
     return _node_class(
         name,
@@ -1460,6 +1517,8 @@ def _build_runnable_node(cls: Callable, name: str, category: str) -> Type:
         optional_inputs=optional or None,
         kind="runnable",
         callable_path=_safe_callable_path(cls),
+        output_node=True,
+        hidden={"unique_id": "UNIQUE_ID"},
     )
 
 
@@ -1628,7 +1687,10 @@ def register_module_nodes(
         if name.startswith("_") or name in candidates:
             continue
         member = getattr(mod, name, None)
-        if inspect.isclass(member) and getattr(member, "__confluid_configurable__", False):
+        # A re-exported configurable may be a class OR a registered builder FUNCTION
+        # (``raidar.configurables`` registers torchvision's ``fasterrcnn_*`` builders) — admit any
+        # callable carrying the configurable marker; the admission filter below classifies it.
+        if callable(member) and getattr(member, "__confluid_configurable__", False):
             candidates[name] = member
 
     for name, target_func in candidates.items():

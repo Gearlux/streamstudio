@@ -4,16 +4,24 @@ import { ComfyWidgets } from "../../scripts/widgets.js";
 
 console.log("ComfyFlux: Loaded Taidal.RunOutput extension");
 
-// Shows the captured stdout/stderr of a Run node's runner (training progress, metrics, logflow lines)
-// in a read-only, COLLAPSIBLE multiline text widget on the node. It updates LIVE during the run: the
-// Python RunNode streams the latest `\r`-collapsed snapshot over the `taidal.run_output` websocket
-// event (so a tqdm / Lightning progress bar updates IN PLACE), and also returns the final text under
-// `ui.text` (restored by onExecuted on re-open). The captured logs are runtime output, not config, so
-// they're never serialised into the saved workflow.json.
+// Shows the captured stdout/stderr of a RUNNABLE node (trainer / evaluator / processor) in a
+// read-only, COLLAPSIBLE multiline text widget on the node. Runnable nodes RUN on execute (they are
+// the terminal OUTPUT_NODE — there is no separate Run node); bridge._build_runnable_node calls
+// fluxstudio.nodes.run_runnable, which streams the latest `\r`-collapsed snapshot over the
+// `taidal.run_output` websocket event (so a tqdm / Lightning progress bar updates IN PLACE) and also
+// returns the final text under `ui.text` (restored by onExecuted on re-open). The captured logs are
+// runtime output, not config, so they're never serialised into the saved workflow.json.
+//
+// A node is a "runnable" iff it declares the hidden `unique_id` input (only runnable nodes do — the
+// bridge folds it in). ComfyUI exposes the full INPUT_TYPES (incl. `hidden`) as `nodeData.input`.
 
-const RUN_NODE = "Taidal_Run";
 const EXPANDED_LABEL = "▾ output";
 const COLLAPSED_LABEL = "▸ output";
+
+// True for a generated runnable node — the one structural marker only runnable nodes carry.
+function isRunnableNode(nodeData) {
+    return nodeData?.input?.hidden?.unique_id !== undefined;
+}
 
 function ensureOutputWidget(node) {
     let widget = node.widgets?.find((w) => w.name === "run_output");
@@ -77,15 +85,16 @@ function setOutput(node, text) {
 app.registerExtension({
     name: "Taidal.RunOutput",
     async setup() {
-        // LIVE stream: the RunNode pushes `{node, text}` every poll while the runner runs.
+        // LIVE stream: a runnable node pushes `{node, text}` every poll while it runs.
         api.addEventListener("taidal.run_output", (event) => {
             const detail = event?.detail || {};
             const node = app.graph?.getNodeById?.(Number(detail.node));
-            if (node && node.comfyClass === RUN_NODE) setOutput(node, detail.text ?? "");
+            if (node && node._isTaidalRunnable) setOutput(node, detail.text ?? "");
         });
     },
     async beforeRegisterNodeDef(nodeType, nodeData) {
-        if (nodeData.name !== RUN_NODE) return;
+        if (!isRunnableNode(nodeData)) return;
+        nodeType.prototype._isTaidalRunnable = true; // marks instances for the live-event handler above
 
         const onNodeCreated = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function () {

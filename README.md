@@ -42,6 +42,8 @@ Taidal nodes then appear in ComfyUI's *Add Node* menu grouped by what they ARE, 
 
 Object sockets (model / loss / metric) are **role-qualified and task-agnostic**: a classification model and a segmentation model both carry `DATAFLUX_OBJECT:model`, so a model docks into *any* trainer's `model` slot — the role still stops you wiring a loss into a model slot. The **Retag** node re-stamps an object's role to force a connection when you need it.
 
+A model node can come from a **builder function**, not just a class. Many libraries ship their models as factory functions — torchvision's detectors are `fasterrcnn_resnet50_fpn(...)`, `ssdlite320_mobilenet_v3_large(...)`, etc. These are registered (`raidar.configurables`, with `role="model"`), so each appears under `Taidal/Model/Detection` as an object node whose widgets (`num_classes`, `weights_backbone`, …) are read straight from the function's signature. Wire its **`class`** output into a detection **Trainer**'s `model` slot — because the node is lazy, the trainer injects the dataset-derived `num_classes` at run time, so you can leave that widget blank.
+
 ### Hiding ComfyUI's built-in nodes
 
 By default the palette shows ComfyUI's built-in nodes (KSampler, Preview Image, …) **alongside** the Taidal nodes. To launch a Taidal-only palette, pass `--no-default-nodes`:
@@ -55,6 +57,10 @@ This (a) prunes ComfyUI's built-in / `comfy_extras` / API nodes from the *Add No
 > **Note:** hiding the defaults also removes ComfyUI's native viewers (*Preview Image*, text/number displays) that the **Extract from Sample** adapter normally feeds — so use the Taidal-only palette for building/exporting pipelines, and the default palette when you want to preview samples on the canvas.
 
 Under the hood the flag exports `FLUXSTUDIO_HIDE_DEFAULT_NODES=1` to the launched ComfyUI process (it's a subprocess); if you launch ComfyUI directly (not via the `fluxstudio` CLI) you can set that env var yourself for the same effect.
+
+### Empty starting canvas
+
+FluxStudio starts on an **empty canvas** rather than ComfyUI's built-in Stable-Diffusion sample workflow (Checkpoint → CLIP → KSampler → VAE → Save Image), which has nothing to do with Taidal pipelines. The same empty canvas is loaded when you close the last workflow tab. This is a bundled ComfyUI web extension (`web/empty_default_graph.js`) — no flag needed; your own saved/restored workflows open normally.
 
 ## Building a pipeline
 
@@ -95,9 +101,11 @@ Preview Image                    # ← native ComfyUI viewer
 
 ### Running a trainer / evaluator / processor
 
-Trainer / evaluator / processor nodes are **build-only** — they construct the runnable and output it on a `DATAFLUX_RUNNABLE` wire so the graph stays cheap to inspect. Wire that into the terminal **Run (train / evaluate / process)** node (`Taidal/FluxStudio`) and **Queue Prompt** to actually execute the (potentially long) `.run()`. The Run node honours ComfyUI's **interrupt button**: it runs the work on a background thread and, when you press interrupt, injects a `KeyboardInterrupt` so the run stops cleanly at the next batch / sample boundary (PyTorch Lightning shuts down gracefully). A single long-running C kernel can't be interrupted mid-call, so cancellation lands between steps, not instantly.
+A trainer / evaluator / processor node **runs itself when you Queue the graph** — it IS a terminal output node, so there is no separate "Run" node to wire. **Queue Prompt** executes the (potentially long) `.run()`. The node honours ComfyUI's **interrupt button**: it runs the work on a background thread and, when you press interrupt, injects a `KeyboardInterrupt` so the run stops cleanly at the next batch / sample boundary (PyTorch Lightning shuts down gracefully). A single long-running C kernel can't be interrupted mid-call, so cancellation lands between steps, not instantly. (To build/inspect/export a graph without training, just don't Queue it — use the **Export Graph → Taidal YAML** menu command.)
 
-The Run node shows the runner's output **live** in a collapsible widget on the node: training progress, metrics, and an in-place-updating **tqdm / Lightning progress bar** stream in as the run proceeds (and still mirror to the console). Use the `▾ output` toggle to fold the log away; the captured text is runtime output and is never saved into the workflow.
+The node shows the runner's output **live** in a collapsible widget on itself: training progress, metrics, and an in-place-updating **tqdm / Lightning progress bar** stream in as the run proceeds (and still mirror to the console). Use the `▾ output` toggle to fold the log away; the captured text is runtime output and is never saved into the workflow.
+
+**Outputs are wireable sockets.** Every confluid `@output` a runnable declares is a typed output socket on the node, filled with the run's LIVE value. For a marainer trainer / evaluator (and the sonair / deltaid / raidar specialisations) that's `computed_metrics` (the run's final scalar metrics, e.g. `test/accuracy`, `val/loss`) and `label_names` (the resolved class names) — both `STRING` sockets carrying JSON, so wire them into ComfyUI's native **Show Text** node to see them — plus `trained_model` (a `DATAFLUX_OBJECT:model` you wire straight into an evaluator node's `model` slot to chain train → eval in one graph). Add a new value `@output` upstream and it becomes a socket automatically — no FluxStudio change needed.
 
 **Attaching loggers / callbacks.** An object node's constructor params that accept an *object* (rather than a typed/string value) render as wired `DATAFLUX_OBJECT` input sockets — so to log a run, drop a logger node (e.g. `TensorBoardLogger`, `CSVLogger`) and wire its **`instance`** output into the **Lightning Trainer** node. A param that accepts a *list* of objects (the Trainer's `logger` / `callbacks`) grows **dynamic `logger_0`, `logger_1`, …** sockets as you wire — so you can attach several loggers (or callbacks) at once, just like the `op_N` / `source_N` list inputs. String-settable knobs like `accelerator` (`"gpu"`) and `precision` stay editable widgets; only genuinely object-typed params become sockets.
 

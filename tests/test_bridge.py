@@ -18,6 +18,7 @@ functions' annotations would route everything through the string-contains
 fallback and silently defeat the very branches under test.
 """
 
+import json
 from pathlib import Path
 from typing import List, Literal, Optional
 from unittest.mock import MagicMock, patch
@@ -1146,7 +1147,7 @@ def test_op_node_runtime_check_rejects_mismatched_sample() -> None:
 # Runnable + object nodes (trainers / evaluators / processors as canvas nodes)
 # --------------------------------------------------------------------------- #
 
-from typing import Any  # noqa: E402
+from typing import Any, Dict, Type  # noqa: E402
 
 from confluid import LazyClass, Mandatory, configurable, output  # noqa: E402
 
@@ -1156,9 +1157,12 @@ from fluxstudio.bridge import (  # noqa: E402
     _admits_object_list,
     _build_object_node,
     _build_runnable_node,
+    _is_object_member_class,
     _is_runnable,
     _is_wireable_object_param,
     _object_socket,
+    _object_socket_for_class,
+    _output_socket_type,
 )
 
 
@@ -1220,24 +1224,28 @@ def test_build_runnable_node_member_sockets_and_widgets() -> None:
     assert opt["val_set"] == (SOURCE_TYPE,)
 
 
-def test_runnable_node_execute_builds_and_post_sets_members() -> None:
+def test_runnable_node_execute_builds_post_sets_and_runs() -> None:
+    # The node RUNS on execute (it is the OUTPUT_NODE): it builds the runnable (ctor + post-setattr),
+    # then calls run(). Returns the {"ui": ..., "result": (runnable, *outputs)} display form.
     node = _build_runnable_node(_FakeTrainer, "Taidal_Fake", "Taidal/Fake")
     model, train_set = object(), object()
     custom_opt = LazyClass(float)
-    built = node().execute(model=model, train_set=train_set, num_classes=3, optimizer=custom_opt, val_set=None)[0]
+    result = node().execute(model=model, train_set=train_set, num_classes=3, optimizer=custom_opt, val_set=None)
+    built = result["result"][0]
 
     assert isinstance(built, _FakeTrainer)
     assert built.model is model  # ctor param
     assert built.num_classes == 3
     assert built.optimizer is custom_opt  # wired body slot set post-construction
     assert built.val_set is None  # unwired optional -> keeps baked default
-    assert built.ran is False  # build-only: run() NOT called
+    assert built.ran is True  # the node RAN it on execute (no separate Run node)
 
 
 def test_create_comfy_node_dispatches_runnable() -> None:
     node = create_comfy_node(_FakeTrainer, "Taidal_Fake", "Taidal/Fake")
     assert node.TAIDAL_NODE_KIND == "runnable"
     assert node.RETURN_TYPES == (RUNNABLE_TYPE,)
+    assert getattr(node, "OUTPUT_NODE", False) is True  # a runnable node runs on Queue
 
 
 @configurable(task="faketask", role="trainer", validate=False)
@@ -1269,15 +1277,77 @@ def test_runnable_node_appends_declared_outputs() -> None:
     assert node.RETURN_TYPES == (RUNNABLE_TYPE, _object_socket("model"))
 
 
-def test_runnable_node_execute_emits_outputs_guarded_pre_run() -> None:
+def test_runnable_node_runs_and_emits_live_outputs() -> None:
+    # The node RUNS the runnable, then reads each @output LIVE (post-run) and emits it on its socket —
+    # NOT None. trained_model (an object) passes through; the getter no longer raises because run() ran.
     node = _build_runnable_node(_FakeTrainerWithOutput, "Taidal_FakeOut", "Taidal/Fake")
     model = object()
-    out = node().execute(model=model, train_set=object())
-    # Build-only node: the runnable plus one slot per declared output; the run-output getter raises
-    # pre-run, so it is emitted as None (no exception escapes execute).
-    assert len(out) == 2
-    assert isinstance(out[0], _FakeTrainerWithOutput)
-    assert out[1] is None
+    result = node().execute(model=model, train_set=object())
+    runnable, trained = result["result"]
+    assert isinstance(runnable, _FakeTrainerWithOutput)
+    assert runnable._ran is True
+    assert trained is model  # live post-run value, not None
+
+
+def test_output_socket_type_maps_containers_to_string() -> None:
+    from typing import Dict, List
+
+    import torch.nn as nn
+
+    # Containers ride a STRING (JSON) socket — and computed_metrics must NOT mis-map to OBJECT:metric.
+    assert _output_socket_type("computed_metrics", Dict[str, float]) == "STRING"
+    assert _output_socket_type("label_names", List[str]) == "STRING"
+    # A role-bearing object output stays a role-qualified DATAFLUX_OBJECT socket.
+    assert _output_socket_type("trained_model", nn.Module) == _object_socket("model")
+    # A dataset-named output rides DATAFLUX_SOURCE.
+    assert _output_socket_type("dataset", object) == SOURCE_TYPE
+
+
+@configurable(task="faketask", role="trainer", validate=False)
+class _FakeTrainerWithDisplayOutputs:
+    """A runnable declaring an object output (``trained_model``) AND container outputs."""
+
+    def __init__(self, model: Any, train_set: Any) -> None:
+        self.model = model
+        self.train_set = train_set
+
+    def run(self) -> None:
+        pass
+
+    @property
+    @output
+    def trained_model(self) -> Any:
+        return self.model
+
+    @property
+    @output
+    def computed_metrics(self) -> "dict[str, float]":
+        return {"acc": 1.0}
+
+    @property
+    @output
+    def label_names(self) -> "list[str]":
+        return ["a"]
+
+
+def test_runnable_node_is_output_node_with_all_outputs() -> None:
+    # EVERY declared @output becomes a static wireable socket (no dynamic outputs): the object output
+    # rides DATAFLUX_OBJECT:model, the container outputs ride STRING (JSON). The node is an OUTPUT_NODE
+    # with a hidden unique_id (for the live-output widget).
+    node = _build_runnable_node(_FakeTrainerWithDisplayOutputs, "Taidal_FakeDisp", "Taidal/Fake")
+    assert getattr(node, "OUTPUT_NODE", False) is True
+    assert node.INPUT_TYPES()["hidden"]["unique_id"] == "UNIQUE_ID"
+    assert node.RETURN_NAMES == ("runnable", "trained_model", "computed_metrics", "label_names")
+    assert node.RETURN_TYPES == (RUNNABLE_TYPE, _object_socket("model"), "STRING", "STRING")
+
+
+def test_runnable_node_emits_container_outputs_as_json_strings() -> None:
+    # On execute the container @outputs come back JSON-encoded on their STRING sockets (wire to Show Text).
+    node = _build_runnable_node(_FakeTrainerWithDisplayOutputs, "Taidal_FakeDisp", "Taidal/Fake")
+    result = node().execute(model=object(), train_set=object())
+    _runnable, _trained, metrics_json, names_json = result["result"]
+    assert json.loads(metrics_json) == {"acc": 1.0}
+    assert json.loads(names_json) == ["a"]
 
 
 def test_runnable_node_required_inputs_include_mandatory_marked() -> None:
@@ -1330,6 +1400,66 @@ def test_object_node_lazy_defers_instance_and_skips_runtime_param() -> None:
     # A runtime-injected required param (``params``) -> no standalone instance, only the LazyClass.
     assert instance is None
     assert isinstance(lazy, LazyClass) and lazy.kwargs.get("lr") == 0.5
+
+
+# --------------------------------------------------------------------------- #
+# A registered builder FUNCTION (not a class) becomes an OBJECT node.
+# The canonical case: ``raidar.configurables`` registers torchvision's detection
+# builders (``fasterrcnn_*``) with role="model" + lazy=True. A local function
+# stands in (markers stamped by hand) so the test carries no torchvision dep.
+# --------------------------------------------------------------------------- #
+def _build_detector(num_classes: Optional[int] = None, weights_backbone: str = "DEFAULT") -> Dict[str, Any]:
+    """A builder FUNCTION (mirrors a torchvision detection builder): all params defaulted."""
+    return {"num_classes": num_classes, "weights_backbone": weights_backbone}
+
+
+_build_detector.__confluid_configurable__ = True  # type: ignore[attr-defined]
+_build_detector.__confluid_role__ = "model"  # type: ignore[attr-defined]
+_build_detector.__confluid_category__ = "detection_model"  # type: ignore[attr-defined]
+_build_detector.__confluid_lazy__ = True  # type: ignore[attr-defined]
+
+
+def test_object_member_predicate_accepts_marked_function() -> None:
+    # The gate is "callable + marked", not "class + marked".
+    assert _is_object_member_class(_build_detector) is True
+    # A bare unmarked function is NOT an object member.
+    assert _is_object_member_class(lambda: None) is False
+
+
+def test_object_node_from_builder_function() -> None:
+    """A builder FUNCTION yields an OBJECT node: role-qualified socket + signature widgets,
+    and ``class`` is a ``LazyClass`` of the FUNCTION (wires straight into a model slot)."""
+    # role="model" -> the output docks into a runnable's ``model`` slot with no Retag.
+    assert _object_socket_for_class(_build_detector) == f"{OBJECT_TYPE}:model"
+    node = _build_object_node(_build_detector, "Taidal_Detector", "Taidal/Model/Detection")
+    assert node.RETURN_TYPES == (f"{OBJECT_TYPE}:model", f"{OBJECT_TYPE}:model")
+    spec = node.INPUT_TYPES()
+    widgets = {**spec.get("required", {}), **spec.get("optional", {})}
+    assert "num_classes" in widgets  # introspected from the FUNCTION's own signature
+    instance, lazy = node().execute(num_classes=2, weights_backbone="DEFAULT")
+    assert isinstance(lazy, LazyClass) and lazy.target is _build_detector
+    assert lazy.kwargs.get("num_classes") == 2
+    # All params defaulted -> a live instance is buildable (not deferred).
+    assert instance == {"num_classes": 2, "weights_backbone": "DEFAULT"}
+
+
+def test_register_module_nodes_admits_reexported_function(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pass 2 admits a registered builder FUNCTION re-exported via ``__all__`` (not just classes)."""
+    import sys
+    import types as _types
+
+    mod = _types.ModuleType("fake.builders")
+    mod.build_detector = _build_detector  # type: ignore[attr-defined]
+    mod.__all__ = ["build_detector"]  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "fake.builders", mod)
+
+    mappings: Dict[str, Type] = {}
+    display: Dict[str, str] = {}
+    with patch("fluxstudio.bridge.scan_module", return_value=[]):
+        register_module_nodes("fake.builders", mappings, display)
+    assert len(mappings) == 1
+    (cls,) = mappings.values()
+    assert cls.RETURN_TYPES == (f"{OBJECT_TYPE}:model", f"{OBJECT_TYPE}:model")
 
 
 # --------------------------------------------------------------------------- #

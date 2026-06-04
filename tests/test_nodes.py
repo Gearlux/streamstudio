@@ -236,16 +236,12 @@ def test_static_node_mappings_present() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# RunNode — terminal OUTPUT node that calls .run() on a built runnable
+# run_runnable — runs a built runnable (each per-class runnable node's execute calls this)
 # --------------------------------------------------------------------------- #
 
 
-def test_run_node_calls_run() -> None:
-    from fluxstudio.bridge import RUNNABLE_TYPE
-    from fluxstudio.nodes import RunNode
-
-    assert RunNode.OUTPUT_NODE is True
-    assert RunNode.INPUT_TYPES()["required"]["runnable"] == (RUNNABLE_TYPE,)
+def test_run_runnable_calls_run_and_returns_text() -> None:
+    from fluxstudio.nodes import run_runnable
 
     calls = []
 
@@ -253,28 +249,24 @@ def test_run_node_calls_run() -> None:
         def run(self) -> None:
             calls.append(True)
 
-    result = RunNode().run(_Runnable())
+    text = run_runnable(_Runnable())
     assert calls == [True]
-    # run() returns the {"ui": {"text": [...]}, "result": (text,)} display form.
-    status = result["result"]
-    assert "_Runnable" in status[0] and "complete" in status[0]
-    assert result["ui"]["text"] == [status[0]]
+    # run_runnable returns the captured text; the node's execute wraps it in {"ui": {"text": [...]}}.
+    assert "_Runnable" in text and "complete" in text
 
 
-def test_run_node_captures_runner_output() -> None:
-    # The runner's stdout/stderr is captured and returned on both the output socket and ui.text.
-    from fluxstudio.nodes import RunNode
+def test_run_runnable_captures_runner_output() -> None:
+    # The runner's stdout/stderr is captured and returned as the text.
+    from fluxstudio.nodes import run_runnable
 
     class _Printy:
         def run(self) -> None:
             print("epoch 1: loss=0.5")
             print("done", file=sys.stderr)
 
-    result = RunNode().run(_Printy())
-    text = result["ui"]["text"][0]
+    text = run_runnable(_Printy())
     assert "epoch 1: loss=0.5" in text
     assert "done" in text
-    assert result["result"][0] == text
 
 
 def test_collapse_carriage_returns_keeps_final_frame() -> None:
@@ -298,11 +290,11 @@ def test_strip_ansi_removes_csi_sequences() -> None:
     assert _strip_ansi("plain ━━━ 50%") == "plain ━━━ 50%"
 
 
-def test_run_node_strips_ansi_progress_codes() -> None:
+def test_run_runnable_strips_ansi_progress_codes() -> None:
     # A Rich-style bar emits cursor/erase + dim/underline ANSI codes that a plain text widget can't
-    # render. The captured widget copy (result socket + pushes) must be stripped clean; the live
-    # console tee keeps them (so the bar still animates in the terminal) — not asserted here.
-    from fluxstudio.nodes import RunNode
+    # render. The captured text must be stripped clean; the live console tee keeps them (so the bar
+    # still animates in the terminal) — not asserted here.
+    from fluxstudio.nodes import run_runnable
 
     esc = "\x1b"
 
@@ -312,20 +304,19 @@ def test_run_node_strips_ansi_progress_codes() -> None:
             sys.stdout.write(f"\r{esc}[2KTesting 10000/10000 {esc}[2m0:00:40{esc}[0m {esc}[2;4m249.83it/s{esc}[0m\n")
             sys.stdout.flush()
 
-    result = RunNode().run(_RichBar(), unique_id=None)
-    text = result["result"][0]
+    text = run_runnable(_RichBar(), unique_id=None)
     assert esc not in text
     assert "[2K" not in text and "[0m" not in text
     assert "Testing 10000/10000 0:00:40 249.83it/s" in text
 
 
-def test_run_node_streams_output_live(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_runnable_streams_output_live(monkeypatch: pytest.MonkeyPatch) -> None:
     # The runner's output is pushed to the node's widget DURING the run (so progress bars update live),
     # not only at the end. We record each _send_run_output call and assert >1 push (live + final).
     import time
 
     from fluxstudio import nodes as nodes_mod
-    from fluxstudio.nodes import RunNode
+    from fluxstudio.nodes import run_runnable
 
     pushes: list = []
     monkeypatch.setattr(nodes_mod, "_send_run_output", lambda uid, text: pushes.append((uid, text)))
@@ -339,13 +330,13 @@ def test_run_node_streams_output_live(monkeypatch: pytest.MonkeyPatch) -> None:
                 time.sleep(0.12)  # span several 0.1s poll ticks so the loop streams mid-run
             print("\rdone 100%")
 
-    result = RunNode().run(_Progress(), unique_id="7")
+    text = run_runnable(_Progress(), unique_id="7")
 
     # Streaming fired more than once (at least one live push before the final one), all addressed to
-    # this node, and the \r-collapsed final frame is what lands on the socket / last push.
+    # this node, and the \r-collapsed final frame is what lands on the returned text / last push.
     assert len(pushes) >= 2
     assert all(uid == "7" for uid, _ in pushes)
-    assert result["result"][0] == "done 100%"
+    assert text == "done 100%"
     assert pushes[-1][1] == "done 100%"
 
 
@@ -357,18 +348,18 @@ def test_send_run_output_is_a_safe_noop_without_comfyui() -> None:
     _send_run_output("1", "anything")  # server absent: guarded try/except swallows the import error
 
 
-def test_run_node_rejects_non_runnable() -> None:
-    from fluxstudio.nodes import RunNode
+def test_run_runnable_rejects_non_runnable() -> None:
+    from fluxstudio.nodes import run_runnable
 
     with pytest.raises(RuntimeError, match="no callable run"):
-        RunNode().run(object())
+        run_runnable(object())
 
 
-def test_run_node_restores_autograd_for_torch_runner_under_inference_mode() -> None:
+def test_run_runnable_restores_autograd_for_torch_runner_under_inference_mode() -> None:
     # ComfyUI wraps graph execution in torch.inference_mode(); a TorchRunner (training) must get
     # normal autograd restored inside run() or loss.backward() fails. Simulate the wrapping and
     # assert a tensor built inside run() carries a grad graph.
-    from fluxstudio.nodes import RunNode
+    from fluxstudio.nodes import run_runnable
 
     observed = {}
 
@@ -384,14 +375,14 @@ def test_run_node_restores_autograd_for_torch_runner_under_inference_mode() -> N
             observed["has_grad"] = lin.weight.grad is not None
 
     with torch.inference_mode():
-        RunNode().run(_TorchRunnable())
+        run_runnable(_TorchRunnable())
 
     assert observed == {"grad_enabled": True, "inference": False, "has_grad": True}
 
 
-def test_run_node_leaves_inference_mode_for_plain_runnable() -> None:
+def test_run_runnable_leaves_inference_mode_for_plain_runnable() -> None:
     # An inference-only runnable (no __torch_runner__) runs as-is under ComfyUI's inference mode.
-    from fluxstudio.nodes import RunNode
+    from fluxstudio.nodes import run_runnable
 
     observed = {}
 
@@ -400,16 +391,16 @@ def test_run_node_leaves_inference_mode_for_plain_runnable() -> None:
             observed["inference"] = torch.is_inference_mode_enabled()
 
     with torch.inference_mode():
-        RunNode().run(_PlainRunnable())
+        run_runnable(_PlainRunnable())
 
     assert observed["inference"] is True
 
 
-def test_run_node_interrupt_stops_running_runnable() -> None:
-    # The user pressed ComfyUI's interrupt button mid-run: RunNode polls the flag, injects a
+def test_run_runnable_interrupt_stops_running_runnable() -> None:
+    # The user pressed ComfyUI's interrupt button mid-run: run_runnable polls the flag, injects a
     # KeyboardInterrupt into the worker thread, and re-raises the interrupt signal for a clean stop.
     import fluxstudio.nodes as nodes
-    from fluxstudio.nodes import RunNode, _interrupt_exception_type
+    from fluxstudio.nodes import _interrupt_exception_type, run_runnable
 
     started = threading.Event()
     ran_to_completion = {"value": False}
@@ -429,27 +420,27 @@ def test_run_node_interrupt_stops_running_runnable() -> None:
 
     with patch.object(nodes, "_processing_interrupted", _interrupted):
         with pytest.raises(_interrupt_exception_type()):
-            RunNode().run(_SlowRunnable())
+            run_runnable(_SlowRunnable())
 
     assert ran_to_completion["value"] is False
 
 
-def test_run_node_propagates_genuine_worker_exception() -> None:
+def test_run_runnable_propagates_genuine_worker_exception() -> None:
     # A real error inside run() (not an interrupt) is surfaced to the caller, unchanged.
-    from fluxstudio.nodes import RunNode
+    from fluxstudio.nodes import run_runnable
 
     class _Boom:
         def run(self) -> None:
             raise ValueError("kaboom")
 
     with pytest.raises(ValueError, match="kaboom"):
-        RunNode().run(_Boom())
+        run_runnable(_Boom())
 
 
-def test_run_node_grad_context_is_active_inside_worker_thread() -> None:
+def test_run_runnable_grad_context_is_active_inside_worker_thread() -> None:
     # The grad restore for a TorchRunner must happen ON the worker thread (torch grad mode is
     # thread-local), and the work must run on a DIFFERENT thread than the caller.
-    from fluxstudio.nodes import RunNode
+    from fluxstudio.nodes import run_runnable
 
     main_thread = threading.get_ident()
     observed = {}
@@ -463,12 +454,12 @@ def test_run_node_grad_context_is_active_inside_worker_thread() -> None:
             observed["inference"] = torch.is_inference_mode_enabled()
 
     with torch.inference_mode():
-        status = RunNode().run(_TorchRunnable())
+        text = run_runnable(_TorchRunnable())
 
     assert observed["thread"] != main_thread
     assert observed["grad_enabled"] is True
     assert observed["inference"] is False
-    assert "_TorchRunnable" in status["result"][0] and "complete" in status["result"][0]
+    assert "_TorchRunnable" in text and "complete" in text
 
 
 # ---------------------------------------------------------------------------
