@@ -1081,7 +1081,14 @@ def test_nullable_numeric_becomes_optional_socket() -> None:
     assert "ratio" not in required
     assert optional["count"][0] == "INT"
     assert optional["ratio"][0] == "FLOAT"
-    # A concrete-default int is still a required INT widget.
+    # Nullable optional sockets must NOT carry a numeric default (0 / 0.0):
+    # the Python default is None ("disabled"), and a numeric config default could be
+    # passed by ComfyUI as a kwarg when the socket is unconnected, defeating None.
+    count_config = optional["count"][1] if len(optional["count"]) > 1 else {}
+    ratio_config = optional["ratio"][1] if len(optional["ratio"]) > 1 else {}
+    assert "default" not in count_config
+    assert "default" not in ratio_config
+    # A concrete-default int is still a required INT widget with the right default.
     assert required["n"] == ("INT", {"default": 3})
 
 
