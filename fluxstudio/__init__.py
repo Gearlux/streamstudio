@@ -180,9 +180,14 @@ def _discover_and_register_nodes() -> None:
         seen.add(mod_path)
         # The palette path per node is ``Taidal/<Package>/<Category>[/<group>]`` — built inside
         # register_module_nodes from the module's top-level package + each class's confluid
-        # category/group (see bridge._node_category). We only pass the module to scan.
+        # category/group (see bridge._node_category). ep.dist.name is the distribution name
+        # (e.g. "waivefront-helios") — passed as dist_name so the [PKG] label tag is derived
+        # from the dist, not the top-level Python package (which would collapse companion
+        # namespace packages like waivefront-helios back to [WAIVEFRONT]).
         try:
-            register_module_nodes(mod_path, NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS)
+            ep_dist = getattr(ep, "dist", None)
+            dist_name = ep_dist.name if ep_dist is not None else None
+            register_module_nodes(mod_path, NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS, dist_name=dist_name)
         except Exception as e:
             # We use debug instead of warning here because not all confluid modules
             # will have valid ComfyUI ops, and we don't want to spam the user's startup log.

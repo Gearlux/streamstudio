@@ -325,28 +325,6 @@ _HF_METADATA_PARAM = "metadata_features"
 # To surface another role (e.g. ``"sink"``) add it here AND tag the classes.
 _NODE_CATEGORIES = {"op", "source", "engine"}
 
-# Canonical palette display casing for workspace packages whose ``str.title()`` would mangle the
-# intended CamelCase (``dataflux`` → ``Dataflux`` not ``DataFlux``). The top-level package of each
-# discovered node's entry-point module is the palette's first level (``Taidal/<Package>/…``).
-# Unlisted packages fall back to ``str.title()``.
-_PACKAGE_DISPLAY_NAMES = {
-    "dataflux": "DataFlux",
-    "fluxstudio": "FluxStudio",
-    "logflow": "LogFlow",
-    "waivefront": "Waivefront",
-    "sonair": "Sonair",
-    "deltaid": "Deltaid",
-    "raidar": "Raidar",
-    "raidar_ultralytics": "Raidar Ultralytics",
-    "marainer": "Marainer",
-    "navigaitor": "Navigaitor",
-}
-
-
-def _package_display_name(package: str) -> str:
-    """Palette label for a top-level package — canonical casing if known, else ``str.title()``."""
-    return _PACKAGE_DISPLAY_NAMES.get(package, package.title())
-
 
 # The CLI's ``--no-default-nodes`` flag exports this so the fluxstudio import inside ComfyUI knows
 # to (a) prune ComfyUI's built-in nodes from the palette and (b) surface the Taidal nodes at the
@@ -893,6 +871,7 @@ def _node_class(
     optional_inputs: Optional[Dict[str, Any]] = None,
     output_node: bool = False,
     hidden: Optional[Dict[str, Any]] = None,
+    is_random: bool = False,
 ) -> Type:
     """Assemble a ComfyUI node class from its parts.
 
@@ -931,6 +910,10 @@ def _node_class(
         attrs["OUTPUT_NODE"] = True
     if return_names is not None:
         attrs["RETURN_NAMES"] = return_names
+    if is_random:
+        # float("nan") != float("nan") always → ComfyUI always considers the output stale
+        # and re-executes the full upstream chain on every queue prompt.
+        attrs["IS_CHANGED"] = classmethod(lambda cls, **kw: float("nan"))
     return type(name, (object,), attrs)
 
 
@@ -999,6 +982,7 @@ def _build_source_node(cls: Callable, name: str, category: str) -> Type:
         produces=_spec_to_dict(cls, "PRODUCES"),
         kind="source",
         callable_path=_safe_callable_path(cls),
+        is_random=getattr(cls, "__confluid_random__", False),
     )
 
 
@@ -1031,9 +1015,10 @@ def _build_op_node(cls: Callable, name: str, category: str) -> Type:
             if accepts is not None:
                 got = infer_sample_type(sample)
                 if not accepts.accepts(got):
+                    detail = accepts.explain_mismatch(got)
                     raise RuntimeError(
-                        f"{getattr(cls, '__name__', 'op')} cannot accept the upstream sample: "
-                        f"expects {accepts} but got {got}."
+                        f"{getattr(cls, '__name__', 'op')} cannot accept the upstream sample — {detail}. "
+                        f"(op expects {accepts.input}, upstream produces {got.input})"
                     )
             applied = op(sample)
             if applied is None:
@@ -1055,6 +1040,7 @@ def _build_op_node(cls: Callable, name: str, category: str) -> Type:
         produces=_spec_to_dict(cls, "PRODUCES"),
         kind="op",
         callable_path=_safe_callable_path(cls),
+        is_random=getattr(cls, "__confluid_random__", False),
     )
 
 
@@ -1558,14 +1544,19 @@ def _humanize_node_name(name: str) -> str:
     return name.replace("_", " ")
 
 
-def _package_tag(module_path: str) -> str:
-    """The bracketed package tag shown in a node's LABEL (``[SONAIR]`` / ``[DATAFLUX]``).
+def _package_tag(module_path: str, dist_name: Optional[str] = None) -> str:
+    """The bracketed package tag shown in a node's LABEL (``[SONAIR]`` / ``[WAIVEFRONT-HELIOS]``).
 
     The palette is grouped by ROLE/TASK (or category) — NOT by package (see :func:`_node_category`) —
-    so the producing package is surfaced in the node label instead. Uppercased canonical casing via
-    :data:`_PACKAGE_DISPLAY_NAMES` (``dataflux`` → ``DATAFLUX``, ``sonair`` → ``SONAIR``).
+    so the producing package is surfaced in the node label instead.
+
+    Uses the distribution name (``ep.dist.name``) when available so companion namespace packages
+    (e.g. ``waivefront-helios``) are distinguished from their parent (``waivefront``).
+    Falls back to the top-level Python package name when ``dist_name`` is absent.
     """
-    return _package_display_name(module_path.split(".")[0]).upper()
+    if dist_name is not None:
+        return dist_name.upper()
+    return module_path.split(".")[0].upper()
 
 
 def _node_category(
@@ -1630,6 +1621,7 @@ def register_module_nodes(
     target_mappings: Dict[str, Type],
     display_name_mappings: Dict[str, str],
     root: Optional[str] = None,
+    dist_name: Optional[str] = None,
 ) -> None:
     """Scan a module and register its buildable callables as ComfyUI nodes.
 
@@ -1734,5 +1726,5 @@ def register_module_nodes(
             ),
         )
         target_mappings[node_name] = node_class
-        display_name_mappings[node_name] = f"[{_package_tag(module_path)}] {_humanize_node_name(name)}"
+        display_name_mappings[node_name] = f"[{_package_tag(module_path, dist_name)}] {_humanize_node_name(name)}"
         logger.debug(f"ComfyFlux: Registered node {node_name} for {module_path}.{name}")
