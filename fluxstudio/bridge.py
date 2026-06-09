@@ -541,9 +541,11 @@ def _widget_for(param: inspect.Parameter, owner: Optional[Callable] = None) -> T
     # when wired it receives the correct Python type directly.  ``_build_config_inputs`` routes
     # entries tagged with ``_nullable_optional=True`` into the "optional" section of INPUT_TYPES.
     if param.default is None and comfy_type in ("INT", "FLOAT"):
-        config = DEFAULT_WIDGET_CONFIG.get(comfy_type, {}).copy()
-        config["_nullable_optional"] = True
-        return comfy_type, config
+        # Do NOT copy DEFAULT_WIDGET_CONFIG: the Python default is None ("disabled"), not 0 / 0.0.
+        # A numeric default in the socket config would mislead both the UI (suggesting 0 is a valid
+        # default) and potentially ComfyUI's backend (which may pass the config default as a kwarg
+        # when the socket is left unconnected — delivering 0 instead of None to the constructor).
+        return comfy_type, {"_nullable_optional": True}
 
     # Nullable bool (e.g. ``Optional[bool] = None`` like ``pl.Trainer.enable_progress_bar`` /
     # ``enable_checkpointing`` / ``enable_model_summary``): a ComfyUI BOOLEAN checkbox can't BE None, and
