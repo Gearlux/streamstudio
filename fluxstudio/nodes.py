@@ -269,6 +269,10 @@ class SampleExtractorNode:
             label = (sample.metadata or {}).get("label_name") if field == "target" else None
             n: Any = int(scalar) if float(scalar).is_integer() else scalar
             return f"{label} (id={n})" if label is not None else str(n)
+        # Lists and dicts: show full content as YAML so bounding-box annotations, metadata
+        # dicts, etc. are human-readable rather than just "list" or "dict".
+        if isinstance(value, (list, dict)):
+            return _to_yaml_str(value)
         shape = getattr(value, "shape", None)
         shape_str = f" shape={tuple(shape)}" if shape is not None else ""
         return f"{SampleExtractorNode._spec_summary(spec)}{shape_str}".strip()
@@ -698,6 +702,59 @@ class MixSamplesNode:
 
 
 # ---------------------------------------------------------------------------
+# YAML serialization helper + node
+# ---------------------------------------------------------------------------
+
+
+def _to_yaml_str(obj: Any) -> str:
+    """Serialize ``obj`` to a YAML string.
+
+    Taidal ``@configurable`` instances use ``confluid.dump`` (preserves
+    ``!class:`` / ``!ref:`` tags).  Everything else falls through to
+    ``yaml.safe_dump``; non-serializable objects fall back to ``repr()``.
+    """
+    try:
+        from confluid import dump
+
+        return dump(obj).strip()
+    except Exception:
+        pass
+    try:
+        import yaml
+
+        return yaml.safe_dump(obj, default_flow_style=False, allow_unicode=True, sort_keys=False).strip()
+    except Exception:
+        return repr(obj)
+
+
+class YamlDumpNode:
+    """Serialize any Taidal op, source, configurable object, or plain Python value to YAML.
+
+    Wire any object — a DataFlux op, a source, a trained model, a bounding-box list, a
+    metadata dict — into the ``object`` socket and read the YAML text from ``yaml``.
+
+    * Taidal ``@configurable`` objects are dumped with ``confluid.dump`` (round-trippable
+      ``!class:Foo(param=value)`` format).
+    * Plain Python containers (lists, dicts, scalars) use standard ``yaml.safe_dump``.
+    * Anything else falls back to ``repr()``.
+
+    Chain the ``yaml`` output to a **Show Text** node to inspect the object.
+    """
+
+    CATEGORY = _FLUXSTUDIO_CATEGORY
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("yaml",)
+    FUNCTION = "dump"
+
+    @classmethod
+    def INPUT_TYPES(cls) -> Dict[str, Any]:
+        return {"required": {"object": (ANY,)}}
+
+    def dump(self, object: Any) -> Tuple[str]:
+        return (_to_yaml_str(object),)
+
+
+# ---------------------------------------------------------------------------
 # Scalar math expression nodes
 # ---------------------------------------------------------------------------
 
@@ -790,6 +847,7 @@ NODE_CLASS_MAPPINGS: Dict[str, Type] = {
     "Taidal_Retag": RetagObjectNode,
     "Taidal_ComposeSample": ComposeSampleNode,
     "Taidal_MixSamples": MixSamplesNode,
+    "Taidal_YamlDump": YamlDumpNode,
     "Taidal_Math": MathNode,
 }
 
@@ -799,5 +857,6 @@ NODE_DISPLAY_NAME_MAPPINGS: Dict[str, str] = {
     "Taidal_Retag": "Retag (role / task)",
     "Taidal_ComposeSample": "Compose Sample (3-way)",
     "Taidal_MixSamples": "Mix Samples (merge metadata)",
+    "Taidal_YamlDump": "YAML Dump",
     "Taidal_Math": "Math",
 }

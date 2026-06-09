@@ -29,7 +29,9 @@ from fluxstudio.nodes import (
     RetagObjectNode,
     SampleExtractorNode,
     WalkDatasetNode,
+    YamlDumpNode,
     _colormap_choices,
+    _to_yaml_str,
 )
 
 
@@ -218,9 +220,11 @@ def test_extract_string_field_passthrough() -> None:
 
 
 def test_extract_text_summary_for_pythontype_and_anytype() -> None:
-    # list target -> PythonType("list") summary; None target -> AnyType fallback.
+    # list target -> full YAML content (not just "list"); None target -> AnyType fallback.
     list_text = SampleExtractorNode().extract(Sample(input=0, target=[1, 2, 3]), field="target")[2]
-    assert list_text == "list"
+    # Full content must be present — each element appears in the YAML.
+    assert "1" in list_text and "3" in list_text
+    assert list_text != "list"  # old truncated summary is gone
     none_text = SampleExtractorNode().extract(Sample(input=0, target=None), field="target")[2]
     assert none_text == "AnyType"
 
@@ -347,10 +351,12 @@ def test_static_node_mappings_present() -> None:
     assert NODE_CLASS_MAPPINGS["Taidal_ExtractSample"] is SampleExtractorNode
     assert NODE_CLASS_MAPPINGS["Taidal_ComposeSample"] is ComposeSampleNode
     assert NODE_CLASS_MAPPINGS["Taidal_MixSamples"] is MixSamplesNode
+    assert NODE_CLASS_MAPPINGS["Taidal_YamlDump"] is YamlDumpNode
     assert NODE_DISPLAY_NAME_MAPPINGS["Taidal_WalkDataset"] == "Walk Dataset (by index)"
     assert NODE_DISPLAY_NAME_MAPPINGS["Taidal_ExtractSample"] == "Extract from Sample"
     assert NODE_DISPLAY_NAME_MAPPINGS["Taidal_ComposeSample"] == "Compose Sample (3-way)"
     assert NODE_DISPLAY_NAME_MAPPINGS["Taidal_MixSamples"] == "Mix Samples (merge metadata)"
+    assert NODE_DISPLAY_NAME_MAPPINGS["Taidal_YamlDump"] == "YAML Dump"
 
 
 # --------------------------------------------------------------------------- #
@@ -633,3 +639,89 @@ def test_retag_keep_is_noop_and_none_clears() -> None:
     RetagObjectNode().retag(obj, target_role=_RETAG_NONE, target_task=_RETAG_NONE)
     assert obj.__confluid_role__ is None
     assert obj.__confluid_task__ is None
+
+
+# --------------------------------------------------------------------------- #
+# _to_yaml_str + YamlDumpNode
+# --------------------------------------------------------------------------- #
+
+
+def test_to_yaml_str_plain_list() -> None:
+    result = _to_yaml_str([[10, 20, 30, 40], [50, 60, 70, 80]])
+    assert "10" in result and "80" in result
+
+
+def test_to_yaml_str_plain_dict() -> None:
+    result = _to_yaml_str({"snr": 12.5, "label": "wifi"})
+    assert "snr" in result and "12.5" in result and "wifi" in result
+
+
+def test_to_yaml_str_configurable_object() -> None:
+    from confluid import configurable
+
+    @configurable
+    class _DummyOp:
+        def __init__(self, gain: float = 1.0) -> None:
+            self.gain = gain
+
+    result = _to_yaml_str(_DummyOp(gain=2.5))
+    # confluid.dump uses !class: tag notation
+    assert "_DummyOp" in result
+    assert "2.5" in result
+
+
+def test_to_yaml_str_non_serializable_falls_back_to_repr() -> None:
+    class _UnknownThing:
+        def __repr__(self) -> str:
+            return "UnknownThing()"
+
+    result = _to_yaml_str(_UnknownThing())
+    assert "UnknownThing" in result
+
+
+def test_extract_list_target_shows_full_yaml() -> None:
+    """_to_text for a list target must show the complete content, not just 'list'."""
+    bboxes = [[10, 20, 100, 200], [30, 40, 150, 250]]
+    sample = Sample(input=np.zeros((8, 8, 3), dtype="uint8"), target=bboxes, metadata={})
+    _img, _mask, text, _i, _f = SampleExtractorNode().extract(sample, field="target")
+    # Full content present — not just a type summary.
+    assert "10" in text and "250" in text
+
+
+def test_extract_dict_metadata_shows_full_yaml() -> None:
+    meta = {"snr_db": 12.5, "modulation": "QPSK", "label": 7}
+    sample = Sample(input=np.zeros((4, 4, 3), dtype="uint8"), target=meta, metadata={})
+    _img, _mask, text, _i, _f = SampleExtractorNode().extract(sample, field="target")
+    assert "snr_db" in text and "12.5" in text and "QPSK" in text
+
+
+def test_yaml_dump_node_list() -> None:
+    (yaml_str,) = YamlDumpNode().dump([[1, 2], [3, 4]])
+    assert "1" in yaml_str and "4" in yaml_str
+
+
+def test_yaml_dump_node_dict() -> None:
+    (yaml_str,) = YamlDumpNode().dump({"key": "value", "n": 42})
+    assert "key" in yaml_str and "value" in yaml_str and "42" in yaml_str
+
+
+def test_yaml_dump_node_configurable() -> None:
+    from confluid import configurable
+
+    @configurable
+    class _Op:
+        def __init__(self, rate: float = 0.5) -> None:
+            self.rate = rate
+
+    (yaml_str,) = YamlDumpNode().dump(_Op(rate=0.9))
+    assert "_Op" in yaml_str and "0.9" in yaml_str
+
+
+def test_yaml_dump_node_input_types() -> None:
+    spec = YamlDumpNode.INPUT_TYPES()
+    assert spec["required"]["object"] == (ANY,)
+
+
+def test_yaml_dump_node_return_types() -> None:
+    assert YamlDumpNode.RETURN_TYPES == ("STRING",)
+    assert YamlDumpNode.RETURN_NAMES == ("yaml",)
