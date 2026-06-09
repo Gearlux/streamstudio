@@ -534,18 +534,12 @@ def _widget_for(param: inspect.Parameter, owner: Optional[Callable] = None) -> T
 
     # Nullable numeric (e.g. ``Optional[int] = None``, ``Optional[Union[float, int, str]] = None``
     # like ``ThresholdOp.low_level`` / ``HuggingFaceSource.count``):
-    # ComfyUI's INT/FLOAT widgets can't represent None — 0 is a distinct, often-breaking value
-    # (``count=0`` → no samples; ``low_level=0`` → a real threshold of zero, not "disabled").
-    # Render as a properly-typed OPTIONAL socket instead: when the socket is left unconnected the
-    # param is absent from ``execute`` kwargs → the constructor default (``None``) applies;
-    # when wired it receives the correct Python type directly.  ``_build_config_inputs`` routes
-    # entries tagged with ``_nullable_optional=True`` into the "optional" section of INPUT_TYPES.
+    # INT/FLOAT widgets can't represent None — 0 is a distinct, often-breaking value.
+    # A FLOAT/INT optional socket triggers ComfyUI's type coercion (``float(None)``) when the
+    # socket is left unconnected, crashing before execute is called.  Use a blank STRING widget
+    # instead: "" → None (disabled), "5.5" → cast to the numeric type in ``_coerce_kwargs``.
     if param.default is None and comfy_type in ("INT", "FLOAT"):
-        # Do NOT copy DEFAULT_WIDGET_CONFIG: the Python default is None ("disabled"), not 0 / 0.0.
-        # A numeric default in the socket config would mislead both the UI (suggesting 0 is a valid
-        # default) and potentially ComfyUI's backend (which may pass the config default as a kwarg
-        # when the socket is left unconnected — delivering 0 instead of None to the constructor).
-        return comfy_type, {"_nullable_optional": True}
+        return "STRING", {"default": "", "multiline": False}
 
     # Nullable bool (e.g. ``Optional[bool] = None`` like ``pl.Trainer.enable_progress_bar`` /
     # ``enable_checkpointing`` / ``enable_model_summary``): a ComfyUI BOOLEAN checkbox can't BE None, and
