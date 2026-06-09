@@ -54,57 +54,71 @@ def test_eval_formula_import_blocked() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_math_node_returns_three_outputs() -> None:
+def test_math_node_returns_four_outputs() -> None:
     node = MathNode()
     result = node.compute("a + b", 1.0, 2.0)
-    assert len(result) == 3
+    assert len(result) == 4
 
 
 def test_math_node_float_output() -> None:
     node = MathNode()
-    f, _, _ = node.compute("a + b", 1.5, 2.5)
+    f, _, _, _ = node.compute("a + b", 1.5, 2.5)
     assert f == pytest.approx(4.0)
     assert isinstance(f, float)
 
 
 def test_math_node_int_output() -> None:
     node = MathNode()
-    _, i, _ = node.compute("a * b", 3, 4)
+    _, i, _, _ = node.compute("a * b", 3, 4)
     assert i == 12
     assert isinstance(i, int)
 
 
 def test_math_node_bool_output_true() -> None:
     node = MathNode()
-    _, _, b = node.compute("a > b", 10, 5)
+    _, _, b, _ = node.compute("a > b", 10, 5)
     assert b is True
     assert isinstance(b, bool)
 
 
 def test_math_node_bool_output_false() -> None:
     node = MathNode()
-    _, _, b = node.compute("a > b", 3, 5)
+    _, _, b, _ = node.compute("a > b", 3, 5)
     assert b is False
+
+
+def test_math_node_str_output() -> None:
+    node = MathNode()
+    _, _, _, s = node.compute("a + b", 1.5, 2.5)
+    assert isinstance(s, str)
+    assert s == str(4.0)
+
+
+def test_math_node_str_output_bool_result() -> None:
+    node = MathNode()
+    _, _, _, s = node.compute("a > b", 10, 5)
+    assert s == "True"
 
 
 def test_math_node_all_five_inputs() -> None:
     node = MathNode()
-    f, _, _ = node.compute("a + b + c + d + e", 1.0, 2.0, 3.0, 4.0, 5.0)
+    f, _, _, _ = node.compute("a + b + c + d + e", 1.0, 2.0, 3.0, 4.0, 5.0)
     assert f == pytest.approx(15.0)
 
 
 def test_math_node_unwired_inputs_default_to_zero() -> None:
     node = MathNode()
     # Pass None to simulate an unwired optional socket.
-    f, i, b = node.compute("a + b + c + d + e", None, None, None, None, None)
+    f, i, b, s = node.compute("a + b + c + d + e", None, None, None, None, None)
     assert f == pytest.approx(0.0)
     assert i == 0
     assert b is False
+    assert s == "0"
 
 
 def test_math_node_accepts_int_inputs() -> None:
     node = MathNode()
-    f, i, _ = node.compute("a // b", 7, 2)
+    f, i, _, _ = node.compute("a // b", 7, 2)
     assert i == 3
     assert f == pytest.approx(3.0)
 
@@ -112,14 +126,14 @@ def test_math_node_accepts_int_inputs() -> None:
 def test_math_node_accepts_bool_inputs() -> None:
     # BOOLEAN values from ComfyUI are Python bools — valid operands.
     node = MathNode()
-    f, i, _ = node.compute("a + b", True, True)
+    f, i, _, _ = node.compute("a + b", True, True)
     assert f == pytest.approx(2.0)
     assert i == 2
 
 
 def test_math_node_sqrt_formula() -> None:
     node = MathNode()
-    f, i, _ = node.compute("sqrt(a**2 + b**2)", 3.0, 4.0)
+    f, i, _, _ = node.compute("sqrt(a**2 + b**2)", 3.0, 4.0)
     assert f == pytest.approx(5.0)
     assert i == 5
 

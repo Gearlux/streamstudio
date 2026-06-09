@@ -726,8 +726,8 @@ class MathNode:
     """
 
     CATEGORY = _MATH_CATEGORY
-    RETURN_TYPES = ("FLOAT", "INT", "BOOLEAN")
-    RETURN_NAMES = ("float", "int", "bool")
+    RETURN_TYPES = ("FLOAT", "INT", "BOOLEAN", "STRING")
+    RETURN_NAMES = ("float", "int", "bool", "str")
     FUNCTION = "compute"
 
     @classmethod
@@ -753,7 +753,7 @@ class MathNode:
         c: Any = 0,
         d: Any = 0,
         e: Any = 0,
-    ) -> Tuple[float, int, bool]:
+    ) -> Tuple[float, int, bool, str]:
         # Unwired optional inputs arrive as None — treat as 0.
         a = 0 if a is None else a
         b = 0 if b is None else b
@@ -761,7 +761,7 @@ class MathNode:
         d = 0 if d is None else d
         e = 0 if e is None else e
         result = _eval_formula(formula, a, b, c, d, e)
-        return (float(result), int(result), bool(result))
+        return (float(result), int(result), bool(result), str(result))
 
 
 # Statically-defined adapter nodes, merged into the auto-discovered set by fluxstudio/__init__.py.
