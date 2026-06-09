@@ -987,12 +987,16 @@ def _build_source_node(cls: Callable, name: str, category: str) -> Type:
 
 
 def _build_op_node(cls: Callable, name: str, category: str) -> Type:
-    """Build a dual-mode op node: ``(SAMPLE?, op_*) -> (SAMPLE, OP)``.
+    """Build a dual-mode op node: ``(SAMPLE?, op_*) -> (SAMPLE, OP[, @output…])``.
 
     The op node both APPLIES the op (the ``sample`` input chained to the ``sample`` output, today's
     linear-pipeline UX) AND exposes the constructed op on the ``op`` output (``DATAFLUX_OP``), so it
     can feed a higher-order op. ``sample`` is OPTIONAL: leave it unconnected to use the node purely
     as an op-value. Higher-order ops (op-list constructor param) gain dynamic ``op_*`` inputs.
+
+    Any ``@output`` properties declared on the op class (e.g. ``applied_impairments``) become extra
+    output sockets appended after ``(sample, op)`` — read from the live op instance after
+    ``__call__`` completes (or their pre-call default when ``sample`` is unconnected).
     """
     accepts = getattr(cls, "ACCEPTS", None)
     op_list_param = _op_list_param(cls)
@@ -1001,6 +1005,10 @@ def _build_op_node(cls: Callable, name: str, category: str) -> Type:
     optional: Dict[str, Any] = {"sample": (SAMPLE_TYPE,)}
     if op_list_param is not None:
         optional["op_0"] = (OP_TYPE,)  # seed; web/op_list.js grows op_1, op_2, … as they fill
+
+    # Collect any @output properties declared on this op class.
+    out_specs = list(output_specs(cast(type, cls)))
+    out_sockets = [_output_socket_type(s["name"], _output_return_anno(cls, s["name"])) for s in out_specs]
 
     def execute(self: Any, sample: Any = None, **kwargs: Any) -> Tuple[Any, ...]:
         if op_list_param is not None:
@@ -1026,15 +1034,24 @@ def _build_op_node(cls: Callable, name: str, category: str) -> Type:
                     f"{getattr(cls, '__name__', 'op')} filtered out the sample (returned None); "
                     "nothing to pass downstream."
                 )
-        return (applied, op)
+        # Read each @output property from the live op instance (post-call values, or pre-call defaults).
+        extra_outs: List[Any] = []
+        for spec, socket in zip(out_specs, out_sockets):
+            try:
+                value = getattr(op, spec["name"])
+            except Exception as exc:
+                logger.debug("{}: output {!r} unavailable ({}); emitting None.", name, spec["name"], exc)
+                value = None
+            extra_outs.append(_coerce_output_value(value, socket))
+        return (applied, op, *extra_outs)
 
     return _node_class(
         name,
         category,
         required,
-        (SAMPLE_TYPE, OP_TYPE),
+        (SAMPLE_TYPE, OP_TYPE, *out_sockets),
         execute,
-        return_names=("sample", "op"),
+        return_names=("sample", "op", *[s["name"] for s in out_specs]),
         optional_inputs=optional,
         accepts=_spec_to_dict(cls, "ACCEPTS"),
         produces=_spec_to_dict(cls, "PRODUCES"),
