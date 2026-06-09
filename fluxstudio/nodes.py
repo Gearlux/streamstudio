@@ -231,7 +231,16 @@ class SampleExtractorNode:
 
     @staticmethod
     def _as_2d(value: Any) -> Optional[np.ndarray]:
-        """Coerce ``value`` to a 2-D ndarray (squeezing singleton axes), or ``None`` if not 2-D-like."""
+        """Coerce ``value`` to a 2-D ndarray, or ``None`` if the shape is not mask-like.
+
+        Handles:
+          ``[H, W]``       → as-is
+          ``[1, H, W]``    → squeeze batch/channel dim
+          ``[H, W, 1]``    → squeeze trailing dim
+          ``[C, H, W]``    → take channel 0 (channels-first, e.g. PyTorch segmentation output)
+          ``[H, W, C]``    → take channel 0 on the last axis (channels-last)
+        Anything else (e.g. a 1-D signal, bounding-box list) returns ``None``.
+        """
         if torch.is_tensor(value):
             value = value.detach().cpu().numpy()
         elif hasattr(value, "convert"):  # PIL.Image.Image
@@ -239,7 +248,17 @@ class SampleExtractorNode:
         if not isinstance(value, np.ndarray):
             return None
         arr = np.squeeze(value)
-        return arr if arr.ndim == 2 else None
+        if arr.ndim == 2:
+            return arr
+        if arr.ndim == 3 and np.issubdtype(arr.dtype, np.floating):
+            # Float 3-D arrays are segmentation probability maps ([C,H,W] or [H,W,C]).
+            # Integer/uint8 3-D arrays are colour images — not masks, fall through to None.
+            # C=1 was already squeezed above, so C >= 2 here.
+            # Prefer channels-first ([C,H,W]): the smallest axis is almost always C.
+            if arr.shape[0] <= arr.shape[1] and arr.shape[0] <= arr.shape[2]:
+                return np.asarray(arr[0])  # channels-first: [C, H, W] -> [H, W]
+            return np.asarray(arr[..., 0])  # channels-last:  [H, W, C] -> [H, W]
+        return None
 
     @staticmethod
     def _to_text(value: Any, spec: Any, scalar: Optional[float], sample: Any, field: str) -> str:
