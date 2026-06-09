@@ -551,8 +551,12 @@ def _widget_for(param: inspect.Parameter, owner: Optional[Callable] = None) -> T
     if has_default and param.default is not None:
         if comfy_type == "INT" and isinstance(param.default, int):
             config["default"] = param.default
+            if param.default < 0:
+                config["min"] = -(2**53)
         elif comfy_type == "FLOAT" and isinstance(param.default, (int, float)):
             config["default"] = float(param.default)
+            if param.default < 0:
+                config["min"] = -1e308
         elif comfy_type == "BOOLEAN" and isinstance(param.default, bool):
             config["default"] = param.default
         elif comfy_type == "STRING":
