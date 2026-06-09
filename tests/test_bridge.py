@@ -79,7 +79,7 @@ def test_node_execution() -> None:
     node = NodeClass()
 
     ds = datasets.Dataset.from_dict({"val": [1, 2, 3]})
-    result = node.execute(dataset=ds, amount=10)
+    result = node.execute(dataset=ds, amount=10)["result"]
 
     assert isinstance(result, tuple)
     assert len(result) == 1
@@ -284,7 +284,7 @@ def test_node_execution_tuple_return_passthrough() -> None:
         return ("a", "b")
 
     node = create_comfy_node(op, "TupleNode")()
-    result = node.execute()
+    result = node.execute()["result"]
     assert result == ("a", "b")
     assert len(result) == 2
 
@@ -625,7 +625,7 @@ def test_source_node_execute_wraps_in_flux() -> None:
     from dataflux.core import Flux
 
     node = create_comfy_node(_FakeSource, "Taidal__FakeSource")()
-    (out,) = node.execute(path="x", count=2)
+    (out,) = node.execute(path="x", count=2)["result"]
     assert isinstance(out, Flux)
     assert len(out) == 2
 
@@ -679,14 +679,14 @@ def test_positive_float_default_has_no_min_override() -> None:
 
 def test_op_node_constructs_and_applies() -> None:
     node = create_comfy_node(_FakeOp, "Taidal__FakeOp")()
-    applied, op = node.execute(sample=Sample(input=10), bump=5)
+    applied, op = node.execute(sample=Sample(input=10), bump=5)["result"]
     assert applied.input == 15
     assert isinstance(op, _FakeOp)  # the constructed op is exposed on the second output
 
 
 def test_op_node_value_mode_without_sample() -> None:
     # Leave ``sample`` unconnected -> applied is None, but the op is still constructed and exposed.
-    applied, op = create_comfy_node(_FakeOp, "Taidal__FakeOp")().execute(bump=3)
+    applied, op = create_comfy_node(_FakeOp, "Taidal__FakeOp")().execute(bump=3)["result"]
     assert applied is None
     assert isinstance(op, _FakeOp) and op.bump == 3
 
@@ -765,7 +765,7 @@ def test_op_node_output_property_returns_live_value_after_call() -> None:
             return sample
 
     node = create_comfy_node(_OpWithOutput, "Taidal__OpWithOutput2")()
-    _applied_sample, _op, names_json = node.execute(sample=Sample(input=1))
+    _applied_sample, _op, names_json = node.execute(sample=Sample(input=1))["result"]
     assert json.loads(names_json) == ["x"]
 
 
@@ -792,7 +792,7 @@ def test_op_node_output_property_returns_pre_call_default_without_sample() -> No
             return sample
 
     node = create_comfy_node(_OpWithOutput, "Taidal__OpWithOutput3")()
-    _none, _op, names_json = node.execute()
+    _none, _op, names_json = node.execute()["result"]
     assert json.loads(names_json) == []
 
 
@@ -815,11 +815,34 @@ def test_higher_order_op_gets_op_list_inputs_and_composes() -> None:
     assert "ops" not in spec["required"]
     assert spec["optional"]["op_0"] == (OP_TYPE,)
     # Build two op-values (bump +1, +2) and compose them via the op-list inputs.
-    _, op1 = create_comfy_node(_FakeOp, "Taidal__FakeOp1")().execute(bump=1)
-    _, op2 = create_comfy_node(_FakeOp, "Taidal__FakeOp2")().execute(bump=2)
-    applied, hoo = node_cls().execute(sample=Sample(input=10), op_0=op1, op_1=op2)
+    _, op1 = create_comfy_node(_FakeOp, "Taidal__FakeOp1")().execute(bump=1)["result"]
+    _, op2 = create_comfy_node(_FakeOp, "Taidal__FakeOp2")().execute(bump=2)["result"]
+    applied, hoo = node_cls().execute(sample=Sample(input=10), op_0=op1, op_1=op2)["result"]
     assert applied.input == 13  # 10 +1 +2, in order
     assert isinstance(hoo, _FakeHigherOrderOp) and len(hoo.ops) == 2
+
+
+def test_execute_always_returns_ui_timing_dict() -> None:
+    """Every generated node's execute returns {"ui": {"text": [timing]}, "result": ...}."""
+    node = create_comfy_node(_FakeSource, "Taidal__TimingSrc")()
+    raw = node.execute(path="x", count=1)
+    assert isinstance(raw, dict), "execute must return a dict with ui+result"
+    assert "ui" in raw and "result" in raw
+    text = raw["ui"]["text"]
+    assert len(text) >= 1
+    assert "ms" in text[-1], f"timing label expected in text, got {text}"
+
+
+def test_execute_timing_is_non_negative() -> None:
+    node = create_comfy_node(_FakeOp, "Taidal__TimingOp")()
+    raw = node.execute(sample=Sample(input=0), bump=0)
+    text = raw["ui"]["text"][-1]
+    # Extract the numeric part: "⏱ 12 ms" -> 12.0
+    import re
+
+    match = re.search(r"([\d.]+)\s*ms", text)
+    assert match is not None, f"expected ms in timing label, got {text!r}"
+    assert float(match.group(1)) >= 0
 
 
 def test_generic_function_with_sample_param_gets_sample_socket() -> None:
@@ -863,8 +886,8 @@ def test_source_node_consumes_a_wired_source() -> None:
     from dataflux.core import Flux
 
     upstream = create_comfy_node(_FakeSource, "Taidal__Up")()
-    (src,) = upstream.execute(path="x", count=4)  # a Flux of 4 samples (inputs 0..3)
-    (out,) = create_comfy_node(_FakeView, "Taidal__View")().execute(source=src, start=1)
+    (src,) = upstream.execute(path="x", count=4)["result"]  # a Flux of 4 samples (inputs 0..3)
+    (out,) = create_comfy_node(_FakeView, "Taidal__View")().execute(source=src, start=1)["result"]
     assert isinstance(out, Flux)
     assert [s.input for s in out] == [1, 2, 3]  # index 0 dropped by start=1
 
@@ -879,9 +902,9 @@ def test_flux_engine_node_wires_source_and_op_collection() -> None:
     assert spec["optional"]["op_0"] == (OP_TYPE,)
     assert "ops" not in spec.get("required", {}) and "source" not in spec.get("required", {})
 
-    (src,) = create_comfy_node(_FakeSource, "Taidal__Up2")().execute(path="x", count=3)
-    _, op1 = create_comfy_node(_FakeOp, "Taidal__Op1")().execute(bump=1)
-    (out,) = node_cls().execute(source=src, op_0=op1)
+    (src,) = create_comfy_node(_FakeSource, "Taidal__Up2")().execute(path="x", count=3)["result"]
+    _, op1 = create_comfy_node(_FakeOp, "Taidal__Op1")().execute(bump=1)["result"]
+    (out,) = node_cls().execute(source=src, op_0=op1)["result"]
     assert isinstance(out, Flux)
     assert [s.input for s in out] == [1, 2, 3]  # each of inputs 0,1,2 bumped +1
 
@@ -895,9 +918,9 @@ def test_jointflux_engine_node_wires_source_list() -> None:
     assert spec["optional"]["source_0"] == (SOURCE_TYPE,)
     assert "fluxes" not in spec.get("required", {})
 
-    (a,) = create_comfy_node(_FakeSource, "Taidal__A")().execute(path="a", count=2)
-    (b,) = create_comfy_node(_FakeSource, "Taidal__B")().execute(path="b", count=3)
-    (out,) = node_cls().execute(source_0=a, source_1=b)
+    (a,) = create_comfy_node(_FakeSource, "Taidal__A")().execute(path="a", count=2)["result"]
+    (b,) = create_comfy_node(_FakeSource, "Taidal__B")().execute(path="b", count=3)["result"]
+    (out,) = node_cls().execute(source_0=a, source_1=b)["result"]
     assert isinstance(out, Flux)
     assert len(out) == 5  # 2 + 3 concatenated
 
@@ -913,8 +936,8 @@ def test_real_dataset_split_node_wires_source_and_splits() -> None:
     assert spec["optional"]["source"] == (SOURCE_TYPE,)
     assert "source" not in spec.get("required", {})
 
-    (src,) = create_comfy_node(_FakeSource, "Taidal__SplitUp")().execute(path="x", count=10)
-    (out,) = node_cls().execute(source=src, split="val", val_fraction=0.2, seed=0)
+    (src,) = create_comfy_node(_FakeSource, "Taidal__SplitUp")().execute(path="x", count=10)["result"]
+    (out,) = node_cls().execute(source=src, split="val", val_fraction=0.2, seed=0)["result"]
     assert isinstance(out, Flux)
     assert len(out) == 2  # 20% of 10
 
@@ -928,8 +951,8 @@ def test_real_range_source_node_wires_source() -> None:
     # ``source`` is now defaulted (lazy / zero-arg convention) -> wired DATAFLUX_SOURCE input in the
     # OPTIONAL bucket (required-when-no-default, else optional); start/end stay widgets.
     assert spec["optional"]["source"] == (SOURCE_TYPE,)
-    (src,) = create_comfy_node(_FakeSource, "Taidal__RangeUp")().execute(path="x", count=10)
-    (out,) = node_cls().execute(source=src, start=2, end=5)
+    (src,) = create_comfy_node(_FakeSource, "Taidal__RangeUp")().execute(path="x", count=10)["result"]
+    (out,) = node_cls().execute(source=src, start=2, end=5)["result"]
     assert isinstance(out, Flux)
     assert [s.input for s in out] == [2, 3, 4]
 
@@ -943,9 +966,9 @@ def test_real_concat_source_node_wires_source_list() -> None:
     # ``sources`` (List) -> dynamic source_0 seed (DATAFLUX_SOURCE), not a STRING widget.
     assert spec["optional"]["source_0"] == (SOURCE_TYPE,)
     assert "sources" not in spec.get("required", {})
-    (a,) = create_comfy_node(_FakeSource, "Taidal__CA")().execute(path="a", count=2)
-    (b,) = create_comfy_node(_FakeSource, "Taidal__CB")().execute(path="b", count=3)
-    (out,) = node_cls().execute(source_0=a, source_1=b)
+    (a,) = create_comfy_node(_FakeSource, "Taidal__CA")().execute(path="a", count=2)["result"]
+    (b,) = create_comfy_node(_FakeSource, "Taidal__CB")().execute(path="b", count=3)["result"]
+    (out,) = node_cls().execute(source_0=a, source_1=b)["result"]
     assert isinstance(out, Flux)
     assert len(out) == 5  # 2 + 3 concatenated
 
@@ -1305,7 +1328,7 @@ def test_source_node_stashes_produces_none_when_undeclared() -> None:
 
 def test_op_node_runtime_check_passes_matching_sample() -> None:
     node = create_comfy_node(_TypedOp, "Taidal__TypedOp")()
-    out, _op = node.execute(sample=Sample(input=np.zeros((4, 4), dtype=np.float32)))
+    out, _op = node.execute(sample=Sample(input=np.zeros((4, 4), dtype=np.float32)))["result"]
     assert out.input.dtype == bool
 
 
@@ -1557,7 +1580,7 @@ def test_object_node_non_lazy_returns_instance_and_lazy() -> None:
     node = _build_object_node(_EagerMember, "Taidal_Eager", "Taidal/Obj")
     assert node.RETURN_TYPES == (OBJECT_TYPE, OBJECT_TYPE)
     assert node.RETURN_NAMES == ("instance", "class")
-    instance, lazy = node().execute(channels=5)
+    instance, lazy = node().execute(channels=5)["result"]
     assert isinstance(instance, _EagerMember) and instance.channels == 5
     assert isinstance(lazy, LazyClass) and lazy.kwargs.get("channels") == 5
 
@@ -1568,7 +1591,7 @@ def test_object_node_lazy_defers_instance_and_skips_runtime_param() -> None:
     # The runtime-injected required param is skipped; configurable knobs remain.
     assert "params" not in spec["required"]
     assert "lr" in spec["required"]
-    instance, lazy = node().execute(lr=0.5)
+    instance, lazy = node().execute(lr=0.5)["result"]
     # A runtime-injected required param (``params``) -> no standalone instance, only the LazyClass.
     assert instance is None
     assert isinstance(lazy, LazyClass) and lazy.kwargs.get("lr") == 0.5
@@ -1608,7 +1631,7 @@ def test_object_node_from_builder_function() -> None:
     spec = node.INPUT_TYPES()
     widgets = {**spec.get("required", {}), **spec.get("optional", {})}
     assert "num_classes" in widgets  # introspected from the FUNCTION's own signature
-    instance, lazy = node().execute(num_classes=2, weights_backbone="DEFAULT")
+    instance, lazy = node().execute(num_classes=2, weights_backbone="DEFAULT")["result"]
     assert isinstance(lazy, LazyClass) and lazy.target is _build_detector
     assert lazy.kwargs.get("num_classes") == 2
     # All params defaulted -> a live instance is buildable (not deferred).
@@ -1697,12 +1720,12 @@ def test_object_node_object_param_is_a_socket_not_a_widget() -> None:
 def test_object_node_wires_object_into_kwargs_and_omits_unwired() -> None:
     node = _build_object_node(_ObjConfig, "Taidal_ObjCfg", "Taidal/Obj")
     wired = _FakeLogger(save_dir="run1")
-    instance, lazy = node().execute(logger=wired, accel="gpu", max_epochs=2)
+    instance, lazy = node().execute(logger=wired, accel="gpu", max_epochs=2)["result"]
     # The wired live object is passed through verbatim into the built instance + LazyClass kwargs.
     assert isinstance(instance, _ObjConfig) and instance.logger is wired
     assert lazy.kwargs.get("logger") is wired and lazy.kwargs.get("accel") == "gpu"
     # An unwired (None) object socket is omitted so the ctor default (True) applies.
-    instance2, lazy2 = node().execute(logger=None, accel="cpu", max_epochs=1)
+    instance2, lazy2 = node().execute(logger=None, accel="cpu", max_epochs=1)["result"]
     assert "logger" not in lazy2.kwargs and instance2.logger is True
 
 
@@ -1742,13 +1765,13 @@ def test_object_node_collects_indexed_objects_into_list() -> None:
     node = _build_object_node(_ObjListConfig, "Taidal_ObjList", "Taidal/Obj")
     a, b = _FakeLogger("a"), _FakeLogger("b")
     # Two wired loggers (index-ordered) -> a list; the single socket key never appears.
-    instance, lazy = node().execute(logger_0=a, logger_1=b, max_epochs=2)
+    instance, lazy = node().execute(logger_0=a, logger_1=b, max_epochs=2)["result"]
     assert lazy.kwargs.get("logger") == [a, b]
     assert isinstance(instance, _ObjListConfig) and instance.logger == [a, b]
     # One wired -> a list of one; none wired -> omitted so the ctor default (True) applies.
-    _, lazy_one = node().execute(logger_0=a)
+    _, lazy_one = node().execute(logger_0=a)["result"]
     assert lazy_one.kwargs.get("logger") == [a]
-    inst_none, lazy_none = node().execute(logger_0=None, logger_1=None)
+    inst_none, lazy_none = node().execute(logger_0=None, logger_1=None)["result"]
     assert "logger" not in lazy_none.kwargs and inst_none.logger is True
 
 
@@ -1767,7 +1790,7 @@ def test_real_lightning_trainer_logger_is_a_dynamic_list_socket() -> None:
     assert "logger" not in allin  # replaced by the indexed seed
     assert allin["accelerator"][0] == "STRING"
     # Two loggers collect into a list passed to the Trainer.
-    _, lazy = node().execute(logger_0=CSVLogger("a"), logger_1=CSVLogger("b"))
+    _, lazy = node().execute(logger_0=CSVLogger("a"), logger_1=CSVLogger("b"))["result"]
     assert isinstance(lazy.kwargs.get("logger"), list) and len(lazy.kwargs["logger"]) == 2
 
 
@@ -1875,7 +1898,7 @@ def test_object_node_warns_when_instance_cannot_be_built(monkeypatch: pytest.Mon
     monkeypatch.setattr(bridge, "logger", log)
 
     node = _build_object_node(_PickyMember, "Taidal_Picky", "Taidal/Obj")
-    instance, lazy = node().execute(size=0)  # invalid -> build fails
+    instance, lazy = node().execute(size=0)["result"]  # invalid -> build fails
     assert instance is None  # could not build -> None
     assert isinstance(lazy, LazyClass)  # lazy is always available
     assert log.warning.called  # actionable warning emitted
@@ -1883,7 +1906,7 @@ def test_object_node_warns_when_instance_cannot_be_built(monkeypatch: pytest.Mon
 
     # A complete config builds the live instance and emits no warning.
     log.reset_mock()
-    instance2, _ = node().execute(size=4)
+    instance2, _ = node().execute(size=4)["result"]
     assert isinstance(instance2, _PickyMember) and instance2.size == 4
     assert not log.warning.called
 

@@ -33,6 +33,7 @@ import importlib
 import inspect
 import json
 import os
+import time
 import types as _types
 from typing import (
     AbstractSet,
@@ -899,12 +900,36 @@ def _node_class(
         input_spec["optional"] = optional_inputs
     if hidden:
         input_spec["hidden"] = hidden
+
+    # Wrap execute with wall-clock timing.  The timing label is injected into
+    # ComfyUI's ui["text"] list (the same mechanism PreviewAny uses) so it
+    # appears on the node after each execution.  For runnable nodes that already
+    # return a ui dict with a text log, the timing is appended at the end of the
+    # last text entry so the training log stays readable.  For all other nodes
+    # the result tuple is wrapped as {"ui": {"text": [timing]}, "result": tuple}.
+    _inner_execute = execute
+
+    def _timed_execute(self: Any, **kwargs: Any) -> Any:
+        t0 = time.perf_counter()
+        result = _inner_execute(self, **kwargs)
+        elapsed_ms = (time.perf_counter() - t0) * 1000.0
+        timing_label = f"⏱ {elapsed_ms:.0f} ms"
+        if isinstance(result, dict) and "ui" in result:
+            ui = result["ui"]
+            texts = list(ui.get("text", []))
+            if texts:
+                texts[-1] = str(texts[-1]) + f"\n{timing_label}"
+            else:
+                texts = [timing_label]
+            return {**result, "ui": {**ui, "text": texts}}
+        return {"ui": {"text": [timing_label]}, "result": result}
+
     attrs: Dict[str, Any] = {
         "INPUT_TYPES": classmethod(lambda cls, _spec=input_spec: _spec),
         "RETURN_TYPES": return_types,
         "FUNCTION": "execute",
         "CATEGORY": category,
-        "execute": execute,
+        "execute": _timed_execute,
         "TAIDAL_ACCEPTS": accepts,
         "TAIDAL_PRODUCES": produces,
         "TAIDAL_NODE_KIND": kind,
