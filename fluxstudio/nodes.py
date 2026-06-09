@@ -706,125 +706,62 @@ def _eval_formula(formula: str, a: Any, b: Any, c: Any, d: Any, e: Any) -> Any:
         raise ValueError(f"Math formula {formula!r} failed: {exc}") from exc
 
 
-class FloatMathNode:
-    """Compute a formula over up to 5 named float inputs (a–e) and output a float result.
+class MathNode:
+    """Evaluate a formula over up to 5 named inputs (a–e) and emit float, int, and bool outputs.
 
-    The ``formula`` field is a Python math expression string using the variable names
-    ``a``, ``b``, ``c``, ``d``, ``e`` and any symbol from the stdlib ``math`` module
-    (e.g. ``"sqrt(a**2 + b**2)"``). All inputs default to ``0.0`` and are wirable
-    FLOAT sockets — wire only those your formula uses and leave the rest at their defaults.
+    Inputs a–e accept ANY wired ComfyUI type (INT, FLOAT, BOOLEAN, STRING, …) — wire only
+    those your formula uses; unwired inputs default to ``0``. The ``formula`` is a Python
+    expression with access to all ``math`` module symbols (``sqrt``, ``sin``, ``log``, …)
+    plus ``abs``, ``min``, ``max``, ``round``, ``pow``. Variable names shadow same-named
+    math constants (e.g. wiring ``e=5`` is ``5``, not Euler's ``2.718``).
+
+    The single result is cast to all three output types simultaneously — wire whichever
+    output socket your downstream node expects.
+
+    Examples::
+
+        a=3, b=4, formula="sqrt(a**2 + b**2)"  →  float=5.0, int=5, bool=True
+        a=10, formula="a > 5"                  →  float=1.0, int=1, bool=True
+        a=6, b=7, formula="a * b"              →  float=42.0, int=42, bool=True
     """
 
     CATEGORY = _MATH_CATEGORY
-    RETURN_TYPES = ("FLOAT",)
-    RETURN_NAMES = ("result",)
+    RETURN_TYPES = ("FLOAT", "INT", "BOOLEAN")
+    RETURN_NAMES = ("float", "int", "bool")
     FUNCTION = "compute"
 
     @classmethod
     def INPUT_TYPES(cls) -> Dict[str, Any]:
-        _f = ("FLOAT", {"default": 0.0})
         return {
             "required": {
                 "formula": ("STRING", {"default": "a + b", "multiline": False}),
-                "a": _f,
-                "b": _f,
-                "c": _f,
-                "d": _f,
-                "e": _f,
-            }
+            },
+            "optional": {
+                "a": (ANY,),
+                "b": (ANY,),
+                "c": (ANY,),
+                "d": (ANY,),
+                "e": (ANY,),
+            },
         }
 
     def compute(
-        self, formula: str, a: float = 0.0, b: float = 0.0, c: float = 0.0, d: float = 0.0, e: float = 0.0
-    ) -> Tuple[float]:
-        return (float(_eval_formula(formula, a, b, c, d, e)),)
-
-
-class IntMathNode:
-    """Compute a formula over up to 5 named integer inputs (a–e) and output an integer result.
-
-    The ``formula`` field is a Python math expression string using the variable names
-    ``a``, ``b``, ``c``, ``d``, ``e`` and any symbol from the stdlib ``math`` module.
-    The result is cast to ``int`` (truncating toward zero). All inputs default to ``0``
-    and are wirable INT sockets.
-    """
-
-    CATEGORY = _MATH_CATEGORY
-    RETURN_TYPES = ("INT",)
-    RETURN_NAMES = ("result",)
-    FUNCTION = "compute"
-
-    @classmethod
-    def INPUT_TYPES(cls) -> Dict[str, Any]:
-        _i = ("INT", {"default": 0})
-        return {
-            "required": {
-                "formula": ("STRING", {"default": "a + b", "multiline": False}),
-                "a": _i,
-                "b": _i,
-                "c": _i,
-                "d": _i,
-                "e": _i,
-            }
-        }
-
-    def compute(self, formula: str, a: int = 0, b: int = 0, c: int = 0, d: int = 0, e: int = 0) -> Tuple[int]:
-        return (int(_eval_formula(formula, a, b, c, d, e)),)
-
-
-class FloatToIntNode:
-    """Convert a FLOAT to an INT using round, floor, or ceil.
-
-    Args:
-        value: The float value to convert.
-        mode: Rounding mode — ``round`` (nearest, ties to even), ``floor`` (toward −∞),
-            or ``ceil`` (toward +∞).
-    """
-
-    CATEGORY = _MATH_CATEGORY
-    RETURN_TYPES = ("INT",)
-    RETURN_NAMES = ("result",)
-    FUNCTION = "convert"
-
-    @classmethod
-    def INPUT_TYPES(cls) -> Dict[str, Any]:
-        return {
-            "required": {
-                "value": ("FLOAT", {"default": 0.0}),
-                "mode": (["round", "floor", "ceil"], {"default": "round"}),
-            }
-        }
-
-    def convert(self, value: float, mode: str = "round") -> Tuple[int]:
-        if mode == "floor":
-            return (_math_module.floor(value),)
-        if mode == "ceil":
-            return (_math_module.ceil(value),)
-        return (round(value),)
-
-
-class IntToFloatNode:
-    """Convert an INT to a FLOAT (a lossless widening cast).
-
-    Args:
-        value: The integer value to convert.
-    """
-
-    CATEGORY = _MATH_CATEGORY
-    RETURN_TYPES = ("FLOAT",)
-    RETURN_NAMES = ("result",)
-    FUNCTION = "convert"
-
-    @classmethod
-    def INPUT_TYPES(cls) -> Dict[str, Any]:
-        return {
-            "required": {
-                "value": ("INT", {"default": 0}),
-            }
-        }
-
-    def convert(self, value: int) -> Tuple[float]:
-        return (float(value),)
+        self,
+        formula: str,
+        a: Any = 0,
+        b: Any = 0,
+        c: Any = 0,
+        d: Any = 0,
+        e: Any = 0,
+    ) -> Tuple[float, int, bool]:
+        # Unwired optional inputs arrive as None — treat as 0.
+        a = 0 if a is None else a
+        b = 0 if b is None else b
+        c = 0 if c is None else c
+        d = 0 if d is None else d
+        e = 0 if e is None else e
+        result = _eval_formula(formula, a, b, c, d, e)
+        return (float(result), int(result), bool(result))
 
 
 # Statically-defined adapter nodes, merged into the auto-discovered set by fluxstudio/__init__.py.
@@ -834,10 +771,7 @@ NODE_CLASS_MAPPINGS: Dict[str, Type] = {
     "Taidal_Retag": RetagObjectNode,
     "Taidal_ComposeSample": ComposeSampleNode,
     "Taidal_MixSamples": MixSamplesNode,
-    "Taidal_FloatMath": FloatMathNode,
-    "Taidal_IntMath": IntMathNode,
-    "Taidal_FloatToInt": FloatToIntNode,
-    "Taidal_IntToFloat": IntToFloatNode,
+    "Taidal_Math": MathNode,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS: Dict[str, str] = {
@@ -846,8 +780,5 @@ NODE_DISPLAY_NAME_MAPPINGS: Dict[str, str] = {
     "Taidal_Retag": "Retag (role / task)",
     "Taidal_ComposeSample": "Compose Sample (3-way)",
     "Taidal_MixSamples": "Mix Samples (merge metadata)",
-    "Taidal_FloatMath": "Float Math",
-    "Taidal_IntMath": "Int Math",
-    "Taidal_FloatToInt": "Float → Int",
-    "Taidal_IntToFloat": "Int → Float",
+    "Taidal_Math": "Math",
 }
