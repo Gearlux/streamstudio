@@ -641,6 +641,42 @@ def test_op_class_becomes_dual_mode_sample_node() -> None:
     assert spec["optional"]["sample"] == (SAMPLE_TYPE,)
 
 
+def test_negative_float_default_sets_min_in_widget_config() -> None:
+    """A FLOAT param with a negative default gets ``min`` set so ComfyUI allows negative input."""
+    from confluid import configurable as _cfg
+
+    @_cfg(category="op")
+    class _NegDefaultOp:
+        def __init__(self, noise_power_db: float = -30.0) -> None:
+            self.noise_power_db = noise_power_db
+
+        def __call__(self, sample: Sample) -> Sample:
+            return sample
+
+    spec = create_comfy_node(_NegDefaultOp, "Taidal__NegDefaultOp").INPUT_TYPES()
+    widget_type, widget_cfg = spec["required"]["noise_power_db"]
+    assert widget_type == "FLOAT"
+    assert widget_cfg["default"] == -30.0
+    assert "min" in widget_cfg and widget_cfg["min"] < 0
+
+
+def test_positive_float_default_has_no_min_override() -> None:
+    """A FLOAT param with a non-negative default does not get an explicit min."""
+    from confluid import configurable as _cfg
+
+    @_cfg(category="op")
+    class _PosDefaultOp:
+        def __init__(self, scale: float = 1.0) -> None:
+            self.scale = scale
+
+        def __call__(self, sample: Sample) -> Sample:
+            return sample
+
+    spec = create_comfy_node(_PosDefaultOp, "Taidal__PosDefaultOp").INPUT_TYPES()
+    _, widget_cfg = spec["required"]["scale"]
+    assert "min" not in widget_cfg
+
+
 def test_op_node_constructs_and_applies() -> None:
     node = create_comfy_node(_FakeOp, "Taidal__FakeOp")()
     applied, op = node.execute(sample=Sample(input=10), bump=5)
