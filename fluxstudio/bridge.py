@@ -532,12 +532,18 @@ def _widget_for(param: inspect.Parameter, owner: Optional[Callable] = None) -> T
         default = param.default if has_default and isinstance(param.default, str) else ""
         return "STRING", {"default": default, "taidal_widget": "DIRECTORY"}
 
-    # Nullable numeric (e.g. ``Optional[int] = None`` like ``HuggingFaceSource.count``):
-    # ComfyUI's INT/FLOAT widgets can't represent None, and their 0 default is a distinct,
-    # often-breaking value (``count=0`` means "no samples"). Use a blank STRING that
-    # _coerce_kwargs turns back into None when empty, or casts to the number when filled.
+    # Nullable numeric (e.g. ``Optional[int] = None``, ``Optional[Union[float, int, str]] = None``
+    # like ``ThresholdOp.low_level`` / ``HuggingFaceSource.count``):
+    # ComfyUI's INT/FLOAT widgets can't represent None — 0 is a distinct, often-breaking value
+    # (``count=0`` → no samples; ``low_level=0`` → a real threshold of zero, not "disabled").
+    # Render as a properly-typed OPTIONAL socket instead: when the socket is left unconnected the
+    # param is absent from ``execute`` kwargs → the constructor default (``None``) applies;
+    # when wired it receives the correct Python type directly.  ``_build_config_inputs`` routes
+    # entries tagged with ``_nullable_optional=True`` into the "optional" section of INPUT_TYPES.
     if param.default is None and comfy_type in ("INT", "FLOAT"):
-        return "STRING", {"default": "", "multiline": False}
+        config = DEFAULT_WIDGET_CONFIG.get(comfy_type, {}).copy()
+        config["_nullable_optional"] = True
+        return comfy_type, config
 
     # Nullable bool (e.g. ``Optional[bool] = None`` like ``pl.Trainer.enable_progress_bar`` /
     # ``enable_checkpointing`` / ``enable_model_summary``): a ComfyUI BOOLEAN checkbox can't BE None, and
@@ -565,8 +571,18 @@ def _widget_for(param: inspect.Parameter, owner: Optional[Callable] = None) -> T
     return comfy_type, config
 
 
-def _build_config_inputs(func: Callable, skip: Optional[AbstractSet[str]] = None) -> Dict[str, Any]:
-    """Build the ``required`` inputs dict (constructor config widgets) for a callable.
+def _build_config_inputs(
+    func: Callable, skip: Optional[AbstractSet[str]] = None
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """Build ``(required_widgets, nullable_optional_sockets)`` for a callable's constructor params.
+
+    ``required_widgets`` — the normal ``required`` section of ``INPUT_TYPES``: typed widgets the user
+    fills directly on the node (strings, dropdowns, INT/FLOAT sliders, …).
+
+    ``nullable_optional_sockets`` — params typed ``Optional[int/float] = None``: rendered as FLOAT/INT
+    *optional input sockets* so the user can wire a compatible output (e.g. a Float Math result) into
+    them.  When the socket is left unconnected the param is absent from ``execute`` kwargs and the
+    constructor default (``None``) applies — semantically correct for "disabled bound", "no limit", etc.
 
     Each widget's ``tooltip`` is sourced from the callable's docstring ``Args:``
     block (via :func:`confluid.parse_param_docs`) — the same per-parameter help
@@ -574,7 +590,7 @@ def _build_config_inputs(func: Callable, skip: Optional[AbstractSet[str]] = None
     docstring and it appears as a hover tooltip here; an undocumented parameter
     simply gets no tooltip (fix it upstream, never hand-write one here).
 
-    ``skip`` names parameters to omit from the widget set — used by op nodes to
+    ``skip`` names parameters to omit from both sets — used by op nodes to
     exclude the op-list param (it becomes a ``DATAFLUX_OP`` socket, not a widget).
     """
     try:
@@ -583,9 +599,10 @@ def _build_config_inputs(func: Callable, skip: Optional[AbstractSet[str]] = None
         ValueError,
         TypeError,
     ):  # pragma: no cover - defensive: inspect rejects rare builtins
-        return {}
+        return {}, {}
     param_docs = parse_param_docs(func)
     required: Dict[str, Any] = {}
+    nullable_optionals: Dict[str, Any] = {}
     for name, param in sig.parameters.items():
         if skip and name in skip:
             continue
@@ -597,11 +614,13 @@ def _build_config_inputs(func: Callable, skip: Optional[AbstractSet[str]] = None
         ):
             continue
         comfy_type, config = _widget_for(param, owner=func)
+        is_nullable_opt = bool(config.pop("_nullable_optional", False))
         doc = param_docs.get(name)
         if doc:
             config = {**config, "tooltip": doc}
-        required[name] = (comfy_type,) if not config else (comfy_type, config)
-    return required
+        entry = (comfy_type,) if not config else (comfy_type, config)
+        (nullable_optionals if is_nullable_opt else required)[name] = entry
+    return required, nullable_optionals
 
 
 def _coerce_kwargs(func: Callable, kwargs: Dict[str, Any]) -> Dict[str, Any]:
@@ -965,9 +984,9 @@ def _build_source_node(cls: Callable, name: str, category: str) -> Type:
     src_list_param = _source_list_param(cls)
     op_list_param = _op_list_param(cls)
     wired = {p for p in (src_param, src_list_param, op_list_param) if p is not None}
-    required = _build_config_inputs(cls, skip=wired or None)
+    required, nullable_opts = _build_config_inputs(cls, skip=wired or None)
 
-    optional: Dict[str, Any] = {}
+    optional: Dict[str, Any] = {**nullable_opts}
     if src_param is not None:
         try:
             default = inspect.signature(cls).parameters[src_param].default
@@ -1030,8 +1049,8 @@ def _build_op_node(cls: Callable, name: str, category: str) -> Type:
     accepts = getattr(cls, "ACCEPTS", None)
     op_list_param = _op_list_param(cls)
     # Config widgets EXCLUDING the op-list param (it rides DATAFLUX_OP sockets, not a widget).
-    required = _build_config_inputs(cls, skip={op_list_param} if op_list_param else None)
-    optional: Dict[str, Any] = {"sample": (SAMPLE_TYPE,)}
+    required, nullable_opts = _build_config_inputs(cls, skip={op_list_param} if op_list_param else None)
+    optional: Dict[str, Any] = {"sample": (SAMPLE_TYPE,), **nullable_opts}
     if op_list_param is not None:
         optional["op_0"] = (OP_TYPE,)  # seed; web/op_list.js grows op_1, op_2, … as they fill
 
@@ -1091,7 +1110,7 @@ def _build_op_node(cls: Callable, name: str, category: str) -> Type:
 
 
 def _build_generic_node(func: Callable, name: str, category: str) -> Type:
-    inputs = _build_config_inputs(func)
+    inputs, nullable_opts = _build_config_inputs(func)
     try:
         ret_ann = inspect.signature(func).return_annotation
     except (
@@ -1113,6 +1132,7 @@ def _build_generic_node(func: Callable, name: str, category: str) -> Type:
         execute,
         kind="generic",
         callable_path=_safe_callable_path(func),
+        optional_inputs=nullable_opts or None,
     )
 
 
@@ -1347,7 +1367,7 @@ def _build_object_node(cls: Callable, name: str, category: str) -> Type:
     except (ValueError, TypeError):  # pragma: no cover - defensive
         pass
 
-    inputs = _build_config_inputs(
+    inputs, nullable_opts = _build_config_inputs(
         cls, skip=(set(skip) if skip else set()) | object_single_params | object_list_params or None
     )
     inputs.update(object_required)
@@ -1415,7 +1435,7 @@ def _build_object_node(cls: Callable, name: str, category: str) -> Type:
         (obj_socket, obj_socket),
         execute,
         return_names=("instance", "class"),
-        optional_inputs=object_optional or None,
+        optional_inputs={**object_optional, **nullable_opts} or None,
         kind="object",
         callable_path=_safe_callable_path(cls),
     )
@@ -1493,8 +1513,8 @@ def _build_runnable_node(cls: Callable, name: str, category: str) -> Type:
 
     # Scalars stay widgets; skip the socket members (and any non-ctor body slot, which
     # _build_config_inputs wouldn't see anyway).
-    required: Dict[str, Any] = _build_config_inputs(cls, skip=set(socket_members) or None)
-    optional: Dict[str, Any] = {}
+    required, nullable_opts = _build_config_inputs(cls, skip=set(socket_members) or None)
+    optional: Dict[str, Any] = {**nullable_opts}
     for member, socket in socket_members.items():
         if member in required_params:
             required[member] = (socket,)
