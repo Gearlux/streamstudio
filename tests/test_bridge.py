@@ -681,6 +681,85 @@ def test_deterministic_op_node_has_no_is_changed() -> None:
     assert not hasattr(node, "IS_CHANGED")
 
 
+def test_op_node_with_output_property_adds_extra_sockets() -> None:
+    """An op that declares @output properties gets extra output sockets beyond (sample, op)."""
+    from confluid import configurable as _cfg
+    from confluid.decorators import output as _output
+
+    @_cfg(category="op")
+    class _OpWithOutput:
+        def __init__(self) -> None:
+            self._last: str = ""
+
+        @property
+        @_output
+        def last_label(self) -> str:
+            return self._last
+
+        def __call__(self, sample: Sample) -> Sample:
+            self._last = str(sample.input)
+            return sample
+
+    node_cls = create_comfy_node(_OpWithOutput, "Taidal__OpWithOutput")
+    # Three outputs: sample, op, last_label (STRING because str is scalar)
+    assert node_cls.RETURN_TYPES == (SAMPLE_TYPE, OP_TYPE, "STRING")
+    assert node_cls.RETURN_NAMES == ("sample", "op", "last_label")
+
+
+def test_op_node_output_property_returns_live_value_after_call() -> None:
+    """The @output socket carries the live value that the op property returns after __call__."""
+    import json
+    from typing import List as _List
+
+    from confluid import configurable as _cfg
+    from confluid.decorators import output as _output
+
+    @_cfg(category="op")
+    class _OpWithOutput:
+        def __init__(self) -> None:
+            self._applied: _List[str] = []
+
+        @property
+        @_output
+        def applied_names(self) -> _List[str]:
+            return self._applied
+
+        def __call__(self, sample: Sample) -> Sample:
+            self._applied = ["x"]
+            return sample
+
+    node = create_comfy_node(_OpWithOutput, "Taidal__OpWithOutput2")()
+    _applied_sample, _op, names_json = node.execute(sample=Sample(input=1))
+    assert json.loads(names_json) == ["x"]
+
+
+def test_op_node_output_property_returns_pre_call_default_without_sample() -> None:
+    """When sample is None (op-value mode), @output carries the pre-call default."""
+    import json
+    from typing import List as _List
+
+    from confluid import configurable as _cfg
+    from confluid.decorators import output as _output
+
+    @_cfg(category="op")
+    class _OpWithOutput:
+        def __init__(self) -> None:
+            self._applied: _List[str] = []
+
+        @property
+        @_output
+        def applied_names(self) -> _List[str]:
+            return self._applied
+
+        def __call__(self, sample: Sample) -> Sample:
+            self._applied = ["x"]
+            return sample
+
+    node = create_comfy_node(_OpWithOutput, "Taidal__OpWithOutput3")()
+    _none, _op, names_json = node.execute()
+    assert json.loads(names_json) == []
+
+
 class _FakeHigherOrderOp:
     """A higher-order op: its constructor takes a list of OPS and applies them in sequence."""
 
