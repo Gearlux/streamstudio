@@ -1064,30 +1064,22 @@ def test_non_source_unannotated_class_is_generic() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_nullable_numeric_becomes_optional_socket() -> None:
+def test_nullable_numeric_becomes_blank_string_widget() -> None:
     # Optional[int/float]=None must NOT become an INT/FLOAT widget defaulting to 0: 0 is a
     # distinct, often-breaking value (e.g. HuggingFaceSource count=0 -> "no samples";
     # ThresholdOp low_level=0 -> a real threshold at zero, not "disabled").
-    # They become OPTIONAL SOCKETS of the proper type: when unconnected the param is absent
-    # from execute kwargs -> the constructor default (None) applies; when wired the user can
-    # connect a FLOAT/INT output from another node directly.
+    # Using an INT/FLOAT optional socket causes ComfyUI to call float(None) before execute,
+    # crashing with TypeError. Use a blank STRING widget: "" -> None, "5" -> cast to int.
     def fn(count: Optional[int] = None, ratio: Optional[float] = None, n: int = 3) -> None: ...
 
     node_types = create_comfy_node(fn, "Taidal__Nullable").INPUT_TYPES()
     required = node_types.get("required", {})
     optional = node_types.get("optional", {})
-    # Nullable numerics move to the optional section as their real type.
-    assert "count" not in required
-    assert "ratio" not in required
-    assert optional["count"][0] == "INT"
-    assert optional["ratio"][0] == "FLOAT"
-    # Nullable optional sockets must NOT carry a numeric default (0 / 0.0):
-    # the Python default is None ("disabled"), and a numeric config default could be
-    # passed by ComfyUI as a kwarg when the socket is unconnected, defeating None.
-    count_config = optional["count"][1] if len(optional["count"]) > 1 else {}
-    ratio_config = optional["ratio"][1] if len(optional["ratio"]) > 1 else {}
-    assert "default" not in count_config
-    assert "default" not in ratio_config
+    # Nullable numerics stay in required as blank STRING widgets (not optional sockets).
+    assert required["count"] == ("STRING", {"default": "", "multiline": False})
+    assert required["ratio"] == ("STRING", {"default": "", "multiline": False})
+    assert "count" not in optional
+    assert "ratio" not in optional
     # A concrete-default int is still a required INT widget with the right default.
     assert required["n"] == ("INT", {"default": 3})
 
@@ -1424,9 +1416,9 @@ def test_build_runnable_node_member_sockets_and_widgets() -> None:
     # from ANY model (any task), so a loss can't dock but a cross-task model can.
     assert req["model"] == (_object_socket("model"),)
     assert req["train_set"] == (SOURCE_TYPE,)
-    # ``num_classes: Optional[int] = None`` is a nullable-numeric param → optional INT socket so
-    # the user can wire a computed class count from another node rather than typing it by hand.
-    assert opt["num_classes"][0] == "INT"
+    # ``num_classes: Optional[int] = None`` is a nullable-numeric param → blank STRING widget
+    # (INT/FLOAT sockets cause ComfyUI to crash with float(None) when unconnected).
+    assert req["num_classes"] == ("STRING", {"default": "", "multiline": False})
     assert req["run_name"][0] == "STRING"
     # Deferred / dataset body slots -> OPTIONAL sockets (unwired keeps the baked default).
     # ``optimizer`` is role-less (not in _STRICT_SLOT_ROLES) -> generic OBJECT_TYPE, not qualified.
