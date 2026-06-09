@@ -63,9 +63,10 @@ def test_discover_returns_quietly_when_entry_points_fail() -> None:
 
 
 def test_discover_forwards_module_to_register() -> None:
-    """__init__ now only forwards the entry-point module + the shared mappings; the palette
-    path (Taidal/<Package>/<Category>/<group>) is derived per-node inside register_module_nodes."""
-    fake_ep = SimpleNamespace(value="waivefront.sinks")
+    """__init__ forwards the entry-point module, shared mappings, and dist_name so the [PKG]
+    label tag is derived from the distribution name (not just the top-level Python package)."""
+    fake_dist = SimpleNamespace(name="waivefront-helios")
+    fake_ep = SimpleNamespace(value="waivefront.helios", dist=fake_dist)
     fake_register = MagicMock()
     with patch("importlib.metadata.entry_points", return_value=[fake_ep]):
         with patch.object(fluxstudio, "register_module_nodes", fake_register):
@@ -73,12 +74,27 @@ def test_discover_forwards_module_to_register() -> None:
 
     fake_register.assert_called_once()
     args, kwargs = fake_register.call_args
-    assert args[0] == "waivefront.sinks"
+    assert args[0] == "waivefront.helios"
     assert args[1] is fluxstudio.NODE_CLASS_MAPPINGS
     assert args[2] is fluxstudio.NODE_DISPLAY_NAME_MAPPINGS
+    # dist_name carries the distribution package name for the [PKG] label.
+    assert kwargs.get("dist_name") == "waivefront-helios"
     # No category/root override — the bridge builds the path from the module + class tags.
     assert "category" not in kwargs
     assert "root" not in kwargs
+
+
+def test_discover_forwards_none_dist_name_when_dist_absent() -> None:
+    """When ep.dist is absent (e.g. in tests using SimpleNamespace without dist), dist_name=None."""
+    fake_ep = SimpleNamespace(value="waivefront.sinks")  # no .dist attribute
+    fake_register = MagicMock()
+    with patch("importlib.metadata.entry_points", return_value=[fake_ep]):
+        with patch.object(fluxstudio, "register_module_nodes", fake_register):
+            fluxstudio._discover_and_register_nodes()
+
+    fake_register.assert_called_once()
+    _, kwargs = fake_register.call_args
+    assert kwargs.get("dist_name") is None
 
 
 def test_discover_is_one_shot_per_process() -> None:
@@ -88,7 +104,7 @@ def test_discover_is_one_shot_per_process() -> None:
     scan/log must happen once while a second module identity still ends up with the full node set.
     """
     fake_ep = SimpleNamespace(value="waivefront.sinks")
-    fake_register = MagicMock(side_effect=lambda mod, cmap, dmap: cmap.update({"Taidal_X": object()}))
+    fake_register = MagicMock(side_effect=lambda mod, cmap, dmap, **kw: cmap.update({"Taidal_X": object()}))
     with patch("importlib.metadata.entry_points", return_value=[fake_ep]):
         with patch.object(fluxstudio, "register_module_nodes", fake_register):
             fluxstudio._discover_and_register_nodes()  # first call: scans

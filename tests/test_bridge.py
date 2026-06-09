@@ -42,6 +42,7 @@ from fluxstudio.bridge import (
     _literal_options,
     _map_type,
     _node_category,
+    _package_tag,
     create_comfy_node,
     hide_default_comfy_nodes,
     node_root,
@@ -345,6 +346,42 @@ def test_register_module_nodes_palette_path_with_group_and_tag() -> None:
     assert display["Taidal_dataflux_op_numpy_grouped_op"] == "[DATAFLUX] grouped op"
 
 
+def test_package_tag_uses_dist_name_when_provided() -> None:
+    """dist_name (ep.dist.name) takes precedence over the module path so companion namespace
+    packages like waivefront-helios produce [WAIVEFRONT-HELIOS] instead of [WAIVEFRONT]."""
+    assert _package_tag("waivefront.helios", dist_name="waivefront-helios") == "WAIVEFRONT-HELIOS"
+    assert _package_tag("waivefront.torchsig.synthetic", dist_name="waivefront-torchsig") == "WAIVEFRONT-TORCHSIG"
+    assert _package_tag("waivefront.processing", dist_name="waivefront") == "WAIVEFRONT"
+    assert _package_tag("sonair", dist_name="sonair") == "SONAIR"
+
+
+def test_package_tag_falls_back_to_top_level_package_without_dist_name() -> None:
+    """When dist_name is absent the fallback is the first dotted segment uppercased."""
+    assert _package_tag("waivefront.processing") == "WAIVEFRONT"
+    assert _package_tag("dataflux.ops.numpy") == "DATAFLUX"
+    assert _package_tag("sonair") == "SONAIR"
+
+
+def test_register_module_nodes_label_uses_dist_name() -> None:
+    """Passing dist_name to register_module_nodes surfaces the correct [PKG] tag."""
+    mappings: dict = {}
+    display: dict = {}
+    discovered = [{"path": "waivefront.helios:helios_op", "name": "helios_op"}]
+
+    def _helios_op(x: int) -> str:
+        return str(x)
+
+    _helios_op.__confluid_category__ = "op"  # type: ignore[attr-defined]
+
+    with patch("fluxstudio.bridge.scan_module", return_value=discovered):
+        with patch("fluxstudio.bridge.resolve_callable", return_value=_helios_op):
+            register_module_nodes("waivefront.helios", mappings, display, dist_name="waivefront-helios")
+
+    key = "Taidal_waivefront_op_helios_op"
+    assert key in display
+    assert display[key] == "[WAIVEFRONT-HELIOS] helios op"
+
+
 def test_register_module_nodes_same_name_different_module_no_collision() -> None:
     """Two same-named ops in different modules (e.g. numpy vs torch ``RescaleOp``) must BOTH
     register — the package/category/group-qualified key keeps them distinct instead of the second
@@ -622,6 +659,26 @@ def test_op_node_raises_when_op_filters_sample() -> None:
     node = create_comfy_node(_FilterishOp, "Taidal__Filterish")()
     with pytest.raises(RuntimeError, match="filtered out"):
         node.execute(sample=Sample(input=1))
+
+
+def test_random_op_node_has_is_changed() -> None:
+    from confluid import configurable as _cfg
+
+    @_cfg(category="op", random=True)
+    class _RandomOp:
+        def __init__(self) -> None: ...
+
+        def __call__(self, sample: Sample) -> Sample:
+            return sample
+
+    node = create_comfy_node(_RandomOp, "Taidal__RandomOp")
+    assert hasattr(node, "IS_CHANGED")
+    assert node.IS_CHANGED() != node.IS_CHANGED()  # nan != nan → always considered changed
+
+
+def test_deterministic_op_node_has_no_is_changed() -> None:
+    node = create_comfy_node(_FakeOp, "Taidal__FakeOpDeterministic")
+    assert not hasattr(node, "IS_CHANGED")
 
 
 class _FakeHigherOrderOp:
