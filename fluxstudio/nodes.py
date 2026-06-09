@@ -12,6 +12,7 @@ provides the index-walk stepper.
 
 import ctypes
 import io
+import math as _math_module
 import re
 import sys
 import threading
@@ -596,15 +597,261 @@ class RetagObjectNode:
         return (object,)
 
 
+# ---------------------------------------------------------------------------
+# Sample composition nodes
+# ---------------------------------------------------------------------------
+
+
+class ComposeSampleNode:
+    """Build a new Sample by plucking each field from a different source Sample.
+
+    Takes three ``DATAFLUX_SAMPLE`` inputs and assembles a fresh Sample where:
+
+    * ``input``    comes from ``input_sample``
+    * ``target``   comes from ``target_sample``
+    * ``metadata`` comes from ``metadata_sample``
+
+    Use this when three parallel pipeline branches each carry the "right" field
+    and you need to reunite them — e.g. the left branch produced a rendered
+    image, the right branch produced detection boxes, and a third carries the
+    original provenance metadata.
+    """
+
+    CATEGORY = _FLUXSTUDIO_CATEGORY
+    RETURN_TYPES = (SAMPLE_TYPE,)
+    RETURN_NAMES = ("sample",)
+    FUNCTION = "compose"
+
+    @classmethod
+    def INPUT_TYPES(cls) -> Dict[str, Any]:
+        return {
+            "required": {
+                "input_sample": (SAMPLE_TYPE,),
+                "target_sample": (SAMPLE_TYPE,),
+                "metadata_sample": (SAMPLE_TYPE,),
+            }
+        }
+
+    def compose(
+        self, input_sample: Any, target_sample: Any, metadata_sample: Any
+    ) -> Tuple[Any, ...]:
+        result = input_sample._replace(
+            target=target_sample.target,
+            metadata=metadata_sample.metadata,
+        )
+        return (result,)
+
+
+class MixSamplesNode:
+    """Build a new Sample by combining fields from three source Samples and merging all metadata.
+
+    * ``input``    comes from ``input_sample``
+    * ``target``   comes from ``target_sample``
+    * ``metadata`` is the shallow dict union of all three samples' metadata dicts
+      (``input_sample`` lowest priority, ``metadata_sample`` highest — later keys win)
+
+    Use this when you want to accumulate metadata produced at different pipeline
+    stages rather than discard two samples' metadata entirely.
+    """
+
+    CATEGORY = _FLUXSTUDIO_CATEGORY
+    RETURN_TYPES = (SAMPLE_TYPE,)
+    RETURN_NAMES = ("sample",)
+    FUNCTION = "mix"
+
+    @classmethod
+    def INPUT_TYPES(cls) -> Dict[str, Any]:
+        return {
+            "required": {
+                "input_sample": (SAMPLE_TYPE,),
+                "target_sample": (SAMPLE_TYPE,),
+                "metadata_sample": (SAMPLE_TYPE,),
+            }
+        }
+
+    def mix(
+        self, input_sample: Any, target_sample: Any, metadata_sample: Any
+    ) -> Tuple[Any, ...]:
+        m1 = input_sample.metadata if isinstance(input_sample.metadata, dict) else {}
+        m2 = target_sample.metadata if isinstance(target_sample.metadata, dict) else {}
+        m3 = metadata_sample.metadata if isinstance(metadata_sample.metadata, dict) else {}
+        result = input_sample._replace(
+            target=target_sample.target,
+            metadata={**m1, **m2, **m3},
+        )
+        return (result,)
+
+
+# ---------------------------------------------------------------------------
+# Scalar math expression nodes
+# ---------------------------------------------------------------------------
+
+# Palette folder for math utility nodes — sibling to _FLUXSTUDIO_CATEGORY.
+_MATH_CATEGORY = "/".join(p for p in (node_root(), "Math") if p)
+
+# A restricted math namespace for formula evaluation: every public symbol from
+# the stdlib ``math`` module plus the built-in scalar helpers. No builtins are
+# passed to ``eval`` so ``exec``, ``import``, ``open``, etc. are unavailable.
+_MATH_NAMESPACE: Dict[str, Any] = {k: getattr(_math_module, k) for k in dir(_math_module) if not k.startswith("_")}
+_MATH_NAMESPACE.update({"abs": abs, "min": min, "max": max, "round": round, "pow": pow})
+
+
+def _eval_formula(formula: str, a: Any, b: Any, c: Any, d: Any, e: Any) -> Any:
+    """Evaluate a math formula string with variables a–e in a safe restricted namespace.
+
+    Variables a–e take precedence over same-named math constants (e.g. ``math.e``).
+    """
+    # Math namespace first, then variables — so user variables (including 'e') shadow
+    # any math-module constants of the same name (e.g. math.e ≈ 2.718 must not win).
+    local_ns: Dict[str, Any] = {**_MATH_NAMESPACE, "a": a, "b": b, "c": c, "d": d, "e": e}
+    try:
+        return eval(formula, {"__builtins__": {}}, local_ns)  # noqa: S307
+    except Exception as exc:
+        raise ValueError(f"Math formula {formula!r} failed: {exc}") from exc
+
+
+class FloatMathNode:
+    """Compute a formula over up to 5 named float inputs (a–e) and output a float result.
+
+    The ``formula`` field is a Python math expression string using the variable names
+    ``a``, ``b``, ``c``, ``d``, ``e`` and any symbol from the stdlib ``math`` module
+    (e.g. ``"sqrt(a**2 + b**2)"``). All inputs default to ``0.0`` and are wirable
+    FLOAT sockets — wire only those your formula uses and leave the rest at their defaults.
+    """
+
+    CATEGORY = _MATH_CATEGORY
+    RETURN_TYPES = ("FLOAT",)
+    RETURN_NAMES = ("result",)
+    FUNCTION = "compute"
+
+    @classmethod
+    def INPUT_TYPES(cls) -> Dict[str, Any]:
+        _f = ("FLOAT", {"default": 0.0})
+        return {
+            "required": {
+                "formula": ("STRING", {"default": "a + b", "multiline": False}),
+                "a": _f,
+                "b": _f,
+                "c": _f,
+                "d": _f,
+                "e": _f,
+            }
+        }
+
+    def compute(
+        self, formula: str, a: float = 0.0, b: float = 0.0, c: float = 0.0, d: float = 0.0, e: float = 0.0
+    ) -> Tuple[float]:
+        return (float(_eval_formula(formula, a, b, c, d, e)),)
+
+
+class IntMathNode:
+    """Compute a formula over up to 5 named integer inputs (a–e) and output an integer result.
+
+    The ``formula`` field is a Python math expression string using the variable names
+    ``a``, ``b``, ``c``, ``d``, ``e`` and any symbol from the stdlib ``math`` module.
+    The result is cast to ``int`` (truncating toward zero). All inputs default to ``0``
+    and are wirable INT sockets.
+    """
+
+    CATEGORY = _MATH_CATEGORY
+    RETURN_TYPES = ("INT",)
+    RETURN_NAMES = ("result",)
+    FUNCTION = "compute"
+
+    @classmethod
+    def INPUT_TYPES(cls) -> Dict[str, Any]:
+        _i = ("INT", {"default": 0})
+        return {
+            "required": {
+                "formula": ("STRING", {"default": "a + b", "multiline": False}),
+                "a": _i,
+                "b": _i,
+                "c": _i,
+                "d": _i,
+                "e": _i,
+            }
+        }
+
+    def compute(self, formula: str, a: int = 0, b: int = 0, c: int = 0, d: int = 0, e: int = 0) -> Tuple[int]:
+        return (int(_eval_formula(formula, a, b, c, d, e)),)
+
+
+class FloatToIntNode:
+    """Convert a FLOAT to an INT using round, floor, or ceil.
+
+    Args:
+        value: The float value to convert.
+        mode: Rounding mode — ``round`` (nearest, ties to even), ``floor`` (toward −∞),
+            or ``ceil`` (toward +∞).
+    """
+
+    CATEGORY = _MATH_CATEGORY
+    RETURN_TYPES = ("INT",)
+    RETURN_NAMES = ("result",)
+    FUNCTION = "convert"
+
+    @classmethod
+    def INPUT_TYPES(cls) -> Dict[str, Any]:
+        return {
+            "required": {
+                "value": ("FLOAT", {"default": 0.0}),
+                "mode": (["round", "floor", "ceil"], {"default": "round"}),
+            }
+        }
+
+    def convert(self, value: float, mode: str = "round") -> Tuple[int]:
+        if mode == "floor":
+            return (_math_module.floor(value),)
+        if mode == "ceil":
+            return (_math_module.ceil(value),)
+        return (round(value),)
+
+
+class IntToFloatNode:
+    """Convert an INT to a FLOAT (a lossless widening cast).
+
+    Args:
+        value: The integer value to convert.
+    """
+
+    CATEGORY = _MATH_CATEGORY
+    RETURN_TYPES = ("FLOAT",)
+    RETURN_NAMES = ("result",)
+    FUNCTION = "convert"
+
+    @classmethod
+    def INPUT_TYPES(cls) -> Dict[str, Any]:
+        return {
+            "required": {
+                "value": ("INT", {"default": 0}),
+            }
+        }
+
+    def convert(self, value: int) -> Tuple[float]:
+        return (float(value),)
+
+
 # Statically-defined adapter nodes, merged into the auto-discovered set by fluxstudio/__init__.py.
 NODE_CLASS_MAPPINGS: Dict[str, Type] = {
     "Taidal_WalkDataset": WalkDatasetNode,
     "Taidal_ExtractSample": SampleExtractorNode,
     "Taidal_Retag": RetagObjectNode,
+    "Taidal_ComposeSample": ComposeSampleNode,
+    "Taidal_MixSamples": MixSamplesNode,
+    "Taidal_FloatMath": FloatMathNode,
+    "Taidal_IntMath": IntMathNode,
+    "Taidal_FloatToInt": FloatToIntNode,
+    "Taidal_IntToFloat": IntToFloatNode,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS: Dict[str, str] = {
     "Taidal_WalkDataset": "Walk Dataset (by index)",
     "Taidal_ExtractSample": "Extract from Sample",
     "Taidal_Retag": "Retag (role / task)",
+    "Taidal_ComposeSample": "Compose Sample (3-way)",
+    "Taidal_MixSamples": "Mix Samples (merge metadata)",
+    "Taidal_FloatMath": "Float Math",
+    "Taidal_IntMath": "Int Math",
+    "Taidal_FloatToInt": "Float → Int",
+    "Taidal_IntToFloat": "Int → Float",
 }
