@@ -24,6 +24,8 @@ from fluxstudio.nodes import (
     ANY,
     NODE_CLASS_MAPPINGS,
     NODE_DISPLAY_NAME_MAPPINGS,
+    ComposeSampleNode,
+    MixSamplesNode,
     RetagObjectNode,
     SampleExtractorNode,
     WalkDatasetNode,
@@ -224,6 +226,118 @@ def test_extract_text_summary_for_pythontype_and_anytype() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# ComposeSampleNode
+# --------------------------------------------------------------------------- #
+
+
+def test_compose_input_types_has_three_sample_sockets() -> None:
+    required = ComposeSampleNode.INPUT_TYPES()["required"]
+    assert set(required) == {"input_sample", "target_sample", "metadata_sample"}
+    for key in ("input_sample", "target_sample", "metadata_sample"):
+        assert required[key][0] == "DATAFLUX_SAMPLE"
+
+
+def test_compose_takes_input_from_first_sample() -> None:
+    s1 = Sample(input=np.array([1, 2, 3]), target=None, metadata={})
+    s2 = Sample(input=np.array([9, 9, 9]), target="box", metadata={})
+    s3 = Sample(input=None, target=None, metadata={"src": "camera"})
+    (out,) = ComposeSampleNode().compose(s1, s2, s3)
+    assert np.array_equal(out.input, s1.input)
+
+
+def test_compose_takes_target_from_second_sample() -> None:
+    s1 = Sample(input=0, target="original", metadata={})
+    s2 = Sample(input=0, target="override", metadata={})
+    s3 = Sample(input=0, target=None, metadata={})
+    (out,) = ComposeSampleNode().compose(s1, s2, s3)
+    assert out.target == "override"
+
+
+def test_compose_takes_metadata_from_third_sample() -> None:
+    s1 = Sample(input=0, target=None, metadata={"a": 1})
+    s2 = Sample(input=0, target=None, metadata={"b": 2})
+    s3 = Sample(input=0, target=None, metadata={"c": 3, "src": "lidar"})
+    (out,) = ComposeSampleNode().compose(s1, s2, s3)
+    assert out.metadata == {"c": 3, "src": "lidar"}
+
+
+def test_compose_does_not_merge_metadata() -> None:
+    # ComposeSampleNode is STRICT — only metadata_sample's dict is forwarded.
+    s1 = Sample(input=0, target=None, metadata={"from_s1": True})
+    s2 = Sample(input=0, target=None, metadata={"from_s2": True})
+    s3 = Sample(input=0, target=None, metadata={"from_s3": True})
+    (out,) = ComposeSampleNode().compose(s1, s2, s3)
+    assert "from_s1" not in out.metadata
+    assert "from_s2" not in out.metadata
+    assert out.metadata == {"from_s3": True}
+
+
+def test_compose_return_type_is_sample() -> None:
+    s = Sample(input=0, target=0, metadata={})
+    (out,) = ComposeSampleNode().compose(s, s, s)
+    assert isinstance(out, Sample)
+
+
+# --------------------------------------------------------------------------- #
+# MixSamplesNode
+# --------------------------------------------------------------------------- #
+
+
+def test_mix_input_types_has_three_sample_sockets() -> None:
+    required = MixSamplesNode.INPUT_TYPES()["required"]
+    assert set(required) == {"input_sample", "target_sample", "metadata_sample"}
+    for key in ("input_sample", "target_sample", "metadata_sample"):
+        assert required[key][0] == "DATAFLUX_SAMPLE"
+
+
+def test_mix_takes_input_from_first_sample() -> None:
+    s1 = Sample(input=42, target=None, metadata={})
+    s2 = Sample(input=99, target="t", metadata={})
+    s3 = Sample(input=0, target=None, metadata={})
+    (out,) = MixSamplesNode().mix(s1, s2, s3)
+    assert out.input == 42
+
+
+def test_mix_takes_target_from_second_sample() -> None:
+    s1 = Sample(input=0, target="old", metadata={})
+    s2 = Sample(input=0, target="new", metadata={})
+    s3 = Sample(input=0, target=None, metadata={})
+    (out,) = MixSamplesNode().mix(s1, s2, s3)
+    assert out.target == "new"
+
+
+def test_mix_merges_metadata_from_all_three() -> None:
+    s1 = Sample(input=0, target=None, metadata={"a": 1})
+    s2 = Sample(input=0, target=None, metadata={"b": 2})
+    s3 = Sample(input=0, target=None, metadata={"c": 3})
+    (out,) = MixSamplesNode().mix(s1, s2, s3)
+    assert out.metadata == {"a": 1, "b": 2, "c": 3}
+
+
+def test_mix_metadata_later_keys_win() -> None:
+    # metadata_sample (s3) should override target_sample (s2) which overrides input_sample (s1).
+    s1 = Sample(input=0, target=None, metadata={"key": "from_s1"})
+    s2 = Sample(input=0, target=None, metadata={"key": "from_s2"})
+    s3 = Sample(input=0, target=None, metadata={"key": "from_s3"})
+    (out,) = MixSamplesNode().mix(s1, s2, s3)
+    assert out.metadata["key"] == "from_s3"
+
+
+def test_mix_handles_empty_metadata_dicts() -> None:
+    s1 = Sample(input=0, target=None, metadata={})
+    s2 = Sample(input=0, target="t", metadata={})
+    s3 = Sample(input=0, target=None, metadata={"x": 7})
+    (out,) = MixSamplesNode().mix(s1, s2, s3)
+    assert out.metadata == {"x": 7}
+
+
+def test_mix_return_type_is_sample() -> None:
+    s = Sample(input=0, target=0, metadata={})
+    (out,) = MixSamplesNode().mix(s, s, s)
+    assert isinstance(out, Sample)
+
+
+# --------------------------------------------------------------------------- #
 # Static registration mappings
 # --------------------------------------------------------------------------- #
 
@@ -231,8 +345,12 @@ def test_extract_text_summary_for_pythontype_and_anytype() -> None:
 def test_static_node_mappings_present() -> None:
     assert NODE_CLASS_MAPPINGS["Taidal_WalkDataset"] is WalkDatasetNode
     assert NODE_CLASS_MAPPINGS["Taidal_ExtractSample"] is SampleExtractorNode
+    assert NODE_CLASS_MAPPINGS["Taidal_ComposeSample"] is ComposeSampleNode
+    assert NODE_CLASS_MAPPINGS["Taidal_MixSamples"] is MixSamplesNode
     assert NODE_DISPLAY_NAME_MAPPINGS["Taidal_WalkDataset"] == "Walk Dataset (by index)"
     assert NODE_DISPLAY_NAME_MAPPINGS["Taidal_ExtractSample"] == "Extract from Sample"
+    assert NODE_DISPLAY_NAME_MAPPINGS["Taidal_ComposeSample"] == "Compose Sample (3-way)"
+    assert NODE_DISPLAY_NAME_MAPPINGS["Taidal_MixSamples"] == "Mix Samples (merge metadata)"
 
 
 # --------------------------------------------------------------------------- #
