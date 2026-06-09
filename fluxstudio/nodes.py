@@ -632,9 +632,7 @@ class ComposeSampleNode:
             }
         }
 
-    def compose(
-        self, input_sample: Any, target_sample: Any, metadata_sample: Any
-    ) -> Tuple[Any, ...]:
+    def compose(self, input_sample: Any, target_sample: Any, metadata_sample: Any) -> Tuple[Any, ...]:
         result = input_sample._replace(
             target=target_sample.target,
             metadata=metadata_sample.metadata,
@@ -669,9 +667,7 @@ class MixSamplesNode:
             }
         }
 
-    def mix(
-        self, input_sample: Any, target_sample: Any, metadata_sample: Any
-    ) -> Tuple[Any, ...]:
+    def mix(self, input_sample: Any, target_sample: Any, metadata_sample: Any) -> Tuple[Any, ...]:
         m1 = input_sample.metadata if isinstance(input_sample.metadata, dict) else {}
         m2 = target_sample.metadata if isinstance(target_sample.metadata, dict) else {}
         m3 = metadata_sample.metadata if isinstance(metadata_sample.metadata, dict) else {}
