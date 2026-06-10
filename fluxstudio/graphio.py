@@ -42,7 +42,7 @@ from dataflux.discovery import resolve_callable
 from logflow import get_logger
 
 from fluxstudio.bridge import _OP_LIST_PARAMS, _SOURCE_LIST_PARAMS, OBJECT_TYPE, OP_TYPE, SOURCE_TYPE, _coerce_kwargs
-from fluxstudio.export import UnsupportedTopologyError, _is_link
+from fluxstudio.export import _SAMPLE_INPUT, UnsupportedTopologyError, _id_sort_key, _is_link
 
 logger = get_logger(__name__)
 
@@ -752,16 +752,43 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
     on collision); a wire becomes a ``!ref:<name>`` in the consumer's kwargs. ``num_classes`` /
     ``image_size`` are hoisted to top-level vars. The result is serialised with
     :func:`confluid.dump` and matches the navigaitor / reference config shape.
+
+    Nodes with no Confluid YAML form do NOT fail the export — they are skipped and listed in
+    a leading ``#`` comment block: native ComfyUI nodes (viewers / primitives — not in
+    ``node_mappings``), the canvas-only Taidal adapters (Walk / Extract / Retag / … — no
+    ``TAIDAL_CALLABLE_PATH``), and any Taidal node whose spec fails to build (logged at
+    ``warning``; the rest of the graph still exports). An op's ``sample`` chain wire is
+    data-flow, not configuration, so chained ops export as standalone entries (the op-chain
+    artifact is ``export_ops_yamls`` / "Export Taidal Ops"); a dropped wire into a real
+    config member is also noted in the comment block.
     """
     pnodes = _normalize_workflow(graph, node_mappings)
     if not pnodes:
         return _confluid_dump({})
 
     # Recover a Fluid spec per node + which output slot each consumer wired (for object lazy/instance).
+    # Non-exportable nodes are collected (not fatal) and surfaced as YAML comments below.
     specs: Dict[str, Tuple[type, bool, Dict[str, Any]]] = {}
+    skipped: List[Tuple[str, str, str]] = []  # (node_id, class_type, reason)
     for nid, pnode in pnodes.items():
-        if getattr(node_mappings.get(pnode.class_type), "TAIDAL_CALLABLE_PATH", None):
-            specs[nid] = _build_fluid(pnode, node_mappings)
+        node_cls = node_mappings.get(pnode.class_type)
+        if getattr(node_cls, "TAIDAL_CALLABLE_PATH", None):
+            try:
+                specs[nid] = _build_fluid(pnode, node_mappings)
+            except Exception as e:
+                # A Taidal node that won't serialize must not sink the whole export —
+                # actionable for the operator, so log at warning (unlike the expected skips).
+                logger.warning(
+                    f"workflow_to_yaml: skipping node {nid} ({pnode.class_type}) — "
+                    f"could not serialize it: {type(e).__name__}: {e}"
+                )
+                skipped.append((nid, pnode.class_type, f"failed to serialize — {type(e).__name__}: {e}"))
+        elif node_cls is None:
+            logger.debug(f"workflow_to_yaml: skipping node {nid} ({pnode.class_type}) — native ComfyUI node.")
+            skipped.append((nid, pnode.class_type, "native ComfyUI node"))
+        else:
+            logger.debug(f"workflow_to_yaml: skipping node {nid} ({pnode.class_type}) — canvas-only adapter.")
+            skipped.append((nid, pnode.class_type, "canvas-only Taidal adapter (no Confluid form)"))
 
     # The WIRED OUTPUT SLOT is authoritative for an object node's eager/lazy-ness: a consumer that
     # pulled the `lazy` output (slot 1) → !lazy:; the `instance` output (slot 0) → !class: (eager).
@@ -780,14 +807,21 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
     # Build a Fluid marker per node, wiring links as References and list-params as Reference lists.
     fluids: Dict[str, Any] = {}
     referenced: set = set()
+    dropped_wires: List[Tuple[str, str, str, str]] = []  # (consumer_name, input, src_id, src_class_type)
     for nid, (cls, is_lazy, kwargs) in specs.items():
         pnode = pnodes[nid]
         wired: Dict[str, List[Tuple[str, str]]] = {}
         for input_name, (src_id, _slot) in pnode.links.items():
+            base = _strip_index(input_name)
+            if base == _SAMPLE_INPUT:
+                # The op-chaining data-flow socket — never a constructor kwarg. Chained ops
+                # export as standalone entries; the chain itself is the ops-export artifact.
+                continue
             if src_id not in specs:
+                src_type = pnodes[src_id].class_type if src_id in pnodes else "unknown"
+                dropped_wires.append((names[nid], base, src_id, src_type))
                 continue
             referenced.add(src_id)
-            base = _strip_index(input_name)
             wired.setdefault(base, []).append((input_name, src_id))
         for base, items in wired.items():
             if len(items) == 1 and items[0][0] == base:
@@ -798,7 +832,28 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
         fluids[nid] = LazyClass(cls, **kwargs) if is_lazy else Class(cls, **kwargs)
 
     document = _hoist_document(fluids, names, referenced, specs)
-    return _confluid_dump(document)
+    return _skipped_comment_block(skipped, dropped_wires) + _confluid_dump(document)
+
+
+def _skipped_comment_block(skipped: List[Tuple[str, str, str]], dropped_wires: List[Tuple[str, str, str, str]]) -> str:
+    """Render the skipped-node / dropped-wire summary as a leading ``#`` comment block.
+
+    Comments are invisible to ``confluid.load`` / any YAML parser, so the document below
+    stays a normal, runnable config — the block only tells the user what the export left out
+    and why. Empty string when nothing was skipped (the all-Taidal export is byte-identical
+    to before).
+    """
+    if not skipped and not dropped_wires:
+        return ""
+    lines = ["# NOTE: the canvas contained node(s) with no Confluid YAML form; they were left out:"]
+    for nid, class_type, reason in sorted(skipped, key=lambda s: _id_sort_key(s[0])):
+        lines.append(f"#   - node {nid} ({class_type}): {reason}")
+    if dropped_wires:
+        lines.append("# Wires from skipped nodes into exported config members were dropped")
+        lines.append("# (each member falls back to its default):")
+        for consumer, input_name, src_id, src_type in dropped_wires:
+            lines.append(f"#   - {consumer}.{input_name} <- node {src_id} ({src_type})")
+    return "\n".join(lines) + "\n"
 
 
 def _assign_ref_names(
@@ -812,11 +867,16 @@ def _assign_ref_names(
     applied by :mod:`fluxstudio.subgraphio` when nodes are nested.)
     """
     # Preferred base name = the consumer input socket this node feeds (model / train_set / …).
+    # The op-chaining ``sample`` socket is data-flow, not a config member — naming an op
+    # ``sample`` after it would be meaningless, so those wires don't contribute a name.
     fed_as: Dict[str, str] = {}
     for pnode in pnodes.values():
         for input_name, (src_id, _slot) in pnode.links.items():
+            base = _strip_index(input_name)
+            if base == _SAMPLE_INPUT:
+                continue
             if src_id in specs and src_id not in fed_as:
-                fed_as[src_id] = _strip_index(input_name)
+                fed_as[src_id] = base
     names: Dict[str, str] = {}
     used: Dict[str, int] = {}
     for nid in specs:
