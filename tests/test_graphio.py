@@ -284,8 +284,10 @@ def test_export_skips_native_and_adapter_nodes_with_comment() -> None:
     assert "node 5 (Taidal_ExtractSample): canvas-only Taidal adapter" in comments
     assert "node 6 (PreviewImage): native ComfyUI node" in comments
     # The Taidal nodes still export — and the document stays parseable (comments are invisible).
+    # The source is named by its class: its only consumer (Walk) is skipped, and skipped
+    # consumers' socket names are UI plumbing, never ref names.
     graph = confluid.resolve(yaml_text)
-    assert "HuggingFaceSource" in str(graph["source"].target)
+    assert "HuggingFaceSource" in str(graph["hugging_face_source"].target)
     assert all("RescaleOp" in str(graph[k].target) for k in ("rescale_op", "rescale_op_2", "rescale_op_3"))
 
 
@@ -361,6 +363,283 @@ def test_export_dropped_config_wire_is_commented() -> None:
     # Prompt-form graph with a DANGLING link (source node id absent entirely) → "unknown".
     prompt = {"2": {"class_type": "split", "inputs": {"source": ["99", 0]}}}
     assert "dataset_split.source <- node 99 (unknown)" in workflow_to_yaml(prompt, nm)
+
+
+# --- subgraph-instance inlining (the real ComfyUI save format) --------------------------
+
+
+def _chain_subgraph_def(def_id: str) -> Dict[str, Any]:
+    """A 2-op subgraph saved the way current ComfyUI writes it — inner links as DICTS.
+
+    Boundary: input slot 0 (sample) → inner head 21; input slot 1 (k) → 21's `in_max`
+    WIDGET input; inner chain 21 → 22; 22 → output slot 0.
+    """
+    return {
+        "id": def_id,
+        "name": "Chain",
+        "inputNode": {"id": -10},
+        "outputNode": {"id": -20},
+        "inputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE"}, {"name": "k", "type": "FLOAT"}],
+        "outputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE"}],
+        "nodes": [
+            {
+                "id": 21,
+                "type": "rescale",
+                "widgets_values": [0.0, 9.0, 0.0, 1.0, False],
+                "inputs": [
+                    {"name": "sample", "type": "DATAFLUX_SAMPLE", "link": 197},
+                    {"name": "in_max", "type": "FLOAT", "widget": {"name": "in_max"}, "link": 198},
+                ],
+                "outputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "links": [194]}],
+            },
+            {
+                "id": 22,
+                "type": "rescale",
+                "widgets_values": [0.0, 7.0, 0.0, 1.0, False],
+                "inputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "link": 194}],
+                "outputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "links": [199]}],
+            },
+        ],
+        "links": [
+            {
+                "id": 194,
+                "origin_id": 21,
+                "origin_slot": 0,
+                "target_id": 22,
+                "target_slot": 0,
+                "type": "DATAFLUX_SAMPLE",
+            },
+            {
+                "id": 197,
+                "origin_id": -10,
+                "origin_slot": 0,
+                "target_id": 21,
+                "target_slot": 0,
+                "type": "DATAFLUX_SAMPLE",
+            },
+            {"id": 198, "origin_id": -10, "origin_slot": 1, "target_id": 21, "target_slot": 1, "type": "FLOAT"},
+            {
+                "id": 199,
+                "origin_id": 22,
+                "origin_slot": 0,
+                "target_id": -20,
+                "target_slot": 0,
+                "type": "DATAFLUX_SAMPLE",
+            },
+        ],
+    }
+
+
+def _two_instance_workflow() -> Dict[str, Any]:
+    """src → instance#1 → Preview, src → instance#2, Primitive → instance#1's k input."""
+    return {
+        "nodes": [
+            {
+                "id": 1,
+                "type": "src",
+                "widgets_values": ["mnist", "", "image", "label", "", ""],
+                "inputs": [],
+                "outputs": [{"name": "source", "type": "DATAFLUX_SOURCE", "links": [1, 3]}],
+            },
+            {
+                "id": 2,
+                "type": "sg-chain",
+                "widgets_values": [],
+                "inputs": [
+                    {"name": "sample", "type": "DATAFLUX_SAMPLE", "link": 1},
+                    {"name": "k", "type": "FLOAT", "widget": {"name": "k"}, "link": 4},
+                ],
+                "outputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "links": [2]}],
+            },
+            {
+                "id": 3,
+                "type": "sg-chain",
+                "widgets_values": [],
+                "inputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "link": 3}],
+                "outputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "links": []}],
+            },
+            {
+                "id": 4,
+                "type": "PrimitiveNode",
+                "widgets_values": [5.0],
+                "inputs": [],
+                "outputs": [{"name": "FLOAT", "type": "FLOAT", "links": [4]}],
+            },
+            {
+                "id": 5,
+                "type": "PreviewImage",
+                "widgets_values": [],
+                "inputs": [{"name": "images", "type": "IMAGE", "link": 2}],
+                "outputs": [],
+            },
+        ],
+        "links": [
+            [1, 1, 0, 2, 0, "DATAFLUX_SAMPLE"],
+            [2, 2, 0, 5, 0, "IMAGE"],
+            [3, 1, 0, 3, 0, "DATAFLUX_SAMPLE"],
+            [4, 4, 0, 2, 1, "FLOAT"],
+        ],
+        "definitions": {"subgraphs": [_chain_subgraph_def("sg-chain")]},
+    }
+
+
+def test_inline_subgraphs_dict_links_and_boundary_restitch() -> None:
+    # The real save format stores a definition's inner links as DICTS — positional indexing
+    # raised `KeyError: 1` and aborted the whole export ("Export failed: 1"). The inliner must
+    # parse them, re-stitch boundary wires, and renumber link ids per instance (3× the same
+    # definition reuses the same inner ids).
+    from fluxstudio.graphio import _inline_subgraphs
+
+    flat = _inline_subgraphs(_two_instance_workflow())
+
+    assert all(n["type"] != "sg-chain" for n in flat["nodes"])
+    rescales = [n["id"] for n in flat["nodes"] if n["type"] == "rescale"]
+    assert len(rescales) == 4  # two copies per instance
+    link_ids = [link[0] for link in flat["links"]]
+    assert len(link_ids) == len(set(link_ids))  # no collisions across instance copies
+
+    edges = {(link[1], link[2], link[3], link[4]) for link in flat["links"]}
+    by_id = {n["id"]: n for n in flat["nodes"]}
+    heads = [nid for nid in rescales if (1, 0, nid, 0) in edges]  # fed by the source
+    assert len(heads) == 2  # one head per instance
+    for head in heads:
+        tails = [t for (o, _os, t, ts) in edges if o == head and ts == 0 and t in rescales]
+        assert len(tails) == 1  # inner chain stays within its own instance copy
+        # node input/output link refs were rewritten to the new ids
+        head_in_link = by_id[head]["inputs"][0]["link"]
+        assert any(link[0] == head_in_link and link[1] == 1 for link in flat["links"])
+    # instance#1's k input re-stitched onto the inner head's in_max WIDGET input
+    assert any((4, 0, head, 1) in edges for head in heads)
+    # instance#1's output re-originates at its tail and still feeds the Preview node
+    assert any((o, 0, 5, 0) in edges and o in rescales for (o, _os, t, _ts) in edges if t == 5)
+
+
+def test_export_inlines_subgraph_instances_end_to_end() -> None:
+    # The miniature of the real `impairments.json` shape: subgraph instances + a Primitive
+    # feeding a widget input + native viewers. Export must succeed, emit the inner ops, and
+    # note the Primitive wire drop.
+    yaml_text = workflow_to_yaml(_two_instance_workflow(), _canvas_mappings())
+    graph = confluid.resolve(yaml_text)
+    rescale_keys = [k for k, v in graph.items() if hasattr(v, "target") and "RescaleOp" in str(v.target)]
+    assert len(rescale_keys) == 4
+    assert "node 4 (PrimitiveNode): native ComfyUI node" in yaml_text
+    assert ".in_max <- node 4 (PrimitiveNode)" in yaml_text
+
+
+def test_inline_subgraphs_nested_definitions_flatten() -> None:
+    from fluxstudio.graphio import _inline_subgraphs
+
+    inner_def = {
+        "id": "sg-inner",
+        "inputNode": {"id": -10},
+        "outputNode": {"id": -20},
+        "nodes": [
+            {
+                "id": 31,
+                "type": "rescale",
+                "widgets_values": [0.0, 9.0, 0.0, 1.0, False],
+                "inputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "link": 100}],
+                "outputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "links": [101]}],
+            }
+        ],
+        "links": [
+            {
+                "id": 100,
+                "origin_id": -10,
+                "origin_slot": 0,
+                "target_id": 31,
+                "target_slot": 0,
+                "type": "DATAFLUX_SAMPLE",
+            },
+            {
+                "id": 101,
+                "origin_id": 31,
+                "origin_slot": 0,
+                "target_id": -20,
+                "target_slot": 0,
+                "type": "DATAFLUX_SAMPLE",
+            },
+        ],
+    }
+    outer_def = {
+        "id": "sg-outer",
+        "inputNode": {"id": -10},
+        "outputNode": {"id": -20},
+        "nodes": [
+            {
+                "id": 41,
+                "type": "sg-inner",
+                "widgets_values": [],
+                "inputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "link": 110}],
+                "outputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "links": [111]}],
+            }
+        ],
+        "links": [
+            {
+                "id": 110,
+                "origin_id": -10,
+                "origin_slot": 0,
+                "target_id": 41,
+                "target_slot": 0,
+                "type": "DATAFLUX_SAMPLE",
+            },
+            {
+                "id": 111,
+                "origin_id": 41,
+                "origin_slot": 0,
+                "target_id": -20,
+                "target_slot": 0,
+                "type": "DATAFLUX_SAMPLE",
+            },
+        ],
+    }
+    workflow = {
+        "nodes": [
+            {
+                "id": 1,
+                "type": "src",
+                "widgets_values": ["mnist", "", "image", "label", "", ""],
+                "inputs": [],
+                "outputs": [{"name": "source", "type": "DATAFLUX_SOURCE", "links": [1]}],
+            },
+            {
+                "id": 2,
+                "type": "sg-outer",
+                "widgets_values": [],
+                "inputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "link": 1}],
+                "outputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "links": []}],
+            },
+        ],
+        "links": [[1, 1, 0, 2, 0, "DATAFLUX_SAMPLE"]],
+        "definitions": {"subgraphs": [inner_def, outer_def]},
+    }
+    flat = _inline_subgraphs(workflow)
+    types = [n["type"] for n in flat["nodes"]]
+    assert "sg-outer" not in types and "sg-inner" not in types
+    assert types.count("rescale") == 1
+    rescale = next(n for n in flat["nodes"] if n["type"] == "rescale")
+    assert any(link[1] == 1 and link[3] == rescale["id"] for link in flat["links"])  # src still feeds it
+
+
+def test_inline_subgraphs_self_referential_definition_terminates() -> None:
+    # A definition containing an instance of itself can never flatten — the depth cap must
+    # stop the loop (warning) instead of hanging.
+    from fluxstudio.graphio import _inline_subgraphs
+
+    cyclic = {
+        "id": "sg-cycle",
+        "inputNode": {"id": -10},
+        "outputNode": {"id": -20},
+        "nodes": [{"id": 51, "type": "sg-cycle", "widgets_values": [], "inputs": [], "outputs": []}],
+        "links": [],
+    }
+    workflow = {
+        "nodes": [{"id": 1, "type": "sg-cycle", "widgets_values": [], "inputs": [], "outputs": []}],
+        "links": [],
+        "definitions": {"subgraphs": [cyclic]},
+    }
+    flat = _inline_subgraphs(workflow)  # must return, not hang
+    assert flat["definitions"] == {"subgraphs": []}
 
 
 def test_export_all_taidal_graph_has_no_comment_block() -> None:

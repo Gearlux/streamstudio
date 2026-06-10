@@ -29,6 +29,7 @@ inlines any saved subgraph back into the flat hoisted YAML.
 
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union, cast
 
@@ -616,37 +617,138 @@ def _wrap_in_subgraph(
 # =======================================================================================
 
 
+def _link_six(link: Any) -> Optional[List[Any]]:
+    """Normalise a litegraph link to ``[id, origin_id, origin_slot, target_id, target_slot, type]``.
+
+    Top-level links are usually 6-arrays, but ComfyUI saves a SUBGRAPH definition's inner links
+    as dicts (``{"id": …, "origin_id": …}``) — indexing those positionally was the
+    ``KeyError: 1`` that aborted every whole-graph export containing a subgraph instance.
+    """
+    if isinstance(link, dict):
+        return [
+            link.get("id"),
+            link.get("origin_id"),
+            link.get("origin_slot", 0),
+            link.get("target_id"),
+            link.get("target_slot", 0),
+            link.get("type"),
+        ]
+    if isinstance(link, (list, tuple)) and len(link) >= 6:
+        return list(link[:6])
+    return None
+
+
+def _inline_subgraphs_once(graph: Dict[str, Any]) -> Tuple[Dict[str, Any], bool]:
+    """One level of subgraph-instance flattening; returns ``(graph, changed)``.
+
+    Replaces every instance node with remapped copies of its definition's inner nodes and
+    RE-STITCHES the wires crossing the instance boundary: an outer link into instance input
+    ``k`` reattaches to the inner node(s) the definition's ``inputNode`` (id ``-10``) slot ``k``
+    feeds (a subgraph input may fan out to several inner targets), and an outer link from
+    instance output ``k`` re-originates at the inner node feeding ``outputNode`` (id ``-20``)
+    slot ``k``. The whole links array is then REBUILT with fresh sequential ids and every
+    node's ``inputs[].link`` / ``outputs[].links`` references rewritten — inner link ids are
+    only unique within their definition, so copying them verbatim collides across two
+    instances of the same subgraph (and with top-level ids).
+    """
+    subgraphs = {sg["id"]: sg for sg in graph.get("definitions", {}).get("subgraphs", [])}
+    instance_ids = {n["id"] for n in graph.get("nodes", []) if n.get("type") in subgraphs}
+    if not instance_ids:
+        return graph, False
+
+    next_node_id = max((n["id"] for n in graph.get("nodes", []) if isinstance(n.get("id"), int)), default=0)
+    out_nodes: List[Dict[str, Any]] = [copy.deepcopy(n) for n in graph.get("nodes", []) if n["id"] not in instance_ids]
+
+    # Edges as [origin, origin_slot, target, target_slot, type]; ids re-assigned at the end.
+    edges: List[List[Any]] = []
+    for link in graph.get("links", []):
+        six = _link_six(link)
+        if six is not None:
+            edges.append(six[1:])
+
+    # Boundary maps per instance: input slot k → inner targets; output slot k → inner origin.
+    in_map: Dict[Tuple[Any, Any], List[Tuple[Any, Any]]] = {}
+    out_map: Dict[Tuple[Any, Any], Tuple[Any, Any]] = {}
+    for node in graph.get("nodes", []):
+        sg = subgraphs.get(node.get("type"))
+        if sg is None:
+            continue
+        idmap: Dict[Any, int] = {}
+        for inode in sg.get("nodes", []):
+            next_node_id += 1
+            idmap[inode["id"]] = next_node_id
+            inode_copy = copy.deepcopy(inode)
+            inode_copy["id"] = next_node_id
+            out_nodes.append(inode_copy)
+        for link in sg.get("links", []):
+            six = _link_six(link)
+            if six is None:
+                continue
+            _lid, origin, oslot, target, tslot, ltype = six
+            if origin == -10:  # subgraph input slot `oslot` feeds inner input (target, tslot)
+                in_map.setdefault((node["id"], oslot), []).append((idmap.get(target, target), tslot))
+            elif target == -20:  # inner output (origin, oslot) feeds subgraph output slot `tslot`
+                out_map[(node["id"], tslot)] = (idmap.get(origin, origin), oslot)
+            else:
+                edges.append([idmap.get(origin, origin), oslot, idmap.get(target, target), tslot, ltype])
+
+    # Re-stitch edges that touch an instance node onto the inner nodes.
+    resolved: List[List[Any]] = []
+    for origin, oslot, target, tslot, ltype in edges:
+        if origin in instance_ids:
+            inner_origin = out_map.get((origin, oslot))
+            if inner_origin is None:
+                continue  # instance output unwired inside the definition — dangling, drop
+            origin, oslot = inner_origin
+        if target in instance_ids:
+            for inner_target, inner_tslot in in_map.get((target, tslot), []):
+                resolved.append([origin, oslot, inner_target, inner_tslot, ltype])
+            continue  # unwired-inside instance input → outer link drops
+        resolved.append([origin, oslot, target, tslot, ltype])
+
+    # Rebuild the links array with fresh ids + rewrite every node's link references (the link id
+    # is the join key _normalize_ui_workflow matches inputs against, so refs must follow).
+    by_id = {n["id"]: n for n in out_nodes}
+    for node in out_nodes:
+        for inp in node.get("inputs", []) or []:
+            if isinstance(inp, dict):
+                inp["link"] = None
+        for outp in node.get("outputs", []) or []:
+            if isinstance(outp, dict):
+                outp["links"] = []
+    out_links: List[List[Any]] = []
+    for origin, oslot, target, tslot, ltype in resolved:
+        src, dst = by_id.get(origin), by_id.get(target)
+        if src is None or dst is None:
+            continue  # endpoint vanished (defensive)
+        link_id = len(out_links) + 1
+        out_links.append([link_id, origin, oslot, target, tslot, ltype])
+        inputs = dst.get("inputs", []) or []
+        if isinstance(tslot, int) and 0 <= tslot < len(inputs) and isinstance(inputs[tslot], dict):
+            inputs[tslot]["link"] = link_id
+        outputs = src.get("outputs", []) or []
+        if isinstance(oslot, int) and 0 <= oslot < len(outputs) and isinstance(outputs[oslot], dict):
+            outputs[oslot].setdefault("links", []).append(link_id)
+    return {**graph, "nodes": out_nodes, "links": out_links}, True
+
+
 def _inline_subgraphs(graph: Dict[str, Any]) -> Dict[str, Any]:
     """Flatten ``definitions.subgraphs`` instances into the top-level node set for export.
 
-    Each subgraph instance node is replaced by the subgraph's internal nodes (ids remapped so they
-    can't collide with top-level nodes) and internal links, dropping the ``inputNode``/``outputNode``
-    (id ``-10`` / ``-20``) boundary links. So a workflow saved as a subgraph round-trips back to the
-    same flat hoisted YAML. (Standalone-reusable ``include:`` files are a documented follow-up.)
+    Repeats the single-level pass so an instance nested inside another definition also
+    flattens (depth-capped — a self-referential definition cannot terminate). So a workflow
+    saved with subgraphs exports like its flat equivalent.
+    (Standalone-reusable ``include:`` files are a documented follow-up.)
     """
-    subgraphs = {sg["id"]: sg for sg in graph.get("definitions", {}).get("subgraphs", [])}
-    if not subgraphs:
+    if not graph.get("definitions", {}).get("subgraphs", []):
         return graph
-    plain = [n for n in graph.get("nodes", []) if n["type"] not in subgraphs]
-    next_id = max((n["id"] for n in plain), default=0)
-    out_nodes: List[Dict[str, Any]] = list(plain)
-    out_links: List[List[Any]] = list(graph.get("links", []))
-    for node in graph.get("nodes", []):
-        sg = subgraphs.get(node["type"])
-        if sg is None:
-            continue
-        idmap: Dict[int, int] = {}
-        for inode in sg.get("nodes", []):
-            next_id += 1
-            idmap[inode["id"]] = next_id
-            out_nodes.append({**inode, "id": next_id})
-        for link in sg.get("links", []):
-            if link[1] == -10 or link[3] == -20:  # boundary link — drop
-                continue
-            out_links.append(
-                [link[0], idmap.get(link[1], link[1]), link[2], idmap.get(link[3], link[3]), link[4], link[5]]
-            )
-    return {**graph, "nodes": out_nodes, "links": out_links, "definitions": {"subgraphs": []}}
+    for _ in range(16):
+        graph, changed = _inline_subgraphs_once(graph)
+        if not changed:
+            break
+    else:
+        logger.warning("_inline_subgraphs: subgraph nesting deeper than 16 levels (cyclic definition?) — stopping.")
+    return {**graph, "definitions": {"subgraphs": []}}
 
 
 def _normalize_workflow(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> Dict[str, "_PNode"]:
@@ -866,11 +968,15 @@ def _assign_ref_names(
     On collision, disambiguate with a numeric suffix (``model_2``). (Subgraph path-prefixing is
     applied by :mod:`fluxstudio.subgraphio` when nodes are nested.)
     """
-    # Preferred base name = the consumer input socket this node feeds (model / train_set / …).
+    # Preferred base name = the CONFIG input socket this node feeds (model / train_set / …) —
+    # only on an exported consumer: a skipped node's sockets (a YamlDump `object`, a PreviewAny
+    # `source`, a Math `a`) are UI plumbing, not config members, and would produce junk names.
     # The op-chaining ``sample`` socket is data-flow, not a config member — naming an op
-    # ``sample`` after it would be meaningless, so those wires don't contribute a name.
+    # ``sample`` after it would be meaningless, so those wires don't contribute a name either.
     fed_as: Dict[str, str] = {}
-    for pnode in pnodes.values():
+    for nid, pnode in pnodes.items():
+        if nid not in specs:
+            continue
         for input_name, (src_id, _slot) in pnode.links.items():
             base = _strip_index(input_name)
             if base == _SAMPLE_INPUT:
