@@ -29,7 +29,7 @@ fluxstudio
 On first run this:
 
 1. Clones ComfyUI into `~/.fluxstudio/ComfyUI` and installs its `requirements.txt` into the active environment.
-2. Installs the [ComfyUI-Manager](https://github.com/Comfy-Org/ComfyUI-Manager) custom node (plus any extra custom nodes you request — see [Custom nodes](#custom-nodes-comfyui-manager--extras) below).
+2. Installs the [ComfyUI-Manager](https://github.com/Comfy-Org/ComfyUI-Manager) custom node, plus any custom nodes declared by installed packages or requested by you — see [Custom nodes](#custom-nodes-comfyui-manager--extras) below.
 3. Symlinks the installed `fluxstudio` package into `ComfyUI/custom_nodes/fluxstudio`.
 4. Launches ComfyUI (`python main.py`) under the **same interpreter**, so ComfyUI's node discovery reads the entry-point metadata from your active `.venv`.
 
@@ -47,17 +47,30 @@ A model node can come from a **builder function**, not just a class. Many librar
 
 ### Custom nodes: ComfyUI-Manager + extras
 
-Every launch (not just the first) seeds ComfyUI's `custom_nodes/` directory:
+Every launch (not just the first) seeds ComfyUI's `custom_nodes/` directory from **three tiers** (deduped, installed in this order):
 
-- **[ComfyUI-Manager](https://github.com/Comfy-Org/ComfyUI-Manager) is installed by default** — it adds a *Manager* button to the ComfyUI toolbar from which you can install, update, and remove further custom nodes without leaving the GUI. Skip it with `--no-manager`.
-- **Extra custom nodes** can be requested two ways; both take git URLs and combine (env entries first, then flags):
+1. **Package-declared — the `fluxstudio.custom_nodes` entry-point group.** Nodes declared here are *generally available*: declared once in a package's `pyproject.toml`, they install for every user of that package on every launch, with no flags or env vars. fluxstudio itself bundles **[ComfyUI-Manager](https://github.com/Comfy-Org/ComfyUI-Manager)** this way — it adds a *Manager* button to the ComfyUI toolbar from which you install, update, and remove further custom nodes without leaving the GUI. Any installed package can contribute:
 
-| Mechanism | Example |
-|---|---|
-| Repeatable `--custom-node` flag | `fluxstudio --custom-node https://github.com/rgthree/rgthree-comfy --custom-node https://github.com/crystian/ComfyUI-Crystools` |
-| `FLUXSTUDIO_CUSTOM_NODES` env var (comma-separated) | `FLUXSTUDIO_CUSTOM_NODES="https://github.com/rgthree/rgthree-comfy,https://github.com/crystian/ComfyUI-Crystools" fluxstudio` |
+   ```toml
+   [project.entry-points."fluxstudio.custom_nodes"]
+   my_package = "my_package.custom_nodes:CUSTOM_NODE_URLS"   # a git-URL str, or an iterable of them
+   ```
 
-Each repo is cloned into `custom_nodes/<repo-name>` and, if it ships a `requirements.txt`, its dependencies are pip-installed into the **active environment** (the same one ComfyUI runs in). The install is **idempotent**: a repo whose directory already exists is skipped, so updating or removing a node is ComfyUI-Manager's job, not the launcher's. A clone or dependency failure of one node logs a warning and the launch continues — a broken custom node never blocks the studio.
+   To bundle more nodes with **fluxstudio itself**, append to `CUSTOM_NODE_URLS` in [`fluxstudio/custom_nodes.py`](fluxstudio/custom_nodes.py) — that tuple is fluxstudio's own declaration. (Editing the tuple takes effect on the next launch; *adding or renaming an entry point* changes installed metadata, so an editable install must be reinstalled — `uv pip install -e ./fluxstudio`.) Skip just the manager with `--no-manager`; skip the entire declared tier with `--no-declared-nodes`.
+
+2. **`FLUXSTUDIO_CUSTOM_NODES` env var** — comma-separated git URLs:
+
+   ```bash
+   FLUXSTUDIO_CUSTOM_NODES="https://github.com/rgthree/rgthree-comfy,https://github.com/crystian/ComfyUI-Crystools" fluxstudio
+   ```
+
+3. **Repeatable `--custom-node` flag** — ad-hoc, per launch:
+
+   ```bash
+   fluxstudio --custom-node https://github.com/rgthree/rgthree-comfy --custom-node https://github.com/crystian/ComfyUI-Crystools
+   ```
+
+Each repo is cloned into `custom_nodes/<repo-name>` and, if it ships a `requirements.txt`, its dependencies are pip-installed into the **active environment** (the same one ComfyUI runs in). The install is **idempotent**: a repo whose directory already exists is skipped, so updating or removing a node is ComfyUI-Manager's job, not the launcher's. A clone or dependency failure of one node — or a broken entry-point declaration — logs a warning and the launch continues; a broken custom node never blocks the studio. (`--no-manager` filters the manager from the *declared* tier only: explicitly requesting its URL via env/flag still installs it.)
 
 ### Hiding ComfyUI's built-in nodes
 
@@ -185,7 +198,7 @@ flux = Flux.from_ops_yaml("ops.yaml", source=HuggingFaceSource(path="ylecun/mnis
 
 > `Flux.from_ops_yaml` **materializes** the markers before attaching them: `confluid.load` leaves `!class:` markers nested under a mapping key deferred, and `Flux` refuses to iterate deferred markers by design — so a plain `load(...)["ops"]` is not enough. Use the helper (or `confluid.materialize`).
 
-**Scope.** v1 exports linear op chains, plus **fan-out** (one op output wired to ≥2 op nodes) compiled to a `dataflux.ops.tee.Tee`. A graph holding **several disconnected chains** exports each chain individually — one complete, individually-loadable `{ops: [...]}` document per chain, in deterministic head-node order. The compiler is a faithful translator — it does **not** auto-insert `Copy`/`Stash` for branch isolation; place those op nodes explicitly. True multi-input merges (fan-in), cycles, and widget inputs driven by a link raise an `UnsupportedTopologyError` (HTTP 400 from the route) with an actionable message. (The strict single-chain API forms `compile_ops` / `export_ops_yaml` still reject a multi-chain graph — use `compile_op_chains` / `export_ops_yamls` for the per-chain behaviour.)
+**Scope.** v1 exports linear op chains, plus **fan-out** (one op output wired to ≥2 op nodes) compiled to a `dataflux.ops.tee.Tee`. A graph holding **several disconnected chains** exports each chain individually — one complete, individually-loadable `{ops: [...]}` document per chain, in deterministic head-node order. The compiler is a faithful translator — it does **not** auto-insert `Copy`/`Stash` for branch isolation; place those op nodes explicitly. A widget **driven by a link** (e.g. a Math node computing a threshold per sample) is a runtime value a static op-list cannot hold — the kwarg is **omitted** (the op keeps its constructor default) and the omission is listed in a leading `#` comment of that chain's document. True multi-input merges (fan-in) and cycles raise an `UnsupportedTopologyError` (HTTP 400 from the route) with an actionable message. (The strict single-chain API forms `compile_ops` / `export_ops_yaml` still reject a multi-chain graph — use `compile_op_chains` / `export_ops_yamls` for the per-chain behaviour.)
 
 ## Importing & exporting whole pipelines (Taidal YAML ↔ canvas)
 
@@ -235,7 +248,7 @@ trainer: !class:marainer.trainer.LightningTrainer
 
 ### v1 scope & limitations
 
-- **Export skips what YAML can't express — it never fails on it.** A canvas usually contains nodes with no Confluid form: native ComfyUI nodes (*Preview Image*, *Show Text*, primitives), the canvas-only Taidal adapters (*Walk Dataset*, *Extract from Sample*, *Retag*, …), and occasionally a node whose config can't be serialized. **Export Graph → Taidal YAML** leaves those out and lists each one (with the reason) in a leading `#` comment block of the downloaded YAML — the document below stays a normal, loadable config of the remaining Taidal nodes. A wire from a skipped node into an exported config member is dropped (the member falls back to its default) and noted in the same block. An op's `sample` chain wire is data-flow, not configuration, so sample-chained ops export as standalone entries — the op-*chain* artifact is **Export Taidal Ops** (above).
+- **Export skips what YAML can't express — it never fails on it.** A canvas usually contains nodes with no Confluid form: native ComfyUI nodes (*Preview Image*, *Show Text*, primitives), the canvas-only Taidal adapters (*Walk Dataset*, *Extract from Sample*, *Retag*, …), and occasionally a node whose config can't be serialized. **Export Graph → Taidal YAML** leaves those out and lists each one (with the reason) in a leading `#` comment block of the downloaded YAML — the document below stays a normal, loadable config of the remaining Taidal nodes. A wire from a skipped node into an exported config member is dropped (the member falls back to its default) and noted in the same block. The canvas **wiring is preserved**: each run of sample-chained ops folds into a `pipeline: !class:dataflux.core.Flux` entry — `source: !ref:<source>` (traced through the *Walk Dataset* adapter back to the source node) plus the ordered `ops:` list, with fan-out compiled to a nested `Tee` — so the exported YAML reconstructs the same data flow (`confluid.materialize(confluid.load("config.yaml"))["pipeline"]` is an iterable `Flux`). A chain broken by a skipped node continues as its own `pipeline_N` entry.
 - A config member with **no FluxStudio node** (a class not tagged op/source/engine/member — e.g. a torchmetrics `MetricCollection`) is **dropped from the canvas with a warning** on import; the runnable falls back to its default. To surface such a class, tag/register it (loggers and the base `LightningTrainer`/`LightningEvaluator` are registered in `marainer.configurables`).
 - Object **nodes** grow dynamic `logger_N` / `callbacks_N` sockets for list-valued object params (see *Attaching loggers / callbacks* above), and the whole-graph graphio round-trip respects them: **import** wires a `List`-valued member's items into `logger_0`, `logger_1`, … and **export** collapses those sockets back into one `logger:` list (the importer/exporter read the node's own `<name>_0` seed to decide).
 - **Subgraphs** are self-contained in the `workflow.json` (`definitions.subgraphs`); on export they're **inlined** back into the flat YAML — including workflows saved by current ComfyUI (which stores a definition's inner links as dicts), several instances of the same definition, nested definitions, and the wires crossing the subgraph boundary (an outer wire into a subgraph input re-attaches to the inner node(s) it feeds — fan-out included — and a subgraph output re-originates at its inner producer). Standalone reusable `include:` files are a follow-up.

@@ -4,10 +4,12 @@ Subcommands (all offline — importing :mod:`fluxstudio` populates ``NODE_CLASS_
 entry-point discovery, so the converters work WITHOUT a running ComfyUI):
 
 * ``run`` (the default — bare ``fluxstudio`` still works): launch ComfyUI with the Taidal
-  nodes auto-configured. Also installs ComfyUI-Manager by default (``--no-manager`` skips it)
-  plus any extra custom nodes requested via the repeatable ``--custom-node <git-url>`` flag or
-  the ``FLUXSTUDIO_CUSTOM_NODES`` env var (comma-separated git URLs) — idempotently: a repo
-  already present under ``custom_nodes/`` is left alone.
+  nodes auto-configured. Also seeds ComfyUI custom nodes from three tiers — the
+  ``fluxstudio.custom_nodes`` entry-point group (nodes DECLARED by installed packages,
+  including fluxstudio's own bundled ComfyUI-Manager; ``--no-manager`` filters the manager,
+  ``--no-declared-nodes`` skips the tier), the ``FLUXSTUDIO_CUSTOM_NODES`` env var
+  (comma-separated git URLs), and the repeatable ``--custom-node <git-url>`` flag —
+  idempotently: a repo already present under ``custom_nodes/`` is left alone.
 * ``export``: compile a saved ComfyUI **API-format** graph's OPS into Confluid YAML op-list(s)
   (``fluxstudio export graph.json -o ops.yaml``) — the offline twin of the canvas Export-Ops
   button. Shares :func:`fluxstudio.export.export_ops_yamls`; a graph with several disconnected
@@ -26,19 +28,22 @@ import os
 import subprocess
 import sys
 from collections.abc import Sequence
+from importlib.metadata import entry_points
 from pathlib import Path
 
 from logflow import get_logger
 
+from fluxstudio.custom_nodes import COMFYUI_MANAGER_URL  # bundled default; --no-manager filters it
+
 logger = get_logger(__name__)
 
-# ComfyUI-Manager is installed into custom_nodes/ by default (skip with --no-manager): it gives
-# the launched ComfyUI an in-app store to install / update / remove further custom nodes, so the
-# bootstrap only has to seed it — everything else is manageable from the GUI.
-COMFYUI_MANAGER_URL = "https://github.com/Comfy-Org/ComfyUI-Manager"
+# Entry-point group through which ANY installed package declares "generally available" custom
+# nodes (installed on every launch, no flags needed). Each entry point resolves to a git-URL str
+# or an iterable of them; fluxstudio's own declaration is fluxstudio/custom_nodes.py.
+CUSTOM_NODES_ENTRY_POINT_GROUP = "fluxstudio.custom_nodes"
 
 # Env twin of the repeatable --custom-node flag: comma-separated git URLs of EXTRA custom nodes
-# to install on launch. Both feed _install_custom_nodes (flag values after env values).
+# to install on launch. Install order is declared (entry points) -> env -> flags, deduped.
 CUSTOM_NODES_ENV_VAR = "FLUXSTUDIO_CUSTOM_NODES"
 
 
@@ -52,6 +57,42 @@ def _env_custom_nodes() -> list[str]:
     """Extra custom-node git URLs from ``FLUXSTUDIO_CUSTOM_NODES`` (comma-separated, blanks dropped)."""
     raw = os.environ.get(CUSTOM_NODES_ENV_VAR, "")
     return [url for url in (part.strip() for part in raw.split(",")) if url]
+
+
+def _declared_custom_nodes() -> list[str]:
+    """Custom-node git URLs declared by installed packages via ``fluxstudio.custom_nodes``.
+
+    Each entry point resolves to a ``str`` URL or an iterable of them. A broken declaration is
+    skipped with an actionable warning (it is a packaging bug in the declaring package) — like
+    every other custom-node failure, it must never block the launch.
+    """
+    urls: list[str] = []
+    for ep in entry_points(group=CUSTOM_NODES_ENTRY_POINT_GROUP):
+        try:
+            value = ep.load()
+        except Exception:  # arbitrary third-party metadata — anything can go wrong on load
+            logger.warning(f"Failed to load custom-node entry point '{ep.name}' ({ep.value}); skipping it.")
+            continue
+        if isinstance(value, str):
+            urls.append(value)
+            continue
+        try:
+            items = list(value)
+        except TypeError:
+            logger.warning(
+                f"Custom-node entry point '{ep.name}' must resolve to a str or an iterable of str, "
+                f"got {type(value).__name__}; skipping it."
+            )
+            continue
+        for item in items:
+            if isinstance(item, str):
+                urls.append(item)
+            else:
+                logger.warning(
+                    f"Custom-node entry point '{ep.name}' contains a non-str item "
+                    f"({type(item).__name__}); skipping that item."
+                )
+    return urls
 
 
 def _install_custom_nodes(comfy_dir: Path, urls: Sequence[str]) -> None:
@@ -121,10 +162,14 @@ def _run(args: argparse.Namespace) -> None:
     else:
         logger.info(f"Using existing ComfyUI installation at {comfy_dir}")
 
-    # 2. Install bundled + requested custom nodes (idempotent — an existing checkout is skipped).
-    custom_node_urls: list[str] = [COMFYUI_MANAGER_URL] if args.manager else []
-    custom_node_urls.extend(_env_custom_nodes())
-    custom_node_urls.extend(args.custom_node or [])
+    # 2. Install declared + requested custom nodes (idempotent — an existing checkout is skipped).
+    # Tiers: entry-point-declared (incl. fluxstudio's own bundled ComfyUI-Manager) -> env -> flags.
+    # --no-manager filters the manager URL from the DECLARED tier only — an explicit env/flag
+    # request for it is the stronger signal and still installs.
+    declared = _declared_custom_nodes() if args.declared_nodes else []
+    if not args.manager:
+        declared = [url for url in declared if url != COMFYUI_MANAGER_URL]
+    custom_node_urls = list(dict.fromkeys([*declared, *_env_custom_nodes(), *(args.custom_node or [])]))
     _install_custom_nodes(comfy_dir, custom_node_urls)
 
     # 3. Symlink FluxStudio nodes into ComfyUI's custom_nodes directory
@@ -263,6 +308,17 @@ def main() -> None:
         help=(
             "Install the ComfyUI-Manager custom node on launch (default), giving the GUI an "
             "in-app store to install/update/remove further custom nodes. --no-manager skips it."
+        ),
+    )
+    parser.add_argument(
+        "--declared-nodes",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Install the custom nodes installed packages declare via the fluxstudio.custom_nodes "
+            "entry-point group (default; includes fluxstudio's own bundled ComfyUI-Manager). "
+            "--no-declared-nodes skips the whole tier — --custom-node / FLUXSTUDIO_CUSTOM_NODES "
+            "still install."
         ),
     )
     parser.add_argument(
