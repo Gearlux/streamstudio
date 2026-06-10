@@ -99,7 +99,12 @@ def _sample_predecessor(node: Dict[str, Any]) -> Optional[str]:
     return str(sample_in[0]) if _is_link(sample_in) else None
 
 
-def _op_to_instance(node_id: str, node: Dict[str, Any], node_mappings: Dict[str, Any]) -> Instance:
+def _op_to_instance(
+    node_id: str,
+    node: Dict[str, Any],
+    node_mappings: Dict[str, Any],
+    dropped_notes: Optional[List[str]] = None,
+) -> Instance:
     """Build a Confluid ``Instance`` marker (``!class:X()`` on dump) for one op node.
 
     Recovers the wrapped class from ``TAIDAL_CALLABLE_PATH``, takes the literal (non-link)
@@ -107,6 +112,11 @@ def _op_to_instance(node_id: str, node: Dict[str, Any], node_mappings: Dict[str,
     live node uses (``bridge._coerce_kwargs``), so blank/optional/List widgets serialize the
     way they'd construct. Explicit kwargs on the ``Instance`` make the dump robust regardless
     of whether the op stores each arg as a same-named attribute.
+
+    A widget input driven by a LINK (e.g. a Math node computing a threshold per sample) is a
+    runtime value a static op-list cannot hold. With ``dropped_notes`` given (the compile-chain
+    path), the kwarg is OMITTED — the op keeps its constructor default — and a human-readable
+    note is appended for the document's comment block; without it (a direct call), it raises.
     """
     class_type = node["class_type"]
     cls = node_mappings.get(class_type)
@@ -123,10 +133,20 @@ def _op_to_instance(node_id: str, node: Dict[str, Any], node_mappings: Dict[str,
         if key == _SAMPLE_INPUT:
             continue
         if _is_link(value):
-            raise UnsupportedTopologyError(
-                f"Input {key!r} on node {node_id!r} ({class_type}) is driven by a link, not a "
-                "widget value. Ops export needs literal config values — set it inline on the node."
+            if dropped_notes is None:
+                raise UnsupportedTopologyError(
+                    f"Input {key!r} on node {node_id!r} ({class_type}) is driven by a link, not a "
+                    "widget value. Ops export needs literal config values — set it inline on the node."
+                )
+            logger.debug(
+                f"_op_to_instance: omitting {key!r} on node {node_id} ({class_type}) — wired from "
+                f"node {value[0]} (runtime value); the op keeps its constructor default."
             )
+            dropped_notes.append(
+                f"{class_type} (node {node_id}): {key!r} is wired from node {value[0]} — "
+                "omitted, the op keeps its constructor default"
+            )
+            continue
         literal_inputs[key] = value
 
     target = resolve_callable(path)
@@ -141,7 +161,11 @@ def _id_sort_key(nid: str) -> Any:
     return (0, int(nid)) if nid.isdigit() else (1, nid)
 
 
-def compile_op_chains(prompt: Dict[str, Any], node_mappings: Dict[str, Any]) -> List[List[Any]]:
+def compile_op_chains(
+    prompt: Dict[str, Any],
+    node_mappings: Dict[str, Any],
+    chain_notes: Optional[List[List[str]]] = None,
+) -> List[List[Any]]:
     """Compile a ComfyUI prompt graph into op-lists — ONE per independent op chain.
 
     Unlike :func:`compile_ops`, disconnected op chains are legal: each chain head (an op
@@ -149,10 +173,15 @@ def compile_op_chains(prompt: Dict[str, Any], node_mappings: Dict[str, Any]) -> 
     ordered (Tee-nested) op-list. Chains are returned in deterministic head-node-id order
     (numeric-aware, so node ``'2'`` sorts before ``'10'``).
 
+    A widget input driven by a link (a runtime value) does not abort the compile — the kwarg
+    is omitted (the op keeps its constructor default) and a note is recorded per chain.
+
     Args:
         prompt: The ComfyUI prompt / API-format graph (``{node_id: {class_type, inputs}}``).
         node_mappings: FluxStudio's ``NODE_CLASS_MAPPINGS`` (maps ``class_type`` → node class,
             carrying ``TAIDAL_NODE_KIND`` / ``TAIDAL_CALLABLE_PATH``).
+        chain_notes: Optional accumulator; one ``List[str]`` of omitted-kwarg notes is appended
+            PER returned chain (parallel lists), for the exporter's comment block.
 
     Returns:
         One list per chain, each suitable for ``Flux(ops=...)`` after a dump/load round-trip —
@@ -160,8 +189,7 @@ def compile_op_chains(prompt: Dict[str, Any], node_mappings: Dict[str, Any]) -> 
         at any fan-out tail. Empty when the graph has no op nodes.
 
     Raises:
-        UnsupportedTopologyError: fan-in, a cycle, a widget-input driven by a link, or an
-            unresolvable op node.
+        UnsupportedTopologyError: fan-in, a cycle, or an unresolvable op node.
     """
     op_ids = [nid for nid, node in prompt.items() if _node_kind(node.get("class_type", ""), node_mappings) == "op"]
     if not op_ids:
@@ -191,23 +219,28 @@ def compile_op_chains(prompt: Dict[str, Any], node_mappings: Dict[str, Any]) -> 
 
     visited: set = set()
 
-    def linearize(nid: str) -> List[Any]:
+    def linearize(nid: str, notes: List[str]) -> List[Any]:
         if nid in visited:  # pragma: no cover - defensive: single-socket op nodes form a forest, never a re-entrant DAG
             raise UnsupportedTopologyError(f"Cycle detected at node {nid!r}; op-graphs must be acyclic.")
         visited.add(nid)
-        instance = _op_to_instance(nid, prompt[nid], node_mappings)
+        instance = _op_to_instance(nid, prompt[nid], node_mappings, dropped_notes=notes)
         children = sorted(successors[nid], key=_id_sort_key)
         if not children:
             return [instance]
         if len(children) == 1:
-            return [instance, *linearize(children[0])]
+            return [instance, *linearize(children[0], notes)]
         # Fan-out → Tee. Each branch is its own op sub-list. Tee runs them sequentially on the
         # same Sample/metadata; branches don't reconverge via a sample wire (that would be fan-in,
         # which is impossible through the single ``sample`` socket and rejected above).
-        branches = [linearize(child) for child in children]
+        branches = [linearize(child, notes) for child in children]
         return [instance, Instance(Tee, branches=branches)]
 
-    chains = [linearize(root) for root in sorted(roots, key=_id_sort_key)]
+    chains = []
+    for root in sorted(roots, key=_id_sort_key):
+        notes: List[str] = []
+        chains.append(linearize(root, notes))
+        if chain_notes is not None:
+            chain_notes.append(notes)
 
     # Every op node has at most one sample predecessor (single ``sample`` socket), so the
     # op-graph is a forest: any node not reached from some chain head sits in a component
@@ -262,9 +295,23 @@ def export_ops_yamls(prompt: Dict[str, Any], node_mappings: Dict[str, Any]) -> L
     the same consumer contract as :func:`export_ops_yaml` (``confluid.load(path)["ops"]``),
     one per chain, in deterministic head-node-id order. A graph with no op nodes yields a
     single empty ``ops: []`` document (callers always have something to write/download).
+
+    A chain whose ops had link-driven widget values (omitted — runtime values) carries a
+    leading ``#`` comment block naming each omission; comments are invisible to the loader.
     """
-    chains = compile_op_chains(prompt, node_mappings) or [[]]
-    return [dump({"ops": chain}) for chain in chains]
+    notes_per_chain: List[List[str]] = []
+    chains = compile_op_chains(prompt, node_mappings, chain_notes=notes_per_chain)
+    if not chains:
+        return [dump({"ops": []})]
+    docs: List[str] = []
+    for chain, notes in zip(chains, notes_per_chain):
+        comment = ""
+        if notes:
+            lines = ["# NOTE: widget values wired from other nodes are runtime values an op-list cannot hold:"]
+            lines += [f"#   - {note}" for note in notes]
+            comment = "\n".join(lines) + "\n"
+        docs.append(comment + dump({"ops": chain}))
+    return docs
 
 
 def chain_output_paths(base: Union[str, Path], count: int) -> List[Path]:

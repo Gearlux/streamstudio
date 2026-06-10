@@ -288,18 +288,50 @@ def test_export_skips_native_and_adapter_nodes_with_comment() -> None:
     # consumers' socket names are UI plumbing, never ref names.
     graph = confluid.resolve(yaml_text)
     assert "HuggingFaceSource" in str(graph["hugging_face_source"].target)
-    assert all("RescaleOp" in str(graph[k].target) for k in ("rescale_op", "rescale_op_2", "rescale_op_3"))
+    assert "Flux" in str(graph["pipeline"].target) and "Flux" in str(graph["pipeline_2"].target)
 
 
-def test_export_sample_chain_is_data_flow_not_config() -> None:
-    # The op-chaining `sample` wire must NOT leak into kwargs (`sample: !ref ...` would crash
-    # the reloaded constructor) and must not name the op entries (`sample:`/`sample_2:`).
+def test_export_folds_sample_chains_into_flux_pipelines() -> None:
+    # The canvas WIRING must survive: sample-chained ops fold into `pipeline: !class:Flux`
+    # entries — `source:` traced through the (skipped) Walk adapter back to the source node,
+    # `ops:` the ordered inline op list. No `sample:` kwarg leaks (it would crash on reload),
+    # and the chained ops do NOT appear as standalone top-level entries.
     yaml_text = workflow_to_yaml(_canvas_workflow(), _canvas_mappings())
     assert "sample:" not in yaml_text
     graph = confluid.resolve(yaml_text)
-    op_markers = [v for v in graph.values() if isinstance(v, (Class, Instance)) and "RescaleOp" in str(v.target)]
-    assert len(op_markers) == 3
-    assert all("sample" not in m.kwargs for m in op_markers)
+    assert not any(k.startswith("rescale_op") for k in graph)  # folded, not standalone
+    assert yaml_text.count("!ref 'hugging_face_source'") == 2  # both pipelines reference the source
+    pipeline, pipeline_2 = graph["pipeline"], graph["pipeline_2"]
+    for flux in (pipeline, pipeline_2):
+        assert "Flux" in str(flux.target)
+        # resolve() substitutes the !ref: with the shared source marker (identity sharing)
+        assert "HuggingFaceSource" in str(getattr(flux.kwargs.get("source"), "target", ""))
+    assert len(pipeline.kwargs["ops"]) == 2  # node 3 → node 4
+    assert len(pipeline_2.kwargs["ops"]) == 1  # node 7
+    assert all("RescaleOp" in str(op) for op in pipeline.kwargs["ops"])
+    # in_max rode along on the inline op entries
+    assert "in_max: 255.0" in yaml_text
+
+
+def test_export_folds_fan_out_into_tee() -> None:
+    # Fan-out inside a chain (one op's sample output feeding two ops) folds into a nested Tee,
+    # exactly like the ops-export shape.
+    workflow = _canvas_workflow()
+    workflow["nodes"].append(
+        {
+            "id": 8,
+            "type": "rescale",
+            "widgets_values": [0.0, 99.0, 0.0, 1.0, False],
+            "inputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "link": 7}],
+        }
+    )
+    workflow["links"].append([7, 3, 0, 8, 0, "DATAFLUX_SAMPLE"])  # node 3 now fans out to 4 AND 8
+    yaml_text = workflow_to_yaml(workflow, _canvas_mappings())
+    graph = confluid.resolve(yaml_text)
+    ops = graph["pipeline"].kwargs["ops"]
+    assert len(ops) == 2  # head op + the Tee
+    assert "Tee" in str(ops[1])
+    assert "in_max: 99.0" in yaml_text  # the second branch's op rode inside the Tee
 
 
 def test_export_failing_taidal_node_is_isolated_with_warning() -> None:
@@ -516,14 +548,18 @@ def test_inline_subgraphs_dict_links_and_boundary_restitch() -> None:
 
 def test_export_inlines_subgraph_instances_end_to_end() -> None:
     # The miniature of the real `impairments.json` shape: subgraph instances + a Primitive
-    # feeding a widget input + native viewers. Export must succeed, emit the inner ops, and
-    # note the Primitive wire drop.
+    # feeding a widget input + native viewers. Export must succeed, fold each instance's
+    # inner chain into a Flux pipeline (source attached), and note the Primitive wire drop.
     yaml_text = workflow_to_yaml(_two_instance_workflow(), _canvas_mappings())
     graph = confluid.resolve(yaml_text)
-    rescale_keys = [k for k, v in graph.items() if hasattr(v, "target") and "RescaleOp" in str(v.target)]
-    assert len(rescale_keys) == 4
+    assert yaml_text.count("!ref 'hugging_face_source'") == 2
+    for key in ("pipeline", "pipeline_2"):
+        flux = graph[key]
+        assert "Flux" in str(flux.target)
+        assert "HuggingFaceSource" in str(getattr(flux.kwargs.get("source"), "target", ""))
+        assert len(flux.kwargs["ops"]) == 2  # the definition's inner 2-op chain
     assert "node 4 (PrimitiveNode): native ComfyUI node" in yaml_text
-    assert ".in_max <- node 4 (PrimitiveNode)" in yaml_text
+    assert "pipeline[RescaleOp].in_max <- node 4 (PrimitiveNode)" in yaml_text
 
 
 def test_inline_subgraphs_nested_definitions_flatten() -> None:

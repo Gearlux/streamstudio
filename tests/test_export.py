@@ -228,13 +228,33 @@ def test_multiple_heads_raise_in_strict_compile_ops() -> None:
         compile_ops(prompt, _op_mappings())
 
 
-def test_widget_driven_by_link_raises() -> None:
+def test_widget_driven_by_link_is_omitted_with_note() -> None:
+    # A widget wired from another node (e.g. a Math node computing a threshold) is a runtime
+    # value a static op-list cannot hold — the kwarg is OMITTED (constructor default) and the
+    # omission noted per chain, instead of aborting the export.
     prompt = {
         "1": {"class_type": "WalkDatasetNode", "inputs": {}},
-        "2": _rescale_node(["1", 0], in_min=["1", 0], in_max=255.0),  # in_min wired, not literal
+        "2": _rescale_node(["1", 0], in_min=["9", 0], in_max=255.0),  # in_min wired, not literal
     }
+    notes: list = []
+    chains = compile_op_chains(prompt, _op_mappings(), chain_notes=notes)
+    assert len(chains) == 1
+    assert chains[0][0].kwargs == {"in_max": 255.0}  # in_min omitted
+    assert len(notes) == 1 and "'in_min' is wired from node 9" in notes[0][0]
+
+    doc = export_ops_yamls(prompt, _op_mappings())[0]
+    assert doc.startswith("# NOTE:") and "'in_min' is wired from node 9" in doc
+    ops = _load_ops(doc)
+    assert len(ops) == 1  # the doc stays individually loadable
+
+
+def test_op_to_instance_without_accumulator_still_raises_on_link() -> None:
+    # The strict direct-call form keeps the legible error (no silent omission without a note).
+    from fluxstudio.export import _op_to_instance
+
+    node = _rescale_node(["1", 0], in_min=["9", 0], in_max=255.0)
     with pytest.raises(UnsupportedTopologyError, match="driven by a link"):
-        compile_ops(prompt, _op_mappings())
+        _op_to_instance("2", node, _op_mappings())
 
 
 def test_unresolvable_callable_path_raises() -> None:
