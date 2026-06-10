@@ -39,7 +39,9 @@ from confluid import get_configurable_attrs
 from confluid import load as _confluid_load
 from confluid import resolve as _confluid_resolve
 from confluid.registry import resolve_class
+from dataflux import Flux
 from dataflux.discovery import resolve_callable
+from dataflux.ops.tee import Tee
 from logflow import get_logger
 
 from fluxstudio.bridge import _OP_LIST_PARAMS, _SOURCE_LIST_PARAMS, OBJECT_TYPE, OP_TYPE, SOURCE_TYPE, _coerce_kwargs
@@ -859,10 +861,11 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
     a leading ``#`` comment block: native ComfyUI nodes (viewers / primitives — not in
     ``node_mappings``), the canvas-only Taidal adapters (Walk / Extract / Retag / … — no
     ``TAIDAL_CALLABLE_PATH``), and any Taidal node whose spec fails to build (logged at
-    ``warning``; the rest of the graph still exports). An op's ``sample`` chain wire is
-    data-flow, not configuration, so chained ops export as standalone entries (the op-chain
-    artifact is ``export_ops_yamls`` / "Export Taidal Ops"); a dropped wire into a real
-    config member is also noted in the comment block.
+    ``warning``; the rest of the graph still exports). The canvas WIRING is preserved:
+    sample-chained ops fold into ``pipeline: !class:Flux`` entries (``source: !ref:<source>``
+    traced through a Walk-style adapter + an ordered ``ops:`` list, fan-out as a nested
+    ``Tee``) instead of unconnected standalone entries; a dropped wire into a real config
+    member is noted in the comment block.
     """
     pnodes = _normalize_workflow(graph, node_mappings)
     if not pnodes:
@@ -904,6 +907,11 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
                 cls, _is_lazy, kw = specs[src_id]
                 specs[src_id] = (cls, src_slot == 1, kw)
 
+    # Fold sample-chained ops into Flux pipeline entries so the canvas WIRING survives in the
+    # YAML: each chain becomes `pipeline: !class:Flux` with `source: !ref:<source>` (traced
+    # through a skipped adapter like Walk) and an ordered `ops:` list, fan-out as a nested Tee.
+    chain_specs, chain_heads, op_succs = _collect_op_chains(pnodes, specs, node_mappings)
+
     names = _assign_ref_names(pnodes, specs, node_mappings)
 
     # Build a Fluid marker per node, wiring links as References and list-params as Reference lists.
@@ -916,8 +924,8 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
         for input_name, (src_id, _slot) in pnode.links.items():
             base = _strip_index(input_name)
             if base == _SAMPLE_INPUT:
-                # The op-chaining data-flow socket — never a constructor kwarg. Chained ops
-                # export as standalone entries; the chain itself is the ops-export artifact.
+                # The op-chaining data-flow socket — never a constructor kwarg (the chain
+                # structure is captured by the folded Flux pipeline entries below).
                 continue
             if src_id not in specs:
                 src_type = pnodes[src_id].class_type if src_id in pnodes else "unknown"
@@ -933,8 +941,129 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
                 kwargs[base] = [Reference(names[src]) for _n, src in ordered]
         fluids[nid] = LazyClass(cls, **kwargs) if is_lazy else Class(cls, **kwargs)
 
+    def _chain_op_instance(nid: str, chain_key: str) -> Instance:
+        """An inline ``!class:Op()`` Instance for a chained op, with non-sample wires resolved."""
+        cls, _lazy, kwargs = chain_specs[nid]
+        kwargs = dict(kwargs)
+        for input_name, (src_id, _slot) in pnodes[nid].links.items():
+            base = _strip_index(input_name)
+            if base == _SAMPLE_INPUT:
+                continue  # the chain itself — expressed by the ops-list order
+            if src_id in specs:
+                referenced.add(src_id)
+                kwargs[base] = Reference(names[src_id])
+            else:
+                src_type = pnodes[src_id].class_type if src_id in pnodes else "unknown"
+                dropped_wires.append((f"{chain_key}[{cls.__name__}]", base, src_id, src_type))
+        return Instance(cast(type, cls), **kwargs)
+
+    def _fold_chain(nid: str, chain_key: str) -> List[Any]:
+        """Linearize a chain into inline op Instances; fan-out becomes a nested Tee (ops-export shape)."""
+        instance = _chain_op_instance(nid, chain_key)
+        children = sorted(op_succs.get(nid, []), key=_id_sort_key)
+        if not children:
+            return [instance]
+        if len(children) == 1:
+            return [instance, *_fold_chain(children[0], chain_key)]
+        return [instance, Instance(Tee, branches=[_fold_chain(child, chain_key) for child in children])]
+
+    chain_entries: List[Tuple[str, Any]] = []
+    used_keys = set(names.values())
+    pipeline_count = 0
+    for head, source_nid in chain_heads:
+        pipeline_count += 1
+        key = "pipeline" if pipeline_count == 1 else f"pipeline_{pipeline_count}"
+        while key in used_keys:
+            pipeline_count += 1
+            key = f"pipeline_{pipeline_count}"
+        used_keys.add(key)
+        flux_kwargs: Dict[str, Any] = {"ops": _fold_chain(head, key)}
+        if source_nid is not None:
+            referenced.add(source_nid)
+            flux_kwargs["source"] = Reference(names[source_nid])
+        chain_entries.append((key, Class(Flux, **flux_kwargs)))
+
     document = _hoist_document(fluids, names, referenced, specs)
+    for key, value in chain_entries:  # pipelines last — they are the roots of the config
+        document[key] = value
     return _skipped_comment_block(skipped, dropped_wires) + _confluid_dump(document)
+
+
+def _collect_op_chains(
+    pnodes: Dict[str, "_PNode"], specs: Dict[str, Tuple[type, bool, Dict[str, Any]]], node_mappings: Dict[str, Any]
+) -> Tuple[Dict[str, Tuple[type, bool, Dict[str, Any]]], List[Tuple[str, Optional[str]]], Dict[str, List[str]]]:
+    """Identify sample-chained op nodes and POP them out of ``specs`` for Flux folding.
+
+    A chain is a maximal run of op-kind nodes connected by their ``sample`` sockets. Each
+    chain folds into ONE ``Flux`` pipeline entry, so its ops must not also appear as
+    standalone top-level entries. Returns ``(chain_specs, chain_heads, op_succs)`` where
+    ``chain_heads`` is ``[(head_id, source_id-or-None), …]`` in deterministic head order —
+    the source is traced through ONE skipped boundary node (the Walk adapter pattern:
+    op.sample ← Walk ← source) or taken directly when the head's feed is a source node.
+
+    NOT folded (stay standalone entries): an op with no sample wiring at all (a configured
+    op-value), and any chain containing an op consumed as a ``DATAFLUX_OP`` value by an
+    exported node (an ``op_N`` list input — those wires reference top-level entries).
+    """
+
+    def _kind(nid: str) -> Optional[str]:
+        return getattr(node_mappings.get(pnodes[nid].class_type), "TAIDAL_NODE_KIND", None)
+
+    op_ids = {nid for nid in specs if _kind(nid) == "op"}
+    op_succs: Dict[str, List[str]] = {nid: [] for nid in op_ids}
+    heads: List[str] = []
+    for nid in op_ids:
+        pred = pnodes[nid].links.get(_SAMPLE_INPUT)
+        if pred is not None and pred[0] in op_ids:
+            op_succs[pred[0]].append(nid)
+        else:
+            heads.append(nid)
+
+    # An op pulled by its DATAFLUX_OP value output into an exported node (op_N lists of a
+    # higher-order op / engine) is referenced BY NAME — its chain cannot fold away.
+    consumed_as_value: set = set()
+    for cnid, pnode in pnodes.items():
+        if cnid not in specs:
+            continue
+        for input_name, (src_id, _slot) in pnode.links.items():
+            if _strip_index(input_name) != _SAMPLE_INPUT and src_id in op_ids:
+                consumed_as_value.add(src_id)
+
+    def _members(head: str) -> List[str]:
+        out, stack, seen = [], [head], set()
+        while stack:
+            nid = stack.pop()
+            if nid in seen:  # pragma: no cover - defensive: single sample socket → a forest
+                continue
+            seen.add(nid)
+            out.append(nid)
+            stack.extend(op_succs[nid])
+        return out
+
+    def _trace_source(head: str) -> Optional[str]:
+        pred = pnodes[head].links.get(_SAMPLE_INPUT)
+        if pred is None:
+            return None
+        src_id = pred[0]
+        if src_id in specs and _kind(src_id) == "source":
+            return src_id
+        if src_id in pnodes and src_id not in specs:  # one skipped boundary node (Walk)
+            for _name, (up_id, _s) in pnodes[src_id].links.items():
+                if up_id in specs and _kind(up_id) == "source":
+                    return up_id
+        return None
+
+    chain_specs: Dict[str, Tuple[type, bool, Dict[str, Any]]] = {}
+    chain_heads: List[Tuple[str, Optional[str]]] = []
+    for head in sorted(heads, key=_id_sort_key):
+        members = _members(head)
+        has_sample_edge = bool(op_succs[head]) or pnodes[head].links.get(_SAMPLE_INPUT) is not None
+        if not has_sample_edge or any(m in consumed_as_value for m in members):
+            continue  # stays a standalone entry
+        chain_heads.append((head, _trace_source(head)))
+        for member in members:
+            chain_specs[member] = specs.pop(member)
+    return chain_specs, chain_heads, op_succs
 
 
 def _skipped_comment_block(skipped: List[Tuple[str, str, str]], dropped_wires: List[Tuple[str, str, str, str]]) -> str:

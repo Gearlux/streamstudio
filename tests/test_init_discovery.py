@@ -471,7 +471,8 @@ def test_export_ops_route_multi_chain_returns_one_doc_per_chain(tmp_path: Path) 
 
 
 def test_export_ops_route_400_on_bad_topology() -> None:
-    # A structurally-unexportable graph (widget driven by a link) -> UnsupportedTopologyError -> 400.
+    # A structurally-unexportable graph (a sample-wire CYCLE) -> UnsupportedTopologyError -> 400.
+    # (A widget driven by a link is no longer an error — it's omitted with a note.)
     from dataflux.ops.torch import RescaleOp
 
     from fluxstudio.bridge import create_comfy_node
@@ -480,7 +481,8 @@ def test_export_ops_route_400_on_bad_topology() -> None:
         handler = routes.post_handlers["/taidal/export_ops"]
         fluxstudio.NODE_CLASS_MAPPINGS["Taidal_RescaleOp"] = create_comfy_node(RescaleOp, "Taidal_RescaleOp")
         prompt = {
-            "2": {"class_type": "Taidal_RescaleOp", "inputs": {"in_min": ["9", 0], "in_max": 255.0}},
+            "2": {"class_type": "Taidal_RescaleOp", "inputs": {"sample": ["3", 0], "in_min": 0.0, "in_max": 255.0}},
+            "3": {"class_type": "Taidal_RescaleOp", "inputs": {"sample": ["2", 0], "in_min": 0.0, "in_max": 1.0}},
         }
         asyncio.run(handler(_json_request({"prompt": prompt})))
     data, kwargs = web.calls[-1]
