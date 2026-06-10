@@ -20,7 +20,7 @@ fallback and silently defeat the very branches under test.
 
 import json
 from pathlib import Path
-from typing import List, Literal, Optional
+from typing import List, Literal, Optional, Union
 from unittest.mock import MagicMock, patch
 
 import datasets
@@ -127,6 +127,21 @@ def test_map_type_forward_ref_dataset_string() -> None:
 
 def test_map_type_unknown_falls_back_to_string() -> None:
     assert _map_type("blob", bytes) == "STRING"
+
+
+def test_map_type_union_int_str_returns_string() -> None:
+    # Union[int, str] (SampleSpec) must return STRING, not INT.
+    assert _map_type("length", Union[int, str]) == "STRING"
+
+
+def test_map_type_optional_int_still_int() -> None:
+    # Optional[int] has no "str" → still INT.
+    assert _map_type("count", Optional[int]) == "INT"
+
+
+def test_map_type_union_int_float_still_float() -> None:
+    # Union[int, float] has no "str" → falls through to float branch.
+    assert _map_type("value", Union[int, float]) == "FLOAT"
 
 
 # --------------------------------------------------------------------------- #
@@ -1938,3 +1953,106 @@ def test_register_module_nodes_admits_runnable_and_member() -> None:
     # The runnable (no op/source/engine category) AND the role="model" member are both admitted.
     assert any(v.TAIDAL_NODE_KIND == "runnable" for v in mappings.values())
     assert any(v.TAIDAL_NODE_KIND == "object" for v in mappings.values())
+
+
+# --------------------------------------------------------------------------- #
+# strict_typing — Union[int, str] dual-socket behaviour
+# --------------------------------------------------------------------------- #
+
+
+def test_strict_typing_union_int_str_gets_dual_optional_sockets() -> None:
+    """An op with __confluid_strict_typing__ gets {name}_samples + {name}_duration sockets."""
+    from confluid import configurable as cfg
+    from dataflux.sample import Sample
+
+    from fluxstudio.bridge import _build_config_inputs
+
+    @cfg(category="op", strict_typing=True)
+    class _StrictOp:
+        def __init__(self, length: Union[int, str] = 1024, mode: str = "front") -> None:
+            self.length = length
+            self.mode = mode
+
+        def __call__(self, sample: Sample) -> Sample:
+            return sample
+
+    required, optional, split_map = _build_config_inputs(_StrictOp.__init__, strict_typing=True)
+    # The Union[int, str] param is NOT in required (no normal widget).
+    assert "length" not in required
+    # It generates two optional sockets.
+    assert "length_samples" in optional
+    assert "length_duration" in optional
+    assert optional["length_samples"][0] == "INT"
+    assert optional["length_duration"][0] == "STRING"
+    # split_map records the mapping.
+    assert split_map == {"length": ("length_samples", "length_duration")}
+    # Plain str param is still in required as a normal widget.
+    assert "mode" in required
+
+
+def test_strict_typing_false_union_int_str_gets_single_string_widget() -> None:
+    """Default (strict_typing=False): Union[int, str] → single STRING widget, no split_map."""
+    from fluxstudio.bridge import _build_config_inputs
+
+    def fn(length: Union[int, str] = 1024) -> None: ...
+
+    required, optional, split_map = _build_config_inputs(fn, strict_typing=False)
+    assert "length" in required
+    assert required["length"][0] == "STRING"
+    assert split_map == {}
+
+
+def test_strict_typing_node_execute_merges_duration_string() -> None:
+    """The generated node merges {name}_duration back into the canonical param name."""
+    from confluid import configurable as cfg
+    from dataflux.sample import Sample
+
+    from fluxstudio.bridge import create_comfy_node
+
+    received: dict = {}
+
+    @cfg(category="op", strict_typing=True)
+    class _MergeOp:
+        def __init__(self, length: Union[int, str] = 1024) -> None:
+            received["length"] = length
+
+        def __call__(self, sample: Sample) -> Sample:
+            return sample
+
+    node_cls = create_comfy_node(_MergeOp, "Taidal__MergeOp")
+    node = node_cls()
+
+    # Wire the duration socket: pass "5ms", leave samples absent.
+    node.execute(length_duration="5ms")
+    assert received["length"] == "5ms"
+
+    # Wire the samples socket: pass 2048, leave duration empty.
+    node.execute(length_samples=2048, length_duration="")
+    assert received["length"] == 2048
+
+    # Both absent: constructor default (1024) applies — neither key in kwargs.
+    received.clear()
+    node.execute()
+    assert received.get("length", 1024) == 1024
+
+
+def test_strict_typing_node_execute_str_wins_over_samples() -> None:
+    """Duration string takes priority over samples INT when both are supplied."""
+    from confluid import configurable as cfg
+    from dataflux.sample import Sample
+
+    from fluxstudio.bridge import create_comfy_node
+
+    received: dict = {}
+
+    @cfg(category="op", strict_typing=True)
+    class _PriorityOp:
+        def __init__(self, length: Union[int, str] = 1024) -> None:
+            received["length"] = length
+
+        def __call__(self, sample: Sample) -> Sample:
+            return sample
+
+    node = create_comfy_node(_PriorityOp, "Taidal__PriorityOp")()
+    node.execute(length_samples=512, length_duration="2ms")
+    assert received["length"] == "2ms"

@@ -71,6 +71,7 @@ class WalkDatasetNode:
     otherwise an out-of-range index raises.
     """
 
+    __confluid_display_name__ = "Walk Dataset (by index)"
     CATEGORY = _FLUXSTUDIO_CATEGORY
     RETURN_TYPES = (SAMPLE_TYPE,)
     RETURN_NAMES = ("sample",)
@@ -141,6 +142,7 @@ class SampleExtractorNode:
     in those nodes and only field extraction lives here.
     """
 
+    __confluid_display_name__ = "Extract from Sample"
     CATEGORY = _FLUXSTUDIO_CATEGORY
     RETURN_TYPES = ("IMAGE", "MASK", "STRING", "INT", "FLOAT")
     RETURN_NAMES = ("image", "mask", "text", "int", "float")
@@ -585,6 +587,7 @@ class RetagObjectNode:
     adapters. The Retag node is a canvas convenience; hand-written YAML controls types directly.
     """
 
+    __confluid_display_name__ = "Retag (role / task)"
     CATEGORY = _FLUXSTUDIO_CATEGORY
     RETURN_TYPES = (ANY,)
     RETURN_NAMES = ("object",)
@@ -640,6 +643,7 @@ class ComposeSampleNode:
     original provenance metadata.
     """
 
+    __confluid_display_name__ = "Compose Sample (3-way)"
     CATEGORY = _FLUXSTUDIO_CATEGORY
     RETURN_TYPES = (SAMPLE_TYPE,)
     RETURN_NAMES = ("sample",)
@@ -675,6 +679,7 @@ class MixSamplesNode:
     stages rather than discard two samples' metadata entirely.
     """
 
+    __confluid_display_name__ = "Mix Samples (merge metadata)"
     CATEGORY = _FLUXSTUDIO_CATEGORY
     RETURN_TYPES = (SAMPLE_TYPE,)
     RETURN_NAMES = ("sample",)
@@ -741,6 +746,7 @@ class YamlDumpNode:
     Chain the ``yaml`` output to a **Show Text** node to inspect the object.
     """
 
+    __confluid_display_name__ = "YAML Dump"
     CATEGORY = _FLUXSTUDIO_CATEGORY
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("yaml",)
@@ -801,6 +807,7 @@ class MathNode:
         a=6, b=7, formula="a * b"              →  float=42.0, int=42, bool=True
     """
 
+    __confluid_display_name__ = "Math"
     CATEGORY = _MATH_CATEGORY
     RETURN_TYPES = ("FLOAT", "INT", "BOOLEAN", "STRING")
     RETURN_NAMES = ("float", "int", "bool", "str")
@@ -841,6 +848,8 @@ class MathNode:
 
 
 # Statically-defined adapter nodes, merged into the auto-discovered set by fluxstudio/__init__.py.
+# Keys are stable workflow identifiers — do not rename them.  Display names come from each class's
+# ``__confluid_display_name__`` attribute (set by ``@configurable(display_name=...)`` or directly).
 NODE_CLASS_MAPPINGS: Dict[str, Type] = {
     "Taidal_WalkDataset": WalkDatasetNode,
     "Taidal_ExtractSample": SampleExtractorNode,
@@ -852,11 +861,5 @@ NODE_CLASS_MAPPINGS: Dict[str, Type] = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS: Dict[str, str] = {
-    "Taidal_WalkDataset": "Walk Dataset (by index)",
-    "Taidal_ExtractSample": "Extract from Sample",
-    "Taidal_Retag": "Retag (role / task)",
-    "Taidal_ComposeSample": "Compose Sample (3-way)",
-    "Taidal_MixSamples": "Mix Samples (merge metadata)",
-    "Taidal_YamlDump": "YAML Dump",
-    "Taidal_Math": "Math",
+    k: getattr(cls, "__confluid_display_name__", cls.__name__) for k, cls in NODE_CLASS_MAPPINGS.items()
 }

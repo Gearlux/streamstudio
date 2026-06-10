@@ -459,6 +459,10 @@ def _map_type(param_name: str, annotation: Any) -> str:
     low = str_ann.lower()
     if "bool" in low:
         return "BOOLEAN"
+    # Union[int, str] (e.g. SampleSpec) — STRING covers both "1024" and "1ms".
+    # Must precede the bare-int check or the str branch is silently dropped.
+    if "int" in low and "str" in low:
+        return "STRING"
     if "int" in low and "float" not in low:
         return "INT"
     if "float" in low:
@@ -568,9 +572,11 @@ def _widget_for(param: inspect.Parameter, owner: Optional[Callable] = None) -> T
 
 
 def _build_config_inputs(
-    func: Callable, skip: Optional[AbstractSet[str]] = None
-) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    """Build ``(required_widgets, nullable_optional_sockets)`` for a callable's constructor params.
+    func: Callable,
+    skip: Optional[AbstractSet[str]] = None,
+    strict_typing: bool = False,
+) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Tuple[str, str]]]:
+    """Build ``(required_widgets, nullable_optional_sockets, split_map)`` for a callable's params.
 
     ``required_widgets`` — the normal ``required`` section of ``INPUT_TYPES``: typed widgets the user
     fills directly on the node (strings, dropdowns, INT/FLOAT sliders, …).
@@ -579,6 +585,10 @@ def _build_config_inputs(
     *optional input sockets* so the user can wire a compatible output (e.g. a Float Math result) into
     them.  When the socket is left unconnected the param is absent from ``execute`` kwargs and the
     constructor default (``None``) applies — semantically correct for "disabled bound", "no limit", etc.
+
+    ``split_map`` — when ``strict_typing=True``, maps each ``Union[int, str]`` param name to its two
+    optional socket keys ``(int_key, str_key)`` so the generated node's execute can merge them back
+    into the canonical param name before constructing the op.
 
     Each widget's ``tooltip`` is sourced from the callable's docstring ``Args:``
     block (via :func:`confluid.parse_param_docs`) — the same per-parameter help
@@ -595,10 +605,11 @@ def _build_config_inputs(
         ValueError,
         TypeError,
     ):  # pragma: no cover - defensive: inspect rejects rare builtins
-        return {}, {}
+        return {}, {}, {}
     param_docs = parse_param_docs(func)
     required: Dict[str, Any] = {}
     nullable_optionals: Dict[str, Any] = {}
+    split_map: Dict[str, Tuple[str, str]] = {}
     for name, param in sig.parameters.items():
         if skip and name in skip:
             continue
@@ -612,11 +623,31 @@ def _build_config_inputs(
         comfy_type, config = _widget_for(param, owner=func)
         is_nullable_opt = bool(config.pop("_nullable_optional", False))
         doc = param_docs.get(name)
+
+        # Dual-socket override: Union[int, str] params get two optional sockets when
+        # strict_typing=True — {name}_samples (INT) and {name}_duration (STRING).
+        # The execute wrapper merges whichever is filled back into the canonical param name.
+        if strict_typing:
+            origin = get_origin(param.annotation)
+            args = get_args(param.annotation)
+            if origin is Union and int in args and str in args:
+                int_key = f"{name}_samples"
+                str_key = f"{name}_duration"
+                int_cfg: Dict[str, Any] = {"default": 0, "min": 0, "max": 2**31 - 1, "step": 1}
+                str_cfg: Dict[str, Any] = {"default": "", "multiline": False}
+                if doc:
+                    int_cfg["tooltip"] = doc
+                    str_cfg["tooltip"] = doc
+                nullable_optionals[int_key] = ("INT", int_cfg)
+                nullable_optionals[str_key] = ("STRING", str_cfg)
+                split_map[name] = (int_key, str_key)
+                continue
+
         if doc:
             config = {**config, "tooltip": doc}
         entry = (comfy_type,) if not config else (comfy_type, config)
         (nullable_optionals if is_nullable_opt else required)[name] = entry
-    return required, nullable_optionals
+    return required, nullable_optionals, split_map
 
 
 def _coerce_kwargs(func: Callable, kwargs: Dict[str, Any]) -> Dict[str, Any]:
@@ -669,7 +700,9 @@ def _coerce_kwargs(func: Callable, kwargs: Dict[str, Any]) -> Dict[str, Any]:
                 out[key] = stripped.lower() in ("true", "1", "yes", "on")
                 continue
             # Cast a filled nullable-numeric STRING widget back to its number.
-            if "int" in ann_low and "float" not in ann_low:
+            # Skip for Union[int, str] (SampleSpec) — the value may be a duration like "1ms";
+            # resolve_sample_count handles both forms at call time.
+            if "int" in ann_low and "float" not in ann_low and "str" not in ann_low:
                 out[key] = int(stripped)
                 continue
             if "float" in ann_low:
@@ -892,6 +925,7 @@ def _node_class(
     output_node: bool = False,
     hidden: Optional[Dict[str, Any]] = None,
     is_random: bool = False,
+    split_map: Optional[Dict[str, Tuple[str, str]]] = None,
 ) -> Type:
     """Assemble a ComfyUI node class from its parts.
 
@@ -909,6 +943,11 @@ def _node_class(
     ``module:qualname``) ride on the class as ``TAIDAL_NODE_KIND`` / ``TAIDAL_CALLABLE_PATH`` so the
     ops-export compiler (:mod:`fluxstudio.export`) can pick out the op nodes from a saved graph and
     re-emit each as a Confluid ``!class:`` marker. They have no effect on canvas execution.
+
+    ``split_map`` maps each ``Union[int, str]`` param name (when ``strict_typing=True`` on the
+    configurable) to its ``({name}_samples, {name}_duration)`` socket pair.  The timed execute
+    wrapper merges whichever socket is filled back into the canonical name before forwarding to the
+    inner execute.
     """
     input_spec: Dict[str, Any] = {"required": inputs}
     if optional_inputs:
@@ -923,8 +962,19 @@ def _node_class(
     # last text entry so the training log stays readable.  For all other nodes
     # the result tuple is wrapped as {"ui": {"text": [timing]}, "result": tuple}.
     _inner_execute = execute
+    _split_map = split_map or {}
 
     def _timed_execute(self: Any, **kwargs: Any) -> Any:
+        # Merge dual sockets ({name}_samples / {name}_duration) back into the
+        # canonical param name before the inner execute sees them.
+        for _orig, (_int_key, _str_key) in _split_map.items():
+            _str_val = kwargs.pop(_str_key, "")
+            _int_val = kwargs.pop(_int_key, None)
+            if _str_val:
+                kwargs[_orig] = _str_val
+            elif _int_val is not None and _int_val > 0:
+                kwargs[_orig] = _int_val
+            # else: omit → constructor uses its own default
         t0 = time.perf_counter()
         result = _inner_execute(self, **kwargs)
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
@@ -980,7 +1030,8 @@ def _build_source_node(cls: Callable, name: str, category: str) -> Type:
     src_list_param = _source_list_param(cls)
     op_list_param = _op_list_param(cls)
     wired = {p for p in (src_param, src_list_param, op_list_param) if p is not None}
-    required, nullable_opts = _build_config_inputs(cls, skip=wired or None)
+    _strict = getattr(cls, "__confluid_strict_typing__", False)
+    required, nullable_opts, _split_map = _build_config_inputs(cls, skip=wired or None, strict_typing=_strict)
 
     optional: Dict[str, Any] = {**nullable_opts}
     if src_param is not None:
@@ -1027,6 +1078,7 @@ def _build_source_node(cls: Callable, name: str, category: str) -> Type:
         kind="source",
         callable_path=_safe_callable_path(cls),
         is_random=getattr(cls, "__confluid_random__", False),
+        split_map=_split_map or None,
     )
 
 
@@ -1045,7 +1097,10 @@ def _build_op_node(cls: Callable, name: str, category: str) -> Type:
     accepts = getattr(cls, "ACCEPTS", None)
     op_list_param = _op_list_param(cls)
     # Config widgets EXCLUDING the op-list param (it rides DATAFLUX_OP sockets, not a widget).
-    required, nullable_opts = _build_config_inputs(cls, skip={op_list_param} if op_list_param else None)
+    _strict = getattr(cls, "__confluid_strict_typing__", False)
+    required, nullable_opts, _split_map = _build_config_inputs(
+        cls, skip={op_list_param} if op_list_param else None, strict_typing=_strict
+    )
     optional: Dict[str, Any] = {"sample": (SAMPLE_TYPE,), **nullable_opts}
     if op_list_param is not None:
         optional["op_0"] = (OP_TYPE,)  # seed; web/op_list.js grows op_1, op_2, … as they fill
@@ -1102,11 +1157,12 @@ def _build_op_node(cls: Callable, name: str, category: str) -> Type:
         kind="op",
         callable_path=_safe_callable_path(cls),
         is_random=getattr(cls, "__confluid_random__", False),
+        split_map=_split_map or None,
     )
 
 
 def _build_generic_node(func: Callable, name: str, category: str) -> Type:
-    inputs, nullable_opts = _build_config_inputs(func)
+    inputs, nullable_opts, _ = _build_config_inputs(func)
     try:
         ret_ann = inspect.signature(func).return_annotation
     except (
@@ -1363,7 +1419,7 @@ def _build_object_node(cls: Callable, name: str, category: str) -> Type:
     except (ValueError, TypeError):  # pragma: no cover - defensive
         pass
 
-    inputs, nullable_opts = _build_config_inputs(
+    inputs, nullable_opts, _ = _build_config_inputs(
         cls, skip=(set(skip) if skip else set()) | object_single_params | object_list_params or None
     )
     inputs.update(object_required)
@@ -1509,7 +1565,7 @@ def _build_runnable_node(cls: Callable, name: str, category: str) -> Type:
 
     # Scalars stay widgets; skip the socket members (and any non-ctor body slot, which
     # _build_config_inputs wouldn't see anyway).
-    required, nullable_opts = _build_config_inputs(cls, skip=set(socket_members) or None)
+    required, nullable_opts, _ = _build_config_inputs(cls, skip=set(socket_members) or None)
     optional: Dict[str, Any] = {**nullable_opts}
     for member, socket in socket_members.items():
         if member in required_params:
