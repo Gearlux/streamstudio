@@ -4,7 +4,10 @@ Subcommands (all offline — importing :mod:`fluxstudio` populates ``NODE_CLASS_
 entry-point discovery, so the converters work WITHOUT a running ComfyUI):
 
 * ``run`` (the default — bare ``fluxstudio`` still works): launch ComfyUI with the Taidal
-  nodes auto-configured.
+  nodes auto-configured. Also installs ComfyUI-Manager by default (``--no-manager`` skips it)
+  plus any extra custom nodes requested via the repeatable ``--custom-node <git-url>`` flag or
+  the ``FLUXSTUDIO_CUSTOM_NODES`` env var (comma-separated git URLs) — idempotently: a repo
+  already present under ``custom_nodes/`` is left alone.
 * ``export``: compile a saved ComfyUI **API-format** graph's OPS into Confluid YAML op-list(s)
   (``fluxstudio export graph.json -o ops.yaml``) — the offline twin of the canvas Export-Ops
   button. Shares :func:`fluxstudio.export.export_ops_yamls`; a graph with several disconnected
@@ -22,15 +25,72 @@ import json
 import os
 import subprocess
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 
 from logflow import get_logger
 
 logger = get_logger(__name__)
 
+# ComfyUI-Manager is installed into custom_nodes/ by default (skip with --no-manager): it gives
+# the launched ComfyUI an in-app store to install / update / remove further custom nodes, so the
+# bootstrap only has to seed it — everything else is manageable from the GUI.
+COMFYUI_MANAGER_URL = "https://github.com/Comfy-Org/ComfyUI-Manager"
+
+# Env twin of the repeatable --custom-node flag: comma-separated git URLs of EXTRA custom nodes
+# to install on launch. Both feed _install_custom_nodes (flag values after env values).
+CUSTOM_NODES_ENV_VAR = "FLUXSTUDIO_CUSTOM_NODES"
+
+
+def _custom_node_dir_name(url: str) -> str:
+    """Directory name ``git clone <url>`` produces — the URL basename, ``.git`` stripped."""
+    name = url.rstrip("/").rsplit("/", 1)[-1]
+    return name[: -len(".git")] if name.endswith(".git") else name
+
+
+def _env_custom_nodes() -> list[str]:
+    """Extra custom-node git URLs from ``FLUXSTUDIO_CUSTOM_NODES`` (comma-separated, blanks dropped)."""
+    raw = os.environ.get(CUSTOM_NODES_ENV_VAR, "")
+    return [url for url in (part.strip() for part in raw.split(",")) if url]
+
+
+def _install_custom_nodes(comfy_dir: Path, urls: Sequence[str]) -> None:
+    """Clone each custom-node repo into ``custom_nodes/`` and install its ``requirements.txt``.
+
+    Idempotent and launch-safe: a repo whose target directory already exists is skipped (update /
+    remove it via ComfyUI-Manager), and a clone or pip failure of one node logs a warning and moves
+    on — a broken or unreachable custom node must never block the studio launch.
+    """
+    custom_nodes_dir = comfy_dir / "custom_nodes"
+    custom_nodes_dir.mkdir(parents=True, exist_ok=True)
+    for url in urls:
+        target = custom_nodes_dir / _custom_node_dir_name(url)
+        if target.exists():
+            logger.debug(f"Custom node '{target.name}' already installed at {target}; skipping.")
+            continue
+        logger.info(f"Installing custom node '{target.name}' from {url}...")
+        try:
+            subprocess.run(["git", "clone", url, str(target)], check=True)
+        except subprocess.CalledProcessError:
+            logger.warning(f"Failed to clone custom node {url} — skipping it; launch continues.")
+            continue
+        requirements = target / "requirements.txt"
+        if requirements.exists():
+            logger.info(f"Installing '{target.name}' dependencies into current environment...")
+            try:
+                subprocess.run(
+                    [sys.executable, "-m", "pip", "install", "-r", str(requirements)],
+                    check=True,
+                )
+            except subprocess.CalledProcessError:
+                logger.warning(
+                    f"Failed to install requirements for custom node '{target.name}' — it may not "
+                    "work until its dependencies are installed manually."
+                )
+
 
 def _run(args: argparse.Namespace) -> None:
-    """Clone ComfyUI if needed, symlink the Taidal nodes in, and launch it."""
+    """Clone ComfyUI if needed, install custom nodes, symlink the Taidal nodes in, and launch it."""
     comfy_dir: Path = args.comfy_dir
 
     # 1. Clone ComfyUI if it doesn't exist
@@ -61,7 +121,13 @@ def _run(args: argparse.Namespace) -> None:
     else:
         logger.info(f"Using existing ComfyUI installation at {comfy_dir}")
 
-    # 2. Symlink FluxStudio nodes into ComfyUI's custom_nodes directory
+    # 2. Install bundled + requested custom nodes (idempotent — an existing checkout is skipped).
+    custom_node_urls: list[str] = [COMFYUI_MANAGER_URL] if args.manager else []
+    custom_node_urls.extend(_env_custom_nodes())
+    custom_node_urls.extend(args.custom_node or [])
+    _install_custom_nodes(comfy_dir, custom_node_urls)
+
+    # 3. Symlink FluxStudio nodes into ComfyUI's custom_nodes directory
     source_module_dir = Path(__file__).parent.resolve()
     custom_nodes_dir = comfy_dir / "custom_nodes"
     custom_nodes_dir.mkdir(parents=True, exist_ok=True)
@@ -79,7 +145,7 @@ def _run(args: argparse.Namespace) -> None:
         logger.info(f"Symlinking Taidal nodes: {source_module_dir} -> {link_path}")
         os.symlink(source_module_dir, link_path)
 
-    # 3. Launch ComfyUI
+    # 4. Launch ComfyUI
     # Pass the default-nodes choice to the launched ComfyUI via an env var (it's a subprocess, so an
     # env var is the channel). fluxstudio's import inside ComfyUI reads FLUXSTUDIO_HIDE_DEFAULT_NODES
     # to (a) prune ComfyUI's built-in nodes and (b) surface the Taidal nodes at the palette root.
@@ -188,6 +254,26 @@ def main() -> None:
             "Show ComfyUI's built-in nodes alongside the Taidal nodes (default). "
             "Use --no-default-nodes to hide them so only Taidal nodes appear, surfaced at the "
             "palette root rather than under a Taidal/ folder."
+        ),
+    )
+    parser.add_argument(
+        "--manager",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Install the ComfyUI-Manager custom node on launch (default), giving the GUI an "
+            "in-app store to install/update/remove further custom nodes. --no-manager skips it."
+        ),
+    )
+    parser.add_argument(
+        "--custom-node",
+        action="append",
+        default=None,
+        metavar="GIT_URL",
+        help=(
+            "Git URL of an extra ComfyUI custom node to clone into custom_nodes/ on launch "
+            "(repeatable). The FLUXSTUDIO_CUSTOM_NODES env var (comma-separated URLs) adds more. "
+            "Already-installed nodes are skipped — update or remove them via ComfyUI-Manager."
         ),
     )
     sub = parser.add_subparsers(dest="command")

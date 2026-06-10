@@ -29,8 +29,9 @@ fluxstudio
 On first run this:
 
 1. Clones ComfyUI into `~/.fluxstudio/ComfyUI` and installs its `requirements.txt` into the active environment.
-2. Symlinks the installed `fluxstudio` package into `ComfyUI/custom_nodes/fluxstudio`.
-3. Launches ComfyUI (`python main.py`) under the **same interpreter**, so ComfyUI's node discovery reads the entry-point metadata from your active `.venv`.
+2. Installs the [ComfyUI-Manager](https://github.com/Comfy-Org/ComfyUI-Manager) custom node (plus any extra custom nodes you request — see [Custom nodes](#custom-nodes-comfyui-manager--extras) below).
+3. Symlinks the installed `fluxstudio` package into `ComfyUI/custom_nodes/fluxstudio`.
+4. Launches ComfyUI (`python main.py`) under the **same interpreter**, so ComfyUI's node discovery reads the entry-point metadata from your active `.venv`.
 
 Reuse an existing ComfyUI checkout with `--comfy-dir`:
 
@@ -43,6 +44,20 @@ Taidal nodes then appear in ComfyUI's *Add Node* menu grouped by what they ARE, 
 Object sockets (model / loss / metric) are **role-qualified and task-agnostic**: a classification model and a segmentation model both carry `DATAFLUX_OBJECT:model`, so a model docks into *any* trainer's `model` slot — the role still stops you wiring a loss into a model slot. The **Retag** node re-stamps an object's role to force a connection when you need it.
 
 A model node can come from a **builder function**, not just a class. Many libraries ship their models as factory functions — torchvision's detectors are `fasterrcnn_resnet50_fpn(...)`, `ssdlite320_mobilenet_v3_large(...)`, etc. These are registered (`raidar.configurables`, with `role="model"`), so each appears under `Taidal/Model/Detection` as an object node whose widgets (`num_classes`, `weights_backbone`, …) are read straight from the function's signature. Wire its **`class`** output into a detection **Trainer**'s `model` slot — because the node is lazy, the trainer injects the dataset-derived `num_classes` at run time, so you can leave that widget blank.
+
+### Custom nodes: ComfyUI-Manager + extras
+
+Every launch (not just the first) seeds ComfyUI's `custom_nodes/` directory:
+
+- **[ComfyUI-Manager](https://github.com/Comfy-Org/ComfyUI-Manager) is installed by default** — it adds a *Manager* button to the ComfyUI toolbar from which you can install, update, and remove further custom nodes without leaving the GUI. Skip it with `--no-manager`.
+- **Extra custom nodes** can be requested two ways; both take git URLs and combine (env entries first, then flags):
+
+| Mechanism | Example |
+|---|---|
+| Repeatable `--custom-node` flag | `fluxstudio --custom-node https://github.com/rgthree/rgthree-comfy --custom-node https://github.com/crystian/ComfyUI-Crystools` |
+| `FLUXSTUDIO_CUSTOM_NODES` env var (comma-separated) | `FLUXSTUDIO_CUSTOM_NODES="https://github.com/rgthree/rgthree-comfy,https://github.com/crystian/ComfyUI-Crystools" fluxstudio` |
+
+Each repo is cloned into `custom_nodes/<repo-name>` and, if it ships a `requirements.txt`, its dependencies are pip-installed into the **active environment** (the same one ComfyUI runs in). The install is **idempotent**: a repo whose directory already exists is skipped, so updating or removing a node is ComfyUI-Manager's job, not the launcher's. A clone or dependency failure of one node logs a warning and the launch continues — a broken custom node never blocks the studio.
 
 ### Hiding ComfyUI's built-in nodes
 
