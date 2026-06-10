@@ -14,6 +14,7 @@ carry real annotations we want resolved, not stringized.
 
 import os
 import tempfile
+from pathlib import Path
 from typing import Any, Dict, List
 
 import confluid
@@ -26,7 +27,14 @@ from dataflux.ops.torch import RescaleOp
 from dataflux.sources import HuggingFaceSource
 
 from fluxstudio.bridge import create_comfy_node
-from fluxstudio.export import UnsupportedTopologyError, compile_ops, export_ops_yaml
+from fluxstudio.export import (
+    UnsupportedTopologyError,
+    chain_output_paths,
+    compile_op_chains,
+    compile_ops,
+    export_ops_yaml,
+    export_ops_yamls,
+)
 
 # A non-op boundary node class (stands in for WalkDatasetNode / a source): no TAIDAL_NODE_KIND.
 _BoundaryNode = type("WalkDatasetNode", (object,), {})
@@ -134,10 +142,84 @@ def test_fan_out_compiles_to_tee() -> None:
     assert branches[1][0].kwargs["out_max"] == 99.0
 
 
+# --------------------------------------------------------------------------- multiple chains
+
+
+def _three_chain_prompt() -> Dict[str, Any]:
+    """Three disconnected op chains: heads 2, 5, 10 (10 numeric-sorts AFTER 5), one two-op chain."""
+    return {
+        "1": {"class_type": "WalkDatasetNode", "inputs": {}},
+        "2": _rescale_node(["1", 0], in_min=0.0, in_max=255.0),
+        "3": _rescale_node(["2", 0], in_min=0.0, in_max=1.0, out_max=10.0),
+        "5": _rescale_node(["1", 0], in_min=0.0, in_max=2.0),
+        "10": _rescale_node(None, in_min=0.0, in_max=3.0),  # unconnected sample → its own head
+    }
+
+
+def test_compile_op_chains_single_chain_matches_compile_ops() -> None:
+    prompt = {
+        "1": {"class_type": "WalkDatasetNode", "inputs": {}},
+        "2": _rescale_node(["1", 0], in_min=0.0, in_max=255.0),
+        "3": _rescale_node(["2", 0], in_min=0.0, in_max=1.0, out_max=10.0),
+    }
+    chains = compile_op_chains(prompt, _op_mappings())
+    assert len(chains) == 1
+    assert [o.kwargs for o in chains[0]] == [o.kwargs for o in compile_ops(prompt, _op_mappings())]
+
+
+def test_compile_op_chains_one_list_per_chain_in_head_order() -> None:
+    chains = compile_op_chains(_three_chain_prompt(), _op_mappings())
+    assert len(chains) == 3
+    # Deterministic numeric-aware head order: 2 < 5 < 10; chain 2→3 linearizes fully.
+    assert [op.kwargs["in_max"] for op in chains[0]] == [255.0, 1.0]
+    assert [op.kwargs["in_max"] for op in chains[1]] == [2.0]
+    assert [op.kwargs["in_max"] for op in chains[2]] == [3.0]
+    assert all(isinstance(op, Instance) and op.target is RescaleOp for chain in chains for op in chain)
+
+
+def test_compile_op_chains_empty_graph_yields_no_chains() -> None:
+    prompt = {"1": {"class_type": "WalkDatasetNode", "inputs": {}}}
+    assert compile_op_chains(prompt, _op_mappings()) == []
+
+
+def test_export_ops_yamls_one_doc_per_chain() -> None:
+    docs = export_ops_yamls(_three_chain_prompt(), _op_mappings())
+    assert len(docs) == 3
+    # Each document is individually a complete, loadable {ops: [...]} config.
+    for doc, expected_len in zip(docs, (2, 1, 1)):
+        assert "ops:" in doc and "!class:dataflux.ops.torch.RescaleOp()" in doc
+        ops = _load_ops(doc)
+        assert [type(o).__name__ for o in ops] == ["RescaleOp"] * expected_len
+
+
+def test_export_ops_yamls_single_chain_matches_strict_export() -> None:
+    prompt = {
+        "1": {"class_type": "WalkDatasetNode", "inputs": {}},
+        "2": _rescale_node(["1", 0], in_min=0.0, in_max=255.0),
+    }
+    assert export_ops_yamls(prompt, _op_mappings()) == [export_ops_yaml(prompt, _op_mappings())]
+
+
+def test_export_ops_yamls_empty_graph_yields_single_empty_doc() -> None:
+    prompt = {"1": {"class_type": "WalkDatasetNode", "inputs": {}}}
+    docs = export_ops_yamls(prompt, _op_mappings())
+    assert len(docs) == 1
+    assert _load_ops(docs[0]) == []
+
+
+def test_chain_output_paths_single_keeps_base() -> None:
+    assert chain_output_paths("out/ops.yaml", 1) == [Path("out/ops.yaml")]
+
+
+def test_chain_output_paths_multi_suffixes_stem() -> None:
+    paths = chain_output_paths("out/ops.yaml", 3)
+    assert [p.as_posix() for p in paths] == ["out/ops_1.yaml", "out/ops_2.yaml", "out/ops_3.yaml"]
+
+
 # --------------------------------------------------------------------------- error branches
 
 
-def test_multiple_heads_raise() -> None:
+def test_multiple_heads_raise_in_strict_compile_ops() -> None:
     prompt = {
         "2": _rescale_node(["x", 0], in_min=0.0, in_max=255.0),
         "3": _rescale_node(["y", 0], in_min=0.0, in_max=1.0),
@@ -175,6 +257,19 @@ def test_cycle_raises() -> None:
     prompt["2"]["inputs"]["sample"] = ["3", 0]
     with pytest.raises(UnsupportedTopologyError):
         compile_ops(prompt, _op_mappings())
+
+
+def test_cycle_component_next_to_valid_chain_raises() -> None:
+    # A valid chain (head 2) PLUS a two-node cycle (3↔4): the cycle members are reachable
+    # from no chain head, so even the per-chain compiler must reject the graph.
+    prompt = {
+        "1": {"class_type": "WalkDatasetNode", "inputs": {}},
+        "2": _rescale_node(["1", 0], in_min=0.0, in_max=255.0),
+        "3": _rescale_node(["4", 0], in_min=0.0, in_max=1.0),
+        "4": _rescale_node(["3", 0], in_min=0.0, in_max=2.0),
+    }
+    with pytest.raises(UnsupportedTopologyError, match="form a cycle"):
+        compile_op_chains(prompt, _op_mappings())
 
 
 # --------------------------------------------------------------------------- Pipeline Parity

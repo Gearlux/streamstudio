@@ -18,7 +18,7 @@ logflow.force_no_color()
 from logflow import get_logger  # (import follows force_no_color above)
 
 from fluxstudio.bridge import hide_default_comfy_nodes, register_module_nodes
-from fluxstudio.export import UnsupportedTopologyError, export_ops_yaml
+from fluxstudio.export import UnsupportedTopologyError, chain_output_paths, export_ops_yamls
 from fluxstudio.nodes import NODE_CLASS_MAPPINGS as _STATIC_NODE_CLASS_MAPPINGS
 from fluxstudio.nodes import NODE_DISPLAY_NAME_MAPPINGS as _STATIC_NODE_DISPLAY_NAME_MAPPINGS
 
@@ -315,9 +315,10 @@ try:
             }
             return web.json_response(specs)
 
-    # Compile the current canvas's ops into a Confluid YAML op-list (drops the source +
-    # Walk/Extract adapters) so it can be reattached to any source via
+    # Compile the current canvas's ops into Confluid YAML op-lists (drops the source +
+    # Walk/Extract adapters) so they can be reattached to any source via
     # ``Flux.from_ops_yaml`` / ``confluid.materialize(confluid.load(path)["ops"])``.
+    # A graph with several disconnected op chains yields ONE document per chain.
     # Backs web/export_ops.js: the button POSTs ``{prompt: graphToPrompt(), path?: ...}``.
     export_route_exists = any(
         r.path == "/taidal/export_ops" and r.method == "POST" for r in server.PromptServer.instance.routes
@@ -329,16 +330,20 @@ try:
             try:
                 body = await request.json()
                 prompt = body.get("prompt", body)  # accept a bare prompt or {prompt: ...}
-                yaml_doc = export_ops_yaml(prompt, NODE_CLASS_MAPPINGS)
+                yaml_docs = export_ops_yamls(prompt, NODE_CLASS_MAPPINGS)
+                # ``yaml`` (first doc) kept alongside ``yamls`` for older clients of the route.
+                payload: Dict[str, Any] = {"yamls": yaml_docs, "yaml": yaml_docs[0]}
                 out_path = body.get("path")
                 if out_path:
-                    with open(out_path, "w") as fh:
-                        fh.write(yaml_doc)
-                    return web.json_response({"yaml": yaml_doc, "path": out_path})
-                return web.json_response({"yaml": yaml_doc})
+                    paths = [str(p) for p in chain_output_paths(out_path, len(yaml_docs))]
+                    for chain_path, yaml_doc in zip(paths, yaml_docs):
+                        with open(chain_path, "w") as fh:
+                            fh.write(yaml_doc)
+                    payload.update({"paths": paths, "path": paths[0]})
+                return web.json_response(payload)
             except UnsupportedTopologyError as e:
-                # 400: the graph is structurally not exportable (fan-in, multi-head, …) —
-                # an actionable user error, not a server fault.
+                # 400: the graph is structurally not exportable (fan-in, cycle, link-driven
+                # widget, …) — an actionable user error, not a server fault.
                 return web.json_response({"error": str(e)}, status=400)
             except Exception as e:
                 return web.json_response({"error": str(e)}, status=500)

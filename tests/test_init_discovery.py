@@ -24,6 +24,7 @@ import importlib
 import subprocess
 import sys
 from contextlib import contextmanager
+from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any, Iterator, Optional
 from unittest.mock import MagicMock, patch
@@ -404,6 +405,8 @@ def test_export_ops_route_returns_yaml() -> None:
     data, _kwargs = web.calls[-1]
     assert "ops:" in data["yaml"]
     assert "RescaleOp" in data["yaml"]
+    # A single chain → exactly one doc; `yaml` mirrors it for older clients of the route.
+    assert data["yamls"] == [data["yaml"]]
 
 
 def test_import_yaml_route_returns_workflow() -> None:
@@ -443,8 +446,9 @@ def test_export_workflow_route_returns_yaml() -> None:
     assert "HuggingFaceSource" in data["yaml"]
 
 
-def test_export_ops_route_400_on_bad_topology() -> None:
-    # A structurally-unexportable graph (two heads) -> UnsupportedTopologyError -> 400.
+def test_export_ops_route_multi_chain_returns_one_doc_per_chain(tmp_path: Path) -> None:
+    # Two disconnected chains no longer 400: the route compiles EACH chain into its own YAML
+    # doc and (with `path`) writes one stem-suffixed file per chain.
     from dataflux.ops.torch import RescaleOp
 
     from fluxstudio.bridge import create_comfy_node
@@ -455,6 +459,28 @@ def test_export_ops_route_400_on_bad_topology() -> None:
         prompt = {
             "2": {"class_type": "Taidal_RescaleOp", "inputs": {"sample": ["x", 0], "in_min": 0.0, "in_max": 255.0}},
             "3": {"class_type": "Taidal_RescaleOp", "inputs": {"sample": ["y", 0], "in_min": 0.0, "in_max": 1.0}},
+        }
+        asyncio.run(handler(_json_request({"prompt": prompt, "path": str(tmp_path / "ops.yaml")})))
+    data, _kwargs = web.calls[-1]
+    assert len(data["yamls"]) == 2
+    assert all("RescaleOp" in doc for doc in data["yamls"])
+    assert data["yaml"] == data["yamls"][0]
+    assert [Path(p).name for p in data["paths"]] == ["ops_1.yaml", "ops_2.yaml"]
+    for written, doc in zip(data["paths"], data["yamls"]):
+        assert Path(written).read_text() == doc
+
+
+def test_export_ops_route_400_on_bad_topology() -> None:
+    # A structurally-unexportable graph (widget driven by a link) -> UnsupportedTopologyError -> 400.
+    from dataflux.ops.torch import RescaleOp
+
+    from fluxstudio.bridge import create_comfy_node
+
+    with _fake_comfy() as (routes, web):
+        handler = routes.post_handlers["/taidal/export_ops"]
+        fluxstudio.NODE_CLASS_MAPPINGS["Taidal_RescaleOp"] = create_comfy_node(RescaleOp, "Taidal_RescaleOp")
+        prompt = {
+            "2": {"class_type": "Taidal_RescaleOp", "inputs": {"in_min": ["9", 0], "in_max": 255.0}},
         }
         asyncio.run(handler(_json_request({"prompt": prompt})))
     data, kwargs = web.calls[-1]

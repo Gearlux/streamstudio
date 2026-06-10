@@ -5,9 +5,10 @@ entry-point discovery, so the converters work WITHOUT a running ComfyUI):
 
 * ``run`` (the default — bare ``fluxstudio`` still works): launch ComfyUI with the Taidal
   nodes auto-configured.
-* ``export``: compile a saved ComfyUI **API-format** graph's OPS into a Confluid YAML op-list
+* ``export``: compile a saved ComfyUI **API-format** graph's OPS into Confluid YAML op-list(s)
   (``fluxstudio export graph.json -o ops.yaml``) — the offline twin of the canvas Export-Ops
-  button. Shares :func:`fluxstudio.export.export_ops_yaml`.
+  button. Shares :func:`fluxstudio.export.export_ops_yamls`; a graph with several disconnected
+  op chains writes one file per chain (``ops_1.yaml`` …) / a ``---``-separated stream on stdout.
 * ``import``: convert a Confluid YAML config into a ComfyUI ``workflow.json``
   (``fluxstudio import config.yaml -o workflow.json [--as graph|group|subgraph]``) — the offline
   twin of the canvas "Import Taidal YAML" menu command. Uses :func:`fluxstudio.graphio.yaml_to_workflow`.
@@ -94,11 +95,11 @@ def _run(args: argparse.Namespace) -> None:
 
 
 def _export(args: argparse.Namespace) -> None:
-    """Compile a saved API-format graph's ops into a Confluid YAML op-list."""
+    """Compile a saved API-format graph's ops into Confluid YAML op-list(s) — one per chain."""
     # Import here (not at module top): pulling in fluxstudio runs entry-point node discovery,
     # which is unnecessary weight for the common ``run`` path.
     import fluxstudio
-    from fluxstudio.export import export_ops_yaml
+    from fluxstudio.export import chain_output_paths, export_ops_yamls
 
     graph_path: Path = args.graph
     if not graph_path.exists():
@@ -113,13 +114,20 @@ def _export(args: argparse.Namespace) -> None:
             "Export it from ComfyUI via the dev-mode 'Save (API Format)' button."
         )
 
-    yaml_doc = export_ops_yaml(prompt, fluxstudio.NODE_CLASS_MAPPINGS)
+    yaml_docs = export_ops_yamls(prompt, fluxstudio.NODE_CLASS_MAPPINGS)
 
+    if len(yaml_docs) > 1:
+        logger.info(f"Graph contains {len(yaml_docs)} independent op chains — exporting each individually.")
     if args.output:
-        args.output.write_text(yaml_doc)
-        logger.info(f"Wrote ops YAML to {args.output}")
+        # One file per chain: ``-o ops.yaml`` stays ``ops.yaml`` for a single chain,
+        # ``ops_1.yaml`` … ``ops_N.yaml`` for several.
+        for chain_path, yaml_doc in zip(chain_output_paths(args.output, len(yaml_docs)), yaml_docs):
+            chain_path.write_text(yaml_doc)
+            logger.info(f"Wrote ops YAML to {chain_path}")
     else:
-        sys.stdout.write(yaml_doc)
+        # Several chains on stdout → a ``---``-separated YAML document stream (each document is
+        # individually a complete ``{ops: [...]}`` config; split before feeding confluid.load).
+        sys.stdout.write("---\n".join(yaml_docs))
 
 
 def _import(args: argparse.Namespace) -> None:
@@ -185,14 +193,19 @@ def main() -> None:
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("run", help="Launch ComfyUI with Taidal nodes (default).")
 
-    export_parser = sub.add_parser("export", help="Compile a saved graph's ops to a Confluid YAML op-list.")
+    export_parser = sub.add_parser(
+        "export", help="Compile a saved graph's ops to Confluid YAML op-list(s) — one per independent chain."
+    )
     export_parser.add_argument("graph", type=Path, help="ComfyUI API-format graph JSON.")
     export_parser.add_argument(
         "-o",
         "--output",
         type=Path,
         default=None,
-        help="Write the YAML here (default: stdout).",
+        help=(
+            "Write the YAML here (default: stdout). With several disconnected op chains, one "
+            "file per chain is written (ops.yaml -> ops_1.yaml ... ops_N.yaml)."
+        ),
     )
 
     import_parser = sub.add_parser("import", help="Convert a Confluid YAML config into a ComfyUI workflow.json.")

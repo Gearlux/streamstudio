@@ -16,11 +16,15 @@ Why this is possible: every op node wraps a ``@configurable`` class, and
 :func:`confluid.dump` / :func:`confluid.load` round-trip those — including the **recursive**
 ``Tee(branches=[[...],[...]])``, which is how a branchy graph folds into one (nested) op-list.
 
-Scope (v1): a single linear op chain, plus fan-out (one op output → ≥2 op nodes) compiled to a
-:class:`dataflux.ops.tee.Tee`. The compiler is a **faithful translator, not an optimizer**: it
-does NOT auto-insert ``Copy``/``Stash`` for branch isolation — the user places those nodes
-explicitly (they exist on the canvas). True multi-input merges (fan-in) and widget-driven-by-link
-inputs raise :class:`UnsupportedTopologyError`.
+Scope (v1): linear op chains, plus fan-out (one op output → ≥2 op nodes) compiled to a
+:class:`dataflux.ops.tee.Tee`. A graph holding SEVERAL disconnected op chains exports one
+op-list per chain (:func:`compile_op_chains` / :func:`export_ops_yamls` — what the
+``/taidal/export_ops`` route and the ``fluxstudio export`` CLI use, writing one YAML doc/file
+per chain); the strict single-chain forms (:func:`compile_ops` / :func:`export_ops_yaml`)
+still raise on a multi-chain graph. The compiler is a **faithful translator, not an
+optimizer**: it does NOT auto-insert ``Copy``/``Stash`` for branch isolation — the user places
+those nodes explicitly (they exist on the canvas). True multi-input merges (fan-in), cycles,
+and widget-driven-by-link inputs raise :class:`UnsupportedTopologyError`.
 
 Input format — the ComfyUI prompt / API graph (what ``app.graphToPrompt()`` emits and ``/prompt``
 consumes), NOT the richer UI ``workflow.json``::
@@ -31,7 +35,8 @@ consumes), NOT the richer UI ``workflow.json``::
 ``inputs`` values are either literals (widget values) or ``["<upstream_id>", <slot>]`` links.
 """
 
-from typing import Any, Dict, List, Optional, cast
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Union, cast
 
 from confluid import dump
 from confluid.fluid import Instance
@@ -49,11 +54,13 @@ _SAMPLE_INPUT = "sample"
 
 
 class UnsupportedTopologyError(ValueError):
-    """The canvas op-graph can't be expressed as a (possibly Tee-nested) op-list.
+    """The canvas op-graph can't be expressed as (possibly Tee-nested) op-lists.
 
     Raised for fan-in / multi-input merges (use the ``Stash``/``Unstash`` metadata-bus
-    pattern instead), multiple disconnected op chains, widget-inputs driven by a link,
-    or an op node whose wrapped callable can't be resolved.
+    pattern instead), cycles, widget-inputs driven by a link, an op node whose wrapped
+    callable can't be resolved — and, from the strict single-chain forms
+    (:func:`compile_ops` / :func:`export_ops_yaml`) only, multiple disconnected op chains
+    (the per-chain forms :func:`compile_op_chains` / :func:`export_ops_yamls` accept those).
     """
 
 
@@ -129,8 +136,18 @@ def _op_to_instance(node_id: str, node: Dict[str, Any], node_mappings: Dict[str,
     return Instance(cast(type, target), **coerced)
 
 
-def compile_ops(prompt: Dict[str, Any], node_mappings: Dict[str, Any]) -> List[Any]:
-    """Compile a ComfyUI prompt graph into an ordered (Tee-nested) list of op ``Instance``\\ s.
+def _id_sort_key(nid: str) -> Any:
+    """Deterministic node-id ordering: numeric-aware so ``'2' < '10'``, strings after."""
+    return (0, int(nid)) if nid.isdigit() else (1, nid)
+
+
+def compile_op_chains(prompt: Dict[str, Any], node_mappings: Dict[str, Any]) -> List[List[Any]]:
+    """Compile a ComfyUI prompt graph into op-lists — ONE per independent op chain.
+
+    Unlike :func:`compile_ops`, disconnected op chains are legal: each chain head (an op
+    whose ``sample`` input comes from a boundary node or is unconnected) starts its own
+    ordered (Tee-nested) op-list. Chains are returned in deterministic head-node-id order
+    (numeric-aware, so node ``'2'`` sorts before ``'10'``).
 
     Args:
         prompt: The ComfyUI prompt / API-format graph (``{node_id: {class_type, inputs}}``).
@@ -138,17 +155,17 @@ def compile_ops(prompt: Dict[str, Any], node_mappings: Dict[str, Any]) -> List[A
             carrying ``TAIDAL_NODE_KIND`` / ``TAIDAL_CALLABLE_PATH``).
 
     Returns:
-        A list suitable for ``Flux(ops=...)`` after a dump/load round-trip — each element is a
-        Confluid ``Instance`` (an op), with a synthesized ``Tee`` ``Instance`` at any fan-out tail.
-        Empty when the graph has no op nodes.
+        One list per chain, each suitable for ``Flux(ops=...)`` after a dump/load round-trip —
+        every element a Confluid ``Instance`` (an op), with a synthesized ``Tee`` ``Instance``
+        at any fan-out tail. Empty when the graph has no op nodes.
 
     Raises:
-        UnsupportedTopologyError: fan-in, multiple disconnected op chains, a cycle, a
-            widget-input driven by a link, or an unresolvable op node.
+        UnsupportedTopologyError: fan-in, a cycle, a widget-input driven by a link, or an
+            unresolvable op node.
     """
     op_ids = [nid for nid, node in prompt.items() if _node_kind(node.get("class_type", ""), node_mappings) == "op"]
     if not op_ids:
-        logger.debug("compile_ops: no op nodes in graph — returning empty op-list.")
+        logger.debug("compile_op_chains: no op nodes in graph — returning no chains.")
         return []
 
     op_id_set = set(op_ids)
@@ -171,15 +188,6 @@ def compile_ops(prompt: Dict[str, Any], node_mappings: Dict[str, Any]) -> List[A
             "Op-graph has no chain head (every op's sample input is fed by another op) — "
             "it contains a cycle; op-graphs must be acyclic."
         )
-    if len(roots) > 1:
-        raise UnsupportedTopologyError(
-            f"Found {len(roots)} independent op-chain heads ({sorted(roots)}); ops export needs a "
-            "single connected chain. Export one chain at a time, or route via Stash/Unstash."
-        )
-
-    # Deterministic branch order: sort successor ids (numeric-aware so '2' < '10').
-    def _sort_key(nid: str) -> Any:
-        return (0, int(nid)) if nid.isdigit() else (1, nid)
 
     visited: set = set()
 
@@ -188,7 +196,7 @@ def compile_ops(prompt: Dict[str, Any], node_mappings: Dict[str, Any]) -> List[A
             raise UnsupportedTopologyError(f"Cycle detected at node {nid!r}; op-graphs must be acyclic.")
         visited.add(nid)
         instance = _op_to_instance(nid, prompt[nid], node_mappings)
-        children = sorted(successors[nid], key=_sort_key)
+        children = sorted(successors[nid], key=_id_sort_key)
         if not children:
             return [instance]
         if len(children) == 1:
@@ -199,15 +207,41 @@ def compile_ops(prompt: Dict[str, Any], node_mappings: Dict[str, Any]) -> List[A
         branches = [linearize(child) for child in children]
         return [instance, Instance(Tee, branches=branches)]
 
-    ops = linearize(roots[0])
+    chains = [linearize(root) for root in sorted(roots, key=_id_sort_key)]
 
+    # Every op node has at most one sample predecessor (single ``sample`` socket), so the
+    # op-graph is a forest: any node not reached from some chain head sits in a component
+    # where EVERY node has an op predecessor — a cycle.
     unvisited = op_id_set - visited
     if unvisited:
         raise UnsupportedTopologyError(
-            f"Op nodes {sorted(unvisited)} are not reachable from the chain head {roots[0]!r} "
-            "(disconnected op subgraph); ops export needs a single connected chain."
+            f"Op nodes {sorted(unvisited, key=_id_sort_key)} are not reachable from any chain "
+            "head — they form a cycle; op-graphs must be acyclic."
         )
-    return ops
+    return chains
+
+
+def compile_ops(prompt: Dict[str, Any], node_mappings: Dict[str, Any]) -> List[Any]:
+    """Compile a prompt graph into a SINGLE ordered (Tee-nested) list of op ``Instance``\\ s.
+
+    The strict single-chain variant of :func:`compile_op_chains` — kept for consumers that
+    want the one-pipeline guarantee. Args/returns as there, except:
+
+    Returns:
+        The single chain's op-list; empty when the graph has no op nodes.
+
+    Raises:
+        UnsupportedTopologyError: everything :func:`compile_op_chains` raises, PLUS a graph
+            holding more than one independent op chain.
+    """
+    chains = compile_op_chains(prompt, node_mappings)
+    if len(chains) > 1:
+        raise UnsupportedTopologyError(
+            f"Found {len(chains)} independent op chains; compile_ops/export_ops_yaml need a "
+            "single connected chain — use compile_op_chains/export_ops_yamls to compile each "
+            "chain individually."
+        )
+    return chains[0] if chains else []
 
 
 def export_ops_yaml(prompt: Dict[str, Any], node_mappings: Dict[str, Any]) -> str:
@@ -215,8 +249,42 @@ def export_ops_yaml(prompt: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
 
     The result is a mapping with a single ``ops:`` key holding the ``!class:...()`` op-list,
     so the consumer side is ``confluid.load(path)["ops"]`` → ``Flux(source=..., ops=...)``.
+    Strict: a graph with several independent op chains raises (via :func:`compile_ops`) —
+    use :func:`export_ops_yamls` to get one document per chain instead.
     """
     return dump({"ops": compile_ops(prompt, node_mappings)})
 
 
-__all__ = ["UnsupportedTopologyError", "compile_ops", "export_ops_yaml"]
+def export_ops_yamls(prompt: Dict[str, Any], node_mappings: Dict[str, Any]) -> List[str]:
+    """Compile a prompt graph and serialize EACH independent op chain to its own YAML document.
+
+    Every document is a complete, individually-loadable ``{ops: [!class:...()]}`` mapping —
+    the same consumer contract as :func:`export_ops_yaml` (``confluid.load(path)["ops"]``),
+    one per chain, in deterministic head-node-id order. A graph with no op nodes yields a
+    single empty ``ops: []`` document (callers always have something to write/download).
+    """
+    chains = compile_op_chains(prompt, node_mappings) or [[]]
+    return [dump({"ops": chain}) for chain in chains]
+
+
+def chain_output_paths(base: Union[str, Path], count: int) -> List[Path]:
+    """Output file paths for ``count`` chain documents derived from one user-given ``base``.
+
+    One chain keeps the base path verbatim (``ops.yaml``); several get a 1-based stem suffix
+    (``ops_1.yaml`` … ``ops_N.yaml``). Shared by the ``/taidal/export_ops`` route and the
+    ``fluxstudio export`` CLI so the file-naming policy can't fork.
+    """
+    base = Path(base)
+    if count <= 1:
+        return [base]
+    return [base.with_name(f"{base.stem}_{i}{base.suffix}") for i in range(1, count + 1)]
+
+
+__all__ = [
+    "UnsupportedTopologyError",
+    "chain_output_paths",
+    "compile_op_chains",
+    "compile_ops",
+    "export_ops_yaml",
+    "export_ops_yamls",
+]
