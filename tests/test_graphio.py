@@ -210,6 +210,171 @@ def test_dropped_member_warning_is_interpolated() -> None:
     assert "%s" not in dropped[0]  # … not left as a literal stdlib template
 
 
+# --- export skips non-Taidal nodes (comment block) --------------------------------------
+
+
+def _canvas_mappings() -> Dict[str, Any]:
+    """Mappings mimicking a live canvas: source + op + the static adapter nodes."""
+    from fluxstudio.nodes import NODE_CLASS_MAPPINGS as static_nodes
+
+    return {
+        "src": create_comfy_node(HuggingFaceSource, "src"),
+        "rescale": create_comfy_node(RescaleOp, "rescale"),
+        **static_nodes,
+    }
+
+
+def _canvas_workflow() -> Dict[str, Any]:
+    """A realistic stepping canvas: src → Walk → op → op → Extract → Preview (+ a 2nd chain)."""
+    op_widgets = [0.0, 255.0, 0.0, 1.0, False]
+    return {
+        "nodes": [
+            {"id": 1, "type": "src", "widgets_values": ["mnist", "", "image", "label", "", ""], "inputs": []},
+            {
+                "id": 2,
+                "type": "Taidal_WalkDataset",
+                "widgets_values": [0, "increment", True],
+                "inputs": [{"name": "source", "type": "DATAFLUX_SOURCE", "link": 1}],
+            },
+            {
+                "id": 3,
+                "type": "rescale",
+                "widgets_values": op_widgets,
+                "inputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "link": 2}],
+            },
+            {
+                "id": 4,
+                "type": "rescale",
+                "widgets_values": op_widgets,
+                "inputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "link": 3}],
+            },
+            {
+                "id": 5,
+                "type": "Taidal_ExtractSample",
+                "widgets_values": ["input", "viridis", 512],
+                "inputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "link": 4}],
+            },
+            {"id": 6, "type": "PreviewImage", "widgets_values": [], "inputs": [{"name": "images", "link": 5}]},
+            {
+                "id": 7,
+                "type": "rescale",
+                "widgets_values": op_widgets,
+                "inputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "link": 6}],
+            },
+        ],
+        "links": [
+            [1, 1, 0, 2, 0, "DATAFLUX_SOURCE"],
+            [2, 2, 0, 3, 0, "DATAFLUX_SAMPLE"],
+            [3, 3, 0, 4, 0, "DATAFLUX_SAMPLE"],
+            [4, 4, 0, 5, 0, "DATAFLUX_SAMPLE"],
+            [5, 5, 0, 6, 0, "IMAGE"],
+            [6, 2, 0, 7, 0, "DATAFLUX_SAMPLE"],
+        ],
+    }
+
+
+def test_export_skips_native_and_adapter_nodes_with_comment() -> None:
+    # Native ComfyUI nodes (PreviewImage) and the canvas-only adapters (Walk/Extract) no longer
+    # fail the whole-graph export — they're left out and listed in a leading comment block.
+    yaml_text = workflow_to_yaml(_canvas_workflow(), _canvas_mappings())
+    head = yaml_text.splitlines()
+    assert head[0].startswith("# NOTE:")
+    comments = "\n".join(line for line in head if line.startswith("#"))
+    assert "node 2 (Taidal_WalkDataset): canvas-only Taidal adapter" in comments
+    assert "node 5 (Taidal_ExtractSample): canvas-only Taidal adapter" in comments
+    assert "node 6 (PreviewImage): native ComfyUI node" in comments
+    # The Taidal nodes still export — and the document stays parseable (comments are invisible).
+    graph = confluid.resolve(yaml_text)
+    assert "HuggingFaceSource" in str(graph["source"].target)
+    assert all("RescaleOp" in str(graph[k].target) for k in ("rescale_op", "rescale_op_2", "rescale_op_3"))
+
+
+def test_export_sample_chain_is_data_flow_not_config() -> None:
+    # The op-chaining `sample` wire must NOT leak into kwargs (`sample: !ref ...` would crash
+    # the reloaded constructor) and must not name the op entries (`sample:`/`sample_2:`).
+    yaml_text = workflow_to_yaml(_canvas_workflow(), _canvas_mappings())
+    assert "sample:" not in yaml_text
+    graph = confluid.resolve(yaml_text)
+    op_markers = [v for v in graph.values() if isinstance(v, (Class, Instance)) and "RescaleOp" in str(v.target)]
+    assert len(op_markers) == 3
+    assert all("sample" not in m.kwargs for m in op_markers)
+
+
+def test_export_failing_taidal_node_is_isolated_with_warning() -> None:
+    # A Taidal node whose spec fails to build (unresolvable TAIDAL_CALLABLE_PATH here) is
+    # skipped-with-comment + warning — the rest of the graph still exports.
+    from loguru import logger as _loguru
+
+    class _BadOp:
+        TAIDAL_NODE_KIND = "op"
+        TAIDAL_CALLABLE_PATH = "nonexistent.module:Nope"
+
+        @classmethod
+        def INPUT_TYPES(cls) -> Dict[str, Any]:
+            return {"required": {}}
+
+    nm = {"src": create_comfy_node(HuggingFaceSource, "src"), "bad": _BadOp}
+    workflow = {
+        "nodes": [
+            {"id": 1, "type": "src", "widgets_values": ["mnist", "", "image", "label", "", ""], "inputs": []},
+            {"id": 2, "type": "bad", "widgets_values": [], "inputs": []},
+        ],
+        "links": [],
+    }
+    messages: list = []
+    sink_id = _loguru.add(lambda m: messages.append(m.record["message"]), level="WARNING", format="{message}")
+    try:
+        yaml_text = workflow_to_yaml(workflow, nm)
+    finally:
+        _loguru.remove(sink_id)
+
+    assert "node 2 (bad): failed to serialize" in yaml_text
+    # The healthy source node still exports (unconsumed → named by its class).
+    assert "HuggingFaceSource" in str(confluid.resolve(yaml_text)["hugging_face_source"].target)
+    assert any("could not serialize" in m for m in messages)
+
+
+def test_export_dropped_config_wire_is_commented() -> None:
+    # A wire from a skipped node into a REAL config member (DatasetSplit.source here) is
+    # dropped — the member falls back to its default — and noted in the comment block.
+    from dataflux.sources import DatasetSplit
+
+    nm = {"split": create_comfy_node(DatasetSplit, "split")}
+    workflow = {
+        "nodes": [
+            {"id": 1, "type": "LoadImage", "widgets_values": [], "inputs": []},
+            {
+                "id": 2,
+                "type": "split",
+                "widgets_values": [],
+                "inputs": [{"name": "source", "type": "DATAFLUX_SOURCE", "link": 1}],
+            },
+        ],
+        "links": [[1, 1, 0, 2, 0, "DATAFLUX_SOURCE"]],
+    }
+    yaml_text = workflow_to_yaml(workflow, nm)
+    assert "node 1 (LoadImage): native ComfyUI node" in yaml_text
+    assert "dataset_split.source <- node 1 (LoadImage)" in yaml_text
+    split_marker = confluid.resolve(yaml_text)["dataset_split"]
+    assert "source" not in split_marker.kwargs
+
+    # Prompt-form graph with a DANGLING link (source node id absent entirely) → "unknown".
+    prompt = {"2": {"class_type": "split", "inputs": {"source": ["99", 0]}}}
+    assert "dataset_split.source <- node 99 (unknown)" in workflow_to_yaml(prompt, nm)
+
+
+def test_export_all_taidal_graph_has_no_comment_block() -> None:
+    # When every node is exportable the output is the plain document — no comment header
+    # (the clean round-trip stays byte-identical to the pre-skip behaviour).
+    nm = _engine_mappings()
+    doc = {
+        "pipeline": Class(Flux, source=Reference("raw"), ops=[Instance(RescaleOp, in_min=0.0, in_max=2.0)]),
+        "raw": Instance(HuggingFaceSource, path="mnist"),
+    }
+    yaml_text = workflow_to_yaml(yaml_to_workflow(doc, nm), nm)
+    assert not yaml_text.startswith("#")
+
+
 # --- end-to-end on the real MNIST config -----------------------------------------------
 
 
