@@ -463,6 +463,14 @@ def _map_type(param_name: str, annotation: Any) -> str:
     # Must precede the bare-int check or the str branch is silently dropped.
     if "int" in low and "str" in low:
         return "STRING"
+    # Tuple[float, float] / Tuple[int, int] / Optional variants → two FLOAT/INT widgets (lo + hi).
+    # Must precede the bare int/float branches so "int"/"float" inside a tuple annotation
+    # doesn't collapse to a single scalar widget that can't hold a pair default.
+    if "tuple" in low:
+        if "float" in low:
+            return "RANGE_FLOAT"
+        if "int" in low:
+            return "RANGE_INT"
     if "int" in low and "float" not in low:
         return "INT"
     if "float" in low:
@@ -643,6 +651,29 @@ def _build_config_inputs(
                 split_map[name] = (int_key, str_key)
                 continue
 
+        # Tuple[T, T] range params → two native FLOAT/INT widgets ({name}__lo / {name}__hi).
+        # _coerce_kwargs reconstructs the tuple before passing to the constructor.
+        if comfy_type in ("RANGE_FLOAT", "RANGE_INT"):
+            native = "FLOAT" if comfy_type == "RANGE_FLOAT" else "INT"
+            cast_ = float if comfy_type == "RANGE_FLOAT" else int
+            default_lo: Any = cast_(0)
+            default_hi: Any = cast_(1)
+            if (
+                param.default not in (inspect.Parameter.empty, None)
+                and isinstance(param.default, (tuple, list))
+                and len(param.default) == 2
+            ):
+                default_lo = cast_(param.default[0])
+                default_hi = cast_(param.default[1])
+            lo_cfg: Dict[str, Any] = {"default": default_lo}
+            hi_cfg: Dict[str, Any] = {"default": default_hi}
+            if doc:
+                lo_cfg["tooltip"] = doc
+                hi_cfg["tooltip"] = doc
+            required[f"{name}__lo"] = (native, lo_cfg)
+            required[f"{name}__hi"] = (native, hi_cfg)
+            continue
+
         if doc:
             config = {**config, "tooltip": doc}
         entry = (comfy_type,) if not config else (comfy_type, config)
@@ -668,7 +699,24 @@ def _coerce_kwargs(func: Callable, kwargs: Dict[str, Any]) -> Dict[str, Any]:
     ):  # pragma: no cover - defensive: inspect rejects rare builtins
         return dict(kwargs)
     out: Dict[str, Any] = {}
+
+    # Reconstruct Tuple[T, T] params from their __lo / __hi widget-pair kwargs.
+    lo_map = {k[:-4]: v for k, v in kwargs.items() if k.endswith("__lo")}
+    hi_map = {k[:-4]: v for k, v in kwargs.items() if k.endswith("__hi")}
+    paired = set(lo_map) & set(hi_map)
+    skip_keys = {f"{b}__lo" for b in paired} | {f"{b}__hi" for b in paired}
+    for base in paired:
+        p = sig.parameters.get(base)
+        ann_low = str(p.annotation).lower() if p is not None else ""
+        lo_v, hi_v = lo_map[base], hi_map[base]
+        if "int" in ann_low and "float" not in ann_low:
+            out[base] = (int(lo_v), int(hi_v))
+        else:
+            out[base] = (float(lo_v), float(hi_v))
+
     for key, value in kwargs.items():
+        if key in skip_keys:
+            continue
         param = sig.parameters.get(key)
         # A Literal/enum value (from a combo dropdown) is already the exact constructor value — pass it
         # through verbatim, never through the STRING heuristics below (a member that happens to contain
