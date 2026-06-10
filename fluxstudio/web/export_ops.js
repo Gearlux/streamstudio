@@ -4,9 +4,10 @@ import { api } from "../../scripts/api.js";
 console.log("ComfyFlux: Loaded Taidal.ExportOps extension");
 
 // Canvas-side companion to the /taidal/export_ops backend route + the `fluxstudio export` CLI.
-// Compiles the current graph's OPS (dropping the source + Walk/Extract adapter nodes) into a
-// Confluid YAML op-list and downloads it, so it can be reattached to any source via
-// Flux.from_ops_yaml / confluid.materialize(confluid.load(path)["ops"]).
+// Compiles the current graph's OPS (dropping the source + Walk/Extract adapter nodes) into
+// Confluid YAML op-lists and downloads them, so they can be reattached to any source via
+// Flux.from_ops_yaml / confluid.materialize(confluid.load(path)["ops"]). A graph holding
+// several disconnected op chains downloads ONE file per chain (ops_1.yaml … ops_N.yaml).
 
 function downloadYaml(text, filename) {
     const blob = new Blob([text], { type: "text/yaml" });
@@ -32,11 +33,18 @@ async function exportOps() {
         });
         const data = await res.json();
         if (!res.ok) {
-            // 400 → UnsupportedTopologyError (actionable: fan-in, multi-head, link-driven widget…).
+            // 400 → UnsupportedTopologyError (actionable: fan-in, cycle, link-driven widget…).
             alert("Export ops failed:\n\n" + (data.error || res.statusText));
             return;
         }
-        downloadYaml(data.yaml, "ops.yaml");
+        // One doc per independent op chain (`yamls`; `yaml` is the older single-doc field).
+        const docs = data.yamls || [data.yaml];
+        if (docs.length === 1) {
+            downloadYaml(docs[0], "ops.yaml");
+        } else {
+            // The browser may ask once to allow multiple downloads — expected.
+            docs.forEach((doc, i) => downloadYaml(doc, `ops_${i + 1}.yaml`));
+        }
     } catch (err) {
         console.error("ExportOps: request failed", err);
         alert("Export ops failed: " + err);
