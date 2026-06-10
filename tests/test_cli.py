@@ -12,6 +12,7 @@ state instead.
 
 import os
 import runpy
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -24,12 +25,25 @@ from fluxstudio import cli
 SOURCE = Path(cli.__file__).parent.resolve()
 
 
+@pytest.fixture(autouse=True)
+def _no_ambient_custom_nodes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep call-count assertions hermetic — ignore any ambient FLUXSTUDIO_CUSTOM_NODES export."""
+    monkeypatch.delenv(cli.CUSTOM_NODES_ENV_VAR, raising=False)
+
+
 @pytest.fixture
 def logger_mock(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     """Silence logflow output and expose the logger for message assertions."""
     m = MagicMock()
     monkeypatch.setattr(cli, "logger", m)
     return m
+
+
+def _preinstall_manager(comfy_dir: Path) -> Path:
+    """Create the ComfyUI-Manager checkout dir so the default install is a no-op in this test."""
+    manager = comfy_dir / "custom_nodes" / cli._custom_node_dir_name(cli.COMFYUI_MANAGER_URL)
+    manager.mkdir(parents=True, exist_ok=True)
+    return manager
 
 
 def test_main_clones_when_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, logger_mock: MagicMock) -> None:
@@ -63,6 +77,7 @@ def test_main_uses_existing_and_updates_stale_symlink(
     comfy = tmp_path / "ComfyUI"
     custom = comfy / "custom_nodes"
     custom.mkdir(parents=True)
+    _preinstall_manager(comfy)  # default custom-node install already done -> no clone for it
     link = custom / "fluxstudio"
     stale_target = tmp_path / "somewhere_else"
     stale_target.mkdir()
@@ -73,7 +88,7 @@ def test_main_uses_existing_and_updates_stale_symlink(
     with patch("subprocess.run") as run_mock:
         cli.main()
 
-    # comfy already exists -> no clone/pip, only the launch call
+    # comfy + manager already exist -> no clone/pip, only the launch call
     assert run_mock.call_count == 1
     assert run_mock.call_args.args[0] == [sys.executable, "main.py"]
     assert run_mock.call_args.kwargs["cwd"] == comfy
@@ -125,7 +140,8 @@ def test_main_handles_keyboard_interrupt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, logger_mock: MagicMock
 ) -> None:
     comfy = tmp_path / "ComfyUI"
-    comfy.mkdir()  # exists -> only the launch subprocess.run call fires
+    comfy.mkdir()
+    _preinstall_manager(comfy)  # exists -> only the launch subprocess.run call fires
     monkeypatch.setattr(sys, "argv", ["fluxstudio", "--comfy-dir", str(comfy)])
 
     with patch("subprocess.run", side_effect=KeyboardInterrupt):
@@ -182,6 +198,155 @@ def test_module_run_as_script_invokes_main(tmp_path: Path, monkeypatch: pytest.M
 
     with patch("logflow.get_logger", return_value=MagicMock()), patch("subprocess.run"), patch("os.symlink"):
         runpy.run_path(cli.__file__, run_name="__main__")
+
+
+# --------------------------------------------------------------------------- custom-node install
+
+
+def test_custom_node_dir_name() -> None:
+    # URL basename, with ``.git`` and trailing-slash forms all landing on the repo name.
+    assert cli._custom_node_dir_name("https://github.com/Comfy-Org/ComfyUI-Manager") == "ComfyUI-Manager"
+    assert cli._custom_node_dir_name("https://github.com/foo/Bar.git") == "Bar"
+    assert cli._custom_node_dir_name("https://github.com/foo/Bar/") == "Bar"
+
+
+def test_main_installs_comfyui_manager_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, logger_mock: MagicMock
+) -> None:
+    comfy = tmp_path / "ComfyUI"
+    comfy.mkdir()
+    monkeypatch.setattr(sys, "argv", ["fluxstudio", "--comfy-dir", str(comfy)])
+
+    with patch("subprocess.run") as run_mock:
+        cli.main()
+
+    clones = [c.args[0] for c in run_mock.call_args_list if c.args[0][:2] == ["git", "clone"]]
+    target = comfy / "custom_nodes" / "ComfyUI-Manager"
+    assert clones == [["git", "clone", cli.COMFYUI_MANAGER_URL, str(target)]]
+    # The mocked clone creates no files -> no requirements.txt -> no pip call fires for it.
+    assert all("pip" not in c.args[0] for c in run_mock.call_args_list)
+
+
+def test_main_no_manager_skips_manager_install(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, logger_mock: MagicMock
+) -> None:
+    comfy = tmp_path / "ComfyUI"
+    comfy.mkdir()
+    monkeypatch.setattr(sys, "argv", ["fluxstudio", "--comfy-dir", str(comfy), "--no-manager"])
+
+    with patch("subprocess.run") as run_mock:
+        cli.main()
+
+    # No custom-node clone at all -> the launch is the only subprocess call.
+    assert run_mock.call_count == 1
+    assert run_mock.call_args.args[0] == [sys.executable, "main.py"]
+
+
+def test_main_skips_already_installed_custom_node(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, logger_mock: MagicMock
+) -> None:
+    comfy = tmp_path / "ComfyUI"
+    comfy.mkdir()
+    _preinstall_manager(comfy)
+    monkeypatch.setattr(sys, "argv", ["fluxstudio", "--comfy-dir", str(comfy)])
+
+    with patch("subprocess.run") as run_mock:
+        cli.main()
+
+    # Just the launch — an existing checkout is never re-cloned (update via ComfyUI-Manager).
+    assert run_mock.call_count == 1
+    assert run_mock.call_args.args[0] == [sys.executable, "main.py"]
+
+
+def test_custom_node_flag_and_env_combine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, logger_mock: MagicMock
+) -> None:
+    # Install order: bundled manager, then FLUXSTUDIO_CUSTOM_NODES entries, then --custom-node flags.
+    comfy = tmp_path / "ComfyUI"
+    comfy.mkdir()
+    monkeypatch.setenv(cli.CUSTOM_NODES_ENV_VAR, " https://github.com/a/EnvNode.git , ,https://github.com/b/EnvNode2")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["fluxstudio", "--comfy-dir", str(comfy), "--custom-node", "https://github.com/c/FlagNode"],
+    )
+
+    with patch("subprocess.run") as run_mock:
+        cli.main()
+
+    clone_targets = [Path(c.args[0][3]).name for c in run_mock.call_args_list if c.args[0][:2] == ["git", "clone"]]
+    assert clone_targets == ["ComfyUI-Manager", "EnvNode", "EnvNode2", "FlagNode"]
+    assert all(
+        Path(c.args[0][3]).parent == comfy / "custom_nodes" for c in run_mock.call_args_list if "git" in c.args[0]
+    )
+
+
+def test_custom_node_requirements_installed_after_clone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, logger_mock: MagicMock
+) -> None:
+    # A cloned custom node that ships a requirements.txt gets it pip-installed into this env.
+    comfy = tmp_path / "ComfyUI"
+    comfy.mkdir()
+    monkeypatch.setattr(sys, "argv", ["fluxstudio", "--comfy-dir", str(comfy)])
+
+    def fake_run(cmd: list[str], **kwargs: object) -> MagicMock:
+        if cmd[:2] == ["git", "clone"]:  # simulate the clone materializing the repo
+            repo = Path(cmd[3])
+            repo.mkdir(parents=True)
+            (repo / "requirements.txt").write_text("GitPython\n")
+        return MagicMock()
+
+    with patch("subprocess.run", side_effect=fake_run) as run_mock:
+        cli.main()
+
+    requirements = comfy / "custom_nodes" / "ComfyUI-Manager" / "requirements.txt"
+    pip_calls = [c.args[0] for c in run_mock.call_args_list if "pip" in c.args[0]]
+    assert pip_calls == [[sys.executable, "-m", "pip", "install", "-r", str(requirements)]]
+
+
+def test_custom_node_clone_failure_warns_and_launch_continues(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, logger_mock: MagicMock
+) -> None:
+    comfy = tmp_path / "ComfyUI"
+    comfy.mkdir()
+    bad = "https://github.com/nowhere/Missing"
+    monkeypatch.setattr(sys, "argv", ["fluxstudio", "--comfy-dir", str(comfy), "--no-manager", "--custom-node", bad])
+
+    def fake_run(cmd: list[str], **kwargs: object) -> MagicMock:
+        if cmd[:2] == ["git", "clone"]:
+            raise subprocess.CalledProcessError(128, cmd)
+        return MagicMock()
+
+    with patch("subprocess.run", side_effect=fake_run) as run_mock:
+        cli.main()  # must not raise
+
+    assert run_mock.call_args.args[0] == [sys.executable, "main.py"]  # launch still happened
+    warnings = [str(c.args[0]) for c in logger_mock.warning.call_args_list]
+    assert any("Failed to clone custom node" in w and bad in w for w in warnings)
+
+
+def test_custom_node_pip_failure_warns_and_launch_continues(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, logger_mock: MagicMock
+) -> None:
+    comfy = tmp_path / "ComfyUI"
+    comfy.mkdir()
+    monkeypatch.setattr(sys, "argv", ["fluxstudio", "--comfy-dir", str(comfy)])
+
+    def fake_run(cmd: list[str], **kwargs: object) -> MagicMock:
+        if cmd[:2] == ["git", "clone"]:
+            repo = Path(cmd[3])
+            repo.mkdir(parents=True)
+            (repo / "requirements.txt").write_text("GitPython\n")
+        elif "pip" in cmd:
+            raise subprocess.CalledProcessError(1, cmd)
+        return MagicMock()
+
+    with patch("subprocess.run", side_effect=fake_run) as run_mock:
+        cli.main()  # must not raise
+
+    assert run_mock.call_args.args[0] == [sys.executable, "main.py"]
+    warnings = [str(c.args[0]) for c in logger_mock.warning.call_args_list]
+    assert any("Failed to install requirements" in w and "ComfyUI-Manager" in w for w in warnings)
 
 
 # --------------------------------------------------------------------------- export subcommand
