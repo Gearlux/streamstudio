@@ -1,13 +1,13 @@
 """Tests for ``fluxstudio.cli.main`` — the ComfyUI bootstrap + launch flow.
 
-``main`` does three things on each run: clone ComfyUI if missing, (re)point the
-``custom_nodes/fluxstudio`` symlink at this package, then launch ``main.py``
-under the active interpreter. ``subprocess.run`` is always mocked so no real
-clone / pip install / ComfyUI launch happens, but the symlink branches use a
-real ``tmp_path`` and real ``os.symlink`` — the create / update / already-correct
-/ non-symlink-warning logic is exactly the kind of filesystem reasoning that
-mocking ``os.symlink`` would paper over, so we assert on the resulting link
-state instead.
+``main`` does four things on each run: clone ComfyUI if missing, install custom
+nodes (entry-point-declared / env / flags), (re)point the ``custom_nodes/fluxstudio``
+symlink at this package, then launch ``main.py`` under the active interpreter.
+``subprocess.run`` is always mocked so no real clone / pip install / ComfyUI launch
+happens, but the symlink branches use a real ``tmp_path`` and real ``os.symlink`` —
+the create / update / already-correct / non-symlink-warning logic is exactly the
+kind of filesystem reasoning that mocking ``os.symlink`` would paper over, so we
+assert on the resulting link state instead.
 """
 
 import os
@@ -20,15 +20,42 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from fluxstudio import cli
+from fluxstudio.custom_nodes import CUSTOM_NODE_URLS
 
 # The symlink target main() computes: this installed package's directory.
 SOURCE = Path(cli.__file__).parent.resolve()
+
+
+class _FakeEntryPoint:
+    """Stand-in for an importlib.metadata EntryPoint: load() returns the payload or raises it."""
+
+    def __init__(self, name: str, payload: object) -> None:
+        self.name = name
+        self.value = f"fake.module:{name}"  # the declaration string warnings quote
+        self._payload = payload
+
+    def load(self) -> object:
+        if isinstance(self._payload, BaseException):
+            raise self._payload
+        return self._payload
 
 
 @pytest.fixture(autouse=True)
 def _no_ambient_custom_nodes(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep call-count assertions hermetic — ignore any ambient FLUXSTUDIO_CUSTOM_NODES export."""
     monkeypatch.delenv(cli.CUSTOM_NODES_ENV_VAR, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_declared_nodes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the declared tier to fluxstudio's own bundled list.
+
+    The real ``entry_points()`` reads the whole venv — another installed package declaring
+    ``fluxstudio.custom_nodes`` would leak into call-count assertions. The real loading logic
+    still runs, fed fluxstudio's actual ``CUSTOM_NODE_URLS`` declaration.
+    """
+    eps = [_FakeEntryPoint("fluxstudio", CUSTOM_NODE_URLS)]
+    monkeypatch.setattr(cli, "entry_points", lambda group: eps if group == cli.CUSTOM_NODES_ENTRY_POINT_GROUP else [])
 
 
 @pytest.fixture
@@ -261,7 +288,8 @@ def test_main_skips_already_installed_custom_node(
 def test_custom_node_flag_and_env_combine(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, logger_mock: MagicMock
 ) -> None:
-    # Install order: bundled manager, then FLUXSTUDIO_CUSTOM_NODES entries, then --custom-node flags.
+    # Install order: declared tier (fluxstudio's bundled manager), then FLUXSTUDIO_CUSTOM_NODES
+    # entries, then --custom-node flags.
     comfy = tmp_path / "ComfyUI"
     comfy.mkdir()
     monkeypatch.setenv(cli.CUSTOM_NODES_ENV_VAR, " https://github.com/a/EnvNode.git , ,https://github.com/b/EnvNode2")
@@ -347,6 +375,144 @@ def test_custom_node_pip_failure_warns_and_launch_continues(
     assert run_mock.call_args.args[0] == [sys.executable, "main.py"]
     warnings = [str(c.args[0]) for c in logger_mock.warning.call_args_list]
     assert any("Failed to install requirements" in w and "ComfyUI-Manager" in w for w in warnings)
+
+
+# ------------------------------------------------------------------- entry-point-declared nodes
+
+
+def test_fluxstudio_declares_manager_via_entry_point() -> None:
+    # The REAL installed metadata (bypassing the autouse fake): fluxstudio itself declares the
+    # group, so the manager is "generally available" with no flags. A failure here means the
+    # editable install's *.dist-info is stale — reinstall (`uv pip install -e ./fluxstudio`).
+    import importlib.metadata as md
+
+    ours = [ep for ep in md.entry_points(group=cli.CUSTOM_NODES_ENTRY_POINT_GROUP) if ep.name == "fluxstudio"]
+    assert ours, "fluxstudio.custom_nodes entry point missing from installed metadata (stale editable?)"
+    assert cli.COMFYUI_MANAGER_URL in tuple(ours[0].load())
+
+
+def test_declared_custom_nodes_str_and_iterable_forms(monkeypatch: pytest.MonkeyPatch, logger_mock: MagicMock) -> None:
+    # An entry point may resolve to a single str URL or any iterable of them; order is preserved.
+    eps = [
+        _FakeEntryPoint("one", "https://github.com/a/One"),
+        _FakeEntryPoint("many", ("https://github.com/b/Two", "https://github.com/c/Three")),
+    ]
+    monkeypatch.setattr(cli, "entry_points", lambda group: eps)
+
+    assert cli._declared_custom_nodes() == [
+        "https://github.com/a/One",
+        "https://github.com/b/Two",
+        "https://github.com/c/Three",
+    ]
+    logger_mock.warning.assert_not_called()
+
+
+def test_declared_custom_nodes_broken_or_junk_entries_warn_and_skip(
+    monkeypatch: pytest.MonkeyPatch, logger_mock: MagicMock
+) -> None:
+    # A broken declaration (import error, wrong type, non-str item) warns and is skipped — the
+    # remaining declarations still install; nothing raises.
+    eps = [
+        _FakeEntryPoint("bad_load", ImportError("boom")),
+        _FakeEntryPoint("bad_type", 42),
+        _FakeEntryPoint("mixed", ["https://github.com/x/Ok", 7]),
+        _FakeEntryPoint("good", "https://github.com/y/Good"),
+    ]
+    monkeypatch.setattr(cli, "entry_points", lambda group: eps)
+
+    assert cli._declared_custom_nodes() == ["https://github.com/x/Ok", "https://github.com/y/Good"]
+    warnings = [str(c.args[0]) for c in logger_mock.warning.call_args_list]
+    assert any("bad_load" in w for w in warnings)
+    assert any("bad_type" in w and "int" in w for w in warnings)
+    assert any("mixed" in w and "non-str" in w for w in warnings)
+
+
+def test_main_installs_declared_nodes_from_any_package(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, logger_mock: MagicMock
+) -> None:
+    # Any installed package's declaration installs alongside fluxstudio's bundled manager.
+    comfy = tmp_path / "ComfyUI"
+    comfy.mkdir()
+    eps = [
+        _FakeEntryPoint("fluxstudio", CUSTOM_NODE_URLS),
+        _FakeEntryPoint("acme", ["https://github.com/acme/AcmeNodes"]),
+    ]
+    monkeypatch.setattr(cli, "entry_points", lambda group: eps)
+    monkeypatch.setattr(sys, "argv", ["fluxstudio", "--comfy-dir", str(comfy)])
+
+    with patch("subprocess.run") as run_mock:
+        cli.main()
+
+    clone_targets = [Path(c.args[0][3]).name for c in run_mock.call_args_list if c.args[0][:2] == ["git", "clone"]]
+    assert clone_targets == ["ComfyUI-Manager", "AcmeNodes"]
+
+
+def test_main_no_declared_nodes_skips_package_declared_tier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, logger_mock: MagicMock
+) -> None:
+    # --no-declared-nodes drops the whole entry-point tier (incl. the bundled manager — it IS a
+    # declared node); ad-hoc --custom-node requests still install.
+    comfy = tmp_path / "ComfyUI"
+    comfy.mkdir()
+    eps = [
+        _FakeEntryPoint("fluxstudio", CUSTOM_NODE_URLS),
+        _FakeEntryPoint("acme", ["https://github.com/acme/AcmeNodes"]),
+    ]
+    monkeypatch.setattr(cli, "entry_points", lambda group: eps)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "fluxstudio",
+            "--comfy-dir",
+            str(comfy),
+            "--no-declared-nodes",
+            "--custom-node",
+            "https://github.com/c/FlagNode",
+        ],
+    )
+
+    with patch("subprocess.run") as run_mock:
+        cli.main()
+
+    clone_targets = [Path(c.args[0][3]).name for c in run_mock.call_args_list if c.args[0][:2] == ["git", "clone"]]
+    assert clone_targets == ["FlagNode"]
+
+
+def test_main_dedups_urls_across_tiers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, logger_mock: MagicMock) -> None:
+    # The same URL declared by a package AND given via env/flag clones exactly once.
+    comfy = tmp_path / "ComfyUI"
+    comfy.mkdir()
+    monkeypatch.setenv(cli.CUSTOM_NODES_ENV_VAR, cli.COMFYUI_MANAGER_URL)
+    monkeypatch.setattr(
+        sys, "argv", ["fluxstudio", "--comfy-dir", str(comfy), "--custom-node", cli.COMFYUI_MANAGER_URL]
+    )
+
+    with patch("subprocess.run") as run_mock:
+        cli.main()
+
+    clones = [c.args[0] for c in run_mock.call_args_list if c.args[0][:2] == ["git", "clone"]]
+    assert len(clones) == 1 and clones[0][2] == cli.COMFYUI_MANAGER_URL
+
+
+def test_no_manager_filters_declared_tier_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, logger_mock: MagicMock
+) -> None:
+    # --no-manager drops the manager from the DECLARED tier; an explicit --custom-node request
+    # for the same URL is the stronger signal and still installs.
+    comfy = tmp_path / "ComfyUI"
+    comfy.mkdir()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["fluxstudio", "--comfy-dir", str(comfy), "--no-manager", "--custom-node", cli.COMFYUI_MANAGER_URL],
+    )
+
+    with patch("subprocess.run") as run_mock:
+        cli.main()
+
+    clones = [c.args[0] for c in run_mock.call_args_list if c.args[0][:2] == ["git", "clone"]]
+    assert len(clones) == 1 and clones[0][2] == cli.COMFYUI_MANAGER_URL
 
 
 # --------------------------------------------------------------------------- export subcommand

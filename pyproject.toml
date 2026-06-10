@@ -31,6 +31,15 @@ waivefront = ["waivefront"]
 [project.scripts]
 fluxstudio = "fluxstudio.cli:main"
 
+# Custom-node repos the launcher installs into ComfyUI's custom_nodes/ on every launch
+# ("generally available" — no flags or env vars needed). ANY installed package may declare
+# this group; the target must resolve to a git-URL str or an iterable of them. fluxstudio's
+# own declaration bundles ComfyUI-Manager (see fluxstudio/custom_nodes.py). NOTE: editable
+# installs freeze entry-point metadata — after adding/renaming an entry point here, reinstall
+# (`uv pip install -e ./fluxstudio`); editing the URL tuple in custom_nodes.py needs no reinstall.
+[project.entry-points."fluxstudio.custom_nodes"]
+fluxstudio = "fluxstudio.custom_nodes:CUSTOM_NODE_URLS"
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["fluxstudio*"]
