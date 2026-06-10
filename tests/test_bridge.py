@@ -2056,3 +2056,127 @@ def test_strict_typing_node_execute_str_wins_over_samples() -> None:
     node = create_comfy_node(_PriorityOp, "Taidal__PriorityOp")()
     node.execute(length_samples=512, length_duration="2ms")
     assert received["length"] == "2ms"
+
+
+# ---------------------------------------------------------------------------
+# Tuple[T, T] range-selector widget tests
+# ---------------------------------------------------------------------------
+
+
+def test_map_type_tuple_float_returns_range_float() -> None:
+    from typing import Tuple
+
+    assert _map_type("power_range", Tuple[float, float]) == "RANGE_FLOAT"
+
+
+def test_map_type_tuple_int_returns_range_int() -> None:
+    from typing import Tuple
+
+    assert _map_type("freq_range", Tuple[int, int]) == "RANGE_INT"
+
+
+def test_map_type_optional_tuple_float_returns_range_float() -> None:
+    from typing import Optional, Tuple
+
+    assert _map_type("power_range", Optional[Tuple[float, float]]) == "RANGE_FLOAT"
+
+
+def test_map_type_bare_float_still_returns_float() -> None:
+    assert _map_type("threshold", float) == "FLOAT"
+
+
+def test_build_config_inputs_tuple_float_emits_lo_hi_widgets() -> None:
+    from typing import Tuple
+
+    from fluxstudio.bridge import _build_config_inputs
+
+    def fn(power_range: Tuple[float, float] = (0.01, 10.0)) -> None: ...
+
+    required, _, _ = _build_config_inputs(fn)
+    assert "power_range__lo" in required
+    assert "power_range__hi" in required
+    assert required["power_range__lo"][0] == "FLOAT"
+    assert required["power_range__hi"][0] == "FLOAT"
+    assert required["power_range__lo"][1]["default"] == pytest.approx(0.01)
+    assert required["power_range__hi"][1]["default"] == pytest.approx(10.0)
+    # Original name must NOT appear as a widget
+    assert "power_range" not in required
+
+
+def test_build_config_inputs_tuple_int_emits_lo_hi_widgets() -> None:
+    from typing import Tuple
+
+    from fluxstudio.bridge import _build_config_inputs
+
+    def fn(n_range: Tuple[int, int] = (2, 8)) -> None: ...
+
+    required, _, _ = _build_config_inputs(fn)
+    assert required["n_range__lo"] == ("INT", {"default": 2})
+    assert required["n_range__hi"] == ("INT", {"default": 8})
+
+
+def test_build_config_inputs_tuple_no_default_uses_fallback() -> None:
+    from typing import Tuple
+
+    from fluxstudio.bridge import _build_config_inputs
+
+    def fn(r: Tuple[float, float]) -> None: ...
+
+    required, _, _ = _build_config_inputs(fn)
+    assert required["r__lo"] == ("FLOAT", {"default": 0.0})
+    assert required["r__hi"] == ("FLOAT", {"default": 1.0})
+
+
+def test_coerce_kwargs_reconstructs_float_tuple() -> None:
+    from typing import Tuple
+
+    def fn(power_range: Tuple[float, float] = (0.01, 10.0)) -> None: ...
+
+    result = _coerce_kwargs(fn, {"power_range__lo": 0.05, "power_range__hi": 8.0})
+    assert result == {"power_range": (0.05, 8.0)}
+
+
+def test_coerce_kwargs_reconstructs_int_tuple() -> None:
+    from typing import Tuple
+
+    def fn(n_range: Tuple[int, int] = (2, 8)) -> None: ...
+
+    result = _coerce_kwargs(fn, {"n_range__lo": 3, "n_range__hi": 7})
+    assert result == {"n_range": (3, 7)}
+
+
+def test_coerce_kwargs_tuple_leaves_other_kwargs_intact() -> None:
+    from typing import Tuple
+
+    def fn(power_range: Tuple[float, float] = (0.0, 1.0), scale: float = 1.0) -> None: ...
+
+    result = _coerce_kwargs(fn, {"power_range__lo": 0.1, "power_range__hi": 0.9, "scale": 2.0})
+    assert result["power_range"] == (0.1, 0.9)
+    assert result["scale"] == pytest.approx(2.0)
+
+
+def test_range_widget_node_execute_passes_tuple_to_constructor() -> None:
+    from typing import Tuple
+
+    from confluid import configurable as cfg
+    from dataflux.sample import Sample
+
+    received: dict = {}
+
+    @cfg(category="op")
+    class _RangeOp:
+        def __init__(self, power_range: Tuple[float, float] = (0.01, 10.0)) -> None:
+            received["power_range"] = power_range
+
+        def __call__(self, sample: Sample) -> Sample:
+            return sample
+
+    node_cls = create_comfy_node(_RangeOp, "Taidal__RangeOp")
+    # Verify the INPUT_TYPES has lo/hi widgets, not a single tuple widget
+    required = node_cls.INPUT_TYPES()["required"]
+    assert "power_range__lo" in required
+    assert "power_range__hi" in required
+    assert "power_range" not in required
+    # Verify execute reconstructs the tuple
+    node_cls().execute(power_range__lo=0.05, power_range__hi=5.0)
+    assert received["power_range"] == pytest.approx((0.05, 5.0))
