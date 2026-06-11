@@ -550,7 +550,8 @@ def test_inline_subgraphs_dict_links_and_boundary_restitch() -> None:
 def test_export_inlines_subgraph_instances_end_to_end() -> None:
     # The miniature of the real `impairments.json` shape: subgraph instances + a Primitive
     # feeding a widget input + native viewers. Export must succeed, fold each instance's
-    # inner chain into a Flux pipeline (source attached), and note the Primitive wire drop.
+    # inner chain into a Flux pipeline (source attached), and INLINE the Primitive's value
+    # into the wired widget (the legacy PrimitiveNode folds like the new-style primitives).
     yaml_text = workflow_to_yaml(_two_instance_workflow(), _canvas_mappings())
     graph = confluid.resolve(yaml_text)
     assert yaml_text.count("!ref 'hugging_face_source'") == 2
@@ -559,8 +560,9 @@ def test_export_inlines_subgraph_instances_end_to_end() -> None:
         assert "Flux" in str(flux.target)
         assert "HuggingFaceSource" in str(getattr(flux.kwargs.get("source"), "target", ""))
         assert len(flux.kwargs["ops"]) == 2  # the definition's inner 2-op chain
-    assert "node 4 (PrimitiveNode): native ComfyUI node" in yaml_text
-    assert "pipeline[RescaleOp].in_max <- node 4 (PrimitiveNode)" in yaml_text
+    assert "node 4 (PrimitiveNode): native ComfyUI node" in yaml_text  # still not its own entry
+    assert "in_max: 5.0" in yaml_text  # the Primitive's widget value, inlined
+    assert "<- node 4 (PrimitiveNode)" not in yaml_text  # no dropped-wire note anymore
 
 
 def test_inline_subgraphs_nested_definitions_flatten() -> None:
@@ -860,6 +862,82 @@ def test_primitive_wire_inlines_literal_ui_form() -> None:
     }
     yaml_text = workflow_to_yaml(wf, nm)
     assert "gain: 3.5" in yaml_text
+
+
+def test_legacy_primitive_node_wire_inlines_literal_ui_form() -> None:
+    # The legacy VIRTUAL PrimitiveNode only exists in saved UI workflows (the frontend
+    # folds it out of API prompts); its first widget is the value, the rest is
+    # control_after_generate plumbing.
+    nm = _value_mappings()
+    wf = {
+        "nodes": [
+            {
+                "id": 108,
+                "type": "PrimitiveNode",
+                "widgets_values": ["time_y_bottom", "fixed", ""],
+                "inputs": [],
+                "outputs": [],
+            },
+            {
+                "id": 2,
+                "type": "threshold",
+                "widgets_values": [],
+                "inputs": [{"name": "low_level", "type": "STRING", "link": 7}],
+                "outputs": [],
+            },
+        ],
+        "links": [[7, 108, 0, 2, 0, "STRING"]],
+    }
+    yaml_text = workflow_to_yaml(wf, nm)
+    assert "low_level: time_y_bottom" in yaml_text
+
+
+def test_linked_converted_widget_placeholder_is_ignored() -> None:
+    # A widget converted to an input AND wired keeps a stale placeholder in
+    # widgets_values (the real impairments.json showed ThresholdOp.low_level holding
+    # '>'); the wire is authoritative — the leftover value must not export as config.
+    nm = _value_mappings()
+    wf = {
+        "nodes": [
+            {
+                "id": 2,
+                "type": "threshold",
+                # positional order: low_level, gain — low_level's entry is stale garbage
+                "widgets_values": [">", 2.0],
+                "inputs": [
+                    {"name": "low_level", "type": "STRING", "link": 9, "widget": {"name": "low_level"}},
+                    {"name": "gain", "type": "FLOAT", "link": None, "widget": {"name": "gain"}},
+                ],
+                "outputs": [],
+            },
+            {"id": 99, "type": "UnknownMathNode", "widgets_values": [], "inputs": [], "outputs": []},
+        ],
+        "links": [[9, 99, 0, 2, 0, "STRING"]],
+    }
+    yaml_text = workflow_to_yaml(wf, nm)
+    assert "low_level: '>'" not in yaml_text and "low_level: '>='" not in yaml_text
+    assert "gain: 2.0" in yaml_text  # the UNlinked converted widget keeps its value
+    assert "dropped" in yaml_text or "UnknownMathNode" in yaml_text  # the wire itself is noted
+
+
+def test_single_op_wire_exports_ref() -> None:
+    # ConfigureOp's wired `target` (one DATAFLUX_OP value) references the op's standalone
+    # entry by name — the op-value producer is not folded into the pipeline.
+    from dataflux.ops.configure import ConfigureOp
+
+    nm = {
+        "src": create_comfy_node(HuggingFaceSource, "src"),
+        "cfg": create_comfy_node(ConfigureOp, "cfg"),
+        "threshold": create_comfy_node(ThresholdLikeOp, "threshold"),
+    }
+    prompt = {
+        "1": {"class_type": "src", "inputs": {"path": "mnist"}},
+        "8": {"class_type": "threshold", "inputs": {"gain": 2.0}},
+        "10": {"class_type": "cfg", "inputs": {"sample": ["1", 0], "target": ["8", 1], "param": "low_level"}},
+    }
+    yaml_text = workflow_to_yaml(prompt, nm)
+    assert "!ref 'threshold_like_op'" in yaml_text  # the op-value entry, referenced by name
+    assert "threshold_like_op:" in yaml_text
 
 
 def test_import_of_hoisted_constant_evaluates_consumer_and_places_config_node() -> None:

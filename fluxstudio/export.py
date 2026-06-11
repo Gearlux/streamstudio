@@ -64,15 +64,17 @@ import inspect
 import re
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple, Union, cast
+from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple, Union, cast
 
 from confluid import dump
 from confluid.fluid import Class, Instance, Reference
 from dataflux.discovery import resolve_callable
+from dataflux.ops.configure import ConfigureOp
+from dataflux.ops.formula import FormulaOp
 from dataflux.ops.stash import StashInputOp, StashTargetOp, UnstashInputOp, UnstashTargetOp
 from logflow import get_logger
 
-from fluxstudio.bridge import _coerce_kwargs, _op_list_param
+from fluxstudio.bridge import _SINGLE_OP_PARAMS, _coerce_kwargs, _op_list_param
 
 logger = get_logger(__name__)
 
@@ -86,25 +88,55 @@ _MIX_CLASS_TYPE = "Taidal_MixSamples"
 _MIX_ARGS = ("input_sample", "target_sample", "metadata_sample")
 
 # Native ComfyUI pass-through primitives (``comfy_extras/nodes_primitive.py``): a single
-# ``value`` widget echoed to the output — foldable as that literal. (The legacy virtual
-# ``PrimitiveNode`` never reaches the API prompt; the frontend folds it.)
+# ``value`` widget echoed to the output — foldable as that literal. The legacy virtual
+# ``PrimitiveNode`` never reaches the API prompt (the frontend folds it), but it DOES
+# appear in saved UI ``workflow.json`` graphs — graphio's normalizer captures its first
+# widget as ``value`` so those wires inline too.
 _PRIMITIVE_VALUE_NODES = {
     "PrimitiveString",
     "PrimitiveStringMultiline",
     "PrimitiveInt",
     "PrimitiveFloat",
     "PrimitiveBoolean",
+    "PrimitiveNode",
 }
 
 # Metadata keys used by the inserted stash/unstash ops. They stay in metadata after the
 # run — namespaced so they never collide with real pipeline keys.
 _STASH_KEY_PREFIX = "__taidal_stash_"
 
+# The canvas-only mark: a node whose ``properties["taidal_export"] == "skip"`` (toggled by
+# ``web/export_skip.js``) runs on the canvas but is EXCLUDED from exports — it and
+# everything data-downstream of it (sample wires + Mix args). The canvas export button
+# collects the marked ids and posts them as ``skip_ids``; the CLI takes ``--skip``.
+# (ComfyUI's native mute/bypass need no mark: the frontend drops/reroutes those nodes
+# before the API prompt ever reaches the exporter.)
+_EXPORT_SKIP_PROPERTY = "taidal_export"
+_EXPORT_SKIP_VALUE = "skip"
+
 # Virtual node id for "the component's incoming sample" (whatever the Flux source feeds).
 _ROOT = "__taidal_root__"
 
 # Dynamic ``DATAFLUX_OP`` value sockets a higher-order op node grows (``web/op_list.js``).
 _OP_SOCKET_RE = re.compile(r"^op_(\d+)$")
+
+# The canvas sample→value boundary + scalar-math adapters a VALUE CHAIN walks through
+# (``fluxstudio.nodes.SampleExtractorNode`` / ``MathNode``): an op widget wired from
+# ``… op-chain → Extract(field=input) → Math* → widget`` compiles to a ``ConfigureOp``.
+_EXTRACT_CLASS_TYPE = "Taidal_ExtractSample"
+_MATH_CLASS_TYPE = "Taidal_Math"
+_MATH_VARS = ("a", "b", "c", "d", "e")
+
+
+class _ValueChain(NamedTuple):
+    """A compiled per-sample value derivation feeding an op widget.
+
+    ``op_ids`` are the sample ops between the consumer's own sample predecessor and the
+    Extract boundary (in flow order); ``formulas`` the Math steps as ``(formula, var)``.
+    """
+
+    op_ids: Tuple[str, ...]
+    formulas: Tuple[Tuple[str, str], ...]
 
 
 class UnsupportedTopologyError(ValueError):
@@ -170,6 +202,19 @@ def _snake(class_name: str) -> str:
     return "".join(out)
 
 
+def _marker(fluid_cls: Any, target: Any, kwargs: Dict[str, Any]) -> Any:
+    """Build a Confluid Fluid marker with kwargs set AFTER construction.
+
+    ``Instance(cls, **kwargs)`` collides when an op has a constructor param literally named
+    ``target`` (e.g. ``ConfigureOp.target``) — the marker ctor's own first parameter. The
+    marker stores ``self.kwargs = kwargs`` verbatim, so a post-construction update is
+    exactly equivalent and collision-proof.
+    """
+    marker = fluid_cls(target)
+    marker.kwargs.update(kwargs)
+    return marker
+
+
 def _param_admits_str(target: Any, key: str) -> bool:
     """True when the constructor param's annotation admits ``str`` (expression-capable hint)."""
     try:
@@ -185,15 +230,24 @@ class _FoldContext:
     """Per-document accumulator for the widget-wire folding pass.
 
     Holds the prompt + node mappings the resolvers need, the document's omission
-    ``notes``, and the HOISTED constant entries (``name -> Class marker``, insertion
-    ordered — they dump above ``ops:``). One context per exported document, so a
-    constant wired into two ops in the same component hoists exactly once.
+    ``notes``, the HOISTED constant entries (``name -> Class marker``, insertion
+    ordered — they dump above ``ops:``), and the pre-traced per-consumer VALUE CHAINS
+    (``consumer id -> [(param, _ValueChain)]`` — compiled to ``ConfigureOp`` wraps).
+    One context per exported document, so a constant wired into two ops in the same
+    component hoists exactly once.
     """
 
-    def __init__(self, prompt: Dict[str, Any], node_mappings: Dict[str, Any], notes: List[str]) -> None:
+    def __init__(
+        self,
+        prompt: Dict[str, Any],
+        node_mappings: Dict[str, Any],
+        notes: List[str],
+        configure_specs: Optional[Dict[str, List[Tuple[str, "_ValueChain"]]]] = None,
+    ) -> None:
         self.prompt = prompt
         self.node_mappings = node_mappings
         self.notes = notes
+        self.configure_specs = configure_specs or {}
         self.constants: "OrderedDict[str, Any]" = OrderedDict()
         self._hoisted: Dict[str, str] = {}  # upstream node id -> assigned document name
         self._hoisting: Set[str] = set()  # cycle guard for constant→constant recursion
@@ -207,14 +261,146 @@ class _FoldContext:
         return name
 
 
+def _trace_value_chain(
+    link: Any, consumer_pred: Optional[str], prompt: Dict[str, Any], node_mappings: Dict[str, Any]
+) -> Optional[_ValueChain]:
+    """Trace a widget wire backwards through ``Math* ← Extract(field=input) ← op-chain``.
+
+    The chain must root at the CONSUMER's own sample predecessor (the shared fork), so the
+    derivation can re-run on the consumer's incoming sample inside a ``ConfigureOp``.
+    Returns ``None`` whenever the wire isn't that shape (multi-var Math, a target-field
+    Extract, a different origin, …) — the caller falls back to the omit-with-note path.
+    """
+    formulas: List[Tuple[str, str]] = []
+    cur = link
+    while True:  # Math steps, innermost-first
+        node = prompt.get(str(cur[0]))
+        if node is None:
+            return None
+        if str(node.get("class_type", "")) != _MATH_CLASS_TYPE:
+            break
+        inputs = node.get("inputs", {})
+        wired = [(var, inputs[var]) for var in _MATH_VARS if _is_link(inputs.get(var))]
+        formula = inputs.get("formula")
+        if len(wired) != 1 or not isinstance(formula, str) or not formula.strip():
+            return None
+        formulas.insert(0, (formula, wired[0][0]))
+        cur = wired[0][1]
+
+    extract = prompt.get(str(cur[0]))
+    if extract is None or str(extract.get("class_type", "")) != _EXTRACT_CLASS_TYPE:
+        return None
+    if str(extract.get("inputs", {}).get("field", "input")) != "input":
+        return None  # only the input-field view is the op-chain's flowing value
+    sample_link = extract.get("inputs", {}).get(_SAMPLE_INPUT)
+    if not _is_link(sample_link):
+        return None
+
+    op_ids: List[str] = []
+    cur = sample_link
+    while True:
+        src = str(cur[0])
+        if src == consumer_pred:
+            break
+        if _node_kind(str(prompt.get(src, {}).get("class_type", "")), node_mappings) != "op":
+            return None
+        op_ids.insert(0, src)
+        nxt = prompt[src].get("inputs", {}).get(_SAMPLE_INPUT)
+        if not _is_link(nxt):
+            if consumer_pred is None:  # both the chain and the consumer hang off the raw stream
+                break
+            return None
+        cur = nxt
+    return _ValueChain(tuple(op_ids), tuple(formulas))
+
+
+def _collect_value_chains(
+    prompt: Dict[str, Any], node_mappings: Dict[str, Any]
+) -> Tuple[Dict[str, List[Tuple[str, _ValueChain]]], Set[str]]:
+    """Pre-trace every op widget wire that is a compilable VALUE CHAIN.
+
+    Returns ``(specs, excluded)``: ``specs`` maps a consumer node id to its
+    ``(param, chain)`` list (each becomes a ``ConfigureOp`` wrap), and ``excluded`` the
+    chain-member op ids whose sample output feeds ONLY the chain (pure value branches) —
+    those leave the sample schedule entirely (they re-run inside the ConfigureOp instead
+    of dangling as a dead-end branch).
+    """
+    specs: Dict[str, List[Tuple[str, _ValueChain]]] = {}
+    chain_members: Set[str] = set()
+    for nid, node in prompt.items():
+        if _node_kind(str(node.get("class_type", "")), node_mappings) != "op":
+            continue
+        inputs = node.get("inputs", {})
+        pred = inputs.get(_SAMPLE_INPUT)
+        consumer_pred = str(pred[0]) if _is_link(pred) else None
+        for key, value in inputs.items():
+            if key == _SAMPLE_INPUT or not _is_link(value):
+                continue
+            if _OP_SOCKET_RE.match(key) or key in _SINGLE_OP_PARAMS:
+                continue  # op-value wires embed through their own path
+            chain = _trace_value_chain(value, consumer_pred, prompt, node_mappings)
+            if chain is None:
+                continue
+            specs.setdefault(str(nid), []).append((key, chain))
+            chain_members.update(chain.op_ids)
+
+    excluded: Set[str] = set()
+    for member in chain_members:
+        consumers_ok = True
+        for cnid, cnode in prompt.items():
+            for value in cnode.get("inputs", {}).values():
+                if _is_link(value) and str(value[0]) == member:
+                    in_chain = str(cnid) in chain_members
+                    is_boundary = str(cnode.get("class_type", "")) == _EXTRACT_CLASS_TYPE
+                    if not (in_chain or is_boundary):
+                        consumers_ok = False
+        if consumers_ok:
+            excluded.add(member)
+    return specs, excluded
+
+
+def _expand_skip_ids(skip_ids: Any, prompt: Dict[str, Any]) -> Set[str]:
+    """Resolve user-marked skip ids to the full excluded node set.
+
+    Two expansions: a marked id also matches its SUBGRAPH-inlined inner nodes
+    (``"125"`` excludes ``"125:121"`` — marking an instance excludes the whole instance),
+    and the set closes over DATA edges (``sample`` wires + Mix arguments) — everything
+    downstream of a marked node has no exportable feed, so it is canvas-only too.
+    Widget/op-value wires from an excluded node do NOT exclude the consumer (it just
+    loses that value and keeps its constructor default, with a note).
+    """
+    marked = {str(sid) for sid in (skip_ids or [])}
+    if not marked:
+        return set()
+    excluded = {nid for nid in prompt if nid in marked or any(nid.startswith(f"{sid}:") for sid in marked)}
+    while True:
+        grew = False
+        for nid, node in prompt.items():
+            if nid in excluded:
+                continue
+            inputs = node.get("inputs", {})
+            data_args = _MIX_ARGS if str(node.get("class_type", "")) == _MIX_CLASS_TYPE else (_SAMPLE_INPUT,)
+            for arg in data_args:
+                value = inputs.get(arg)
+                if _is_link(value) and str(value[0]) in excluded:
+                    excluded.add(nid)
+                    grew = True
+                    break
+        if not grew:
+            return excluded
+
+
 def _runtime_value_hint(target: Any, key: str) -> Optional[str]:
-    """The metadata-expression note suffix, for params whose annotation admits ``str``."""
+    """The per-sample-value note suffix: the sanctioned runtime mechanisms.
+
+    Always points at ``dataflux.ops.configure.ConfigureOp`` (compute the value from the
+    sample and inject it as the param — works for ANY op attribute); additionally mentions
+    the metadata-expression form when the param's annotation admits ``str``.
+    """
+    hint = f"; for a per-sample value wrap the op in dataflux ConfigureOp " f"(compute ops + target + param={key!r})"
     if _param_admits_str(target, key):
-        return (
-            "; a per-sample value can ride metadata instead — expression-capable params "
-            "accept '{meta_key}' resolved from sample.meta at call time"
-        )
-    return None
+        hint += " or set the widget to a '{meta_key}' expression resolved from sample.meta at call time"
+    return hint
 
 
 def _resolve_widget_link(target: Any, key: str, link: Any, fold: _FoldContext) -> Tuple[str, Any]:
@@ -239,7 +425,8 @@ def _resolve_widget_link(target: Any, key: str, link: Any, fold: _FoldContext) -
         return ("literal", value)
 
     node_cls = fold.node_mappings.get(class_type)
-    if getattr(node_cls, "TAIDAL_NODE_KIND", None) == "value":
+    kind = getattr(node_cls, "TAIDAL_NODE_KIND", None)
+    if kind == "value":
         if not getattr(node_cls, "TAIDAL_CONSTANT", False):
             return (
                 "drop",
@@ -251,6 +438,15 @@ def _resolve_widget_link(target: Any, key: str, link: Any, fold: _FoldContext) -
             return ("drop", f"; upstream {class_type} output slot {slot} has no declared @output")
         name = _hoist_constant(upstream_id, upstream, fold)
         return ("ref", Reference(f"{name}.{return_names[slot]}"))
+
+    if kind == "op":
+        # A wire from an op node's ``op`` VALUE output (a DATAFLUX_OP wire into a single-op
+        # param like ``RandomApply.op`` / ``ConfigureOp.target``) embeds as a nested instance.
+        return_names = tuple(getattr(node_cls, "RETURN_NAMES", ()) or ())
+        op_slot = return_names.index("op") if "op" in return_names else 1
+        if slot == op_slot:
+            nested = _op_to_instance(upstream_id, upstream, fold.node_mappings, dropped_notes=fold.notes, fold=fold)
+            return ("literal", nested)
 
     return ("drop", _runtime_value_hint(target, key))
 
@@ -301,7 +497,7 @@ def _hoist_constant(node_id: str, node: Dict[str, Any], fold: _FoldContext) -> s
         name = fold.claim_name(_snake(getattr(target, "__name__", class_type)))
         # A deferred ``Class`` marker (``!class:Foo`` — NO parens): the dotted ``!ref:`` reader
         # instantiates it to read the @output property; nothing eager happens at dump time.
-        fold.constants[name] = Class(cast(type, target), **coerced)
+        fold.constants[name] = _marker(Class, cast(type, target), coerced)
         fold._hoisted[node_id] = name
         logger.debug(f"_hoist_constant: node {node_id} ({class_type}) hoisted as {name!r}.")
         return name
@@ -377,13 +573,16 @@ def _op_to_instance(
         )
     target = resolve_callable(path)
 
+    cfg_specs = fold.configure_specs.get(str(node_id), []) if fold is not None else []
+    configured_params = {param for param, _chain in cfg_specs}
+
     inputs = node.get("inputs", {})
     literal_inputs: Dict[str, Any] = {}
     ref_inputs: Dict[str, Any] = {}
     op_links: List[Tuple[int, str, Any]] = []
     for key, value in inputs.items():
-        if key == _SAMPLE_INPUT:
-            continue
+        if key == _SAMPLE_INPUT or key in configured_params:
+            continue  # a configured param is injected per sample by the ConfigureOp wrap below
         if not _is_link(value):
             literal_inputs[key] = value
             continue
@@ -423,14 +622,28 @@ def _op_to_instance(
             coerced[embedded[0]] = embedded[1]
     # ``target`` is the op's @configurable CLASS; pass the type (not the string path) so the
     # dumper emits the dotted ``!class:module.Qualname()`` form that ``confluid.load`` resolves.
-    return Instance(cast(type, target), **coerced)
+    instance = cast(Instance, _marker(Instance, cast(type, target), coerced))
+    if cfg_specs and fold is not None:
+        for param, chain in cfg_specs:
+            # The value chain re-runs on the op's incoming sample inside a ConfigureOp: the
+            # chain ops compute, the Math steps apply as FormulaOps, and the result is set
+            # as the wrapped op's ``param`` (the helios Configure pattern, serialized).
+            compute: List[Any] = [
+                _op_to_instance(mid, fold.prompt[mid], node_mappings, dropped_notes=dropped_notes, fold=fold)
+                for mid in chain.op_ids
+            ]
+            compute += [_marker(Instance, FormulaOp, {"formula": f, "var": v}) for f, v in chain.formulas]
+            instance = cast(
+                Instance, _marker(Instance, ConfigureOp, {"ops": compute, "target": instance, "param": param})
+            )
+    return instance
 
 
 # --------------------------------------------------------------------------- DAG scheduling
 
 
 def _build_graph(
-    prompt: Dict[str, Any], node_mappings: Dict[str, Any]
+    prompt: Dict[str, Any], node_mappings: Dict[str, Any], excluded: Optional[Set[str]] = None
 ) -> Tuple[Dict[str, str], Dict[str, List[Tuple[str, str]]], Dict[str, Set[str]]]:
     """The sample-flow universe: generated op nodes + ``Mix Samples`` adapters.
 
@@ -446,6 +659,8 @@ def _build_graph(
     """
     universe: Dict[str, str] = {}
     for nid, node in prompt.items():
+        if excluded and nid in excluded:
+            continue  # a pure value-chain member — it re-runs inside a ConfigureOp instead
         class_type = str(node.get("class_type", ""))
         if class_type == _MIX_CLASS_TYPE:
             universe[nid] = "mix"
@@ -455,7 +670,7 @@ def _build_graph(
     value_consumed: Set[str] = set()
     for node in prompt.values():
         for key, value in node.get("inputs", {}).items():
-            if _OP_SOCKET_RE.match(key) and _is_link(value):
+            if _is_link(value) and (_OP_SOCKET_RE.match(key) or key in _SINGLE_OP_PARAMS):
                 value_consumed.add(str(value[0]))
 
     preds: Dict[str, List[Tuple[str, str]]] = {}
@@ -669,6 +884,7 @@ def compile_op_chains(
     node_mappings: Dict[str, Any],
     chain_notes: Optional[List[List[str]]] = None,
     chain_constants: Optional[List[Dict[str, Any]]] = None,
+    skip_ids: Optional[Any] = None,
 ) -> List[List[Any]]:
     """Compile a ComfyUI prompt graph — ONE sequential op-list per connected op component.
 
@@ -691,6 +907,10 @@ def compile_op_chains(
             constant entries is appended PER component — the YAML exporters emit them as
             top-level keys above ``ops:`` (a bare compile drops them, so pass this when
             the result will be dumped).
+        skip_ids: Node ids marked CANVAS-ONLY (``properties["taidal_export"] == "skip"``,
+            collected by the canvas export button / the CLI ``--skip`` flag). Each id
+            excludes the node, its subgraph-inlined inner nodes (prefix ``<id>:``), and
+            everything data-downstream of it (sample wires + Mix args), with a note.
 
     Returns:
         One list per component, each suitable for ``Flux(ops=...)`` after a dump/load
@@ -702,7 +922,17 @@ def compile_op_chains(
             merging several distinct sample streams.
     """
     prompt = {str(nid): node for nid, node in prompt.items()}
-    universe, preds, boundary_feeds = _build_graph(prompt, node_mappings)
+    skipped_marks = _expand_skip_ids(skip_ids, prompt)
+    skip_note: Optional[str] = None
+    if skipped_marks:
+        listed = ", ".join(
+            f"node {nid} ({prompt[nid].get('class_type', '?')})" for nid in sorted(skipped_marks, key=_id_sort_key)
+        )
+        skip_note = f"excluded by export-skip mark (canvas-only, incl. data-downstream nodes): {listed}"
+        prompt = {nid: node for nid, node in prompt.items() if nid not in skipped_marks}
+
+    configure_specs, excluded = _collect_value_chains(prompt, node_mappings)
+    universe, preds, boundary_feeds = _build_graph(prompt, node_mappings, excluded)
     if not universe:
         logger.debug("compile_op_chains: no op nodes in graph — returning no chains.")
         return []
@@ -710,8 +940,8 @@ def compile_op_chains(
     chains: List[List[Any]] = []
     for members in _components(universe, preds):
         _check_component(members, preds, boundary_feeds)
-        notes: List[str] = []
-        fold = _FoldContext(prompt, node_mappings, notes)
+        notes: List[str] = [skip_note] if skip_note else []
+        fold = _FoldContext(prompt, node_mappings, notes, configure_specs)
         chains.append(_compile_component(members, universe, preds, prompt, node_mappings, fold))
         if chain_notes is not None:
             chain_notes.append(notes)
@@ -720,7 +950,7 @@ def compile_op_chains(
     return chains
 
 
-def compile_ops(prompt: Dict[str, Any], node_mappings: Dict[str, Any]) -> List[Any]:
+def compile_ops(prompt: Dict[str, Any], node_mappings: Dict[str, Any], skip_ids: Optional[Any] = None) -> List[Any]:
     """Compile a prompt graph into a SINGLE sequential op-list.
 
     The strict single-component variant of :func:`compile_op_chains` — kept for consumers
@@ -735,7 +965,7 @@ def compile_ops(prompt: Dict[str, Any], node_mappings: Dict[str, Any]) -> List[A
         UnsupportedTopologyError: everything :func:`compile_op_chains` raises, PLUS a graph
             holding more than one independent op component.
     """
-    chains = compile_op_chains(prompt, node_mappings)
+    chains = compile_op_chains(prompt, node_mappings, skip_ids=skip_ids)
     if len(chains) > 1:
         raise UnsupportedTopologyError(
             f"Found {len(chains)} independent op components; compile_ops/export_ops_yaml need a "
@@ -761,7 +991,7 @@ def _document(constants: Dict[str, Any], ops: List[Any]) -> Dict[str, Any]:
     return payload
 
 
-def export_ops_yaml(prompt: Dict[str, Any], node_mappings: Dict[str, Any]) -> str:
+def export_ops_yaml(prompt: Dict[str, Any], node_mappings: Dict[str, Any], skip_ids: Optional[Any] = None) -> str:
     """Compile a prompt graph and serialize its ops to a Confluid YAML document.
 
     The result is a mapping holding the hoisted ``constant=True`` entries (if any)
@@ -772,7 +1002,9 @@ def export_ops_yaml(prompt: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
     """
     notes_per_chain: List[List[str]] = []
     constants_per_chain: List[Dict[str, Any]] = []
-    chains = compile_op_chains(prompt, node_mappings, chain_notes=notes_per_chain, chain_constants=constants_per_chain)
+    chains = compile_op_chains(
+        prompt, node_mappings, chain_notes=notes_per_chain, chain_constants=constants_per_chain, skip_ids=skip_ids
+    )
     if len(chains) > 1:
         raise UnsupportedTopologyError(
             f"Found {len(chains)} independent op components; compile_ops/export_ops_yaml need a "
@@ -784,7 +1016,9 @@ def export_ops_yaml(prompt: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
     return _comment_block(notes_per_chain[0]) + dump(_document(constants_per_chain[0], chains[0]))
 
 
-def export_ops_yamls(prompt: Dict[str, Any], node_mappings: Dict[str, Any]) -> List[str]:
+def export_ops_yamls(
+    prompt: Dict[str, Any], node_mappings: Dict[str, Any], skip_ids: Optional[Any] = None
+) -> List[str]:
     """Compile a prompt graph and serialize EACH op component to its own YAML document.
 
     Every document is complete and individually loadable — the hoisted ``constant=True``
@@ -799,7 +1033,9 @@ def export_ops_yamls(prompt: Dict[str, Any], node_mappings: Dict[str, Any]) -> L
     """
     notes_per_chain: List[List[str]] = []
     constants_per_chain: List[Dict[str, Any]] = []
-    chains = compile_op_chains(prompt, node_mappings, chain_notes=notes_per_chain, chain_constants=constants_per_chain)
+    chains = compile_op_chains(
+        prompt, node_mappings, chain_notes=notes_per_chain, chain_constants=constants_per_chain, skip_ids=skip_ids
+    )
     if not chains:
         return [dump({"ops": []})]
     docs: List[str] = []

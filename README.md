@@ -153,7 +153,17 @@ Walk ──────────sample┘
 
 `Parallel(ops=[RescaleOp, StandardizeOp])` applies both to the incoming sample. Leave a higher-order op's `sample` unconnected and take *its* `op` output to nest it inside another higher-order op.
 
-> **Scope.** Works for any op whose constructor takes an `ops`/`branches` list. `Tee` (a list of *branches*) v1 treats each connected op as its own single-op branch — multi-op branches mean pre-composing a branch into one op (future). `FilterOp`/`WrappedOp` wrap a *raw Python callable*, so they aren't canvas nodes at all (bare `@configurable`, i.e. UNcategorised — neither `op` nor `engine`).
+**Single-op params** work the same way with ONE socket instead of a list: a constructor param named `op` or `target` (`RandomApply.op`, `ConfigureOp.target`) renders as one optional `DATAFLUX_OP` input. The canonical use is **`ConfigureOp`** (dataflux, the helios *Configure* pattern) — a per-sample parameter injector: wire the value-computing ops into its `op_N` inputs, the op to configure into `target`, and name the attribute in `param`:
+
+```
+MaxOp        ──op──→ (op_0)   ConfigureOp(param="low_level")  ─sample→ …
+ThresholdOp  ──op──→ (target)      ▲
+Walk ───────────────────sample─────┘
+```
+
+Per sample, the compute chain derives the value (here the sample's max), writes it to `metadata["low_level"]`, sets `target.low_level`, and applies the threshold — replacing the *Extract → Math → widget-wire* pattern with something the ops-export can serialize.
+
+> **Scope.** Works for any op whose constructor takes an `ops`/`branches` list or an `op`/`target` single-op param. `Tee` (a list of *branches*) v1 treats each connected op as its own single-op branch — multi-op branches mean pre-composing a branch into one op (future). `FilterOp`/`WrappedOp` wrap a *raw Python callable*, so they aren't canvas nodes at all (bare `@configurable`, i.e. UNcategorised — neither `op` nor `engine`).
 
 ## Exporting ops to a Flux
 
@@ -214,7 +224,9 @@ The compiler converts the whole **op DAG** of every Taidal/FluxStudio node into 
 | Native ComfyUI primitive (`PrimitiveInt`/`PrimitiveFloat`/`PrimitiveString`/`PrimitiveStringMultiline`/`PrimitiveBoolean`) | the literal `value` widget, inlined |
 | A Taidal **value node** marked `@configurable(constant=True)` (e.g. `ImpairmentsTxConfig`) | **hoisted** as a top-level `!class:` entry carrying its widget settings verbatim; the consumer kwarg becomes a dotted `!ref:<name>.<output>` |
 | A value node **without** the `constant` mark | omitted + a note nudging you to tag the class `constant=True` |
-| Anything else (a per-sample runtime value, e.g. *Extract → Math → widget*) | omitted (the op keeps its constructor default) + a note; when the param accepts `str`, the note points at the **metadata-expression** mechanism — set the widget to `'{meta_key}'` and have an upstream op write `sample.meta["meta_key"]` (e.g. `ThresholdOp.low_level` resolves it at call time) |
+| An op node's `op` value output wired into a **single-op param** (`RandomApply.op`, `ConfigureOp.target`) or an `op_N` list | embedded as a nested `!class:` instance |
+| An ***op-chain → Extract(input) → Math → widget*** value chain rooted at the consumer's own sample feed | **auto-compiled to a `ConfigureOp`**: the chain ops + a `FormulaOp` (the Math formula) re-run per sample inside the wrap and inject the result as the param (the helios *Configure* pattern — e.g. `ThresholdOp.low_level = max * 0.2`); a PURE chain leaves the op schedule entirely |
+| Anything else (a runtime value the compiler can't relate to the consumer's sample) | omitted (the op keeps its constructor default) + a note pointing at the sanctioned mechanisms — wire it through `ConfigureOp` yourself, or, for `str`-capable params, set the widget to a `'{meta_key}'` **metadata expression** an upstream op writes |
 
 A hoisted constant exports like this — the *settings* survive, not just their effect:
 
