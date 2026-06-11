@@ -19,6 +19,7 @@ from confluid import Class, Instance, LazyClass, Reference
 from dataflux import Flux
 from dataflux.ops.torch import RescaleOp
 from dataflux.sources import HuggingFaceSource
+from test_export import ChainLikeOp, ConstTxConfig, ThresholdLikeOp  # local @configurable fixtures
 
 from fluxstudio.bridge import create_comfy_node
 from fluxstudio.graphio import (
@@ -782,3 +783,96 @@ def test_mnist_instantiate_path_matches_marker_path() -> None:
     markers = yaml_to_workflow(str(_MNIST_CFG), nm, instantiate=False)
     live = yaml_to_workflow(str(_MNIST_CFG), nm, instantiate=True)
     assert {n["type"] for n in markers["nodes"]} == {n["type"] for n in live["nodes"]}
+
+
+# --- value-node dotted refs + primitive inlining ----------------------------------------
+
+
+def _value_mappings() -> Dict[str, Any]:
+    """Mappings with a source, two ops, and a constant value node (test_export fixtures)."""
+    return {
+        "src": create_comfy_node(HuggingFaceSource, "src"),
+        "chain": create_comfy_node(ChainLikeOp, "chain"),
+        "threshold": create_comfy_node(ThresholdLikeOp, "threshold"),
+        "txcfg": create_comfy_node(ConstTxConfig, "txcfg"),
+    }
+
+
+def test_value_node_wire_exports_dotted_ref_in_pipeline() -> None:
+    # The chained-op path: the consumer folds into a `pipeline: !class:Flux` entry, and its
+    # wired container params reference the value node's @output by DOTTED ref (a plain
+    # !ref would inject the config INSTANCE where the tuple/dict belongs).
+    nm = _value_mappings()
+    prompt = {
+        "1": {"class_type": "src", "inputs": {"path": "mnist"}},
+        "163": {"class_type": "txcfg", "inputs": {"quantize": False}},
+        "35": {
+            "class_type": "chain",
+            "inputs": {"sample": ["1", 0], "tx_disabled": ["163", 0], "overrides": ["163", 1]},
+        },
+    }
+    yaml_text = workflow_to_yaml(prompt, nm)
+    # Named by its CLASS (a value node's entry is the config object, not the param it feeds).
+    assert "const_tx_config:" in yaml_text
+    assert "!ref 'const_tx_config.disabled'" in yaml_text
+    assert "!ref 'const_tx_config.probability_overrides'" in yaml_text
+
+
+def test_value_node_wire_exports_dotted_ref_standalone() -> None:
+    # The standalone path (an op-value with no sample wiring) takes the same dotted ref.
+    nm = _value_mappings()
+    prompt = {
+        "163": {"class_type": "txcfg", "inputs": {"quantize": False}},
+        "35": {"class_type": "chain", "inputs": {"tx_disabled": ["163", 0]}},
+    }
+    yaml_text = workflow_to_yaml(prompt, nm)
+    assert "!ref 'const_tx_config.disabled'" in yaml_text
+
+
+def test_primitive_wire_inlines_literal_prompt_form() -> None:
+    nm = _value_mappings()
+    prompt = {
+        "1": {"class_type": "src", "inputs": {"path": "mnist"}},
+        "100": {"class_type": "PrimitiveFloat", "inputs": {"value": 3.5}},
+        "2": {"class_type": "threshold", "inputs": {"sample": ["1", 0], "gain": ["100", 0]}},
+    }
+    yaml_text = workflow_to_yaml(prompt, nm)
+    assert "gain: 3.5" in yaml_text
+    assert "dropped" not in yaml_text  # the wire folded — no dropped-wire comment
+
+
+def test_primitive_wire_inlines_literal_ui_form() -> None:
+    # UI workflow.json: a native primitive isn't in the Taidal mappings, but its single
+    # widget is captured by the normalizer so the wire still inlines.
+    nm = _value_mappings()
+    wf = {
+        "nodes": [
+            {"id": 100, "type": "PrimitiveFloat", "widgets_values": [3.5], "inputs": [], "outputs": []},
+            {
+                "id": 2,
+                "type": "threshold",
+                "widgets_values": [],
+                "inputs": [{"name": "gain", "type": "FLOAT", "link": 7}],
+                "outputs": [],
+            },
+        ],
+        "links": [[7, 100, 0, 2, 0, "FLOAT"]],
+    }
+    yaml_text = workflow_to_yaml(wf, nm)
+    assert "gain: 3.5" in yaml_text
+
+
+def test_import_of_hoisted_constant_evaluates_consumer_and_places_config_node() -> None:
+    # confluid.resolve INSTANTIATES a dotted !ref (documented caveat), so on import the
+    # consumer widget carries the EVALUATED value and the config lands as a standalone
+    # value node carrying its settings — re-wire on canvas to re-establish the live link.
+    nm = _value_mappings()
+    doc = {
+        "const_tx_config": Class(ConstTxConfig, quantize=False),
+        "chain_like_op": Class(ChainLikeOp, tx_disabled=Reference("const_tx_config.disabled")),
+    }
+    wf = yaml_to_workflow(doc, nm)
+    types = sorted(n["type"] for n in wf["nodes"])
+    assert types == ["chain", "txcfg"]
+    chain_node = next(n for n in wf["nodes"] if n["type"] == "chain")
+    assert "QuantizeOp" in str(chain_node["widgets_values"])

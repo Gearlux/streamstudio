@@ -204,6 +204,12 @@ def _discover_and_register_nodes() -> None:
 
 _discover_and_register_nodes()
 
+# Re-apply no-color after discovery: some scanned packages (e.g. waivefront-helios / keysight.ai)
+# call logger.remove() + logger.add(colorize=True) at import time, undoing the force_no_color()
+# above.  NO_COLOR=1 is already set; this call only triggers the reconfigure() branch that strips
+# any stray handlers and re-adds logflow's sinks with colorize=False.
+logflow.force_no_color()
+
 # Merge the statically-defined FluxStudio adapter nodes (dataset walker + sample viewer) on top of
 # the auto-discovered DataFlux/Waivefront nodes.
 NODE_CLASS_MAPPINGS.update(_STATIC_NODE_CLASS_MAPPINGS)

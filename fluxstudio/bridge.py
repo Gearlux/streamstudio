@@ -255,8 +255,10 @@ def _infer_member_role(name: str) -> Optional[str]:
 # Constructor params (on higher-order ops) that hold a LIST OF OPS — rendered as dynamic
 # ``DATAFLUX_OP`` multi-inputs (``op_0``, ``op_1``, … via ``web/op_list.js``) instead of a STRING
 # widget, so concrete op nodes wire into them. ``Enable``/``Parallel`` take ``ops``; ``Tee`` takes
-# ``branches`` (a list of op-lists — v1 wraps each connected op as its own single-op branch).
-_OP_LIST_PARAMS = {"ops", "branches"}
+# ``branches`` (a list of op-lists — v1 wraps each connected op as its own single-op branch);
+# ``transforms`` is the helios convention surfaced by waivefront-helios's auto-bridged composites
+# (``HeliosComposeOp`` & co mirror a helios ``*transforms`` variadic as a list param).
+_OP_LIST_PARAMS = {"ops", "branches", "transforms"}
 
 # Constructor params (on source/engine classes) that hold ANOTHER source — rendered as a single
 # wired ``DATAFLUX_SOURCE`` input socket instead of a STRING widget, so a Source/engine node's output
@@ -740,6 +742,34 @@ def _coerce_kwargs(func: Callable, kwargs: Dict[str, Any]) -> Dict[str, Any]:
                 # else: optional with a concrete default -> omit so the default applies
                 continue
             ann_low = ann.lower()
+            # A JSON-encoded container arriving on a STRING input socket: a ``Dict[...]`` or
+            # ``Tuple[str, ...]`` param wired from another node's container ``@output`` (which rides a
+            # STRING socket, json.dumps-encoded by :func:`_coerce_output_value`) or typed by hand.
+            # Decode it back to the real container. MUST precede the list/sequence comma-split below
+            # (kept for ``List``/``Sequence`` params); disjoint from the range-tuple path
+            # (``Tuple[float,float]``/``Tuple[int,int]`` use ``__lo``/``__hi`` widgets whose keys are in
+            # ``skip_keys`` and never reach this loop, and a variable-length ``Tuple[int, ...]`` carries
+            # "int" so it stays a RANGE pair — hence the ``not int / not float`` guard here).
+            if "dict" in ann_low:
+                if stripped.startswith("{"):
+                    try:
+                        out[key] = json.loads(stripped)
+                        continue
+                    except (ValueError, TypeError):
+                        pass
+                out[key] = value  # not JSON — leave the raw string for the constructor to handle
+                continue
+            if "tuple" in ann_low and "float" not in ann_low and "int" not in ann_low:
+                if stripped.startswith("["):
+                    try:
+                        parsed = json.loads(stripped)
+                        out[key] = tuple(parsed) if isinstance(parsed, list) else (parsed,)
+                        continue
+                    except (ValueError, TypeError):
+                        pass
+                # A hand-typed comma-separated value (e.g. ``QuantizeOp, SpursOp``) → a tuple of strings.
+                out[key] = tuple(item.strip() for item in stripped.split(",") if item.strip())
+                continue
             if "list" in ann_low or "sequence" in ann_low:
                 out[key] = [item.strip() for item in stripped.split(",") if item.strip()]
                 continue
@@ -753,7 +783,10 @@ def _coerce_kwargs(func: Callable, kwargs: Dict[str, Any]) -> Dict[str, Any]:
             if "int" in ann_low and "float" not in ann_low and "str" not in ann_low:
                 out[key] = int(stripped)
                 continue
-            if "float" in ann_low:
+            # Same guard for float: a ``Union[float, int, str]`` param (e.g. ThresholdOp's
+            # ``low_level``) accepts call-time expression strings like "{meta_key}" — leave
+            # the string for the constructor; only pure-numeric annotations cast here.
+            if "float" in ann_low and "str" not in ann_low:
                 out[key] = float(stripped)
                 continue
         out[key] = value
@@ -780,6 +813,29 @@ def _op_call_signature(obj: Any) -> Optional[inspect.Signature]:
     if params and _is_sample_annotation(params[0].annotation):
         return sig
     return None
+
+
+def _value_call_signature(obj: Any) -> Optional[inspect.Signature]:
+    """Return ``obj.__call__``'s signature iff ``obj`` is a class whose call takes NO inputs (beyond self).
+
+    A no-arg ``__call__(self)`` marks a VALUE-PRODUCER node — a configurable class that produces values
+    purely from its constructor config (surfaced as ``@output`` sockets), with NO Sample/data input. The
+    canonical users are the ImpairmentsChain config utilities (``ImpairmentsTxConfig`` /
+    ``ImpairmentsRxConfig``). Distinct from :func:`_op_call_signature` (first param is a ``Sample``) and
+    :func:`_is_runnable` (a no-arg ``run`` method, not ``__call__``); checked LAST in the dispatch so a
+    source/op/object/runnable always wins.
+    """
+    if not inspect.isclass(obj) or "__call__" not in vars(obj):
+        return None
+    try:
+        sig = inspect.signature(obj.__call__)
+    except (
+        ValueError,
+        TypeError,
+    ):  # pragma: no cover - defensive: inspect rejects rare callables
+        return None
+    params = [p for n, p in sig.parameters.items() if n not in ("self", "cls")]
+    return sig if not params else None
 
 
 def _is_source(obj: Any) -> bool:
@@ -973,6 +1029,7 @@ def _node_class(
     output_node: bool = False,
     hidden: Optional[Dict[str, Any]] = None,
     is_random: bool = False,
+    is_constant: bool = False,
     split_map: Optional[Dict[str, Tuple[str, str]]] = None,
 ) -> Type:
     """Assemble a ComfyUI node class from its parts.
@@ -991,6 +1048,9 @@ def _node_class(
     ``module:qualname``) ride on the class as ``TAIDAL_NODE_KIND`` / ``TAIDAL_CALLABLE_PATH`` so the
     ops-export compiler (:mod:`fluxstudio.export`) can pick out the op nodes from a saved graph and
     re-emit each as a Confluid ``!class:`` marker. They have no effect on canvas execution.
+    ``is_constant`` mirrors the wrapped callable's ``@configurable(constant=True)`` mark as a
+    ``TAIDAL_CONSTANT`` class attr — the ops-export reads it to HOIST a wired value node into the
+    exported YAML (top-level ``!class:`` + dotted ``!ref:``) instead of dropping the wired values.
 
     ``split_map`` maps each ``Union[int, str]`` param name (when ``strict_typing=True`` on the
     configurable) to its ``({name}_samples, {name}_duration)`` socket pair.  The timed execute
@@ -1047,6 +1107,7 @@ def _node_class(
         "TAIDAL_PRODUCES": produces,
         "TAIDAL_NODE_KIND": kind,
         "TAIDAL_CALLABLE_PATH": callable_path,
+        "TAIDAL_CONSTANT": is_constant,
     }
     if output_node:
         attrs["OUTPUT_NODE"] = True
@@ -1205,6 +1266,53 @@ def _build_op_node(cls: Callable, name: str, category: str) -> Type:
         kind="op",
         callable_path=_safe_callable_path(cls),
         is_random=getattr(cls, "__confluid_random__", False),
+        split_map=_split_map or None,
+    )
+
+
+def _build_value_node(cls: Callable, name: str, category: str) -> Type:
+    """Build a VALUE-producer node: ``(config widgets) -> (@output sockets…)``.
+
+    For a configurable class with a no-arg ``__call__(self)`` (:func:`_value_call_signature`) — a pure
+    value producer with NO Sample input. ``execute`` builds the object from its config widgets, invokes
+    it (``obj()`` — honouring the producer contract), and surfaces each declared ``@output`` property as
+    a typed output socket (containers → JSON ``STRING``, via the same machinery as op/runnable nodes).
+    Unlike an op node there are NO ``sample`` input or ``sample``/``op`` outputs — the only outputs are
+    the declared ``@output``s. Canonical users: the ImpairmentsChain ``ImpairmentsTxConfig`` /
+    ``ImpairmentsRxConfig`` config utilities.
+    """
+    _strict = getattr(cls, "__confluid_strict_typing__", False)
+    required, nullable_opts, _split_map = _build_config_inputs(cls, strict_typing=_strict)
+    optional: Dict[str, Any] = dict(nullable_opts)
+
+    out_specs = list(output_specs(cast(type, cls)))
+    out_sockets = [_output_socket_type(s["name"], _output_return_anno(cls, s["name"])) for s in out_specs]
+
+    def execute(self: Any, **kwargs: Any) -> Tuple[Any, ...]:
+        obj = cls(**_coerce_kwargs(cls, kwargs))
+        obj()  # run the producer (no-arg; @output values may depend on it — harmless for pure-config ones)
+        outs: List[Any] = []
+        for spec, socket in zip(out_specs, out_sockets):
+            try:
+                value = getattr(obj, spec["name"])
+            except Exception as exc:
+                logger.debug("{}: output {!r} unavailable ({}); emitting None.", name, spec["name"], exc)
+                value = None
+            outs.append(_coerce_output_value(value, socket))
+        return tuple(outs)
+
+    return _node_class(
+        name,
+        category,
+        required,
+        tuple(out_sockets),
+        execute,
+        return_names=tuple(s["name"] for s in out_specs),
+        optional_inputs=optional or None,
+        kind="value",
+        callable_path=_safe_callable_path(cls),
+        is_random=getattr(cls, "__confluid_random__", False),
+        is_constant=getattr(cls, "__confluid_constant__", False),
         split_map=_split_map or None,
     )
 
@@ -1686,7 +1794,8 @@ def create_comfy_node(
     processor) becomes a buildable RUNNABLE node (members as wired sockets); ``Sample``-taking op
     classes become ``SAMPLE -> SAMPLE`` nodes; ``Sample``-yielding sources (and task ``role="dataset"``
     classes) become ``-> SOURCE`` nodes; runnable MEMBER classes (model / loss / metric / optimizer /
-    loader / lightning) become ``-> OBJECT`` nodes; everything else falls back to a generic node.
+    loader / lightning) become ``-> OBJECT`` nodes; a no-arg ``__call__(self)`` class becomes a VALUE
+    node (config widgets -> ``@output`` sockets, no Sample I/O); everything else falls back to generic.
     """
     if _is_runnable(func):
         return _build_runnable_node(func, name, category)
@@ -1696,6 +1805,8 @@ def create_comfy_node(
         return _build_source_node(func, name, category)
     if _is_object_member_class(func):
         return _build_object_node(func, name, category)
+    if _value_call_signature(func) is not None:
+        return _build_value_node(func, name, category)
     return _build_generic_node(func, name, category)
 
 
