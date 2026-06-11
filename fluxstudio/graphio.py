@@ -51,6 +51,7 @@ from fluxstudio.export import (
     UnsupportedTopologyError,
     _id_sort_key,
     _is_link,
+    _marker,
     _snake,
 )
 
@@ -809,6 +810,11 @@ def _normalize_ui_workflow(graph: Dict[str, Any], node_mappings: Dict[str, Any])
             link_id = inp.get("link")
             if link_id is not None and link_id in link_src:
                 pnode.links[inp["name"]] = link_src[link_id]
+                if inp.get("widget"):
+                    # A LINKED converted widget: ComfyUI keeps a stale placeholder in
+                    # widgets_values (e.g. ThresholdOp.low_level showing '>') — the wire
+                    # is authoritative, so the leftover widget value must not export.
+                    pnode.widgets.pop(inp["widget"].get("name") or inp["name"], None)
         out[node_id] = pnode
     return out
 
@@ -987,7 +993,9 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
             else:  # dynamic op_N / source_N → a list, ordered by slot index
                 ordered = sorted(items, key=lambda it: _index_of(it[0]))
                 kwargs[base] = [_node_reference(src, slot) for _n, src, slot in ordered]
-        fluids[nid] = LazyClass(cls, **kwargs) if is_lazy else Class(cls, **kwargs)
+        # _marker: kwargs set post-construction — a param literally named `target` (ConfigureOp)
+        # collides with the Fluid ctor's own first parameter.
+        fluids[nid] = _marker(LazyClass if is_lazy else Class, cls, kwargs)
 
     def _chain_op_instance(nid: str, chain_key: str) -> Instance:
         """An inline ``!class:Op()`` Instance for a chained op, with non-sample wires resolved."""
@@ -1007,7 +1015,7 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
                     continue
                 src_type = pnodes[src_id].class_type if src_id in pnodes else "unknown"
                 dropped_wires.append((f"{chain_key}[{cls.__name__}]", base, src_id, src_type))
-        return Instance(cast(type, cls), **kwargs)
+        return cast(Instance, _marker(Instance, cls, kwargs))
 
     def _fold_chain(nid: str, chain_key: str) -> List[Any]:
         """Linearize a chain into inline op Instances; fan-out becomes a nested Tee (ops-export shape)."""

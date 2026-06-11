@@ -260,6 +260,10 @@ def _infer_member_role(name: str) -> Optional[str]:
 # (``HeliosComposeOp`` & co mirror a helios ``*transforms`` variadic as a list param).
 _OP_LIST_PARAMS = {"ops", "branches", "transforms"}
 
+# Single-op constructor params (one op VALUE, not a chain): ``RandomApply.op``,
+# ``ConfigureOp.target``. Rendered as ONE optional ``DATAFLUX_OP`` input socket.
+_SINGLE_OP_PARAMS = {"op", "target"}
+
 # Constructor params (on source/engine classes) that hold ANOTHER source — rendered as a single
 # wired ``DATAFLUX_SOURCE`` input socket instead of a STRING widget, so a Source/engine node's output
 # feeds them. ``DatasetSplit(source=…)`` and ``Flux(source=…)`` use ``source``. Detected by exact
@@ -943,6 +947,24 @@ def _op_list_param(cls: Any) -> Optional[str]:
     return None
 
 
+def _single_op_param(cls: Any) -> Optional[str]:
+    """Name of an op's SINGLE-op constructor param (``op`` / ``target``), or ``None``.
+
+    Detected by name (``_SINGLE_OP_PARAMS``) + a non-scalar annotation — e.g.
+    ``RandomApply(op: Optional[object])``, ``ConfigureOp(target: Optional[object])``. Such a
+    param holds ANOTHER op, so it rides ONE optional ``DATAFLUX_OP`` input socket instead of
+    a STRING widget (the single-op counterpart of :func:`_op_list_param`'s ``op_N`` family).
+    """
+    try:
+        sig = inspect.signature(cls)
+    except (ValueError, TypeError):  # pragma: no cover - defensive
+        return None
+    for pname, param in sig.parameters.items():
+        if pname in _SINGLE_OP_PARAMS and not _is_scalar_anno(param.annotation):
+            return pname
+    return None
+
+
 def _collect_ops(kwargs: Dict[str, Any]) -> List[Any]:
     """Pull the dynamic ``op_0`` / ``op_1`` / … inputs out of ``kwargs``, in slot order, dropping
     unconnected (``None``) ones. The connected op nodes' ``op`` outputs arrive here as kwargs.
@@ -1205,14 +1227,16 @@ def _build_op_node(cls: Callable, name: str, category: str) -> Type:
     """
     accepts = getattr(cls, "ACCEPTS", None)
     op_list_param = _op_list_param(cls)
-    # Config widgets EXCLUDING the op-list param (it rides DATAFLUX_OP sockets, not a widget).
+    single_op_param = _single_op_param(cls)
+    # Config widgets EXCLUDING the op-typed params (they ride DATAFLUX_OP sockets, not widgets).
     _strict = getattr(cls, "__confluid_strict_typing__", False)
-    required, nullable_opts, _split_map = _build_config_inputs(
-        cls, skip={op_list_param} if op_list_param else None, strict_typing=_strict
-    )
+    _socketed = {p for p in (op_list_param, single_op_param) if p is not None}
+    required, nullable_opts, _split_map = _build_config_inputs(cls, skip=_socketed or None, strict_typing=_strict)
     optional: Dict[str, Any] = {"sample": (SAMPLE_TYPE,), **nullable_opts}
     if op_list_param is not None:
         optional["op_0"] = (OP_TYPE,)  # seed; web/op_list.js grows op_1, op_2, … as they fill
+    if single_op_param is not None:
+        optional[single_op_param] = (OP_TYPE,)  # one op VALUE (RandomApply.op / ConfigureOp.target)
 
     # Collect any @output properties declared on this op class.
     out_specs = list(output_specs(cast(type, cls)))
@@ -1224,7 +1248,11 @@ def _build_op_node(cls: Callable, name: str, category: str) -> Type:
             kwargs = {k: v for k, v in kwargs.items() if not (k.startswith("op_") and k[3:].isdigit())}
             # ``Tee.branches`` is a list of op-LISTS; v1 makes each connected op its own 1-op branch.
             kwargs[op_list_param] = [[o] for o in ops] if op_list_param == "branches" else ops
+        wired_op = kwargs.pop(single_op_param, None) if single_op_param is not None else None
         op = cls(**_coerce_kwargs(cls, kwargs))
+        if single_op_param is not None and wired_op is not None:
+            # Post-construction injection (the confluid paradigm) — the wired DATAFLUX_OP value.
+            setattr(op, single_op_param, wired_op)
         applied: Any = None
         if sample is not None:
             # Runtime accept-check (authoritative) before applying — see the type-spec mandate.

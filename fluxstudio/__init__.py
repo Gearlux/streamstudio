@@ -336,7 +336,10 @@ try:
             try:
                 body = await request.json()
                 prompt = body.get("prompt", body)  # accept a bare prompt or {prompt: ...}
-                yaml_docs = export_ops_yamls(prompt, NODE_CLASS_MAPPINGS)
+                # Canvas-only nodes (properties["taidal_export"]=="skip") — collected by
+                # web/export_skip.js and posted by web/export_ops.js.
+                skip_ids = body.get("skip_ids") if isinstance(body, dict) else None
+                yaml_docs = export_ops_yamls(prompt, NODE_CLASS_MAPPINGS, skip_ids=skip_ids)
                 # ``yaml`` (first doc) kept alongside ``yamls`` for older clients of the route.
                 payload: Dict[str, Any] = {"yamls": yaml_docs, "yaml": yaml_docs[0]}
                 out_path = body.get("path")

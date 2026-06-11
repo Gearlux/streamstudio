@@ -1215,6 +1215,35 @@ def test_coerce_kwargs_casts_filled_nullable_numeric() -> None:
     assert _coerce_kwargs(fn, {"count": ""})["count"] is None
 
 
+def test_single_op_param_renders_op_socket() -> None:
+    # ConfigureOp.target / RandomApply.op are SINGLE-op params: one optional DATAFLUX_OP
+    # input socket each (the single-op counterpart of the op_N list family), not a widget.
+    from dataflux.ops.configure import ConfigureOp
+    from dataflux.ops.random_apply import RandomApply
+
+    cfg_node = create_comfy_node(ConfigureOp, "Taidal_ConfigureOp")
+    spec = cfg_node.INPUT_TYPES()
+    assert spec["optional"]["target"] == (OP_TYPE,)
+    assert spec["optional"]["op_0"] == (OP_TYPE,)  # the `ops` compute chain rides op_N
+    assert "target" not in spec["required"] and "ops" not in spec["required"]
+
+    ra_node = create_comfy_node(RandomApply, "Taidal_RandomApply")
+    assert ra_node.INPUT_TYPES()["optional"]["op"] == (OP_TYPE,)
+
+
+def test_configure_op_node_executes_with_wired_target_and_compute() -> None:
+    from dataflux.ops.configure import ConfigureOp
+    from dataflux.ops.numpy import MaxOp, ThresholdOp
+
+    node = create_comfy_node(ConfigureOp, "Taidal_ConfigureOp")()
+    sample = Sample(input=np.array([1.0, 6.0, 2.0]), target=None, metadata={})
+    out = node.execute(sample=sample, target=ThresholdOp(low_op=">="), op_0=MaxOp(), param="low_level")
+    applied, op = out["result"][0], out["result"][1]
+    assert isinstance(op, ConfigureOp)
+    assert applied.meta["low_level"] == 6.0
+    np.testing.assert_array_equal(applied.input, [False, True, False])
+
+
 def test_coerce_kwargs_leaves_expression_string_on_float_str_union() -> None:
     # A ``Union[float, int, str]`` param (e.g. dataflux ThresholdOp.low_level) accepts
     # call-time metadata expressions like "{snr}" — the coercion must NOT float()-cast

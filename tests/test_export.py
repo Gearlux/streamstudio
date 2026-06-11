@@ -26,6 +26,8 @@ import torch
 from confluid import configurable, output
 from confluid.fluid import Instance, Reference
 from dataflux import Flux, Sample
+from dataflux.ops.configure import ConfigureOp
+from dataflux.ops.formula import FormulaOp
 from dataflux.ops.stash import StashInputOp, StashTargetOp, UnstashInputOp, UnstashTargetOp
 from dataflux.ops.tee import Tee
 from dataflux.ops.torch import RescaleOp
@@ -244,6 +246,7 @@ def _op_mappings() -> Dict[str, Any]:
         "Taidal_AddOp": create_comfy_node(AddOp, "Taidal_AddOp"),
         "Taidal_WriteMetaOp": create_comfy_node(WriteMetaOp, "Taidal_WriteMetaOp"),
         "Taidal_SetTargetOp": create_comfy_node(SetTargetOp, "Taidal_SetTargetOp"),
+        "Taidal_ConfigureOp": create_comfy_node(ConfigureOp, "Taidal_ConfigureOp"),
         "WalkDatasetNode": _BoundaryNode,
     }
 
@@ -733,6 +736,124 @@ def test_primitive_fed_by_primitive_follows_the_wire() -> None:
 
 
 # --------------------------------------------------------------------------- op-value embedding
+
+
+def test_configure_op_single_op_wire_embeds_nested_target() -> None:
+    """The helios 'Configure' trick exports statically: a ConfigureOp's wired `target`
+    (a single DATAFLUX_OP wire) and `op_N` compute chain embed as nested instances, so the
+    per-sample runtime value (e.g. ThresholdOp.low_level) becomes expressible in YAML."""
+    prompt = {
+        "1": {"class_type": "WalkDatasetNode", "inputs": {}},
+        "8": {"class_type": "Taidal_ThresholdLikeOp", "inputs": {"gain": 2.0}},  # op-value only
+        "9": {"class_type": "Taidal_AddOp", "inputs": {"amount": 5.0}},  # compute op-value
+        "10": {
+            "class_type": "Taidal_ConfigureOp",
+            "inputs": {"sample": ["1", 0], "target": ["8", 1], "op_0": ["9", 1], "param": "low_level"},
+        },
+    }
+    notes: List[List[str]] = []
+    chains = compile_op_chains(prompt, _op_mappings(), chain_notes=notes)
+    assert len(chains) == 1 and len(chains[0]) == 1 and notes[0] == []
+    cfg = chains[0][0]
+    assert cfg.target is ConfigureOp
+    assert cfg.kwargs["target"].target is ThresholdLikeOp
+    assert cfg.kwargs["target"].kwargs["gain"] == 2.0
+    assert [o.target for o in cfg.kwargs["ops"]] == [AddOp]
+
+    # Round-trip + execution parity: input 3.0 → compute Add(5) → low_level := 8.0.
+    ops = _load_ops(export_ops_yamls(prompt, _op_mappings())[0])
+    out = list(Flux(source=[Sample(input=3.0, target=None, metadata={})], ops=ops))[0]
+    assert out.meta["low_level"] == 8.0
+    assert type(ops[0].target).__name__ == "ThresholdLikeOp" and ops[0].target.low_level == 8.0
+
+
+def _value_chain_prompt(**threshold_extra: Any) -> Dict[str, Any]:
+    """The user's Threshold-subgraph shape: fork → [chain op → Extract → Math] → widget wire.
+
+    Node 2 is the fork (the Magnitude analogue), node 3 the value-computing op (the MaxOp
+    analogue), 4/5 the canvas Extract/Math adapters, 6 the consumer whose ``low_level`` is
+    wired from the Math output.
+    """
+    return {
+        "1": {"class_type": "WalkDatasetNode", "inputs": {}},
+        "2": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["1", 0], "amount": 10.0}},
+        "3": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["2", 0], "amount": 5.0}},
+        "4": {"class_type": "Taidal_ExtractSample", "inputs": {"sample": ["3", 0], "field": "input"}},
+        "5": {"class_type": "Taidal_Math", "inputs": {"formula": "a * 0.2", "a": ["4", 4]}},
+        "6": {
+            "class_type": "Taidal_ThresholdLikeOp",
+            "inputs": {"sample": ["2", 0], "low_level": ["5", 3], "gain": 1.5, **threshold_extra},
+        },
+    }
+
+
+def test_extract_math_value_chain_compiles_to_configure_op() -> None:
+    """The on-canvas ``op → Extract → Math → widget`` pattern compiles to a ConfigureOp:
+    the value derivation re-runs per sample inside the wrap, the Math step becomes a
+    FormulaOp, and the pure chain op leaves the sample schedule (no dead-end branch)."""
+    notes: List[List[str]] = []
+    chains = compile_op_chains(_value_chain_prompt(), _op_mappings(), chain_notes=notes)
+    assert len(chains) == 1 and notes[0] == []  # the wire compiled — no omission note
+    ops = chains[0]
+    # Just the fork op + the wrapped consumer: node 3 is a PURE value branch (excluded),
+    # so there is no fan-out and no stash/unstash insertion.
+    assert [op.target for op in ops] == [AddOp, ConfigureOp]
+    wrap = ops[1]
+    assert wrap.kwargs["param"] == "low_level"
+    assert wrap.kwargs["target"].target is ThresholdLikeOp
+    assert wrap.kwargs["target"].kwargs == {"gain": 1.5}  # low_level injected per sample, not baked
+    compute = wrap.kwargs["ops"]
+    assert [c.target for c in compute] == [AddOp, FormulaOp]
+    assert compute[0].kwargs["amount"] == 5.0
+    assert compute[1].kwargs == {"formula": "a * 0.2", "var": "a"}
+
+    # Round-trip + execution parity: 1 + 10 = 11 → compute (11 + 5) * 0.2 = 3.2 → injected.
+    loaded = _load_ops(export_ops_yamls(_value_chain_prompt(), _op_mappings())[0])
+    out = list(Flux(source=[Sample(input=1.0, target=None, metadata={})], ops=loaded))[0]
+    assert out.meta["low_level"] == pytest.approx(3.2)
+    assert loaded[1].target.low_level == pytest.approx(3.2)
+
+
+def test_value_chain_multi_var_math_keeps_note() -> None:
+    prompt = _value_chain_prompt()
+    prompt["5"]["inputs"]["b"] = ["4", 3]  # a second wired Math var — not compilable
+    notes: List[List[str]] = []
+    chains = compile_op_chains(prompt, _op_mappings(), chain_notes=notes)
+    assert any("'low_level'" in note for note in notes[0])
+    assert all(op.target is not ConfigureOp for chain in chains for op in chain)
+
+
+def test_value_chain_extract_target_field_keeps_note() -> None:
+    prompt = _value_chain_prompt()
+    prompt["4"]["inputs"]["field"] = "target"  # only the input-field view is compilable
+    notes: List[List[str]] = []
+    compile_op_chains(prompt, _op_mappings(), chain_notes=notes)
+    assert any("'low_level'" in note for note in notes[0])
+
+
+def test_value_chain_origin_mismatch_keeps_note() -> None:
+    # The value chain roots at a DIFFERENT sample stream point than the consumer's own
+    # predecessor — the derivation can't re-run on the consumer's incoming sample.
+    prompt = _value_chain_prompt()
+    prompt["9"] = {"class_type": "Taidal_AddOp", "inputs": {"sample": ["1", 0], "amount": 7.0}}
+    prompt["4"]["inputs"]["sample"] = ["9", 0]
+    notes: List[List[str]] = []
+    compile_op_chains(prompt, _op_mappings(), chain_notes=notes)
+    assert any("'low_level'" in note for note in notes[0])
+
+
+def test_impure_value_chain_keeps_branch_and_wraps() -> None:
+    # The chain op ALSO feeds a real downstream op → it stays in the sample schedule
+    # (its other consumer needs it) AND re-runs inside the ConfigureOp compute.
+    prompt = _value_chain_prompt()
+    prompt["7"] = {"class_type": "Taidal_WriteMetaOp", "inputs": {"sample": ["3", 0], "key": "side"}}
+    chains = compile_op_chains(prompt, _op_mappings())
+    ops = chains[0]
+    wraps = [op for op in ops if op.target is ConfigureOp]
+    assert len(wraps) == 1
+    scheduled_adds = [op for op in ops if op.target is AddOp and op.kwargs.get("amount") == 5.0]
+    assert len(scheduled_adds) == 1  # still scheduled for its real consumer
+    assert wraps[0].kwargs["ops"][0].kwargs["amount"] == 5.0  # and embedded in the compute
 
 
 def test_op_value_links_embed_into_higher_order_op() -> None:
