@@ -35,7 +35,9 @@ def main() -> int:
     # Instantiate and execute exactly as ComfyUI would.
     node = node_cls()
     dataset = datasets.Dataset.from_dict({"val": [1, 2, 3]})
-    (result,) = node.execute(dataset=dataset, amount=10)
+    # node.execute() returns {"ui": {...timing...}, "result": (dataset,)}
+    response = node.execute(dataset=dataset, amount=10)
+    (result,) = response["result"]
 
     print(f"# executed node -> val={result['val']}", file=sys.stderr)
     if result["val"] != [11, 12, 13]:

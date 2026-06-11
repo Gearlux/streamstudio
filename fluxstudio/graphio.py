@@ -45,7 +45,14 @@ from dataflux.ops.tee import Tee
 from logflow import get_logger
 
 from fluxstudio.bridge import _OP_LIST_PARAMS, _SOURCE_LIST_PARAMS, OBJECT_TYPE, OP_TYPE, SOURCE_TYPE, _coerce_kwargs
-from fluxstudio.export import _SAMPLE_INPUT, UnsupportedTopologyError, _id_sort_key, _is_link
+from fluxstudio.export import (
+    _PRIMITIVE_VALUE_NODES,
+    _SAMPLE_INPUT,
+    UnsupportedTopologyError,
+    _id_sort_key,
+    _is_link,
+    _snake,
+)
 
 logger = get_logger(__name__)
 
@@ -792,6 +799,12 @@ def _normalize_ui_workflow(graph: Dict[str, Any], node_mappings: Dict[str, Any])
             widget_names, _ = _widget_and_socket_params(node_cls)
             for name, value in zip(widget_names, node.get("widgets_values", []) or []):
                 pnode.widgets[name] = value
+        elif class_type in _PRIMITIVE_VALUE_NODES:
+            # Native primitives aren't in the Taidal mappings, but their single widget IS
+            # their output — capture it so wires from them can inline as literals.
+            values = node.get("widgets_values", []) or []
+            if values:
+                pnode.widgets["value"] = values[0]
         for inp in node.get("inputs", []) or []:
             link_id = inp.get("link")
             if link_id is not None and link_id in link_src:
@@ -813,6 +826,21 @@ def _normalize_prompt(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> D
                 pnode.widgets[name] = value
         out[str(node_id)] = pnode
     return out
+
+
+_MISSING = object()  # sentinel: "no primitive literal here" (``None`` is a legal widget value)
+
+
+def _primitive_literal(src_id: str, pnodes: Dict[str, "_PNode"]) -> Any:
+    """A native primitive pass-through node's literal ``value`` widget, else ``_MISSING``.
+
+    The comfy_extras ``Primitive*`` nodes echo their single ``value`` widget to the
+    output, so a wire from one is a CONSTANT the export can inline instead of dropping.
+    """
+    pnode = pnodes.get(src_id)
+    if pnode is not None and pnode.class_type in _PRIMITIVE_VALUE_NODES:
+        return pnode.widgets.get("value", _MISSING)
+    return _MISSING
 
 
 # Param names whose string value is an importable dotted path → emitted as ``!ref:<path>`` (a
@@ -914,45 +942,69 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
 
     names = _assign_ref_names(pnodes, specs, node_mappings)
 
+    def _node_reference(src_id: str, src_slot: int) -> Reference:
+        """The ``!ref:`` for a wire from ``src_id``'s output ``src_slot``.
+
+        A VALUE node's outputs are its declared ``@output`` properties (slot order ==
+        ``RETURN_NAMES``), so the ref is DOTTED — ``!ref:<name>.<output>`` resolves the
+        property value (e.g. ``impairments_tx_config.disabled``), not the config INSTANCE
+        a plain ``!ref:<name>`` would inject where a tuple/dict belongs. Every other kind
+        keeps the plain whole-node ref (slot semantics live in ``_output_slot``).
+        """
+        src_cls = node_mappings.get(pnodes[src_id].class_type)
+        if getattr(src_cls, "TAIDAL_NODE_KIND", None) == "value":
+            return_names = tuple(getattr(src_cls, "RETURN_NAMES", ()) or ())
+            if src_slot < len(return_names):
+                return Reference(f"{names[src_id]}.{return_names[src_slot]}")
+        return Reference(names[src_id])
+
     # Build a Fluid marker per node, wiring links as References and list-params as Reference lists.
     fluids: Dict[str, Any] = {}
     referenced: set = set()
     dropped_wires: List[Tuple[str, str, str, str]] = []  # (consumer_name, input, src_id, src_class_type)
     for nid, (cls, is_lazy, kwargs) in specs.items():
         pnode = pnodes[nid]
-        wired: Dict[str, List[Tuple[str, str]]] = {}
-        for input_name, (src_id, _slot) in pnode.links.items():
+        wired: Dict[str, List[Tuple[str, str, int]]] = {}
+        for input_name, (src_id, src_slot) in pnode.links.items():
             base = _strip_index(input_name)
             if base == _SAMPLE_INPUT:
                 # The op-chaining data-flow socket — never a constructor kwarg (the chain
                 # structure is captured by the folded Flux pipeline entries below).
                 continue
             if src_id not in specs:
+                literal = _primitive_literal(src_id, pnodes)
+                if literal is not _MISSING:
+                    kwargs[base] = literal  # a native primitive pass-through → inline its widget
+                    continue
                 src_type = pnodes[src_id].class_type if src_id in pnodes else "unknown"
                 dropped_wires.append((names[nid], base, src_id, src_type))
                 continue
             referenced.add(src_id)
-            wired.setdefault(base, []).append((input_name, src_id))
+            wired.setdefault(base, []).append((input_name, src_id, src_slot))
         for base, items in wired.items():
             if len(items) == 1 and items[0][0] == base:
-                kwargs[base] = Reference(names[items[0][1]])
+                kwargs[base] = _node_reference(items[0][1], items[0][2])
             else:  # dynamic op_N / source_N → a list, ordered by slot index
                 ordered = sorted(items, key=lambda it: _index_of(it[0]))
-                kwargs[base] = [Reference(names[src]) for _n, src in ordered]
+                kwargs[base] = [_node_reference(src, slot) for _n, src, slot in ordered]
         fluids[nid] = LazyClass(cls, **kwargs) if is_lazy else Class(cls, **kwargs)
 
     def _chain_op_instance(nid: str, chain_key: str) -> Instance:
         """An inline ``!class:Op()`` Instance for a chained op, with non-sample wires resolved."""
         cls, _lazy, kwargs = chain_specs[nid]
         kwargs = dict(kwargs)
-        for input_name, (src_id, _slot) in pnodes[nid].links.items():
+        for input_name, (src_id, src_slot) in pnodes[nid].links.items():
             base = _strip_index(input_name)
             if base == _SAMPLE_INPUT:
                 continue  # the chain itself — expressed by the ops-list order
             if src_id in specs:
                 referenced.add(src_id)
-                kwargs[base] = Reference(names[src_id])
+                kwargs[base] = _node_reference(src_id, src_slot)
             else:
+                literal = _primitive_literal(src_id, pnodes)
+                if literal is not _MISSING:
+                    kwargs[base] = literal
+                    continue
                 src_type = pnodes[src_id].class_type if src_id in pnodes else "unknown"
                 dropped_wires.append((f"{chain_key}[{cls.__name__}]", base, src_id, src_type))
         return Instance(cast(type, cls), **kwargs)
@@ -1102,6 +1154,8 @@ def _assign_ref_names(
     # `source`, a Math `a`) are UI plumbing, not config members, and would produce junk names.
     # The op-chaining ``sample`` socket is data-flow, not a config member — naming an op
     # ``sample`` after it would be meaningless, so those wires don't contribute a name either.
+    # A VALUE node keeps its class name too: its entry is the CONFIG OBJECT, not the @output
+    # value it feeds (``tx_disabled: !class:ImpairmentsTxConfig`` would read as the tuple).
     fed_as: Dict[str, str] = {}
     for nid, pnode in pnodes.items():
         if nid not in specs:
@@ -1109,6 +1163,9 @@ def _assign_ref_names(
         for input_name, (src_id, _slot) in pnode.links.items():
             base = _strip_index(input_name)
             if base == _SAMPLE_INPUT:
+                continue
+            src_cls = node_mappings.get(pnodes[src_id].class_type) if src_id in pnodes else None
+            if getattr(src_cls, "TAIDAL_NODE_KIND", None) == "value":
                 continue
             if src_id in specs and src_id not in fed_as:
                 fed_as[src_id] = base
@@ -1188,15 +1245,6 @@ def _strip_index(name: str) -> str:
 def _index_of(name: str) -> int:
     tail = name.rsplit("_", 1)[-1]
     return int(tail) if tail.isdigit() else 0
-
-
-def _snake(class_name: str) -> str:
-    out = []
-    for i, ch in enumerate(class_name):
-        if ch.isupper() and i > 0:
-            out.append("_")
-        out.append(ch.lower())
-    return "".join(out)
 
 
 def _scalar_of(value: Any) -> Any:

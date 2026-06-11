@@ -20,12 +20,14 @@ fallback and silently defeat the very branches under test.
 
 import json
 from pathlib import Path
-from typing import List, Literal, Optional, Union
+from typing import Dict, List, Literal, Optional, Tuple, Union
 from unittest.mock import MagicMock, patch
 
 import datasets
 import numpy as np
 import pytest
+from confluid import configurable
+from confluid.decorators import output
 from dataflux.sample import Sample
 from dataflux.typespec import ArrayType, SampleType
 
@@ -43,6 +45,7 @@ from fluxstudio.bridge import (
     _map_type,
     _node_category,
     _package_tag,
+    _value_call_signature,
     create_comfy_node,
     hide_default_comfy_nodes,
     node_root,
@@ -837,6 +840,31 @@ def test_higher_order_op_gets_op_list_inputs_and_composes() -> None:
     assert isinstance(hoo, _FakeHigherOrderOp) and len(hoo.ops) == 2
 
 
+class _FakeHeliosComposite:
+    """Mimics a waivefront-helios auto-bridged composite: helios's ``*transforms``
+    variadic mirrored as an optional ``transforms`` LIST param."""
+
+    def __init__(self, transforms: list = None) -> None:  # type: ignore[type-arg, assignment]
+        self.transforms = transforms or []
+
+    def __call__(self, sample: Sample) -> Sample:
+        for op in self.transforms:
+            sample = op(sample)
+        return sample
+
+
+def test_transforms_list_param_gets_op_list_inputs() -> None:
+    """``transforms`` (the helios-bridge convention) is an op-list name like ``ops``/``branches``."""
+    node_cls = create_comfy_node(_FakeHeliosComposite, "Taidal__HeliosComposite")
+    spec = node_cls.INPUT_TYPES()
+    assert "transforms" not in spec["required"] and "transforms" not in spec["optional"]
+    assert spec["optional"]["op_0"] == (OP_TYPE,)
+    _, op1 = create_comfy_node(_FakeOp, "Taidal__FakeOpT1")().execute(bump=5)["result"]
+    applied, composite = node_cls().execute(sample=Sample(input=10), op_0=op1)["result"]
+    assert applied.input == 15
+    assert isinstance(composite, _FakeHeliosComposite) and len(composite.transforms) == 1
+
+
 def test_execute_always_returns_ui_timing_dict() -> None:
     """Every generated node's execute returns {"ui": {"text": [timing]}, "result": ...}."""
     node = create_comfy_node(_FakeSource, "Taidal__TimingSrc")()
@@ -1035,6 +1063,84 @@ def test_coerce_kwargs_empty_required_passes_through() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Container-input round-trip — a Tuple[str,...] / Dict[...] STRING input socket
+# decoding a JSON-encoded container @output (the input-side complement to the
+# container-@output JSON encoding). See the "container-input round-trip" mandate.
+# --------------------------------------------------------------------------- #
+
+
+def test_coerce_kwargs_decodes_json_tuple_and_dict() -> None:
+    def fn(disabled: Tuple[str, ...] = (), overrides: Optional[Dict[str, float]] = None) -> None: ...
+
+    out = _coerce_kwargs(fn, {"disabled": json.dumps(["A", "B"]), "overrides": json.dumps({"A": 0.5})})
+    assert out["disabled"] == ("A", "B")  # JSON array -> tuple
+    assert out["overrides"] == {"A": 0.5}  # JSON object -> dict
+
+
+def test_coerce_kwargs_tuple_accepts_comma_string() -> None:
+    def fn(disabled: Tuple[str, ...] = ()) -> None: ...
+
+    # A hand-typed comma string (not JSON) on a Tuple[str,...] param -> tuple of names.
+    assert _coerce_kwargs(fn, {"disabled": "A, B ,C"})["disabled"] == ("A", "B", "C")
+
+
+def test_coerce_kwargs_non_json_dict_left_raw() -> None:
+    def fn(overrides: Optional[Dict[str, float]] = None) -> None: ...
+
+    # A Dict param can't be expressed as a comma string; a non-JSON value passes through unchanged.
+    assert _coerce_kwargs(fn, {"overrides": "not json"})["overrides"] == "not json"
+
+
+def test_coerce_kwargs_list_still_comma_splits_after_container_branch() -> None:
+    # Regression: List/Sequence params keep their comma-split (NOT JSON-decoded).
+    def fn(tags: Optional[List[str]] = None) -> None: ...
+
+    assert _coerce_kwargs(fn, {"tags": "x, y"})["tags"] == ["x", "y"]
+
+
+# --------------------------------------------------------------------------- #
+# Value-producer nodes (no-arg __call__, e.g. ImpairmentsTxConfig): config
+# widgets -> @output sockets, NO Sample I/O. See the value-node mandate.
+# --------------------------------------------------------------------------- #
+
+
+@configurable(category="op")
+class _FakeValueConfig:
+    """A value producer: a bool widget + a Tuple @output (no Sample I/O)."""
+
+    def __init__(self, drop_a: bool = False) -> None:
+        self._drop_a = drop_a
+
+    @property
+    @output
+    def disabled(self) -> Tuple[str, ...]:
+        return ("A",) if self._drop_a else ()
+
+    def __call__(self) -> Tuple[str, ...]:
+        return self.disabled
+
+
+def test_value_call_signature_detects_no_arg_call() -> None:
+    # The no-arg __call__ marks a value producer, NOT an op (an op's first param is a Sample).
+    assert _value_call_signature(_FakeValueConfig) is not None
+    from fluxstudio.bridge import _op_call_signature
+
+    assert _op_call_signature(_FakeValueConfig) is None
+
+
+def test_value_node_builds_widgets_and_emits_output_socket() -> None:
+    node = create_comfy_node(_FakeValueConfig, "Taidal__FakeValueConfig")
+    assert node.TAIDAL_NODE_KIND == "value"
+    assert "drop_a" in node.INPUT_TYPES()["required"]  # a real config widget
+    # Value node: outputs are ONLY the declared @outputs — no sample/op sockets, no sample input.
+    assert node.RETURN_NAMES == ("disabled",)
+    assert node.RETURN_TYPES == ("STRING",)
+    assert "sample" not in node.INPUT_TYPES().get("optional", {})
+    (disabled_json,) = node().execute(drop_a=True)["result"]
+    assert json.loads(disabled_json) == ["A"]  # container @output JSON-encoded on the STRING socket
+
+
+# --------------------------------------------------------------------------- #
 # Classifier edge branches
 # --------------------------------------------------------------------------- #
 
@@ -1107,6 +1213,17 @@ def test_coerce_kwargs_casts_filled_nullable_numeric() -> None:
     assert out["ratio"] == 0.25 and isinstance(out["ratio"], float)
     # Blank -> None (i.e. "unset" / all).
     assert _coerce_kwargs(fn, {"count": ""})["count"] is None
+
+
+def test_coerce_kwargs_leaves_expression_string_on_float_str_union() -> None:
+    # A ``Union[float, int, str]`` param (e.g. dataflux ThresholdOp.low_level) accepts
+    # call-time metadata expressions like "{snr}" — the coercion must NOT float()-cast
+    # the widget string (that crashed the node); the constructor resolves it at call time.
+    def fn(low_level: Optional[Union[float, int, str]] = None) -> None: ...
+
+    assert _coerce_kwargs(fn, {"low_level": "{snr}"})["low_level"] == "{snr}"
+    assert _coerce_kwargs(fn, {"low_level": "-30.5"})["low_level"] == "-30.5"  # str passes verbatim
+    assert _coerce_kwargs(fn, {"low_level": ""})["low_level"] is None  # blank -> None default
 
 
 # --------------------------------------------------------------------------- #
@@ -1364,9 +1481,9 @@ def test_op_node_runtime_check_rejects_mismatched_sample() -> None:
 # Runnable + object nodes (trainers / evaluators / processors as canvas nodes)
 # --------------------------------------------------------------------------- #
 
-from typing import Any, Dict, Type  # noqa: E402
+from typing import Any, Type  # noqa: E402
 
-from confluid import LazyClass, Mandatory, configurable, output  # noqa: E402
+from confluid import LazyClass, Mandatory  # noqa: E402
 
 from fluxstudio.bridge import (  # noqa: E402
     OBJECT_TYPE,
