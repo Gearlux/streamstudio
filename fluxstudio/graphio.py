@@ -41,14 +41,19 @@ from confluid import resolve as _confluid_resolve
 from confluid.registry import resolve_class
 from dataflux import Flux
 from dataflux.discovery import resolve_callable
+from dataflux.ops.configure import ConfigureOp
+from dataflux.ops.formula import FormulaOp
 from dataflux.ops.tee import Tee
 from logflow import get_logger
 
 from fluxstudio.bridge import _OP_LIST_PARAMS, _SOURCE_LIST_PARAMS, OBJECT_TYPE, OP_TYPE, SOURCE_TYPE, _coerce_kwargs
 from fluxstudio.export import (
+    _EXPORT_SKIP_PROPERTY,
+    _EXPORT_SKIP_VALUE,
     _PRIMITIVE_VALUE_NODES,
     _SAMPLE_INPUT,
     UnsupportedTopologyError,
+    _collect_value_chains,
     _id_sort_key,
     _is_link,
     _marker,
@@ -774,12 +779,13 @@ def _normalize_workflow(graph: Dict[str, Any], node_mappings: Dict[str, Any]) ->
 
 
 class _PNode:
-    __slots__ = ("class_type", "widgets", "links")
+    __slots__ = ("class_type", "widgets", "links", "export_skip")
 
     def __init__(self, class_type: str) -> None:
         self.class_type = class_type
         self.widgets: Dict[str, Any] = {}
         self.links: Dict[str, Tuple[str, int]] = {}  # input_name -> (src_node_id, src_slot)
+        self.export_skip = False  # properties["taidal_export"] == "skip" (UI workflows only)
 
 
 def _normalize_ui_workflow(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> Dict[str, "_PNode"]:
@@ -795,6 +801,7 @@ def _normalize_ui_workflow(graph: Dict[str, Any], node_mappings: Dict[str, Any])
         node_id = str(node["id"])
         class_type = node["type"]
         pnode = _PNode(class_type)
+        pnode.export_skip = (node.get("properties") or {}).get(_EXPORT_SKIP_PROPERTY) == _EXPORT_SKIP_VALUE
         node_cls = node_mappings.get(class_type)
         if node_cls is not None:
             widget_names, _ = _widget_and_socket_params(node_cls)
@@ -905,13 +912,73 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
     if not pnodes:
         return _confluid_dump({})
 
+    # The export-skip mark (canvas-only nodes) closes over sample wires: everything fed
+    # from a marked node has no exportable feed either, so the whole branch is left out
+    # instead of degenerating into junk pipeline_N fragments.
+    export_skipped = {nid for nid, pnode in pnodes.items() if pnode.export_skip}
+    while True:
+        grew = False
+        for nid, pnode in pnodes.items():
+            if nid in export_skipped:
+                continue
+            pred = pnode.links.get(_SAMPLE_INPUT)
+            if pred is not None and pred[0] in export_skipped:
+                export_skipped.add(nid)
+                grew = True
+        if not grew:
+            break
+
+    # Value chains (op-chain → Extract(field=input) → Math → widget) compile to ConfigureOp
+    # wraps, mirroring the ops-export — the shared tracer consumes a prompt-shaped view of
+    # the (non-skipped) pnodes. PURE chain members re-run inside the wrap's compute, so
+    # they are dropped from the standalone/pipeline surface; the consumed Extract/Math
+    # adapters aren't "left out" either and stay off the skipped list.
+    prompt_view = {
+        nid: {
+            "class_type": p.class_type,
+            "inputs": {**p.widgets, **{k: [s, slot] for k, (s, slot) in p.links.items()}},
+        }
+        for nid, p in pnodes.items()
+        if nid not in export_skipped
+    }
+    configure_specs, vc_excluded = _collect_value_chains(prompt_view, node_mappings)
+    compiled_adapters = {
+        aid for chain_list in configure_specs.values() for _param, chain in chain_list for aid in chain.adapter_ids
+    }
+
+    def _wrap_configured(nid: str, marker: Any, eager: bool) -> Any:
+        """Wrap a consumer marker in ConfigureOp(s) for its compiled value chains."""
+        for param, chain in configure_specs.get(nid, []):
+            try:
+                compute: List[Any] = []
+                for mid in chain.op_ids:
+                    mcls, _mlazy, mkwargs = _build_fluid(pnodes[mid], node_mappings)
+                    compute.append(_marker(Instance, mcls, mkwargs))
+                compute += [_marker(Instance, FormulaOp, {"formula": f, "var": v}) for f, v in chain.formulas]
+                marker = _marker(
+                    Instance if eager else Class, ConfigureOp, {"ops": compute, "target": marker, "param": param}
+                )
+            except Exception as e:  # pragma: no cover - defensive: chain members are plain ops
+                logger.warning(
+                    f"workflow_to_yaml: could not compile the value chain for {nid}.{param} "
+                    f"({type(e).__name__}: {e}); the param keeps its default."
+                )
+        return marker
+
     # Recover a Fluid spec per node + which output slot each consumer wired (for object lazy/instance).
     # Non-exportable nodes are collected (not fatal) and surfaced as YAML comments below.
     specs: Dict[str, Tuple[type, bool, Dict[str, Any]]] = {}
     skipped: List[Tuple[str, str, str]] = []  # (node_id, class_type, reason)
     for nid, pnode in pnodes.items():
         node_cls = node_mappings.get(pnode.class_type)
-        if getattr(node_cls, "TAIDAL_CALLABLE_PATH", None):
+        if nid in export_skipped:
+            logger.debug(f"workflow_to_yaml: skipping node {nid} ({pnode.class_type}) — export-skip mark.")
+            skipped.append((nid, pnode.class_type, "excluded by export-skip mark (canvas-only)"))
+        elif nid in vc_excluded:
+            logger.debug(f"workflow_to_yaml: node {nid} ({pnode.class_type}) re-runs inside a ConfigureOp compute.")
+        elif nid in compiled_adapters:
+            logger.debug(f"workflow_to_yaml: node {nid} ({pnode.class_type}) compiled into a ConfigureOp value chain.")
+        elif getattr(node_cls, "TAIDAL_CALLABLE_PATH", None):
             try:
                 specs[nid] = _build_fluid(pnode, node_mappings)
             except Exception as e:
@@ -970,6 +1037,7 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
     dropped_wires: List[Tuple[str, str, str, str]] = []  # (consumer_name, input, src_id, src_class_type)
     for nid, (cls, is_lazy, kwargs) in specs.items():
         pnode = pnodes[nid]
+        configured = {param for param, _chain in configure_specs.get(nid, [])}
         wired: Dict[str, List[Tuple[str, str, int]]] = {}
         for input_name, (src_id, src_slot) in pnode.links.items():
             base = _strip_index(input_name)
@@ -977,6 +1045,8 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
                 # The op-chaining data-flow socket — never a constructor kwarg (the chain
                 # structure is captured by the folded Flux pipeline entries below).
                 continue
+            if base in configured:
+                continue  # injected per sample by the ConfigureOp wrap
             if src_id not in specs:
                 literal = _primitive_literal(src_id, pnodes)
                 if literal is not _MISSING:
@@ -995,16 +1065,19 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
                 kwargs[base] = [_node_reference(src, slot) for _n, src, slot in ordered]
         # _marker: kwargs set post-construction — a param literally named `target` (ConfigureOp)
         # collides with the Fluid ctor's own first parameter.
-        fluids[nid] = _marker(LazyClass if is_lazy else Class, cls, kwargs)
+        fluids[nid] = _wrap_configured(nid, _marker(LazyClass if is_lazy else Class, cls, kwargs), eager=False)
 
     def _chain_op_instance(nid: str, chain_key: str) -> Instance:
         """An inline ``!class:Op()`` Instance for a chained op, with non-sample wires resolved."""
         cls, _lazy, kwargs = chain_specs[nid]
         kwargs = dict(kwargs)
+        configured = {param for param, _chain in configure_specs.get(nid, [])}
         for input_name, (src_id, src_slot) in pnodes[nid].links.items():
             base = _strip_index(input_name)
             if base == _SAMPLE_INPUT:
                 continue  # the chain itself — expressed by the ops-list order
+            if base in configured:
+                continue  # injected per sample by the ConfigureOp wrap
             if src_id in specs:
                 referenced.add(src_id)
                 kwargs[base] = _node_reference(src_id, src_slot)
@@ -1015,7 +1088,7 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
                     continue
                 src_type = pnodes[src_id].class_type if src_id in pnodes else "unknown"
                 dropped_wires.append((f"{chain_key}[{cls.__name__}]", base, src_id, src_type))
-        return cast(Instance, _marker(Instance, cls, kwargs))
+        return cast(Instance, _wrap_configured(nid, _marker(Instance, cls, kwargs), eager=True))
 
     def _fold_chain(nid: str, chain_key: str) -> List[Any]:
         """Linearize a chain into inline op Instances; fan-out becomes a nested Tee (ops-export shape)."""

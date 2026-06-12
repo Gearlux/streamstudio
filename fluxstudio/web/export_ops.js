@@ -1,5 +1,6 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
+import { collectExportSkipIds } from "./export_skip.js";
 
 console.log("ComfyFlux: Loaded Taidal.ExportOps extension");
 
@@ -25,11 +26,14 @@ async function exportOps() {
     // graphToPrompt() returns { workflow, output }; `output` is the API-format prompt the
     // backend compiler consumes (same shape as ComfyUI "Save (API Format)").
     const { output } = await app.graphToPrompt();
+    // Canvas-only nodes (right-click > "Taidal: exclude from export") — the compiler drops
+    // each marked node plus everything data-downstream of it, with a note in the YAML.
+    const skipIds = collectExportSkipIds(app.graph);
     try {
         const res = await api.fetchApi("/taidal/export_ops", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ prompt: output }),
+            body: JSON.stringify({ prompt: output, skip_ids: skipIds }),
         });
         const data = await res.json();
         if (!res.ok) {

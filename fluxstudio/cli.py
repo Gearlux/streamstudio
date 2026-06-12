@@ -225,7 +225,10 @@ def _export(args: argparse.Namespace) -> None:
             "Export it from ComfyUI via the dev-mode 'Save (API Format)' button."
         )
 
-    yaml_docs = export_ops_yamls(prompt, fluxstudio.NODE_CLASS_MAPPINGS)
+    # ``--skip`` mirrors the canvas export-skip mark; an API-format file carries no node
+    # properties, so the marked ids must be named explicitly here (getattr: tolerate
+    # programmatic Namespace callers that predate the flag).
+    yaml_docs = export_ops_yamls(prompt, fluxstudio.NODE_CLASS_MAPPINGS, skip_ids=getattr(args, "skip", None))
 
     if len(yaml_docs) > 1:
         logger.info(f"Graph contains {len(yaml_docs)} independent op chains — exporting each individually.")
@@ -347,6 +350,17 @@ def main() -> None:
         help=(
             "Write the YAML here (default: stdout). With several disconnected op chains, one "
             "file per chain is written (ops.yaml -> ops_1.yaml ... ops_N.yaml)."
+        ),
+    )
+    export_parser.add_argument(
+        "--skip",
+        action="append",
+        metavar="NODE_ID",
+        default=None,
+        help=(
+            "Exclude this node (and everything data-downstream of it) from the export — the CLI "
+            "twin of the canvas export-skip mark (right-click > 'Taidal: exclude from export'); "
+            "repeatable. A subgraph-instance id excludes the whole inlined instance."
         ),
     )
 

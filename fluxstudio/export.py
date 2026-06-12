@@ -132,11 +132,14 @@ class _ValueChain(NamedTuple):
     """A compiled per-sample value derivation feeding an op widget.
 
     ``op_ids`` are the sample ops between the consumer's own sample predecessor and the
-    Extract boundary (in flow order); ``formulas`` the Math steps as ``(formula, var)``.
+    Extract boundary (in flow order); ``formulas`` the Math steps as ``(formula, var)``;
+    ``adapter_ids`` the consumed Extract/Math canvas nodes (so the whole-graph export can
+    suppress their "left out" listing — their semantics live on in the ConfigureOp).
     """
 
     op_ids: Tuple[str, ...]
     formulas: Tuple[Tuple[str, str], ...]
+    adapter_ids: Tuple[str, ...]
 
 
 class UnsupportedTopologyError(ValueError):
@@ -272,6 +275,7 @@ def _trace_value_chain(
     Extract, a different origin, …) — the caller falls back to the omit-with-note path.
     """
     formulas: List[Tuple[str, str]] = []
+    adapter_ids: List[str] = []
     cur = link
     while True:  # Math steps, innermost-first
         node = prompt.get(str(cur[0]))
@@ -285,6 +289,7 @@ def _trace_value_chain(
         if len(wired) != 1 or not isinstance(formula, str) or not formula.strip():
             return None
         formulas.insert(0, (formula, wired[0][0]))
+        adapter_ids.append(str(cur[0]))
         cur = wired[0][1]
 
     extract = prompt.get(str(cur[0]))
@@ -292,6 +297,7 @@ def _trace_value_chain(
         return None
     if str(extract.get("inputs", {}).get("field", "input")) != "input":
         return None  # only the input-field view is the op-chain's flowing value
+    adapter_ids.append(str(cur[0]))
     sample_link = extract.get("inputs", {}).get(_SAMPLE_INPUT)
     if not _is_link(sample_link):
         return None
@@ -311,7 +317,7 @@ def _trace_value_chain(
                 break
             return None
         cur = nxt
-    return _ValueChain(tuple(op_ids), tuple(formulas))
+    return _ValueChain(tuple(op_ids), tuple(formulas), tuple(adapter_ids))
 
 
 def _collect_value_chains(
