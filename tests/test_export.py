@@ -1012,6 +1012,49 @@ def test_integration_impairments_shape() -> None:
     assert out.meta["regions"] == 11.0  # threshold branch wrote the fork-state input
 
 
+# --------------------------------------------------------------------------- export-skip mark
+
+
+def test_export_skip_mark_drops_node_and_downstream() -> None:
+    # Mark the head of the viewer branch (node 3): it AND its sample-descendant (node 4)
+    # leave the export; the main line is untouched and no fork stash is needed anymore.
+    prompt = {
+        "1": {"class_type": "WalkDatasetNode", "inputs": {}},
+        "2": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["1", 0], "amount": 10.0}},
+        "3": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["2", 0], "amount": 1.0}},  # viz branch head
+        "4": {"class_type": "Taidal_WriteMetaOp", "inputs": {"sample": ["3", 0], "key": "viz"}},
+        "5": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["2", 0], "amount": 2.0}},  # main line
+    }
+    notes: List[List[str]] = []
+    chains = compile_op_chains(prompt, _op_mappings(), chain_notes=notes, skip_ids=["3"])
+    assert len(chains) == 1
+    assert [op.kwargs.get("amount") for op in chains[0]] == [10.0, 2.0]  # flat, no stash, no branch
+    assert any("export-skip mark" in note and "node 3" in note and "node 4" in note for note in notes[0])
+
+
+def test_export_skip_subgraph_prefix_excludes_inlined_instance() -> None:
+    # Marking a subgraph-INSTANCE id ("142") excludes every inlined inner node ("142:...").
+    prompt = {
+        "1": {"class_type": "WalkDatasetNode", "inputs": {}},
+        "2": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["1", 0], "amount": 10.0}},
+        "142:141": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["2", 0], "amount": 1.0}},
+        "142:144": {"class_type": "Taidal_WriteMetaOp", "inputs": {"sample": ["142:141", 0], "key": "k"}},
+    }
+    chains = compile_op_chains(prompt, _op_mappings(), skip_ids=["142"])
+    assert [op.kwargs.get("amount") for op in chains[0]] == [10.0]
+
+
+def test_export_skip_closure_through_mix() -> None:
+    # A Mix consuming a marked branch is data-downstream of it → the Mix and its tail are
+    # excluded too (a merge of a canvas-only stream is canvas-only).
+    prompt = dict(_mix_prompt())
+    chains = compile_op_chains(prompt, _op_mappings(), skip_ids=["4"])  # mark the Z branch head
+    targets = [op.target for op in chains[0]]
+    assert "MixSamplesNode" not in str(targets)
+    flat = [op for op in chains[0] if op.target is AddOp]
+    assert [op.kwargs["amount"] for op in flat] == [10.0, 100.0]  # the X branch survives; tail (post-Mix) gone
+
+
 def test_component_merging_two_streams_raises() -> None:
     prompt = {
         "1": {"class_type": "WalkDatasetNode", "inputs": {}},

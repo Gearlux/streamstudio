@@ -548,6 +548,24 @@ def test_export_single_chain_writes_output_verbatim(tmp_path: Path, logger_mock:
     assert not (tmp_path / "ops_1.yaml").exists()
 
 
+def test_export_skip_flag_excludes_marked_node(tmp_path: Path, logger_mock: MagicMock) -> None:
+    # ``--skip 2`` (repeatable) is the CLI twin of the canvas export-skip mark: the node
+    # (and anything data-downstream) leaves the export.
+    import argparse
+    import json
+
+    _register_rescale_node()
+    graph = tmp_path / "graph.json"
+    graph.write_text(json.dumps({"2": _rescale_prompt_node(["x", 0], 255.0)}))
+    out = tmp_path / "ops.yaml"
+
+    cli._export(argparse.Namespace(graph=graph, output=out, skip=["2"]))
+
+    text = out.read_text()
+    assert "RescaleOp" not in text  # the marked op is gone — only the empty ops doc remains
+    assert "ops: []" in text
+
+
 def test_export_multi_chain_writes_one_file_per_chain(tmp_path: Path, logger_mock: MagicMock) -> None:
     # Two disconnected op chains -> no error; ops.yaml fans out to ops_1.yaml + ops_2.yaml.
     import argparse

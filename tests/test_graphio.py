@@ -19,7 +19,7 @@ from confluid import Class, Instance, LazyClass, Reference
 from dataflux import Flux
 from dataflux.ops.torch import RescaleOp
 from dataflux.sources import HuggingFaceSource
-from test_export import ChainLikeOp, ConstTxConfig, ThresholdLikeOp  # local @configurable fixtures
+from test_export import AddOp, ChainLikeOp, ConstTxConfig, ThresholdLikeOp  # local @configurable fixtures
 
 from fluxstudio.bridge import create_comfy_node
 from fluxstudio.graphio import (
@@ -938,6 +938,96 @@ def test_single_op_wire_exports_ref() -> None:
     yaml_text = workflow_to_yaml(prompt, nm)
     assert "!ref 'threshold_like_op'" in yaml_text  # the op-value entry, referenced by name
     assert "threshold_like_op:" in yaml_text
+
+
+def test_value_chain_compiles_to_configure_op_in_pipeline() -> None:
+    # The whole-graph export compiles the on-canvas ``op → Extract → Math → widget``
+    # pattern exactly like the ops-export: the chained consumer wraps in a ConfigureOp
+    # (chain ops + FormulaOp re-run per sample), the pure chain member leaves the
+    # pipeline, and the consumed Extract/Math adapters are NOT listed as "left out".
+    nm = {
+        "src": create_comfy_node(HuggingFaceSource, "src"),
+        "add": create_comfy_node(AddOp, "add"),
+        "threshold": create_comfy_node(ThresholdLikeOp, "threshold"),
+    }
+    prompt = {
+        "1": {"class_type": "src", "inputs": {"path": "mnist"}},
+        "2": {"class_type": "add", "inputs": {"sample": ["1", 0], "amount": 10.0}},
+        "3": {"class_type": "add", "inputs": {"sample": ["2", 0], "amount": 5.0}},
+        "4": {"class_type": "Taidal_ExtractSample", "inputs": {"sample": ["3", 0], "field": "input"}},
+        "5": {"class_type": "Taidal_Math", "inputs": {"formula": "a * 0.2", "a": ["4", 4]}},
+        "6": {
+            "class_type": "threshold",
+            "inputs": {"sample": ["2", 0], "low_level": ["5", 3], "gain": 1.5},
+        },
+    }
+    yaml_text = workflow_to_yaml(prompt, nm)
+    assert "!class:dataflux.ops.configure.ConfigureOp" in yaml_text
+    assert "formula: a * 0.2" in yaml_text
+    assert ".low_level" not in yaml_text  # no dropped-wire comment — the wire compiled
+    assert "(Taidal_Math)" not in yaml_text and "(Taidal_ExtractSample)" not in yaml_text
+
+    graph = confluid.resolve(yaml_text)
+    flux = next(v for v in graph.values() if isinstance(v, (Class, Instance)) and "Flux" in str(v.target))
+    ops = flux.kwargs["ops"]
+    assert len(ops) == 2  # fork AddOp + the wrapped consumer; the pure chain member is gone
+    wrap = ops[1]
+    assert "ConfigureOp" in str(wrap.target)
+    assert wrap.kwargs["param"] == "low_level"
+    assert "ThresholdLikeOp" in str(wrap.kwargs["target"].target)
+    assert wrap.kwargs["target"].kwargs.get("gain") == 1.5
+    compute = wrap.kwargs["ops"]
+    assert "AddOp" in str(compute[0].target) and compute[0].kwargs.get("amount") == 5.0
+    assert "FormulaOp" in str(compute[1].target)
+
+
+def test_value_chain_wraps_standalone_op_entry() -> None:
+    # A consumer with no sample wiring (a configured op-value) wraps as its standalone entry.
+    nm = {
+        "add": create_comfy_node(AddOp, "add"),
+        "threshold": create_comfy_node(ThresholdLikeOp, "threshold"),
+    }
+    prompt = {
+        "3": {"class_type": "add", "inputs": {"amount": 5.0}},
+        "4": {"class_type": "Taidal_ExtractSample", "inputs": {"sample": ["3", 0], "field": "input"}},
+        "5": {"class_type": "Taidal_Math", "inputs": {"formula": "a + 1", "a": ["4", 4]}},
+        "6": {"class_type": "threshold", "inputs": {"low_level": ["5", 3]}},
+    }
+    yaml_text = workflow_to_yaml(prompt, nm)
+    assert "threshold_like_op: !class:dataflux.ops.configure.ConfigureOp" in yaml_text
+    assert "formula: a + 1" in yaml_text
+
+
+def test_export_skip_property_skips_node_and_downstream() -> None:
+    # The canvas-only mark (properties["taidal_export"]=="skip") excludes the node AND its
+    # sample-descendants from the whole-graph export, with the reason in the comment block.
+    nm = _engine_mappings()
+    wf = {
+        "nodes": [
+            {"id": 1, "type": "src", "widgets_values": ["mnist"], "inputs": [], "outputs": []},
+            {
+                "id": 2,
+                "type": "rescale",
+                "widgets_values": [],
+                "inputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "link": 1}],
+                "outputs": [],
+                "properties": {"taidal_export": "skip"},
+            },
+            {
+                "id": 3,
+                "type": "rescale",
+                "widgets_values": [],
+                "inputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "link": 2}],
+                "outputs": [],
+            },
+        ],
+        "links": [[1, 1, 0, 2, 0, "DATAFLUX_SAMPLE"], [2, 2, 0, 3, 0, "DATAFLUX_SAMPLE"]],
+    }
+    yaml_text = workflow_to_yaml(wf, nm)
+    assert "excluded by export-skip mark" in yaml_text
+    assert "node 2" in yaml_text and "node 3" in yaml_text  # the descendant is skipped too
+    assert "!class:dataflux.ops.torch.RescaleOp" not in yaml_text  # neither op exports
+    assert "hugging_face_source:" in yaml_text  # the source itself still exports
 
 
 def test_import_of_hoisted_constant_evaluates_consumer_and_places_config_node() -> None:
