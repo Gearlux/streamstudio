@@ -69,9 +69,11 @@ from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple, Union, cas
 from confluid import dump
 from confluid.fluid import Class, Instance, Reference
 from dataflux.discovery import resolve_callable
+from dataflux.ops.capture import CaptureOutputOp
 from dataflux.ops.configure import ConfigureOp
 from dataflux.ops.formula import FormulaOp
 from dataflux.ops.stash import StashInputOp, StashTargetOp, UnstashInputOp, UnstashTargetOp
+from dataflux.ops.transform_chain import TransformChain
 from logflow import get_logger
 
 from fluxstudio.bridge import _SINGLE_OP_PARAMS, _coerce_kwargs, _op_list_param
@@ -86,6 +88,12 @@ _SAMPLE_INPUT = "sample"
 # target from arg 2, metadata = the shallow union of all three (arg 3 wins).
 _MIX_CLASS_TYPE = "Taidal_MixSamples"
 _MIX_ARGS = ("input_sample", "target_sample", "metadata_sample")
+
+# The "subgraph as an Op" terminator (``fluxstudio.nodes.SubgraphOpExtractNode``): its ``op``
+# output (slot 0) is the upstream op DAG compiled to ONE ``TransformChain``. When that output
+# feeds a consumer's op slot, the export embeds ``TransformChain(ops=<compiled ancestor cone>)``
+# (DAG→sequential, the same compiler) and the cone's inner ops drop from the standalone schedule.
+_SUBGRAPH_OP_CLASS_TYPE = "Taidal_SubgraphOp"
 
 # Native ComfyUI pass-through primitives (``comfy_extras/nodes_primitive.py``): a single
 # ``value`` widget echoed to the output — foldable as that literal. The legacy virtual
@@ -105,14 +113,27 @@ _PRIMITIVE_VALUE_NODES = {
 # run — namespaced so they never collide with real pipeline keys.
 _STASH_KEY_PREFIX = "__taidal_stash_"
 
+# Op nodes expose their declared @output properties as output sockets at slot >= 2 (slot 0 =
+# ``sample``, slot 1 = ``op`` — see bridge._build_op_node). A wire from such a slot into a LATER
+# op's PARAM is an op-@output capture: the producer is wrapped in CaptureOutputOp (records the
+# ACTUAL @output value into metadata) and the consumer in ConfigureOp(ops=[UnstashInputOp(key)]).
+# The captured value rides the metadata bus under a namespaced key (it persists after the run).
+_OP_OUTPUT_FIRST_SLOT = 2
+_OUTPUT_CAPTURE_PREFIX = "__taidal_output_"
+
 # The canvas-only mark: a node whose ``properties["taidal_export"] == "skip"`` (toggled by
-# ``web/export_skip.js``) runs on the canvas but is EXCLUDED from exports — it and
-# everything data-downstream of it (sample wires + Mix args). The canvas export button
-# collects the marked ids and posts them as ``skip_ids``; the CLI takes ``--skip``.
-# (ComfyUI's native mute/bypass need no mark: the frontend drops/reroutes those nodes
-# before the API prompt ever reaches the exporter.)
+# ``web/export_skip.js``) runs on the canvas but is EXCLUDED from exports — it, everything
+# data-downstream of it (sample wires + Mix args), AND every upstream dependency that
+# serves ONLY excluded nodes (so a marked preview branch doesn't leave its private feeder
+# ops behind). The canvas export button collects the marked ids and posts them as
+# ``skip_ids``; the CLI takes ``--skip``. (ComfyUI's native mute/bypass need no mark: the
+# frontend drops/reroutes those nodes before the API prompt ever reaches the exporter.)
+# The INVERSE selection is the TARGET mark (``"target"``): when any node is marked a
+# target, the export contains exactly the ops that COMPUTE the target(s) — its data
+# ancestor cone — one document per target.
 _EXPORT_SKIP_PROPERTY = "taidal_export"
 _EXPORT_SKIP_VALUE = "skip"
+_EXPORT_TARGET_VALUE = "target"
 
 # Virtual node id for "the component's incoming sample" (whatever the Flux source feeds).
 _ROOT = "__taidal_root__"
@@ -140,6 +161,20 @@ class _ValueChain(NamedTuple):
     op_ids: Tuple[str, ...]
     formulas: Tuple[Tuple[str, str], ...]
     adapter_ids: Tuple[str, ...]
+
+
+class _OutputCapture(NamedTuple):
+    """A compiled op-``@output`` → param wire (e.g. ``NoiseFloorOp.applied_snr_db`` → another op's param).
+
+    ``producer_id`` is the op node whose ``@output`` is captured (a sample-ancestor of the consumer),
+    ``output_name`` the ``@output`` property (``RETURN_NAMES[slot]``), and ``stash_key`` the namespaced
+    metadata key the captured value lands in. The producer is wrapped in ``CaptureOutputOp`` and the
+    consumer in ``ConfigureOp(ops=[UnstashInputOp(stash_key)], target=…, param=…)``.
+    """
+
+    producer_id: str
+    output_name: str
+    stash_key: str
 
 
 class UnsupportedTopologyError(ValueError):
@@ -246,11 +281,26 @@ class _FoldContext:
         node_mappings: Dict[str, Any],
         notes: List[str],
         configure_specs: Optional[Dict[str, List[Tuple[str, "_ValueChain"]]]] = None,
+        excluded: Optional[Set[str]] = None,
+        output_captures: Optional[Dict[str, List[Tuple[str, "_OutputCapture"]]]] = None,
     ) -> None:
         self.prompt = prompt
         self.node_mappings = node_mappings
         self.notes = notes
         self.configure_specs = configure_specs or {}
+        # op-@output → param captures (consumer id -> [(param, capture)]). The consumer is wrapped in
+        # ConfigureOp(UnstashInputOp); the producer is wrapped in CaptureOutputOp — `captures_by_producer`
+        # is the reverse map (producer id -> {output_name: stash_key}) so a producer feeding several
+        # consumers captures each @output exactly once.
+        self.output_captures = output_captures or {}
+        self.captures_by_producer: Dict[str, Dict[str, str]] = {}
+        for _consumer, cap_list in self.output_captures.items():
+            for _param, cap in cap_list:
+                self.captures_by_producer.setdefault(cap.producer_id, {})[cap.output_name] = cap.stash_key
+        # Value-chain members (re-run inside a ConfigureOp). Honoured when a Subgraph-Op
+        # terminator's cone is compiled via :func:`_subgraph_op_instance` (which restricts to
+        # the cone but must still drop these); distinct from the standalone-schedule exclusion.
+        self.excluded: Set[str] = excluded or set()
         self.constants: "OrderedDict[str, Any]" = OrderedDict()
         self._hoisted: Dict[str, str] = {}  # upstream node id -> assigned document name
         self._hoisting: Set[str] = set()  # cycle guard for constant→constant recursion
@@ -365,35 +415,191 @@ def _collect_value_chains(
     return specs, excluded
 
 
-def _expand_skip_ids(skip_ids: Any, prompt: Dict[str, Any]) -> Set[str]:
-    """Resolve user-marked skip ids to the full excluded node set.
+def _trace_output_capture(
+    link: Any, consumer_id: str, prompt: Dict[str, Any], node_mappings: Dict[str, Any]
+) -> Optional[_OutputCapture]:
+    """Trace a widget wire to an op node's ``@output`` slot (>= 2) — an op-``@output`` capture.
 
-    Two expansions: a marked id also matches its SUBGRAPH-inlined inner nodes
-    (``"125"`` excludes ``"125:121"`` — marking an instance excludes the whole instance),
-    and the set closes over DATA edges (``sample`` wires + Mix arguments) — everything
-    downstream of a marked node has no exportable feed, so it is canvas-only too.
-    Widget/op-value wires from an excluded node do NOT exclude the consumer (it just
-    loses that value and keeps its constructor default, with a note).
+    Returns the capture iff the wire comes from an op-kind node's ``@output`` output socket AND that
+    producer is a sample-ANCESTOR of the consumer (so it runs earlier in the schedule and its
+    captured value is on the metadata bus when the consumer reads it). Returns ``None`` otherwise
+    (slot 0/1 = ``sample``/``op``, a non-op or self producer, or a cross-branch producer) — the
+    caller then falls back to the omit-with-note path.
+    """
+    if not _is_link(link):
+        return None
+    producer_id, slot = str(link[0]), int(link[1])
+    producer = prompt.get(producer_id)
+    if producer is None or producer_id == consumer_id:
+        return None  # self-wire (a cycle) is not a capture
+    class_type = str(producer.get("class_type", ""))
+    if _node_kind(class_type, node_mappings) != "op":
+        return None
+    return_names = tuple(getattr(node_mappings.get(class_type), "RETURN_NAMES", ()) or ())
+    if slot < _OP_OUTPUT_FIRST_SLOT or slot >= len(return_names):
+        return None  # slot 0/1 are sample/op (handled elsewhere); out-of-range = not an @output
+    if producer_id not in _ancestor_cone(consumer_id, prompt):
+        return None  # cross-branch: the captured value wouldn't be on the bus — fall back to a note
+    output_name = str(return_names[slot])
+    return _OutputCapture(producer_id, output_name, f"{_OUTPUT_CAPTURE_PREFIX}{producer_id}_{output_name}")
+
+
+def _collect_output_captures(
+    prompt: Dict[str, Any], node_mappings: Dict[str, Any]
+) -> Dict[str, List[Tuple[str, _OutputCapture]]]:
+    """Pre-trace every op-param wire that captures another op's ``@output`` (output slot >= 2).
+
+    Maps a consumer node id to its ``(param, capture)`` list — each compiles to a ``CaptureOutputOp``
+    on the producer + a ``ConfigureOp(ops=[UnstashInputOp(key)])`` on the consumer. Disjoint from
+    value chains by construction (a value chain's immediate upstream is a Math/Extract adapter, not an
+    op-kind node), so this runs alongside :func:`_collect_value_chains`. Both the producer and the
+    consumer stay in the schedule (the producer also transforms the sample; nothing is excluded).
+    """
+    specs: Dict[str, List[Tuple[str, _OutputCapture]]] = {}
+    for nid, node in prompt.items():
+        if _node_kind(str(node.get("class_type", "")), node_mappings) != "op":
+            continue
+        for key, value in node.get("inputs", {}).items():
+            if key == _SAMPLE_INPUT or not _is_link(value):
+                continue
+            if _OP_SOCKET_RE.match(key) or key in _SINGLE_OP_PARAMS:
+                continue  # op-value wires embed through their own path
+            capture = _trace_output_capture(value, str(nid), prompt, node_mappings)
+            if capture is not None:
+                specs.setdefault(str(nid), []).append((key, capture))
+    return specs
+
+
+def _data_preds(node: Dict[str, Any]) -> List[str]:
+    """Upstream node ids on this node's DATA edges (the ``sample`` wire, or Mix args)."""
+    inputs = node.get("inputs", {})
+    data_args = _MIX_ARGS if str(node.get("class_type", "")) == _MIX_CLASS_TYPE else (_SAMPLE_INPUT,)
+    return [str(inputs[arg][0]) for arg in data_args if _is_link(inputs.get(arg))]
+
+
+def _id_segments(node_id: Any) -> Set[str]:
+    """The original node ids a (possibly subgraph-expanded) PROMPT id is built from.
+
+    ComfyUI expands a subgraph instance into prompt ids that PATH-JOIN the original node ids with
+    ``:`` — instance ``378`` of a definition holding node ``371`` → ``"378:371"``, nested →
+    ``"378:368:371"``. A plain top-level node keeps its own id. So the segments of a prompt id are
+    exactly the original ids on the instance path; node ids are globally unique across the workflow
+    and its subgraph definitions, so matching a mark against these segments is unambiguous.
+    """
+    return set(str(node_id).split(":"))
+
+
+def _resolve_marked(marked: Set[str], prompt: Dict[str, Any]) -> Set[str]:
+    """Every PROMPT id whose ``:``-path contains a marked id as a SEGMENT.
+
+    This resolves a ``taidal_export`` mark to the expanded prompt node(s) it names, regardless of
+    where it sits: a top-level node (exact), a subgraph INSTANCE (matches every inner node ``id:*``),
+    or a node INSIDE a definition (that specific node ``*:id`` in each instance). It generalizes the
+    old prefix-only match (instance → inner), which could not reach a mark placed inside a subgraph —
+    the case the ops-export now honours via :func:`collect_export_marks`.
+    """
+    return {nid for nid in prompt if marked & _id_segments(nid)}
+
+
+def _marked_ids(skip_ids: Any, prompt: Dict[str, Any]) -> Set[str]:
+    """The DIRECTLY marked node set: each given id resolved to the expanded prompt ids that name it.
+
+    Marking a subgraph INSTANCE (``"378"``) matches its whole expanded subtree (``"378:371"`` …);
+    marking a node INSIDE a definition (``"371"``) matches that node in each instance (``"378:368:371"``);
+    a top-level id matches itself. See :func:`_resolve_marked` / :func:`_id_segments`.
     """
     marked = {str(sid) for sid in (skip_ids or [])}
     if not marked:
         return set()
-    excluded = {nid for nid in prompt if nid in marked or any(nid.startswith(f"{sid}:") for sid in marked)}
+    return _resolve_marked(marked, prompt)
+
+
+def collect_export_marks(workflow: Any) -> Tuple[List[str], List[str]]:
+    """Read ``taidal_export`` skip/target node ids from a UI ``workflow.json`` (subgraphs included).
+
+    The ops-export consumes the ComfyUI PROMPT form, which carries NO node ``properties`` — so the
+    export marks (``node.properties["taidal_export"]`` ∈ ``"skip"`` / ``"target"``), which the canvas
+    stores on the live graph, must be read from the UI workflow instead. This scans BOTH the
+    top-level nodes AND every subgraph DEFINITION's inner nodes: a mark placed inside a subgraph
+    lives on a definition node, which the prompt expands to ``"<instance>:<inner>"`` and the segment
+    match in :func:`_marked_ids` / the target resolver maps back. Returns ``(skip_ids, target_ids)``
+    as string node ids — pass straight to :func:`export_ops_yamls` / :func:`compile_op_chains`.
+
+    Collecting the marks HERE (Python) rather than in the browser is the single, subgraph-aware
+    source of truth — mirroring how the whole-graph export already reads the same property from the
+    workflow (``graphio._normalize_ui_workflow``). A non-dict / property-less input yields ``([], [])``.
+    """
+    skip: List[str] = []
+    target: List[str] = []
+    if not isinstance(workflow, dict):
+        return skip, target
+
+    def _scan(nodes: Any) -> None:
+        for node in nodes or []:
+            if not isinstance(node, dict):
+                continue
+            mark = (node.get("properties") or {}).get(_EXPORT_SKIP_PROPERTY)
+            if mark == _EXPORT_SKIP_VALUE:
+                skip.append(str(node.get("id")))
+            elif mark == _EXPORT_TARGET_VALUE:
+                target.append(str(node.get("id")))
+
+    _scan(workflow.get("nodes"))
+    for subgraph in (workflow.get("definitions") or {}).get("subgraphs") or []:
+        if isinstance(subgraph, dict):
+            _scan(subgraph.get("nodes"))
+    return skip, target
+
+
+def _expand_skip_ids(skip_ids: Any, prompt: Dict[str, Any]) -> Set[str]:
+    """Resolve user-marked skip ids to the full excluded node set.
+
+    Two expansions: a marked id also matches its SUBGRAPH-inlined inner nodes
+    (``"125"`` excludes ``"125:121"`` — marking an instance excludes the whole instance);
+    and the set closes DOWNSTREAM over data edges (``sample`` wires + Mix arguments) —
+    everything fed from a marked node has no exportable feed, so it is canvas-only too.
+
+    The closure NEVER walks upstream: a skip mark means "this node and everything BEHIND
+    it (data-downstream); the nodes before it still export" — pruning the marked node's
+    sample feeders would eat the pipeline that computes the data (marking the node after
+    a Mix must not erase the Mix). Ops the marked branch no longer consumes simply stay
+    in the schedule; value/config feeders need no pruning here because the ops-export
+    folds them CONSUMER-driven (a constant hoists only when a surviving consumer
+    references it). Widget/op-value wires from an excluded node do NOT exclude the
+    consumer (it just loses that value and keeps its constructor default, with a note).
+    """
+    excluded = _marked_ids(skip_ids, prompt)
+    if not excluded:
+        return set()
     while True:
         grew = False
         for nid, node in prompt.items():
             if nid in excluded:
                 continue
-            inputs = node.get("inputs", {})
-            data_args = _MIX_ARGS if str(node.get("class_type", "")) == _MIX_CLASS_TYPE else (_SAMPLE_INPUT,)
-            for arg in data_args:
-                value = inputs.get(arg)
-                if _is_link(value) and str(value[0]) in excluded:
-                    excluded.add(nid)
-                    grew = True
-                    break
+            # Downstream: any data predecessor excluded → this node has no exportable feed.
+            if any(pred in excluded for pred in _data_preds(node)):
+                excluded.add(nid)
+                grew = True
         if not grew:
             return excluded
+
+
+def _ancestor_cone(target_id: str, prompt: Dict[str, Any]) -> Set[str]:
+    """The export-target's dependency cone: the target + every data ancestor.
+
+    These are exactly the ops that COMPUTE the target — sample wires and Mix arguments
+    followed transitively upstream. (Widget-folded inputs — constants, value chains,
+    op-values — resolve by reference during compilation and need no membership here.)
+    """
+    cone: Set[str] = set()
+    stack = [target_id]
+    while stack:
+        nid = stack.pop()
+        if nid in cone or nid not in prompt:
+            continue
+        cone.add(nid)
+        stack.extend(_data_preds(prompt[nid]))
+    return cone
 
 
 def _runtime_value_hint(target: Any, key: str) -> Optional[str]:
@@ -424,6 +630,14 @@ def _resolve_widget_link(target: Any, key: str, link: Any, fold: _FoldContext) -
         return ("drop", _runtime_value_hint(target, key))
     class_type = str(upstream.get("class_type", ""))
 
+    if class_type == _SUBGRAPH_OP_CLASS_TYPE:
+        # A Subgraph-Op terminator's ``op`` output (slot 0) wired into a single-op slot
+        # (``ConfigureOp.target`` / ``RandomApply.op``): embed its compiled ancestor cone as a
+        # nested ``TransformChain`` instance, the "subgraph as an Op" landing in that slot.
+        if slot == 0:
+            return ("literal", _subgraph_op_instance(upstream_id, fold.prompt, fold.node_mappings, fold))
+        return ("drop", _runtime_value_hint(target, key))
+
     if class_type in _PRIMITIVE_VALUE_NODES:
         value = upstream.get("inputs", {}).get("value")
         if _is_link(value):  # a primitive fed by another node — follow the wire
@@ -453,6 +667,16 @@ def _resolve_widget_link(target: Any, key: str, link: Any, fold: _FoldContext) -
         if slot == op_slot:
             nested = _op_to_instance(upstream_id, upstream, fold.node_mappings, dropped_notes=fold.notes, fold=fold)
             return ("literal", nested)
+        if slot >= _OP_OUTPUT_FIRST_SLOT:
+            # An op-@output wire that wasn't captured (handled by _collect_output_captures) — the
+            # producer isn't a sample-ANCESTOR of this consumer, so its per-sample value can't reach
+            # here through the metadata bus. Drop with a note pointing at the requirement.
+            out_name = return_names[slot] if slot < len(return_names) else f"slot {slot}"
+            return (
+                "drop",
+                f"; to wire {class_type}.{out_name} (an @output) into a param, the producing op must "
+                "be a sample-ancestor of this op (same chain) so its captured value is on the bus",
+            )
 
     return ("drop", _runtime_value_hint(target, key))
 
@@ -535,7 +759,13 @@ def _embed_op_values(
     for _idx, key, link in sorted(op_links, key=lambda item: item[0]):
         src = str(link[0])
         upstream = fold.prompt.get(src)
-        upstream_cls = fold.node_mappings.get(str(upstream.get("class_type", ""))) if upstream else None
+        upstream_type = str(upstream.get("class_type", "")) if upstream else ""
+        if upstream is not None and upstream_type == _SUBGRAPH_OP_CLASS_TYPE:
+            # A Subgraph-Op terminator in this higher-order op's list (e.g. Parallel(ops=[…]))
+            # → embed its compiled cone as a nested TransformChain (the subgraph as one Op).
+            instances.append(_subgraph_op_instance(src, fold.prompt, fold.node_mappings, fold))
+            continue
+        upstream_cls = fold.node_mappings.get(upstream_type) if upstream else None
         if upstream is None or getattr(upstream_cls, "TAIDAL_NODE_KIND", None) != "op":
             fold.notes.append(
                 f"{class_type} (node {node_id}): {key!r} is wired from node {link[0]} — omitted, "
@@ -581,14 +811,16 @@ def _op_to_instance(
 
     cfg_specs = fold.configure_specs.get(str(node_id), []) if fold is not None else []
     configured_params = {param for param, _chain in cfg_specs}
+    capture_specs = fold.output_captures.get(str(node_id), []) if fold is not None else []
+    captured_params = {param for param, _cap in capture_specs}
 
     inputs = node.get("inputs", {})
     literal_inputs: Dict[str, Any] = {}
     ref_inputs: Dict[str, Any] = {}
     op_links: List[Tuple[int, str, Any]] = []
     for key, value in inputs.items():
-        if key == _SAMPLE_INPUT or key in configured_params:
-            continue  # a configured param is injected per sample by the ConfigureOp wrap below
+        if key == _SAMPLE_INPUT or key in configured_params or key in captured_params:
+            continue  # a configured/captured param is injected per sample by the ConfigureOp wrap below
         if not _is_link(value):
             literal_inputs[key] = value
             continue
@@ -642,14 +874,104 @@ def _op_to_instance(
             instance = cast(
                 Instance, _marker(Instance, ConfigureOp, {"ops": compute, "target": instance, "param": param})
             )
+    # op-@output → param (consumer side): inject the producer's CAPTURED value (read back from the
+    # metadata bus via UnstashInputOp) into this op's param per sample.
+    for param, cap in capture_specs:
+        instance = cast(
+            Instance,
+            _marker(
+                Instance,
+                ConfigureOp,
+                {
+                    "ops": [_marker(Instance, UnstashInputOp, {"key": cap.stash_key})],
+                    "target": instance,
+                    "param": param,
+                },
+            ),
+        )
+    # op-@output → param (producer side): if THIS op's @output is captured downstream, wrap it so its
+    # ACTUAL value lands in metadata after it runs (outermost — it applies the configured op above and
+    # reads the @output off the innermost wrapped op via CaptureOutputOp's .target walk).
+    produced = fold.captures_by_producer.get(str(node_id)) if fold is not None else None
+    if produced:
+        instance = cast(Instance, _marker(Instance, CaptureOutputOp, {"op": instance, "captures": dict(produced)}))
     return instance
+
+
+# --------------------------------------------------------------------------- subgraph-as-op
+
+
+def _subgraph_op_instance(
+    terminator_id: str, prompt: Dict[str, Any], node_mappings: Dict[str, Any], fold: _FoldContext
+) -> Instance:
+    """Compile a Subgraph-Op terminator's ancestor cone into a ``TransformChain`` Instance.
+
+    The cone (the ops computing the sample wired into the terminator) is flattened with the
+    SAME DAG→sequential machinery the top level uses — fan-out and ``Mix`` fan-in become
+    ``Stash``/``Unstash`` sequences — so the whole drawn sub-pipeline lands as one
+    ``!class:dataflux.ops.transform_chain.TransformChain(ops=[…])``. The shared ``fold`` means a
+    ``constant=True`` value node inside the subgraph still hoists ONCE to the document top
+    level and the nested ops dotted-``!ref:`` it. ``fold.excluded`` (value-chain members) is
+    honoured; the standalone-schedule exclusion (:func:`_subgraph_cone_excluded`) is NOT applied
+    here — these cone ops are exactly what we compile.
+    """
+    cone = _ancestor_cone(terminator_id, prompt)
+    universe, preds, boundary_feeds = _build_graph(prompt, node_mappings, fold.excluded, restrict=cone)
+    ops: List[Any] = []
+    for members in _components(universe, preds):
+        _check_component(members, preds, boundary_feeds)
+        ops.extend(_compile_component(members, universe, preds, prompt, node_mappings, fold))
+    return cast(Instance, _marker(Instance, TransformChain, {"ops": ops}))
+
+
+def _op_value_consumed(node_id: str, prompt: Dict[str, Any]) -> bool:
+    """True if some node consumes ``node_id``'s output via an op-value slot (``op_N`` / ``op`` / ``target``)."""
+    for cnode in prompt.values():
+        for key, value in cnode.get("inputs", {}).items():
+            if _is_link(value) and str(value[0]) == node_id and (_OP_SOCKET_RE.match(key) or key in _SINGLE_OP_PARAMS):
+                return True
+    return False
+
+
+def _sample_consumed_outside(node_id: str, cone: Set[str], prompt: Dict[str, Any]) -> bool:
+    """True if a node OUTSIDE ``cone`` consumes ``node_id``'s sample output (sample wire or Mix arg)."""
+    for cnid, cnode in prompt.items():
+        if cnid not in cone and node_id in _data_preds(cnode):
+            return True
+    return False
+
+
+def _subgraph_cone_excluded(prompt: Dict[str, Any]) -> Set[str]:
+    """Inner ops of each CONSUMED Subgraph-Op terminator → dropped from the standalone schedule.
+
+    When a terminator's ``op`` output feeds an op slot, its ancestor cone is embedded as a
+    nested ``TransformChain`` in that consumer, so those inner ops must not ALSO compile to a
+    standalone pipeline. A cone op whose sample is consumed OUTSIDE the cone too (a node reused
+    in graph mode) stays scheduled — it is then both embedded and scheduled (the shared-node
+    case). A terminator whose ``op`` output is unwired excludes nothing (its inner ops, if any,
+    schedule as an ordinary pipeline — the "use the subgraph as a graph" path).
+    """
+    excluded: Set[str] = set()
+    for tid, node in prompt.items():
+        if str(node.get("class_type", "")) != _SUBGRAPH_OP_CLASS_TYPE:
+            continue
+        if not _op_value_consumed(tid, prompt):
+            continue
+        cone = _ancestor_cone(tid, prompt)
+        for member in cone - {tid}:
+            if not _sample_consumed_outside(member, cone, prompt):
+                excluded.add(member)
+    return excluded
 
 
 # --------------------------------------------------------------------------- DAG scheduling
 
 
 def _build_graph(
-    prompt: Dict[str, Any], node_mappings: Dict[str, Any], excluded: Optional[Set[str]] = None
+    prompt: Dict[str, Any],
+    node_mappings: Dict[str, Any],
+    excluded: Optional[Set[str]] = None,
+    restrict: Optional[Set[str]] = None,
 ) -> Tuple[Dict[str, str], Dict[str, List[Tuple[str, str]]], Dict[str, Set[str]]]:
     """The sample-flow universe: generated op nodes + ``Mix Samples`` adapters.
 
@@ -667,6 +989,8 @@ def _build_graph(
     for nid, node in prompt.items():
         if excluded and nid in excluded:
             continue  # a pure value-chain member — it re-runs inside a ConfigureOp instead
+        if restrict is not None and nid not in restrict:
+            continue  # export-target mode: only the target's ancestor cone is scheduled
         class_type = str(node.get("class_type", ""))
         if class_type == _MIX_CLASS_TYPE:
             universe[nid] = "mix"
@@ -891,6 +1215,7 @@ def compile_op_chains(
     chain_notes: Optional[List[List[str]]] = None,
     chain_constants: Optional[List[Dict[str, Any]]] = None,
     skip_ids: Optional[Any] = None,
+    target_ids: Optional[Any] = None,
 ) -> List[List[Any]]:
     """Compile a ComfyUI prompt graph — ONE sequential op-list per connected op component.
 
@@ -916,7 +1241,16 @@ def compile_op_chains(
         skip_ids: Node ids marked CANVAS-ONLY (``properties["taidal_export"] == "skip"``,
             collected by the canvas export button / the CLI ``--skip`` flag). Each id
             excludes the node, its subgraph-inlined inner nodes (prefix ``<id>:``), and
-            everything data-downstream of it (sample wires + Mix args), with a note.
+            everything data-downstream of it (sample wires + Mix args), with a note. The
+            closure is FORWARD-ONLY: the nodes before the mark always export (a skip on
+            the node after a Mix means "stop exporting here", never "erase the Mix").
+        target_ids: Node ids marked EXPORT TARGETS (``properties["taidal_export"] ==
+            "target"`` / the CLI ``--target`` flag). When given, the export inverts from
+            opt-out to opt-in: ONE document per target, each containing exactly the ops
+            that COMPUTE that target (its data ancestor cone — the target is the final
+            op); everything outside the cones is simply not scheduled. A skip mark
+            downstream of a target trims nodes the cone never contained; a DIRECT skip
+            mark on a node inside a cone is a contradiction and raises.
 
     Returns:
         One list per component, each suitable for ``Flux(ops=...)`` after a dump/load
@@ -924,39 +1258,98 @@ def compile_op_chains(
         instances. Empty when the graph has no op nodes.
 
     Raises:
-        UnsupportedTopologyError: a cycle, an unresolvable op node, or a component
-            merging several distinct sample streams.
+        UnsupportedTopologyError: a cycle, an unresolvable op node, a component merging
+            several distinct sample streams, an unknown export target, or a skip mark
+            directly on a node inside a target's dependency cone.
     """
     prompt = {str(nid): node for nid, node in prompt.items()}
+
+    # Targets resolve FIRST, against the raw graph. The forward-only skip closure cannot
+    # reach a cone unless a node was marked INSIDE it (any upstream mark of a cone member
+    # is itself a cone member) — that is a genuine contradiction and rejected here.
+    # Each marked id resolves to the EXPANDED prompt node(s) it names (segment match), so a target
+    # placed INSIDE a subgraph (``371`` → ``"378:368:371"``) cones correctly; a mark naming several
+    # prompt nodes (a multi-instance subgraph) yields one cone per matched node.
+    targets = [str(t) for t in (target_ids or []) if str(t).strip()]
+    resolved_targets: List[str] = []
+    missing: List[str] = []
+    for t in targets:
+        matches = sorted(_resolve_marked({t}, prompt), key=_id_sort_key)
+        if matches:
+            resolved_targets.extend(matches)
+        else:
+            missing.append(t)
+    if missing:
+        raise UnsupportedTopologyError(f"Export target(s) {missing} not found in the graph (unknown node id).")
+    target_cones: Dict[str, Set[str]] = {
+        t: _ancestor_cone(t, prompt) for t in sorted(set(resolved_targets), key=_id_sort_key)
+    }
+    protected: Set[str] = set().union(*target_cones.values()) if target_cones else set()
+
+    direct_marks = _marked_ids(skip_ids, prompt)
+    conflicts = sorted(direct_marks & protected, key=_id_sort_key)
+    if conflicts:
+        raise UnsupportedTopologyError(
+            f"Export-skip mark(s) on {conflicts} conflict with the export target(s) "
+            f"{sorted(target_cones)} — the marked node(s) are inside a target's dependency "
+            "cone (needed to compute it). Clear one of the two marks."
+        )
+
     skipped_marks = _expand_skip_ids(skip_ids, prompt)
-    skip_note: Optional[str] = None
+    base_notes: List[str] = []
     if skipped_marks:
         listed = ", ".join(
             f"node {nid} ({prompt[nid].get('class_type', '?')})" for nid in sorted(skipped_marks, key=_id_sort_key)
         )
-        skip_note = f"excluded by export-skip mark (canvas-only, incl. data-downstream nodes): {listed}"
+        base_notes.append(f"excluded by export-skip mark (canvas-only, incl. data-downstream nodes): {listed}")
         prompt = {nid: node for nid, node in prompt.items() if nid not in skipped_marks}
 
-    configure_specs, excluded = _collect_value_chains(prompt, node_mappings)
-    universe, preds, boundary_feeds = _build_graph(prompt, node_mappings, excluded)
-    if not universe:
-        logger.debug("compile_op_chains: no op nodes in graph — returning no chains.")
-        return []
+    configure_specs, vc_excluded = _collect_value_chains(prompt, node_mappings)
+    # op-@output → param captures: a CaptureOutputOp on the producer + a ConfigureOp(UnstashInputOp)
+    # on the consumer. Both stay scheduled (the producer also transforms the sample), so captures add
+    # NOTHING to schedule_excluded.
+    output_captures = _collect_output_captures(prompt, node_mappings)
+    # A consumed Subgraph-Op terminator's inner ops embed as a nested TransformChain in the
+    # consumer (see _subgraph_op_instance), so they drop from the STANDALONE schedule — but NOT
+    # from the cone compile (fold.excluded carries only the value-chain set).
+    sg_excluded = _subgraph_cone_excluded(prompt)
+    schedule_excluded = vc_excluded | sg_excluded
+
+    def _compile(restrict: Optional[Set[str]], extra_notes: List[str]) -> List[List[Any]]:
+        universe, preds, boundary_feeds = _build_graph(prompt, node_mappings, schedule_excluded, restrict)
+        if not universe:
+            logger.debug("compile_op_chains: no op nodes in graph — returning no chains.")
+            return []
+        compiled: List[List[Any]] = []
+        for members in _components(universe, preds):
+            _check_component(members, preds, boundary_feeds)
+            notes: List[str] = [*base_notes, *extra_notes]
+            fold = _FoldContext(
+                prompt, node_mappings, notes, configure_specs, excluded=vc_excluded, output_captures=output_captures
+            )
+            compiled.append(_compile_component(members, universe, preds, prompt, node_mappings, fold))
+            if chain_notes is not None:
+                chain_notes.append(notes)
+            if chain_constants is not None:
+                chain_constants.append(dict(fold.constants))
+        return compiled
+
+    if not target_cones:
+        return _compile(restrict=None, extra_notes=[])
 
     chains: List[List[Any]] = []
-    for members in _components(universe, preds):
-        _check_component(members, preds, boundary_feeds)
-        notes: List[str] = [skip_note] if skip_note else []
-        fold = _FoldContext(prompt, node_mappings, notes, configure_specs)
-        chains.append(_compile_component(members, universe, preds, prompt, node_mappings, fold))
-        if chain_notes is not None:
-            chain_notes.append(notes)
-        if chain_constants is not None:
-            chain_constants.append(dict(fold.constants))
+    for target, cone in target_cones.items():
+        note = f"compiled for export target: node {target} ({prompt[target].get('class_type', '?')})"
+        chains.extend(_compile(restrict=cone, extra_notes=[note]))
     return chains
 
 
-def compile_ops(prompt: Dict[str, Any], node_mappings: Dict[str, Any], skip_ids: Optional[Any] = None) -> List[Any]:
+def compile_ops(
+    prompt: Dict[str, Any],
+    node_mappings: Dict[str, Any],
+    skip_ids: Optional[Any] = None,
+    target_ids: Optional[Any] = None,
+) -> List[Any]:
     """Compile a prompt graph into a SINGLE sequential op-list.
 
     The strict single-component variant of :func:`compile_op_chains` — kept for consumers
@@ -971,7 +1364,7 @@ def compile_ops(prompt: Dict[str, Any], node_mappings: Dict[str, Any], skip_ids:
         UnsupportedTopologyError: everything :func:`compile_op_chains` raises, PLUS a graph
             holding more than one independent op component.
     """
-    chains = compile_op_chains(prompt, node_mappings, skip_ids=skip_ids)
+    chains = compile_op_chains(prompt, node_mappings, skip_ids=skip_ids, target_ids=target_ids)
     if len(chains) > 1:
         raise UnsupportedTopologyError(
             f"Found {len(chains)} independent op components; compile_ops/export_ops_yaml need a "
@@ -997,7 +1390,12 @@ def _document(constants: Dict[str, Any], ops: List[Any]) -> Dict[str, Any]:
     return payload
 
 
-def export_ops_yaml(prompt: Dict[str, Any], node_mappings: Dict[str, Any], skip_ids: Optional[Any] = None) -> str:
+def export_ops_yaml(
+    prompt: Dict[str, Any],
+    node_mappings: Dict[str, Any],
+    skip_ids: Optional[Any] = None,
+    target_ids: Optional[Any] = None,
+) -> str:
     """Compile a prompt graph and serialize its ops to a Confluid YAML document.
 
     The result is a mapping holding the hoisted ``constant=True`` entries (if any)
@@ -1009,7 +1407,12 @@ def export_ops_yaml(prompt: Dict[str, Any], node_mappings: Dict[str, Any], skip_
     notes_per_chain: List[List[str]] = []
     constants_per_chain: List[Dict[str, Any]] = []
     chains = compile_op_chains(
-        prompt, node_mappings, chain_notes=notes_per_chain, chain_constants=constants_per_chain, skip_ids=skip_ids
+        prompt,
+        node_mappings,
+        chain_notes=notes_per_chain,
+        chain_constants=constants_per_chain,
+        skip_ids=skip_ids,
+        target_ids=target_ids,
     )
     if len(chains) > 1:
         raise UnsupportedTopologyError(
@@ -1023,7 +1426,10 @@ def export_ops_yaml(prompt: Dict[str, Any], node_mappings: Dict[str, Any], skip_
 
 
 def export_ops_yamls(
-    prompt: Dict[str, Any], node_mappings: Dict[str, Any], skip_ids: Optional[Any] = None
+    prompt: Dict[str, Any],
+    node_mappings: Dict[str, Any],
+    skip_ids: Optional[Any] = None,
+    target_ids: Optional[Any] = None,
 ) -> List[str]:
     """Compile a prompt graph and serialize EACH op component to its own YAML document.
 
@@ -1040,7 +1446,12 @@ def export_ops_yamls(
     notes_per_chain: List[List[str]] = []
     constants_per_chain: List[Dict[str, Any]] = []
     chains = compile_op_chains(
-        prompt, node_mappings, chain_notes=notes_per_chain, chain_constants=constants_per_chain, skip_ids=skip_ids
+        prompt,
+        node_mappings,
+        chain_notes=notes_per_chain,
+        chain_constants=constants_per_chain,
+        skip_ids=skip_ids,
+        target_ids=target_ids,
     )
     if not chains:
         return [dump({"ops": []})]
@@ -1066,6 +1477,7 @@ def chain_output_paths(base: Union[str, Path], count: int) -> List[Path]:
 __all__ = [
     "UnsupportedTopologyError",
     "chain_output_paths",
+    "collect_export_marks",
     "compile_op_chains",
     "compile_ops",
     "export_ops_yaml",

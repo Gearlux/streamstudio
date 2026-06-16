@@ -1,6 +1,7 @@
 """ComfyUI Entry Point for Taidal/Waivefront nodes."""
 
 import importlib.metadata
+import json
 import sys
 from typing import Any, Dict, List, Optional
 
@@ -17,8 +18,13 @@ logflow.force_no_color()
 
 from logflow import get_logger  # (import follows force_no_color above)
 
-from fluxstudio.bridge import hide_default_comfy_nodes, register_module_nodes
-from fluxstudio.export import UnsupportedTopologyError, chain_output_paths, export_ops_yamls
+from fluxstudio.bridge import (
+    hide_default_comfy_nodes,
+    kept_default_node_names,
+    only_taidal_nodes,
+    register_module_nodes,
+)
+from fluxstudio.export import UnsupportedTopologyError, chain_output_paths, collect_export_marks, export_ops_yamls
 from fluxstudio.nodes import NODE_CLASS_MAPPINGS as _STATIC_NODE_CLASS_MAPPINGS
 from fluxstudio.nodes import NODE_DISPLAY_NAME_MAPPINGS as _STATIC_NODE_DISPLAY_NAME_MAPPINGS
 
@@ -124,20 +130,23 @@ def _prune_default_comfy_nodes() -> int:
     ComfyUI stamps on every loaded node class (``server.py`` defaults a missing one to ``"nodes"``):
     a built-in/extra node's top-level module is one of ``{nodes, comfy_extras, comfy_api_nodes}``; a
     custom node's is ``custom_nodes``. We keep the latter so OTHER third-party extensions loaded
-    before us survive. Returns the number of nodes removed (0 on a second call — idempotent).
+    before us survive. The configurable KEEP-LIST (``kept_default_node_names()`` — PreviewImage /
+    PreviewAny by default, + ``FLUXSTUDIO_KEEP_NODES``) is also spared, so the native viewers the user
+    relies on stay available. Returns the number of nodes removed (0 on a second call — idempotent).
 
-    NOTE: hiding the defaults also removes ComfyUI's native viewers (Preview Image, …) that the
-    Sample-extractor adapter normally feeds, so this is opt-in via the CLI flag, never the default.
+    NOTE: hiding the defaults removes most of ComfyUI's native viewers, so the keep-list exists to
+    retain the ones in use; this whole prune is opt-in via the CLI flag, never the default.
     """
     # ComfyUI's GLOBAL node registry — NOT fluxstudio.nodes (absolute import). Only importable inside
     # ComfyUI, like ``server`` below, so ignore the type-check-time missing-stub error.
     import nodes as comfy_nodes  # type: ignore[import-not-found]
 
     default_roots = {"nodes", "comfy_extras", "comfy_api_nodes"}
+    keep = kept_default_node_names()
     removed = 0
     for key, cls in list(comfy_nodes.NODE_CLASS_MAPPINGS.items()):
         module = getattr(cls, "RELATIVE_PYTHON_MODULE", "nodes")
-        if module.split(".")[0] in default_roots:
+        if module.split(".")[0] in default_roots and key not in keep:
             del comfy_nodes.NODE_CLASS_MAPPINGS[key]
             comfy_nodes.NODE_DISPLAY_NAME_MAPPINGS.pop(key, None)
             removed += 1
@@ -231,6 +240,19 @@ try:
         _pruned = _prune_default_comfy_nodes()
         if _pruned:
             logger.info(f"FluxStudio: hid {_pruned} default ComfyUI nodes (--no-default-nodes).")
+
+    # Palette config for web/palette_filter.js. When --only-taidal-nodes is set, the frontend removes
+    # every non-Taidal node from the Add-Node menu (built-ins AND other third-party custom packs)
+    # EXCEPT the keep-list. This is done frontend-side, post-load, because custom packs that load AFTER
+    # fluxstudio aren't in the global registry at our import time but ARE by the time the browser asks.
+    palette_route_exists = any(
+        r.path == "/taidal/palette_config" and r.method == "GET" for r in server.PromptServer.instance.routes
+    )
+    if not palette_route_exists:
+
+        @server.PromptServer.instance.routes.get("/taidal/palette_config")
+        async def palette_config_handler(request: Any) -> Any:
+            return web.json_response({"only_taidal": only_taidal_nodes(), "keep": sorted(kept_default_node_names())})
 
     route_exists = any(
         r.path == "/taidal/choose_directory" and r.method == "POST" for r in server.PromptServer.instance.routes
@@ -336,10 +358,22 @@ try:
             try:
                 body = await request.json()
                 prompt = body.get("prompt", body)  # accept a bare prompt or {prompt: ...}
-                # Canvas-only nodes (properties["taidal_export"]=="skip") — collected by
-                # web/export_skip.js and posted by web/export_ops.js.
-                skip_ids = body.get("skip_ids") if isinstance(body, dict) else None
-                yaml_docs = export_ops_yamls(prompt, NODE_CLASS_MAPPINGS, skip_ids=skip_ids)
+                # Export marks (properties["taidal_export"] == "skip"/"target") are read in PYTHON
+                # from the full UI ``workflow`` web/export_ops.js posts alongside the prompt — the
+                # prompt strips node properties, and only the workflow carries the subgraph
+                # definitions, so a mark placed INSIDE a subgraph is collected here (subgraph-aware,
+                # one source of truth) and resolved to the expanded prompt ids by the compiler.
+                # Explicit skip_ids/target_ids (older clients / programmatic callers) still merge in.
+                skip_ids = list(body.get("skip_ids") or []) if isinstance(body, dict) else []
+                target_ids = list(body.get("target_ids") or []) if isinstance(body, dict) else []
+                workflow = body.get("workflow") if isinstance(body, dict) else None
+                if workflow is not None:
+                    wf_skip, wf_target = collect_export_marks(workflow)
+                    skip_ids += wf_skip
+                    target_ids += wf_target
+                yaml_docs = export_ops_yamls(
+                    prompt, NODE_CLASS_MAPPINGS, skip_ids=skip_ids or None, target_ids=target_ids or None
+                )
                 # ``yaml`` (first doc) kept alongside ``yamls`` for older clients of the route.
                 payload: Dict[str, Any] = {"yamls": yaml_docs, "yaml": yaml_docs[0]}
                 out_path = body.get("path")

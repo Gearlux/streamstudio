@@ -32,6 +32,8 @@ from dataflux.sample import Sample
 from dataflux.typespec import ArrayType, SampleType
 
 from fluxstudio.bridge import (
+    ARRAY_TYPE,
+    DEFAULT_WIDGET_CONFIG,
     OP_TYPE,
     SAMPLE_TYPE,
     SOURCE_TYPE,
@@ -41,6 +43,7 @@ from fluxstudio.bridge import (
     _is_hf_feature_param,
     _is_hf_metadata_param,
     _is_hf_split_param,
+    _is_socket_type,
     _literal_options,
     _map_type,
     _node_category,
@@ -48,9 +51,68 @@ from fluxstudio.bridge import (
     _value_call_signature,
     create_comfy_node,
     hide_default_comfy_nodes,
+    kept_default_node_names,
     node_root,
+    only_taidal_nodes,
     register_module_nodes,
 )
+
+
+def test_kept_default_node_names_user_config_adds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # PreviewImage / PreviewAny are ALWAYS kept; the config file's keep_nodes list ADDS more (NOT an
+    # env var — FLUXSTUDIO_CONFIG carries only the file's LOCATION).
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("keep_nodes:\n  - CustomViewerXYZ\n  - LoadImage\n")
+    monkeypatch.setenv("FLUXSTUDIO_CONFIG", str(cfg))
+    assert {"PreviewImage", "PreviewAny", "CustomViewerXYZ", "LoadImage"} <= kept_default_node_names()
+
+
+def test_kept_default_node_names_falls_back_to_packaged_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # No user config (FLUXSTUDIO_CONFIG points at a missing file) -> the SHIPPED config.default.yaml is
+    # used, so its appropriate defaults (e.g. MaskToImage) apply.
+    monkeypatch.setenv("FLUXSTUDIO_CONFIG", str(tmp_path / "missing.yaml"))
+    kept = kept_default_node_names()
+    assert {"PreviewImage", "PreviewAny"} <= kept
+    assert "MaskToImage" in kept  # comes from the packaged config.default.yaml fallback
+
+
+def test_kept_default_node_names_last_resort_when_no_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Neither the user config NOR the packaged default is readable -> the safety pair (so the native
+    # viewers never vanish on a broken install).
+    monkeypatch.setenv("FLUXSTUDIO_CONFIG", str(tmp_path / "missing.yaml"))
+    monkeypatch.setattr("fluxstudio.bridge._packaged_default_config_path", lambda: tmp_path / "also_missing.yaml")
+    assert kept_default_node_names() == {"PreviewImage", "PreviewAny"}
+
+
+def test_kept_default_node_names_ignores_malformed_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A malformed user config must never break node discovery — it falls THROUGH to the packaged
+    # default (which still keeps PreviewImage/PreviewAny).
+    cfg = tmp_path / "bad.yaml"
+    cfg.write_text("keep_nodes: : : not valid yaml [")
+    monkeypatch.setenv("FLUXSTUDIO_CONFIG", str(cfg))
+    assert {"PreviewImage", "PreviewAny"} <= kept_default_node_names()
+
+
+def test_only_taidal_nodes_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("FLUXSTUDIO_ONLY_TAIDAL_NODES", raising=False)
+    assert only_taidal_nodes() is False
+    monkeypatch.setenv("FLUXSTUDIO_ONLY_TAIDAL_NODES", "1")
+    assert only_taidal_nodes() is True
+    monkeypatch.setenv("FLUXSTUDIO_ONLY_TAIDAL_NODES", "0")
+    assert only_taidal_nodes() is False
+
+
+def test_array_type_is_a_wire_socket_not_a_widget() -> None:
+    # DATAFLUX_ARRAY (the Extract→Histogram array wire) is a live-object socket type, so graphio's
+    # socket-vs-widget split treats it as a wire. It must NOT be a TYPE_MAP entry (that would retype
+    # auto-generated op params), only a hand-wired adapter socket.
+    assert ARRAY_TYPE == "DATAFLUX_ARRAY"
+    assert _is_socket_type(ARRAY_TYPE) is True
+    from fluxstudio.bridge import TYPE_MAP
+
+    assert ARRAY_TYPE not in TYPE_MAP.values()
 
 
 def test_create_comfy_node() -> None:
@@ -177,7 +239,7 @@ def test_create_comfy_node_scalar_without_default_uses_widget_default() -> None:
         return str(count)
 
     inputs = create_comfy_node(op, "ScalarNode").INPUT_TYPES()
-    assert inputs["required"]["count"] == ("INT", {"default": 0})
+    assert inputs["required"]["count"] == ("INT", {**DEFAULT_WIDGET_CONFIG["INT"], "default": 0})
 
 
 def test_create_comfy_node_string_return_type() -> None:
@@ -517,15 +579,17 @@ def test_register_module_nodes_skips_private_callables() -> None:
 
 
 def test_register_module_nodes_is_a_positive_category_allowlist() -> None:
-    """Only ``category in {op, source, engine}`` registers; task datasets AND uncategorised
+    """Only ``category in {op, source, engine, sink}`` registers; task datasets AND uncategorised
     are excluded.
 
     The generic engines (``Flux``/``JointFlux``) are ``category="engine"`` and now DO register
-    (they compose on the canvas via wired source/op sockets). The raw-callable wrappers
-    ``FilterOp``/``WrappedOp`` are UNcategorised (neither op nor engine), so they stay out even with
-    ``engine`` allowed; task datasets are ``*_dataset`` (a trainer-config concept, not a canvas one);
-    uncategorised callables (helper functions, raw sinks) carry no category. A class appears only once
-    it is deliberately tagged op/source/engine.
+    (they compose on the canvas via wired source/op sockets). DataFlux storage sinks tagged
+    ``category="sink"`` register too (object-member producers wired into a ``DatasetProcessor`` node).
+    The raw-callable wrappers ``FilterOp``/``WrappedOp`` are UNcategorised (neither op nor engine), so
+    they stay out even with ``engine`` allowed; task datasets are ``*_dataset`` (a trainer-config
+    concept, not a canvas one); an UNtagged sink (a ``Storage`` subclass without ``category="sink"``)
+    and uncategorised helper functions carry no category. A class appears only once it is deliberately
+    tagged op/source/engine/sink.
     """
 
     class _FakeEngine:  # category="engine" -> NOW kept (canvas-composable)
@@ -550,6 +614,11 @@ def test_register_module_nodes_is_a_positive_category_allowlist() -> None:
         def __getitem__(self, i: int) -> Sample:
             return Sample(input=i, target=None, metadata={})
 
+    class _FakeSink:  # category="sink" -> kept (a DataFlux storage sink -> DatasetProcessor.sink)
+        __confluid_category__ = "sink"
+
+        def write(self, sample: Sample) -> None: ...
+
     mappings: dict = {}
     display: dict = {}
     discovered = [
@@ -557,12 +626,14 @@ def test_register_module_nodes_is_a_positive_category_allowlist() -> None:
         {"path": "fake.mod:Dataset", "name": "Dataset"},
         {"path": "fake.mod:Uncat", "name": "Uncat"},
         {"path": "fake.mod:RealSource", "name": "RealSource"},
+        {"path": "fake.mod:RealSink", "name": "RealSink"},
     ]
     resolved = {
         "fake.mod:Engine": _FakeEngine,
         "fake.mod:Dataset": _FakeDataset,
         "fake.mod:Uncat": _FakeUncategorised,
         "fake.mod:RealSource": _FakeSource,
+        "fake.mod:RealSink": _FakeSink,
     }
 
     with patch("fluxstudio.bridge.scan_module", return_value=discovered):
@@ -573,6 +644,7 @@ def test_register_module_nodes_is_a_positive_category_allowlist() -> None:
     assert not any("Dataset" in key for key in mappings)  # task dataset excluded
     assert not any("Uncat" in key for key in mappings)  # uncategorised excluded (positive allowlist)
     assert "Taidal_fake_source_RealSource" in mappings  # tagged source kept
+    assert "Taidal_fake_sink_RealSink" in mappings  # tagged sink kept (DatasetProcessor sink node)
 
 
 def test_register_module_nodes_skips_non_callable() -> None:
@@ -678,21 +750,55 @@ def test_negative_float_default_sets_min_in_widget_config() -> None:
     assert "min" in widget_cfg and widget_cfg["min"] < 0
 
 
-def test_positive_float_default_has_no_min_override() -> None:
-    """A FLOAT param with a non-negative default does not get an explicit min."""
+def test_numeric_widgets_always_carry_full_range_bounds() -> None:
+    """EVERY numeric widget carries explicit wide min/max — the ComfyUI frontend clamps
+    a spec without them to ``[0, 2048]``, which silently blocked negative dB values
+    (``TorchSigMetadataOp.noise_power_db = -120``, whose DEFAULT is non-negative) and
+    large ones (``sample_rate = 1e7``)."""
     from confluid import configurable as _cfg
 
     @_cfg(category="op")
-    class _PosDefaultOp:
-        def __init__(self, scale: float = 1.0) -> None:
-            self.scale = scale
+    class _PowerOp:
+        def __init__(self, noise_power_db: float = 0.0, num_taps: int = 1) -> None:
+            self.noise_power_db = noise_power_db
+            self.num_taps = num_taps
 
         def __call__(self, sample: Sample) -> Sample:
             return sample
 
-    spec = create_comfy_node(_PosDefaultOp, "Taidal__PosDefaultOp").INPUT_TYPES()
-    _, widget_cfg = spec["required"]["scale"]
-    assert "min" not in widget_cfg
+    spec = create_comfy_node(_PowerOp, "Taidal__PowerOp").INPUT_TYPES()
+    float_type, float_cfg = spec["required"]["noise_power_db"]
+    assert float_type == "FLOAT"
+    assert float_cfg["min"] <= -120.0
+    assert float_cfg["max"] >= 1e7
+    int_type, int_cfg = spec["required"]["num_taps"]
+    assert int_type == "INT"
+    assert int_cfg["min"] <= -(2**31)
+    assert int_cfg["max"] >= 2**31
+
+
+def test_range_widgets_carry_full_range_bounds() -> None:
+    """The ``__lo``/``__hi`` pair of a Tuple range param inherits the wide bounds —
+    dB ranges are routinely negative (``noise_power_low=(-80.0, -60.0)``)."""
+    from typing import Tuple as _Tuple
+
+    from confluid import configurable as _cfg
+
+    @_cfg(category="op")
+    class _RangeOp:
+        def __init__(self, noise_power_low: _Tuple[float, float] = (-80.0, -60.0)) -> None:
+            self.noise_power_low = noise_power_low
+
+        def __call__(self, sample: Sample) -> Sample:
+            return sample
+
+    spec = create_comfy_node(_RangeOp, "Taidal__RangeOp").INPUT_TYPES()
+    lo_type, lo_cfg = spec["required"]["noise_power_low__lo"]
+    hi_type, hi_cfg = spec["required"]["noise_power_low__hi"]
+    assert lo_type == hi_type == "FLOAT"
+    assert lo_cfg["default"] == -80.0 and hi_cfg["default"] == -60.0
+    assert lo_cfg["min"] <= -120.0 and hi_cfg["min"] <= -120.0
+    assert lo_cfg["max"] >= 1e7 and hi_cfg["max"] >= 1e7
 
 
 def test_op_node_constructs_and_applies() -> None:
@@ -1189,20 +1295,65 @@ def test_nullable_numeric_becomes_blank_string_widget() -> None:
     # Optional[int/float]=None must NOT become an INT/FLOAT widget defaulting to 0: 0 is a
     # distinct, often-breaking value (e.g. HuggingFaceSource count=0 -> "no samples";
     # ThresholdOp low_level=0 -> a real threshold at zero, not "disabled").
-    # Using an INT/FLOAT optional socket causes ComfyUI to call float(None) before execute,
-    # crashing with TypeError. Use a blank STRING widget: "" -> None, "5" -> cast to int.
+    # So the INLINE widget stays a blank STRING ("" -> None / metadata fallback, "5" -> cast). It now
+    # ALSO carries the NULLABLE_NUMERIC tag + its real numeric type, so web/nullable_numeric_socket.js
+    # retypes the "Convert to input" socket from STRING to FLOAT/INT (making the param connectable).
     def fn(count: Optional[int] = None, ratio: Optional[float] = None, n: int = 3) -> None: ...
 
     node_types = create_comfy_node(fn, "Taidal__Nullable").INPUT_TYPES()
     required = node_types.get("required", {})
     optional = node_types.get("optional", {})
-    # Nullable numerics stay in required as blank STRING widgets (not optional sockets).
-    assert required["count"] == ("STRING", {"default": "", "multiline": False})
-    assert required["ratio"] == ("STRING", {"default": "", "multiline": False})
+    # Nullable numerics stay in required as blank STRING widgets (not optional sockets), now tagged.
+    assert required["count"] == (
+        "STRING",
+        {"default": "", "multiline": False, "taidal_widget": "NULLABLE_NUMERIC", "taidal_numeric": "INT"},
+    )
+    assert required["ratio"] == (
+        "STRING",
+        {"default": "", "multiline": False, "taidal_widget": "NULLABLE_NUMERIC", "taidal_numeric": "FLOAT"},
+    )
     assert "count" not in optional
     assert "ratio" not in optional
     # A concrete-default int is still a required INT widget with the right default.
-    assert required["n"] == ("INT", {"default": 3})
+    assert required["n"] == ("INT", {**DEFAULT_WIDGET_CONFIG["INT"], "default": 3})
+
+
+def test_nullable_numeric_validate_inputs_accepts_numeric_wire() -> None:
+    # A node with a nullable-numeric param gets a VALIDATE_INPUTS so ComfyUI accepts a FLOAT/INT wire
+    # into it (the NoiseFloorOp.applied_snr_db -> noise_power_db case). Without it, the canvas socket
+    # is retyped to FLOAT but the backend INPUT_TYPES is STRING -> Queue fails "Return type mismatch".
+    @configurable(category="op")
+    class _NoiseLike:
+        def __init__(self, noise_power_db: Optional[float] = None) -> None:
+            self.noise_power_db = noise_power_db
+
+        def __call__(self, sample: Sample) -> Sample:
+            return sample
+
+    node = create_comfy_node(_NoiseLike, "Taidal__NoiseLike")
+    assert hasattr(node, "VALIDATE_INPUTS")
+    # A FLOAT/INT @output wired into the nullable param validates (the wire we want to allow).
+    assert node.VALIDATE_INPUTS(input_types={"noise_power_db": "FLOAT"}) is True
+    assert node.VALIDATE_INPUTS(input_types={"noise_power_db": "INT"}) is True
+    # Other sockets still type-check: an exact match passes, a genuine mismatch is rejected.
+    assert node.VALIDATE_INPUTS(input_types={"sample": "DATAFLUX_SAMPLE"}) is True
+    bad = node.VALIDATE_INPUTS(input_types={"sample": "FLOAT"})
+    assert bad is not True and "sample" in bad
+
+
+def test_node_without_nullable_numeric_has_no_validate_inputs() -> None:
+    # VALIDATE_INPUTS is added ONLY when a node exposes a nullable-numeric param — other nodes keep
+    # ComfyUI's native return-type check untouched.
+    @configurable(category="op")
+    class _PlainOp:
+        def __init__(self, gain: float = 1.0) -> None:
+            self.gain = gain
+
+        def __call__(self, sample: Sample) -> Sample:
+            return sample
+
+    node = create_comfy_node(_PlainOp, "Taidal__PlainOp")
+    assert not hasattr(node, "VALIDATE_INPUTS")
 
 
 def test_coerce_kwargs_casts_filled_nullable_numeric() -> None:
@@ -1578,8 +1729,11 @@ def test_build_runnable_node_member_sockets_and_widgets() -> None:
     assert req["model"] == (_object_socket("model"),)
     assert req["train_set"] == (SOURCE_TYPE,)
     # ``num_classes: Optional[int] = None`` is a nullable-numeric param → blank STRING widget
-    # (INT/FLOAT sockets cause ComfyUI to crash with float(None) when unconnected).
-    assert req["num_classes"] == ("STRING", {"default": "", "multiline": False})
+    # (preserves None/fallback), tagged NULLABLE_NUMERIC so the JS retypes its converted socket to INT.
+    assert req["num_classes"] == (
+        "STRING",
+        {"default": "", "multiline": False, "taidal_widget": "NULLABLE_NUMERIC", "taidal_numeric": "INT"},
+    )
     assert req["run_name"][0] == "STRING"
     # Deferred / dataset body slots -> OPTIONAL sockets (unwired keeps the baked default).
     # ``optimizer`` is role-less (not in _STRICT_SLOT_ROLES) -> generic OBJECT_TYPE, not qualified.
@@ -2049,6 +2203,75 @@ def test_strict_sockets_reject_cross_role() -> None:
     assert loss_out != model_slot  # cross-role wire is rejected by ComfyUI
 
 
+# --------------------------------------------------------------------------- #
+# Sink nodes (category="sink" → an object-member producer feeding DatasetProcessor)
+# --------------------------------------------------------------------------- #
+
+
+@configurable(category="sink", validate=False)
+class _FakeStorageSink:
+    """A DataFlux storage sink (``category="sink"``) — built as a ``DATAFLUX_OBJECT:sink`` producer."""
+
+    def __init__(self, path: str = "./out", overwrite: bool = False) -> None:
+        self.path = path
+        self.overwrite = overwrite
+
+    def write(self, sample: Sample) -> None: ...  # the whole-Flux sink contract (no run())
+
+
+@configurable(validate=False)
+class _FakeProcessor:
+    """A ``DatasetProcessor``-shaped runnable: a ``flux`` SOURCE input + an optional ``sink`` member."""
+
+    def __init__(self, flux: Any, sink: Any = None) -> None:
+        self.flux = flux
+        self.sink = sink
+
+    def run(self) -> None: ...
+
+
+def test_is_sink_class() -> None:
+    from fluxstudio.bridge import _is_sink_class
+
+    assert _is_sink_class(_FakeStorageSink) is True
+    assert _is_sink_class(_FakeModel) is False  # a role-tagged object member, not a sink
+    assert _is_sink_class(object) is False  # untagged class
+
+
+def test_role_for_class_maps_sink_category_to_sink_role() -> None:
+    """A ``category="sink"`` class carries no ``role=`` tag, but ``_role_for_class`` maps it to a
+    synthetic ``"sink"`` role so its object output sockets as ``DATAFLUX_OBJECT:sink`` — matching the
+    ``DatasetProcessor.sink`` slot."""
+    from fluxstudio.bridge import _role_for_class
+
+    assert _role_for_class(_FakeStorageSink) == "sink"
+
+
+def test_create_comfy_node_dispatches_sink_to_object_node() -> None:
+    """A ``category="sink"`` storage sink (no run / no __call__(sample) / no role tag) is dispatched to
+    an OBJECT producer node: instance+class outputs on a role-qualified ``DATAFLUX_OBJECT:sink`` wire,
+    its ctor config rendered as widgets."""
+    node = create_comfy_node(_FakeStorageSink, "Taidal_fake_sink_FakeStorageSink", "Taidal/Sink")
+    assert node.TAIDAL_NODE_KIND == "object"
+    assert node.RETURN_TYPES == (_object_socket("sink"), _object_socket("sink"))
+    assert node.RETURN_NAMES == ("instance", "class")
+    req = node.INPUT_TYPES()["required"]
+    assert "path" in req and "overwrite" in req  # ctor config -> widgets, not sockets
+
+
+def test_runnable_sink_slot_matches_sink_node_and_flux_is_source() -> None:
+    """A ``DatasetProcessor``-shaped runnable renders ``flux`` as a ``DATAFLUX_SOURCE`` socket and
+    ``sink`` as a ``DATAFLUX_OBJECT:sink`` slot — and the sink node's output type EQUALS that slot, so
+    ComfyUI's string-equality rule lets a sink node dock into the processor (the whole feature)."""
+    proc = _build_runnable_node(_FakeProcessor, "Taidal_fake_FakeProcessor", "Taidal/Proc")
+    spec = proc.INPUT_TYPES()
+    assert spec["required"]["flux"] == (SOURCE_TYPE,)  # a Flux engine node docks into ``flux``
+    sink_slot = spec["optional"]["sink"][0]
+    assert sink_slot == _object_socket("sink")
+    sink_out = create_comfy_node(_FakeStorageSink, "Taidal_sink2", "Taidal/Sink").RETURN_TYPES[0]
+    assert sink_out == sink_slot  # the dock contract: sink-node output == processor sink slot
+
+
 class _PickyMember:
     """A non-lazy member that rejects an incomplete config at construction (like a model needing a
     positive ``num_classes``)."""
@@ -2257,8 +2480,8 @@ def test_build_config_inputs_tuple_int_emits_lo_hi_widgets() -> None:
     def fn(n_range: Tuple[int, int] = (2, 8)) -> None: ...
 
     required, _, _ = _build_config_inputs(fn)
-    assert required["n_range__lo"] == ("INT", {"default": 2})
-    assert required["n_range__hi"] == ("INT", {"default": 8})
+    assert required["n_range__lo"] == ("INT", {**DEFAULT_WIDGET_CONFIG["INT"], "default": 2})
+    assert required["n_range__hi"] == ("INT", {**DEFAULT_WIDGET_CONFIG["INT"], "default": 8})
 
 
 def test_build_config_inputs_tuple_no_default_uses_fallback() -> None:
@@ -2269,8 +2492,8 @@ def test_build_config_inputs_tuple_no_default_uses_fallback() -> None:
     def fn(r: Tuple[float, float]) -> None: ...
 
     required, _, _ = _build_config_inputs(fn)
-    assert required["r__lo"] == ("FLOAT", {"default": 0.0})
-    assert required["r__hi"] == ("FLOAT", {"default": 1.0})
+    assert required["r__lo"] == ("FLOAT", {**DEFAULT_WIDGET_CONFIG["FLOAT"], "default": 0.0})
+    assert required["r__hi"] == ("FLOAT", {**DEFAULT_WIDGET_CONFIG["FLOAT"], "default": 1.0})
 
 
 def test_coerce_kwargs_reconstructs_float_tuple() -> None:
@@ -2326,3 +2549,118 @@ def test_range_widget_node_execute_passes_tuple_to_constructor() -> None:
     # Verify execute reconstructs the tuple
     node_cls().execute(power_range__lo=0.05, power_range__hi=5.0)
     assert received["power_range"] == pytest.approx((0.05, 5.0))
+
+
+def test_interval_bounds_extraction() -> None:
+    """_interval_bounds reads Interval/Ge/Le metadata, unwraps Optional, (None, None) when unmarked."""
+    from typing import Annotated as _Ann
+    from typing import Optional as _Opt
+
+    from annotated_types import Ge as _Ge
+    from annotated_types import Interval as _Interval
+
+    from fluxstudio.bridge import _interval_bounds
+
+    assert _interval_bounds(_Ann[float, _Interval(ge=-200.0, le=50.0)]) == (-200.0, 50.0)
+    assert _interval_bounds(_Ann[float, _Ge(ge=0)]) == (0.0, None)  # partial: lower bound only
+    assert _interval_bounds(_Opt[_Ann[float, _Interval(ge=-1.0, le=1.0)]]) == (-1.0, 1.0)
+    assert _interval_bounds(float) == (None, None)
+    assert _interval_bounds(_Opt[float]) == (None, None)
+
+
+def test_interval_marked_widgets_get_bounds() -> None:
+    """A PEP-593 Interval mark narrows the full-range default bounds on FLOAT and INT widgets."""
+    from typing import Annotated as _Ann
+
+    from annotated_types import Interval as _Interval
+    from confluid import configurable as _cfg
+
+    @_cfg(category="op")
+    class _MarkedOp:
+        def __init__(
+            self,
+            noise_power_db: _Ann[float, _Interval(ge=-200.0, le=50.0)] = -30.0,
+            n_bits: _Ann[int, _Interval(ge=1, le=32)] = 8,
+        ) -> None:
+            self.noise_power_db = noise_power_db
+            self.n_bits = n_bits
+
+        def __call__(self, sample: Sample) -> Sample:
+            return sample
+
+    spec = create_comfy_node(_MarkedOp, "Taidal__MarkedOp").INPUT_TYPES()
+    f_type, f_cfg = spec["required"]["noise_power_db"]
+    assert f_type == "FLOAT" and f_cfg["min"] == -200.0 and f_cfg["max"] == 50.0
+    i_type, i_cfg = spec["required"]["n_bits"]
+    assert i_type == "INT" and i_cfg["min"] == 1 and i_cfg["max"] == 32
+
+
+def test_interval_marked_tuple_range_bounds_both_endpoints() -> None:
+    """Annotated[Tuple[float, float], Interval(...)] bounds BOTH __lo/__hi widgets;
+    a partial mark (Ge only) leaves the other side at the full-range default."""
+    from typing import Annotated as _Ann
+    from typing import Tuple as _Tup
+
+    from annotated_types import Interval as _Interval
+    from confluid import configurable as _cfg
+
+    @_cfg(category="op")
+    class _RangeMarkedOp:
+        def __init__(
+            self,
+            db_window: _Ann[_Tup[float, float], _Interval(ge=-200.0, le=100.0)] = (-80.0, -60.0),
+            watts: _Ann[_Tup[float, float], _Interval(ge=0.0)] = (0.01, 10.0),
+        ) -> None:
+            self.db_window = db_window
+            self.watts = watts
+
+        def __call__(self, sample: Sample) -> Sample:
+            return sample
+
+    spec = create_comfy_node(_RangeMarkedOp, "Taidal__RangeMarkedOp").INPUT_TYPES()
+    for key in ("db_window__lo", "db_window__hi"):
+        _, cfg = spec["required"][key]
+        assert cfg["min"] == -200.0 and cfg["max"] == 100.0
+    _, w_cfg = spec["required"]["watts__lo"]
+    assert w_cfg["min"] == 0.0 and w_cfg["max"] == 1e308  # ge-only: max stays full-range
+
+
+def test_optional_interval_marked_param_stays_nullable_string_and_coerces() -> None:
+    """Optional[Annotated[float, Interval]] = None keeps the blank-STRING nullable
+    convention, and a typed value still casts to float."""
+    from typing import Annotated as _Ann
+    from typing import Optional as _Opt
+
+    from annotated_types import Interval as _Interval
+    from confluid import configurable as _cfg
+
+    @_cfg(category="op")
+    class _NullableMarkedOp:
+        def __init__(self, maybe_db: _Opt[_Ann[float, _Interval(ge=-200.0, le=50.0)]] = None) -> None:
+            self.maybe_db = maybe_db
+
+        def __call__(self, sample: Sample) -> Sample:
+            return sample
+
+    spec = create_comfy_node(_NullableMarkedOp, "Taidal__NullableMarkedOp").INPUT_TYPES()
+    widget_type, cfg = spec["required"]["maybe_db"]
+    assert widget_type == "STRING"
+    # Still nullable-STRING, but tagged so its converted socket retypes to FLOAT (connectable).
+    assert cfg["taidal_widget"] == "NULLABLE_NUMERIC" and cfg["taidal_numeric"] == "FLOAT"
+    assert _coerce_kwargs(_NullableMarkedOp, {"maybe_db": "-120"})["maybe_db"] == -120.0
+    assert _coerce_kwargs(_NullableMarkedOp, {"maybe_db": ""})["maybe_db"] is None
+
+
+def test_map_type_unwraps_annotated() -> None:
+    """Annotated metadata must not reach the string heuristics — the repr of
+    ``Interval`` contains the substring "int" and would mis-classify."""
+    from typing import Annotated as _Ann
+    from typing import Tuple as _Tup
+
+    from annotated_types import Interval as _Interval
+
+    from fluxstudio.bridge import _map_type
+
+    assert _map_type("x", _Ann[float, _Interval(ge=-1.0, le=1.0)]) == "FLOAT"
+    assert _map_type("x", _Ann[int, _Interval(ge=0, le=10)]) == "INT"
+    assert _map_type("x", _Ann[_Tup[float, float], _Interval(ge=0.0)]) == "RANGE_FLOAT"

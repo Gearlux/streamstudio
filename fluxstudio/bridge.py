@@ -35,6 +35,7 @@ import json
 import os
 import time
 import types as _types
+from pathlib import Path
 from typing import (
     AbstractSet,
     Annotated,
@@ -44,6 +45,7 @@ from typing import (
     List,
     Literal,
     Optional,
+    Set,
     Tuple,
     Type,
     Union,
@@ -54,6 +56,7 @@ from typing import (
 )
 
 import datasets
+from annotated_types import Ge, Gt, Interval, Le, Lt
 from confluid import mandatory_param_names, output_specs, parse_param_docs
 from dataflux.discovery import get_callable_path, resolve_callable, scan_module
 from dataflux.typespec import infer_sample_type
@@ -85,6 +88,11 @@ RUNNABLE_TYPE = "DATAFLUX_RUNNABLE"
 # deferred ``LazyClass`` of one (when the member class is tagged ``lazy``) — ridden as a wire so an
 # object node feeds a runnable's member slot. Distinct from SOURCE (datasets ride DATAFLUX_SOURCE).
 OBJECT_TYPE = "DATAFLUX_OBJECT"
+# A raw numpy array / torch tensor ridden as a wire — the field value behind a Sample, carried OUT of
+# the Sample extractor and INTO the Array/Tensor Histogram viewer for value inspection. A hand-wired
+# ADAPTER socket only (``nodes.py``); deliberately NOT in ``TYPE_MAP`` — no op-param annotation maps
+# to it, so auto-generated op nodes are unaffected (an ``np.ndarray`` param stays a STRING widget).
+ARRAY_TYPE = "DATAFLUX_ARRAY"
 
 # Mapping Python types to ComfyUI widget types.
 TYPE_MAP = {
@@ -95,9 +103,14 @@ TYPE_MAP = {
     datasets.Dataset: "HF_DATASET",
 }
 
+# Numeric widgets MUST carry explicit full-range bounds: when ``min``/``max`` are absent
+# from the spec, the ComfyUI frontend clamps to ``min ?? 0`` and ``max ?? 2048`` — silently
+# rejecting negative values (every dB knob: ``noise_power_db=-120``) and large ones
+# (``sample_rate=1e7``, frequencies in Hz). The annotation carries no range info, so the
+# widget is unbounded; an op that needs validation does it in its constructor.
 DEFAULT_WIDGET_CONFIG: Dict[str, Dict[str, Any]] = {
-    "INT": {"default": 0},
-    "FLOAT": {"default": 0.0, "step": 0.01},
+    "INT": {"default": 0, "min": -(2**53), "max": 2**53},
+    "FLOAT": {"default": 0.0, "step": 0.01, "min": -1e308, "max": 1e308},
     "STRING": {"default": "", "multiline": False},
     "BOOLEAN": {"default": False},
 }
@@ -109,6 +122,7 @@ _SOCKET_TYPES = {
     OP_TYPE,
     RUNNABLE_TYPE,
     OBJECT_TYPE,
+    ARRAY_TYPE,
     "HF_DATASET",
 }
 
@@ -145,11 +159,13 @@ def _is_socket_type(socket_type: Any) -> bool:
     return _base_socket_type(socket_type) in _SOCKET_TYPES
 
 
-# A runnable's constructor params / body slots that hold a DATASET / SOURCE — rendered as a wired
-# ``DATAFLUX_SOURCE`` socket (fed by a Source node) instead of a STRING widget. ``source`` (handled by
-# ``_SOURCE_PARAM`` too) covers ``DatasetProcessor``. Detected by name (same convention as the op/
-# source-list params); a runnable's other object members ride ``DATAFLUX_OBJECT`` sockets.
-_DATASET_MEMBER_PARAMS = {"train_set", "val_set", "test_set", "dataset"}
+# A runnable's constructor params / body slots that hold a DATASET / SOURCE / FLUX — rendered as a
+# wired ``DATAFLUX_SOURCE`` socket (fed by a Source / ``Flux`` engine node) instead of a STRING
+# widget. ``flux`` covers ``marainer.processing.DatasetProcessor`` (its sole non-sink input is the
+# ``Flux`` to write); ``source`` is also handled by ``_SOURCE_PARAM``. Detected by name (same
+# convention as the op/source-list params); a runnable's other object members ride ``DATAFLUX_OBJECT``
+# sockets.
+_DATASET_MEMBER_PARAMS = {"train_set", "val_set", "test_set", "dataset", "flux"}
 
 # Discovery ROLES whose classes become OBJECT nodes (a trainer/runnable slot-filler producing a
 # ``DATAFLUX_OBJECT`` wire): a task-scoped model / loss / metric, plus ``logger`` (a Lightning logger
@@ -161,7 +177,9 @@ _DATASET_MEMBER_PARAMS = {"train_set", "val_set", "test_set", "dataset"}
 # form-spec slot pickers (which resolve a picker FROM the slot's default-target category and would
 # then offer the raw ``params``-taking optimizer). Loggers carry ``role="logger"`` (NOT ``lazy``) so
 # they build EAGERLY — a logger's required ``save_dir`` must stay a configurable widget, not be
-# skipped as a runtime-injected slot. See ``_is_object_member_class``.
+# skipped as a runtime-injected slot. See ``_is_object_member_class``. (DataFlux sinks are NOT here:
+# they're admitted by ``category="sink"`` in ``_NODE_CATEGORIES`` and dispatched by ``_is_sink_class``,
+# not by role — but ``_role_for_class`` maps them to a synthetic ``"sink"`` role for socket-typing.)
 _MEMBER_ROLES = {"model", "loss", "metric", "logger"}
 
 # A runnable's object-member PARAM NAME → the ROLE its slot accepts. The slot socket is then
@@ -172,7 +190,9 @@ _MEMBER_ROLES = {"model", "loss", "metric", "logger"}
 # label/grouping), never on the socket. Mirrors navigaitor's ``configs.generate.PARAM_NAME_TO_ROLE``
 # (fluxstudio must NOT import navigaitor — the convention is small and stable). ``logger`` is
 # deliberately ABSENT, as are the infra members (optimizer/loader/lightning): those stay generic
-# ``DATAFLUX_OBJECT`` (no meaningful role-kind distinction to enforce).
+# ``DATAFLUX_OBJECT`` (no meaningful role-kind distinction to enforce). ``sink`` IS qualified so a
+# DataFlux storage sink (output ``DATAFLUX_OBJECT:sink`` via ``_role_for_class``) docks ONLY into a
+# ``DatasetProcessor.sink`` slot — never a model/loss slot, and vice versa.
 _STRICT_SLOT_ROLES = {
     "model": "model",
     "loss_fn": "loss",
@@ -180,6 +200,7 @@ _STRICT_SLOT_ROLES = {
     "train_metrics": "metric",
     "val_metrics": "metric",
     "test_metrics": "metric",
+    "sink": "sink",
 }
 
 # The roles whose object sockets are ROLE-qualified (``DATAFLUX_OBJECT:<role>``). Everything else
@@ -210,7 +231,14 @@ def _role_for_class(cls: Any) -> Optional[str]:
     Python type (a base-class qualname substring scan via :data:`_TYPE_ROLE_BY_BASE`), so e.g. an
     untagged ``torchmetrics`` metric still sockets as a ``metric``. Returns ``None`` when neither a
     tag nor a recognised base applies → the object rides the generic ``DATAFLUX_OBJECT``.
+
+    A ``category="sink"`` class maps to a synthetic ``"sink"`` role (DataFlux storage sinks carry no
+    ``role=`` tag and their ``Storage`` base isn't in :data:`_TYPE_ROLE_BY_BASE`) so the sink node's
+    object output sockets as ``DATAFLUX_OBJECT:sink`` — matching the ``DatasetProcessor.sink`` slot.
+    Checked first: it is the deliberate sink marker (see :data:`_NODE_CATEGORIES` / :func:`_is_sink_class`).
     """
+    if getattr(cls, "__confluid_category__", None) == "sink":
+        return "sink"
     role = getattr(cls, "__confluid_role__", None)
     if role:
         return str(role)
@@ -320,6 +348,14 @@ _HF_METADATA_PARAM = "metadata_features"
 #                   ``Flux.ops`` (dynamic ``op_N`` ``DATAFLUX_OP`` inputs); ``JointFlux.fluxes``
 #                   (dynamic ``source_N`` ``DATAFLUX_SOURCE`` inputs). So a Source/Op node's output
 #                   (it already exposes itself as ``DATAFLUX_SOURCE`` / ``DATAFLUX_OP``) feeds them.
+#   * ``sink``    — the DataFlux storage sinks (``HDF5Sink`` / ``YoloSink`` / ``JsonSink`` …) that
+#                   write a whole Flux (``write(sample)`` / ``open`` / ``flush`` / ``close``). A sink
+#                   is an object-member PRODUCER (``_build_object_node`` → an ``instance`` + ``class``
+#                   output on a ROLE-qualified ``DATAFLUX_OBJECT:sink`` wire, see ``_is_sink_class`` /
+#                   ``_role_for_class``) that docks into a ``DatasetProcessor`` runnable node's
+#                   ``sink`` slot — the same model/loss/logger → trainer relationship. The prediction
+#                   sinks (``DetectionPredictionsSink`` / ``ClassificationPredictionsSink``,
+#                   ``write(prediction, metadata)``) are a DIFFERENT contract and stay UNcategorised.
 # Everything else is excluded by construction:
 #   * the raw-callable op wrappers ``FilterOp`` / ``WrappedOp`` — bare ``@configurable``, so
 #     UNCATEGORISED (neither ``op`` nor ``engine``): their constructor takes a raw Python callable,
@@ -328,9 +364,10 @@ _HF_METADATA_PARAM = "metadata_features"
 #   * task ``dataset``s (``classification_dataset`` …) — a trainer/model-config concept (a
 #     task-scoped, model-ready dataset slot), meaningful for navigaitor's config composition but
 #     NOT for a per-sample DataFlux canvas, which only needs a ``source`` to yield Samples.
-#   * uncategorised module-level helper functions and raw sinks (no ``__confluid_category__``).
-# To surface another role (e.g. ``"sink"``) add it here AND tag the classes.
-_NODE_CATEGORIES = {"op", "source", "engine"}
+#   * uncategorised module-level helper functions (no ``__confluid_category__``); an UNtagged sink
+#     (a raw ``Storage`` subclass without ``category="sink"``) is likewise excluded.
+# To surface another role add it here AND tag the classes.
+_NODE_CATEGORIES = {"op", "source", "engine", "sink"}
 
 
 # The CLI's ``--no-default-nodes`` flag exports this so the fluxstudio import inside ComfyUI knows
@@ -350,6 +387,79 @@ def hide_default_comfy_nodes() -> bool:
     root (:func:`node_root`).
     """
     return os.environ.get(_HIDE_DEFAULT_NODES_ENV, "").strip().lower() in _TRUTHY
+
+
+# ALWAYS-kept base: PreviewImage + PreviewAny ("Preview as text"), the native viewers the
+# Extract-from-Sample adapter feeds. The config file's ``keep_nodes:`` ADDS to these — the extra
+# "appropriate defaults" ship in `config.default.yaml` (`_packaged_default_config_path`), installed
+# with the package and used whenever the user hasn't provided their own config.
+_DEFAULT_KEEP_NODES = ("PreviewImage", "PreviewAny")
+# True ⇒ show ONLY Taidal nodes + the keep-list (hide built-ins AND other custom packs).
+_ONLY_TAIDAL_NODES_ENV = "FLUXSTUDIO_ONLY_TAIDAL_NODES"
+# Carries the config-file LOCATION (not its values) across the CLI→ComfyUI-subprocess boundary; the
+# keep-list itself lives IN the file. Empty/unset ⇒ the default user path.
+_CONFIG_PATH_ENV = "FLUXSTUDIO_CONFIG"
+
+
+def palette_config_path() -> Path:
+    """The USER palette config path: ``$FLUXSTUDIO_CONFIG`` (the CLI's ``--config <file>``) else the
+    default ``~/.fluxstudio/config.yaml``. The shipped :func:`_packaged_default_config_path` is the
+    fallback when this file is absent (so "appropriate defaults" apply when the user hasn't overridden).
+    """
+    env = os.environ.get(_CONFIG_PATH_ENV, "").strip()
+    return Path(env) if env else Path.home() / ".fluxstudio" / "config.yaml"
+
+
+def _packaged_default_config_path() -> Path:
+    """The default palette config SHIPPED with the package (source control) — `fluxstudio/config.default.yaml`."""
+    return Path(__file__).resolve().parent / "config.default.yaml"
+
+
+def _load_palette_config() -> Dict[str, Any]:
+    """Parse the palette config YAML → a dict, trying the user path THEN the shipped default.
+
+    First readable file wins (user override → shipped defaults). Returns ``{}`` only if neither is
+    readable; a malformed file logs a `warning` and falls through (never breaks node discovery).
+    """
+    for path in (palette_config_path(), _packaged_default_config_path()):
+        if not path.exists():
+            continue
+        try:
+            import yaml
+
+            data = yaml.safe_load(path.read_text()) or {}
+            if isinstance(data, dict):
+                return data
+        except Exception as exc:  # noqa: BLE001 - a malformed config must never break node discovery
+            logger.warning(f"FluxStudio: ignoring unreadable palette config {path}: {exc}")
+    return {}
+
+
+def kept_default_node_names() -> Set[str]:
+    """Default-node class names spared from pruning: PreviewImage/PreviewAny ∪ the config's ``keep_nodes``.
+
+    ``PreviewImage`` / ``PreviewAny`` are ALWAYS kept (the native image / "Preview as text" viewers);
+    the palette config's ``keep_nodes:`` list ADDS more. The config is the user's
+    (:func:`palette_config_path` — ``$FLUXSTUDIO_CONFIG`` / ``--config`` else ``~/.fluxstudio/config.yaml``)
+    if present, ELSE the SHIPPED `config.default.yaml` (installed from source control — so its
+    appropriate defaults apply when the user hasn't overridden). Honored by BOTH the
+    ``--no-default-nodes`` backend prune (``fluxstudio.__init__``) and the ``--only-taidal-nodes``
+    frontend filter (``web/palette_filter.js`` via ``/taidal/palette_config``).
+    """
+    keep = _load_palette_config().get("keep_nodes")
+    extra = {str(n).strip() for n in keep if str(n).strip()} if isinstance(keep, list) else set()
+    return set(_DEFAULT_KEEP_NODES) | extra
+
+
+def only_taidal_nodes() -> bool:
+    """True when the CLI asked (via ``--only-taidal-nodes``) to show ONLY Taidal nodes + the keep-list.
+
+    Hides EVERY non-Taidal node — ComfyUI built-ins AND other third-party custom packs — from the
+    palette. Read from :data:`_ONLY_TAIDAL_NODES_ENV`; drives the post-load frontend filter
+    (``web/palette_filter.js``). Stronger than :func:`hide_default_comfy_nodes`; the CLI sets both env
+    vars together so the built-ins are also backend-pruned and the palette roots.
+    """
+    return os.environ.get(_ONLY_TAIDAL_NODES_ENV, "").strip().lower() in _TRUTHY
 
 
 def node_root() -> str:
@@ -443,8 +553,54 @@ def _literal_options(annotation: Any) -> Optional[List[Any]]:
     return None
 
 
+def _as_float(value: Any) -> Optional[float]:
+    """Numeric annotated_types bound -> float; non-numeric (rare custom bound) -> None."""
+    return float(value) if isinstance(value, (int, float)) else None
+
+
+def _interval_bounds(annotation: Any) -> Tuple[Optional[float], Optional[float]]:
+    """Extract ``(min, max)`` from PEP-593 ``Annotated[..., Interval/Ge/Le/Gt/Lt]`` metadata.
+
+    The range-mark convention: a numeric param annotated e.g.
+    ``Annotated[float, Interval(ge=-200.0, le=50.0)]`` renders as a BOUNDED widget
+    (this helper feeds min/max), and ``confluid.to_pydantic`` carries the same mark
+    into navigaitor's JSON schema — one mark, every GUI. ``Optional``/``Union`` arms
+    are unwrapped; an unmarked annotation returns ``(None, None)`` so the full-range
+    ``DEFAULT_WIDGET_CONFIG`` bounds stay in effect. Marks are UX/schema metadata —
+    the constructor remains the validation authority.
+    """
+    origin = get_origin(annotation)
+    if origin is Union:
+        for arm in get_args(annotation):
+            lo, hi = _interval_bounds(arm)
+            if (lo, hi) != (None, None):
+                return lo, hi
+        return None, None
+    if origin is not Annotated:
+        return None, None
+    lo = hi = None
+    for meta in get_args(annotation)[1:]:
+        if isinstance(meta, Interval):
+            lo = _as_float(meta.ge if meta.ge is not None else meta.gt)
+            hi = _as_float(meta.le if meta.le is not None else meta.lt)
+        elif isinstance(meta, Ge):
+            lo = _as_float(meta.ge)
+        elif isinstance(meta, Gt):
+            lo = _as_float(meta.gt)
+        elif isinstance(meta, Le):
+            hi = _as_float(meta.le)
+        elif isinstance(meta, Lt):
+            hi = _as_float(meta.lt)
+    return lo, hi
+
+
 def _map_type(param_name: str, annotation: Any) -> str:
     """Map a Python type annotation to a ComfyUI socket/widget type string."""
+    if get_origin(annotation) is Annotated:
+        # classify by the underlying type; the metadata (e.g. Interval) is read separately
+        # by _interval_bounds — and its repr must not reach the string heuristics below
+        # ("Interval" contains "int").
+        return _map_type(param_name, get_args(annotation)[0])
     if annotation is datasets.Dataset:
         return "HF_DATASET"
 
@@ -550,14 +706,24 @@ def _widget_for(param: inspect.Parameter, owner: Optional[Callable] = None) -> T
         default = param.default if has_default and isinstance(param.default, str) else ""
         return "STRING", {"default": default, "taidal_widget": "DIRECTORY"}
 
-    # Nullable numeric (e.g. ``Optional[int] = None``, ``Optional[Union[float, int, str]] = None``
-    # like ``ThresholdOp.low_level`` / ``HuggingFaceSource.count``):
-    # INT/FLOAT widgets can't represent None — 0 is a distinct, often-breaking value.
-    # A FLOAT/INT optional socket triggers ComfyUI's type coercion (``float(None)``) when the
-    # socket is left unconnected, crashing before execute is called.  Use a blank STRING widget
-    # instead: "" → None (disabled), "5.5" → cast to the numeric type in ``_coerce_kwargs``.
+    # Nullable numeric (e.g. ``Optional[int] = None``, ``Optional[float] = None`` like
+    # ``NoiseFloorOp.noise_power_db`` / ``HuggingFaceSource.count``):
+    # INT/FLOAT widgets can't represent None — 0 is a distinct, often-breaking value — so the
+    # inline widget stays a blank STRING (``"" → None`` = use the constructor default / stamped
+    # metadata fallback; ``"5.5" → cast`` in ``_coerce_kwargs``). The ``taidal_widget`` tag lets
+    # ``web/nullable_numeric_socket.js`` RETYPE the socket created by ComfyUI's "Convert to input"
+    # from STRING to the real ``taidal_numeric`` (FLOAT/INT) — so a numeric output (a Math result,
+    # another op's @output) can wire in (and the export compilers turn the wire into a ConfigureOp).
+    # (The str-capable ``Optional[Union[float, int, str]] = None`` params — ``ThresholdOp.low_level``
+    # with its ``"{meta}"`` expression support — map to STRING above and never reach here, so their
+    # blank-STRING-and-stays-STRING behaviour is unchanged.)
     if param.default is None and comfy_type in ("INT", "FLOAT"):
-        return "STRING", {"default": "", "multiline": False}
+        return "STRING", {
+            "default": "",
+            "multiline": False,
+            "taidal_widget": "NULLABLE_NUMERIC",
+            "taidal_numeric": comfy_type,
+        }
 
     # Nullable bool (e.g. ``Optional[bool] = None`` like ``pl.Trainer.enable_progress_bar`` /
     # ``enable_checkpointing`` / ``enable_model_summary``): a ComfyUI BOOLEAN checkbox can't BE None, and
@@ -572,16 +738,19 @@ def _widget_for(param: inspect.Parameter, owner: Optional[Callable] = None) -> T
     if has_default and param.default is not None:
         if comfy_type == "INT" and isinstance(param.default, int):
             config["default"] = param.default
-            if param.default < 0:
-                config["min"] = -(2**53)
         elif comfy_type == "FLOAT" and isinstance(param.default, (int, float)):
             config["default"] = float(param.default)
-            if param.default < 0:
-                config["min"] = -1e308
         elif comfy_type == "BOOLEAN" and isinstance(param.default, bool):
             config["default"] = param.default
         elif comfy_type == "STRING":
             config["default"] = str(param.default)
+    if comfy_type in ("INT", "FLOAT"):
+        # PEP-593 range mark narrows the full-range default bounds.
+        lo, hi = _interval_bounds(param.annotation)
+        if lo is not None:
+            config["min"] = int(lo) if comfy_type == "INT" else lo
+        if hi is not None:
+            config["max"] = int(hi) if comfy_type == "INT" else hi
     return comfy_type, config
 
 
@@ -671,8 +840,18 @@ def _build_config_inputs(
             ):
                 default_lo = cast_(param.default[0])
                 default_hi = cast_(param.default[1])
-            lo_cfg: Dict[str, Any] = {"default": default_lo}
-            hi_cfg: Dict[str, Any] = {"default": default_hi}
+            # Inherit the full-range min/max (+ step) — dB ranges are routinely negative
+            # (TimeVaryingNoiseOp.noise_power_low = (-80, -60)) and frequency ranges exceed
+            # the frontend's implicit 2048 cap.
+            lo_cfg: Dict[str, Any] = {**DEFAULT_WIDGET_CONFIG[native], "default": default_lo}
+            hi_cfg: Dict[str, Any] = {**DEFAULT_WIDGET_CONFIG[native], "default": default_hi}
+            # A PEP-593 range mark on the tuple (Annotated[Tuple[float, float], Interval(...)])
+            # bounds BOTH endpoint widgets.
+            bound_lo, bound_hi = _interval_bounds(param.annotation)
+            if bound_lo is not None:
+                lo_cfg["min"] = hi_cfg["min"] = cast_(bound_lo)
+            if bound_hi is not None:
+                lo_cfg["max"] = hi_cfg["max"] = cast_(bound_hi)
             if doc:
                 lo_cfg["tooltip"] = doc
                 hi_cfg["tooltip"] = doc
@@ -911,6 +1090,21 @@ def _is_object_member_class(obj: Any) -> bool:
     return getattr(obj, "__confluid_role__", None) in _MEMBER_ROLES or bool(getattr(obj, "__confluid_lazy__", False))
 
 
+def _is_sink_class(obj: Any) -> bool:
+    """True if ``obj`` is a DataFlux storage sink tagged ``@configurable(category="sink")``.
+
+    A sink (``HDF5Sink`` / ``YoloSink`` / ``JsonSink`` …) writes a whole Flux via
+    ``write(sample)`` / ``open`` / ``flush`` / ``close`` — it has NO ``run()`` (not a runnable), NO
+    ``__call__(sample)`` (not an op), and carries no ``role``/``lazy`` mark (not an object member by
+    the role gate), so it matches none of the signature/role dispatch predicates. It is admitted via
+    ``category="sink"`` in :data:`_NODE_CATEGORIES` and routed here: a sink builds as an OBJECT
+    producer node (``_build_object_node``) whose output sockets as ``DATAFLUX_OBJECT:sink`` (see
+    :func:`_role_for_class`), docking into a ``DatasetProcessor`` runnable node's ``sink`` slot. The
+    prediction sinks (``write(prediction, metadata)``) are deliberately UNtagged and excluded.
+    """
+    return inspect.isclass(obj) and getattr(obj, "__confluid_category__", None) == "sink"
+
+
 def _safe_callable_path(func: Callable) -> Optional[str]:
     """Importable ``module:qualname`` for a discovered callable, or ``None``.
 
@@ -1036,6 +1230,51 @@ def _collect_sources(kwargs: Dict[str, Any]) -> List[Any]:
     return [v for _, v in sorted(indexed)]
 
 
+def _validate_inputs_with_nullable_numerics(cls: Any, input_types: Dict[str, Any]) -> Any:
+    """ComfyUI ``VALIDATE_INPUTS`` for generated nodes that expose a connectable nullable-numeric param.
+
+    A nullable numeric (``Optional[int/float]=None``) renders as a blank STRING widget (so blank can mean
+    None / metadata-fallback) tagged ``NULLABLE_NUMERIC``, and ``web/nullable_numeric_socket.js`` retypes
+    its converted CANVAS socket to FLOAT/INT so a numeric wire draws. But the BACKEND ``INPUT_TYPES`` still
+    declares it ``STRING``, so ComfyUI's built-in ``validate_node_input`` would reject the FLOAT/INT→STRING
+    link at Queue ("Return type mismatch") — which is exactly why a wired ``noise_power_db`` validated only
+    when it wasn't in the executed output's cone. Declaring an ``input_types`` parameter makes ComfyUI SKIP
+    that built-in check and defer to us (execution.py): we ACCEPT a FLOAT/INT wire into a NULLABLE_NUMERIC
+    param and otherwise reuse ComfyUI's OWN ``validate_node_input`` (no divergence — every other socket is
+    still type-checked). ``input_types`` maps each LINKED input name → the upstream output's type string.
+    """
+    try:  # ComfyUI's real matcher (only importable inside ComfyUI) — keeps our rules identical to its.
+        from comfy_execution.validation import validate_node_input as _compatible
+    except Exception:  # pragma: no cover - fluxstudio's own tests run without ComfyUI installed
+
+        def _compatible(received: Any, expected: Any, strict: bool = False) -> bool:
+            return received == expected or "*" in (str(received), str(expected))
+
+    declared = {**cls.INPUT_TYPES().get("required", {}), **cls.INPUT_TYPES().get("optional", {})}
+    for name, received in (input_types or {}).items():
+        entry = declared.get(name)
+        expected = entry[0] if isinstance(entry, (list, tuple)) and entry else entry
+        opts = entry[1] if isinstance(entry, (list, tuple)) and len(entry) > 1 and isinstance(entry[1], dict) else {}
+        if opts.get("taidal_widget") == "NULLABLE_NUMERIC" and str(received) in ("FLOAT", "INT"):
+            continue  # the sanctioned numeric-wire-into-nullable-param coercion
+        if not isinstance(expected, str):
+            continue  # a combo options-list (or unknown) — ComfyUI handles those; don't reject here
+        if _compatible(received, expected):
+            continue
+        return f"{name}: received type {received!r} is not compatible with the declared {expected!r}"
+    return True
+
+
+def _has_nullable_numeric_input(*input_dicts: Optional[Dict[str, Any]]) -> bool:
+    """True if any input entry is a ``NULLABLE_NUMERIC``-tagged widget (needs the VALIDATE_INPUTS skip)."""
+    for inputs in input_dicts:
+        for entry in (inputs or {}).values():
+            if isinstance(entry, (list, tuple)) and len(entry) > 1 and isinstance(entry[1], dict):
+                if entry[1].get("taidal_widget") == "NULLABLE_NUMERIC":
+                    return True
+    return False
+
+
 def _node_class(
     name: str,
     category: str,
@@ -1133,6 +1372,12 @@ def _node_class(
     }
     if output_node:
         attrs["OUTPUT_NODE"] = True
+    if _has_nullable_numeric_input(inputs, optional_inputs):
+        # A connectable nullable-numeric param is a blank STRING widget retyped to FLOAT/INT on the
+        # canvas; this lets ComfyUI accept the numeric wire at Queue (it skips its built-in type check
+        # for nodes whose VALIDATE_INPUTS takes `input_types`). Without it the wire draws but Queue
+        # fails with "Return type mismatch" (the backend still sees STRING).
+        attrs["VALIDATE_INPUTS"] = classmethod(_validate_inputs_with_nullable_numerics)
     if return_names is not None:
         attrs["RETURN_NAMES"] = return_names
     if is_random:
@@ -1822,8 +2067,10 @@ def create_comfy_node(
     processor) becomes a buildable RUNNABLE node (members as wired sockets); ``Sample``-taking op
     classes become ``SAMPLE -> SAMPLE`` nodes; ``Sample``-yielding sources (and task ``role="dataset"``
     classes) become ``-> SOURCE`` nodes; runnable MEMBER classes (model / loss / metric / optimizer /
-    loader / lightning) become ``-> OBJECT`` nodes; a no-arg ``__call__(self)`` class becomes a VALUE
-    node (config widgets -> ``@output`` sockets, no Sample I/O); everything else falls back to generic.
+    loader / lightning) AND ``category="sink"`` storage sinks become ``-> OBJECT`` nodes (a sink
+    outputs ``DATAFLUX_OBJECT:sink``, docking into a ``DatasetProcessor`` node's ``sink`` slot); a
+    no-arg ``__call__(self)`` class becomes a VALUE node (config widgets -> ``@output`` sockets, no
+    Sample I/O); everything else falls back to generic.
     """
     if _is_runnable(func):
         return _build_runnable_node(func, name, category)
@@ -1831,7 +2078,10 @@ def create_comfy_node(
         return _build_op_node(func, name, category)
     if _is_source(func) or _is_dataset_member_class(func):
         return _build_source_node(func, name, category)
-    if _is_object_member_class(func):
+    if _is_object_member_class(func) or _is_sink_class(func):
+        # A sink is an object-member PRODUCER (like a model / loss / logger): config widgets ->
+        # ``instance`` + ``class`` outputs on a ``DATAFLUX_OBJECT:sink`` wire, docking into a
+        # ``DatasetProcessor`` node's ``sink`` slot. Reuses ``_build_object_node`` verbatim.
         return _build_object_node(func, name, category)
     if _value_call_signature(func) is not None:
         return _build_value_node(func, name, category)

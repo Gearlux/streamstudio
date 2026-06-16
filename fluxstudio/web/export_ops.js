@@ -1,6 +1,5 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
-import { collectExportSkipIds } from "./export_skip.js";
 
 console.log("ComfyFlux: Loaded Taidal.ExportOps extension");
 
@@ -23,17 +22,19 @@ function downloadYaml(text, filename) {
 }
 
 async function exportOps() {
-    // graphToPrompt() returns { workflow, output }; `output` is the API-format prompt the
-    // backend compiler consumes (same shape as ComfyUI "Save (API Format)").
-    const { output } = await app.graphToPrompt();
-    // Canvas-only nodes (right-click > "Taidal: exclude from export") — the compiler drops
-    // each marked node plus everything data-downstream of it, with a note in the YAML.
-    const skipIds = collectExportSkipIds(app.graph);
+    // graphToPrompt() returns { workflow, output }: `output` is the API-format prompt the backend
+    // compiler consumes (same shape as ComfyUI "Save (API Format)"); `workflow` is the full UI
+    // graph — node properties + subgraph definitions included. The export-skip / export-target
+    // marks live in node.properties (which the prompt strips), so we send the WHOLE workflow and
+    // the backend reads the marks in Python (export.collect_export_marks) — subgraph-aware and the
+    // same single source of truth the whole-graph export uses. This is why a mark placed INSIDE a
+    // subgraph is now honoured (the old JS collector only saw top-level nodes).
+    const { output, workflow } = await app.graphToPrompt();
     try {
         const res = await api.fetchApi("/taidal/export_ops", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ prompt: output, skip_ids: skipIds }),
+            body: JSON.stringify({ prompt: output, workflow }),
         });
         const data = await res.json();
         if (!res.ok) {

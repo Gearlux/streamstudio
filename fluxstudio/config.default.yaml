@@ -1,0 +1,14 @@
+# FluxStudio palette configuration — DEFAULTS shipped with the package (source control).
+#
+# This file is the fallback used when you have NOT provided your own config. To customize, copy it to
+# ~/.fluxstudio/config.yaml (the default user path) and edit, or point --config at any file:
+#     fluxstudio --config /path/to/config.yaml
+# Resolution order: --config / $FLUXSTUDIO_CONFIG  →  ~/.fluxstudio/config.yaml  →  THIS shipped file.
+
+# ComfyUI node class names to KEEP in the palette when nodes are hidden via --no-default-nodes or
+# --only-taidal-nodes. Use each node's registration key / class_type (the name in a saved workflow's
+# "type"/"class_type" field). Edit this list to taste in your own copy.
+keep_nodes:
+  - PreviewImage   # native image viewer (wire Extract from Sample → Preview Image)
+  - PreviewAny     # "Preview as text" — display any value
+  - MaskToImage    # MASK → IMAGE, to preview a segmentation/mask field

@@ -14,6 +14,10 @@ dependencies = [
     "confluid>=0.1.0",
     "data-flux>=0.1.0",
     "datasets",
+    # PEP-593 range marks: the bridge reads Annotated[..., Interval/Ge/Le] into widget
+    # min/max. Already transitive via confluid->pydantic; declared because bridge.py
+    # imports it directly.
+    "annotated-types",
 ]
 requires-python = ">=3.12"
 
@@ -45,7 +49,9 @@ where = ["."]
 include = ["fluxstudio*"]
 
 [tool.setuptools.package-data]
-fluxstudio = ["py.typed"]
+# Ship the default palette config (the fallback used when the user has no own config) + the py.typed
+# marker. `config.default.yaml` is read at runtime by fluxstudio.bridge.
+fluxstudio = ["py.typed", "config.default.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -80,11 +80,34 @@ By default the palette shows ComfyUI's built-in nodes (KSampler, Preview Image, 
 fluxstudio --no-default-nodes
 ```
 
-This (a) prunes ComfyUI's built-in / `comfy_extras` / API nodes from the *Add Node* menu, leaving only the auto-discovered Taidal nodes (and any other third-party custom nodes), and (b) surfaces the Taidal nodes at the **palette root** — `DataFlux/Op/numpy`, `Waivefront/Op/targets`, `FluxStudio` — instead of nested under a `Taidal/` folder (there's nothing left to disambiguate them from). The default `--default-nodes` keeps everything visible and the `Taidal/` grouping.
+This (a) prunes ComfyUI's built-in / `comfy_extras` / API nodes from the *Add Node* menu, leaving the auto-discovered Taidal nodes (and any other third-party custom nodes), and (b) surfaces the Taidal nodes at the **palette root** — `DataFlux/Op/numpy`, `Waivefront/Op/targets`, `FluxStudio` — instead of nested under a `Taidal/` folder (there's nothing left to disambiguate them from). The default `--default-nodes` keeps everything visible and the `Taidal/` grouping.
 
-> **Note:** hiding the defaults also removes ComfyUI's native viewers (*Preview Image*, text/number displays) that the **Extract from Sample** adapter normally feeds — so use the Taidal-only palette for building/exporting pipelines, and the default palette when you want to preview samples on the canvas.
+**Keeping specific default nodes (a config file).** A few native nodes are useful even in a Taidal-only palette, so a configurable **keep-list** survives the prune. **Preview Image** and **Preview as text** (`PreviewAny`) are *always* kept; list any others in a **config file** under `keep_nodes:` (use the node's `class_type`/registration key):
 
-Under the hood the flag exports `FLUXSTUDIO_HIDE_DEFAULT_NODES=1` to the launched ComfyUI process (it's a subprocess); if you launch ComfyUI directly (not via the `fluxstudio` CLI) you can set that env var yourself for the same effect.
+```yaml
+# ~/.fluxstudio/config.yaml
+keep_nodes:
+  - MaskToImage
+  - LoadImage
+```
+
+A **default config ships with the package** (`fluxstudio/config.default.yaml`, source-controlled) and is used as the fallback when you haven't supplied your own — so sensible defaults (`MaskToImage`, …) apply out of the box. Resolution order: `--config <file>` / `$FLUXSTUDIO_CONFIG` → your `~/.fluxstudio/config.yaml` → the shipped `config.default.yaml`. To customize, copy the shipped file to `~/.fluxstudio/config.yaml` (or any path) and edit:
+
+```bash
+cp "$(python -c 'import fluxstudio,os;print(os.path.join(os.path.dirname(fluxstudio.__file__),"config.default.yaml"))')" ~/.fluxstudio/config.yaml
+fluxstudio --no-default-nodes --config ./my-palette.yaml   # or point at any file
+```
+
+**Only Taidal nodes** (`--only-taidal-nodes`) goes further: it hides **every** non-Taidal node — ComfyUI's built-ins **and** other third-party custom packs (mtb, WWAA, …) — leaving only Taidal nodes + the keep-list. It implies `--no-default-nodes`.
+
+```bash
+fluxstudio --only-taidal-nodes                          # only Taidal + Preview Image/as-text
+fluxstudio --only-taidal-nodes --config ./my-palette.yaml
+```
+
+> **Note:** hiding the defaults removes most of ComfyUI's native viewers, but the keep-list retains the ones in use, and Taidal's own **custom viewer nodes are self-contained** — the **Array / Tensor Histogram** and **Display Any** nodes render on their own canvas/widget (no native viewer needed) — so the Taidal-only palette stays fully usable for inspecting data.
+
+Under the hood: the keep-list lives in the config **file** (read inside the launched ComfyUI process); the CLI passes only the file's *location* and the launch-mode toggles via env vars — `FLUXSTUDIO_HIDE_DEFAULT_NODES=1` (hide built-ins), `FLUXSTUDIO_ONLY_TAIDAL_NODES=1` (only-Taidal filter), `FLUXSTUDIO_CONFIG=<path>` (config-file location; empty ⇒ the default). The only-Taidal filter runs in the browser after all nodes load (so it catches custom packs that load after fluxstudio), via the `/taidal/palette_config` route + `web/palette_filter.js`.
 
 ### Empty starting canvas
 
@@ -100,12 +123,19 @@ Discovered callables are classified by their DataFlux role so they wire together
 
 Node labels are the **verbatim** callable name (underscores become spaces; capitals are preserved — `HuggingFaceSource` stays `HuggingFaceSource`, not `Huggingfacesource`). Internal helpers (names starting with `_`) are not surfaced. Hovering any widget shows a **tooltip** sourced from the wrapped callable's docstring `Args:` block (see *Constructor-parameter tooltips* below).
 
-Two adapter nodes (under `Taidal/FluxStudio`) let you step through a dataset and view samples with **native** ComfyUI viewers:
+**Numeric widget ranges.** Every INT/FLOAT widget carries explicit full-range bounds (without them the ComfyUI frontend clamps input to `[0, 2048]` — negative dB values would be unenterable). An op can declare a *real* range on the parameter itself with a PEP-593 mark — `Annotated[float, Interval(ge=-200.0, le=50.0)]` (`annotated_types`) — which the bridge renders as the widget's `min`/`max` (a marked `Tuple[float, float]` range bounds both its `__lo`/`__hi` widgets), and the **same mark** flows into navigaitor's JSON schema via `confluid.to_pydantic`. Reference aliases: `waivefront.torchsig.processing.DbPower` / `DbSnr` / `Probability` / `WattRange` / `DbRange`.
+
+Three adapter nodes (under `Taidal/FluxStudio`) let you step through a dataset and view samples with **native** ComfyUI viewers (plus one interactive value inspector):
 
 - **Walk Dataset (by index)** — takes a `DATAFLUX_SOURCE` and an `index`, and outputs the `Sample` at that index (`source[index]`). The `index` widget uses ComfyUI's `control_after_generate`, **defaulting to *increment*** so each **Queue Prompt** advances to the next sample in order — set the control to *fixed* (or `index` `0`) to reset, or *randomize* to sample at random. `wrap` cycles modulo the dataset length.
-- **Extract from Sample** — takes a `DATAFLUX_SAMPLE` and a `field` selector (`input` / `target`) and unpacks the selected value onto **typed** sockets — `IMAGE`, `MASK`, `STRING`, `INT`, `FLOAT` — so you wire the one your viewer expects. ComfyUI types sockets statically, so instead of retyping one socket per run it surfaces every plausible type; *which* one is meaningful is derived from the sample's features (`Sample.describe()`). `IMAGE` is rendered via `waivefront.visualizers.value_to_image` (PIL / tensor / 2-D map → image; a non-visual value renders as a small text image); the `colormap` widget is a **dropdown** of the supported colormaps (the closed `waivefront.visualizers.Colormap` set — `viridis`, `magma`, `gray`, …) applied to 2-D maps, and `max_size` caps the longest side of the rendered image in pixels (default `512`, larger renders are downscaled, aspect ratio preserved). `MASK` carries a 2-D field (segmentation targets); `STRING` is a label/scalar (with `label_name` when the target has it) or a compact type summary; `INT` / `FLOAT` carry a scalar (e.g. a class id). Drop two of these next to each other (one set to `input`, one to `target`) to view both at once.
+- **Extract from Sample** — takes a `DATAFLUX_SAMPLE` and a `field` selector (`input` / `target`) and unpacks the selected value onto **typed** sockets — `IMAGE`, `MASK`, `STRING`, `INT`, `FLOAT`, `array` — so you wire the one your viewer expects. ComfyUI types sockets statically, so instead of retyping one socket per run it surfaces every plausible type; *which* one is meaningful is derived from the sample's features (`Sample.describe()`). `IMAGE` is rendered via `waivefront.visualizers.value_to_image` (PIL / tensor / 2-D map → image; a non-visual value renders as a small text image); the `colormap` widget is a **dropdown** of the supported colormaps (the closed `waivefront.visualizers.Colormap` set — `viridis`, `magma`, `gray`, …) applied to 2-D maps, and `max_size` caps the longest side of the rendered image in pixels (default `512`, larger renders are downscaled, aspect ratio preserved). `MASK` carries a 2-D field (segmentation targets); `STRING` is a label/scalar (with `label_name` when the target has it) or a compact type summary; `INT` / `FLOAT` carry a scalar (e.g. a class id). The **`array`** output (`DATAFLUX_ARRAY`) carries the **raw field value on demand** — a tensor stays a tensor, an ndarray stays an ndarray (NOT normalized/colormapped like `IMAGE`) — to feed the **Array / Tensor Histogram** viewer or any array-consuming node. Drop two of these next to each other (one set to `input`, one to `target`) to view both at once.
+- **Array / Tensor Histogram** — wire the `array` output above (or a native `IMAGE`) into this node and **Queue Prompt** to inspect the raw values *on the node itself*: a **histogram** of the value distribution (with a `log scale` toggle), the array **rendered as a colormapped image**, and a **hover readout** — move the cursor over the image to read the value (and source coordinate) under the pointer. The `channel` widget selects which channel to view (`-1` = all → mean view / natural RGB; `0..N` picks one) and `colormap` / `bins` / `max_size` control the render. All computation lives in dataflux (`array_histogram` / `select_channel` / `value_to_image`); the node just ships the result to its in-canvas widget — so unlike *Extract → Preview Image* it works **regardless of `--no-default-nodes`** (no native viewer needed). It passes the array straight through so it can sit inline in a pipeline.
 
-This replaces the old all-in-one "Show Sample" output node: extraction lives here, **previewing lives in ComfyUI's own nodes** — wire `IMAGE` into *Preview Image*, `STRING` into a text node, etc.
+- **Display Any** — wire **any** value (a scalar, list, metadata dict, tensor, `Sample`, op/source) into `value` and its text representation appears on the node after **Queue Prompt**. `mode` picks `raw value` (`repr`, truncated for huge values) or `tensor shape` (a recursive summary of shapes/dtypes through lists/dicts/a `Sample` — "what shape is this actually?"). The text is also emitted on a `text` output. A Taidal-native, `--only-taidal-nodes`-friendly stand-in for WAA's *Display Any*.
+- **Apply Text Template** — fill a `template` string with `{a}`…`{e}` placeholders from the matching `a`…`e` inputs (any type; an unwired input is empty; standard format specs like `{a:.2f}` work; an unknown `{x}` renders empty rather than erroring). Emits the filled string on `text` — wire it into *Display Any* or a sink. Inspired by mtb's *Apply Text Template*.
+- **Draw Text to Image** — draw `text` (e.g. from *Apply Text Template*) onto an `image`, or onto a fresh `width`×`height` `background` canvas when none is wired, and output an `IMAGE`. Word-wraps to the image width and anchors by a 9-grid `position` with a `margin` inset; `color`/`background` accept any PIL color name or hex. Feed the `IMAGE` into *Preview Image*, the *Array / Tensor Histogram*, or a save node. The rendering lives in `dataflux.ops.image.draw_text`; the node is glue.
+
+This replaces the old all-in-one "Show Sample" output node: extraction lives here, **previewing lives in ComfyUI's own nodes** — wire `IMAGE` into *Preview Image*, `STRING` into a text node, the `array` socket into **Array / Tensor Histogram**, any value into **Display Any**, etc.
 
 A minimal "walk an image dataset" graph:
 
@@ -120,12 +150,14 @@ RescaleOp  (in_min=0, in_max=255)  # optional op chain — stack any Taidal op n
         │  DATAFLUX_SAMPLE
         ▼
 Extract from Sample (field=input)
-        │  IMAGE                    # also: MASK / STRING / INT / FLOAT
+        │  IMAGE                    # also: MASK / STRING / INT / FLOAT / array
+        ├──────────────► Preview Image            # ← native ComfyUI viewer (IMAGE)
+        │  array
         ▼
-Preview Image                    # ← native ComfyUI viewer
+Array / Tensor Histogram         # histogram + colormapped image + hover-to-read-value
 ```
 
-`Extract from Sample` needs the `[waivefront]` extra to render the `IMAGE` socket (the renderer lives in waivefront); the `STRING` / `INT` / `FLOAT` outputs work without it.
+`Extract from Sample` renders the `IMAGE` socket via `value_to_image` (in dataflux, re-exported from waivefront); the `STRING` / `INT` / `FLOAT` / `array` outputs work without the optional `[waivefront]` extra. The **Array / Tensor Histogram** viewer likewise runs on the core install (its math is in dataflux), so it needs no extra and no native viewer.
 
 ### Running a trainer / evaluator / processor
 
@@ -163,7 +195,40 @@ Walk ───────────────────sample────
 
 Per sample, the compute chain derives the value (here the sample's max), writes it to `metadata["low_level"]`, sets `target.low_level`, and applies the threshold — replacing the *Extract → Math → widget-wire* pattern with something the ops-export can serialize.
 
+### Wiring a value into an op parameter
+
+Any op's scalar parameter (a number you'd normally type, e.g. `noise_power_db`) can instead be **driven by a wire**: right-click the node → *"Convert `<param>` to input"*, then connect a numeric output into the new socket. Nullable dB-style params (`Optional[float] = None`) are handled specially — they show as a blank field (blank = use the stamped-metadata fallback / constructor default), and FluxStudio makes the wire work end-to-end: a bundled extension retypes the converted socket to `FLOAT`/`INT` so the link draws, and the node's `VALIDATE_INPUTS` tells ComfyUI to accept that numeric wire at **Queue** time (without it the link draws but Queue fails with *"Return type mismatch between linked nodes"* — which is why a wired param can look fine until you run an output node, like *Preview as text*, that includes it).
+
+What you can wire in, and how each compiles, is the [DAG → sequential](#dag--sequential) table below — a fixed value from a **Primitive** node inlines as a literal, a same-sample **Extract → Math** derivation becomes a `ConfigureOp`, and **another op's `@output`** (e.g. one `NoiseFloorOp`'s `applied_snr_db` into a later op's `noise_power_db`) becomes a `CaptureOutputOp` + `ConfigureOp` pair as long as the producing op is upstream on the same sample path.
+
 > **Scope.** Works for any op whose constructor takes an `ops`/`branches` list or an `op`/`target` single-op param. `Tee` (a list of *branches*) v1 treats each connected op as its own single-op branch — multi-op branches mean pre-composing a branch into one op (future). `FilterOp`/`WrappedOp` wrap a *raw Python callable*, so they aren't canvas nodes at all (bare `@configurable`, i.e. UNcategorised — neither `op` nor `engine`).
+
+## Subgraph as an Op
+
+The higher-order ops above are *sequential* (a flat op-list wired into `op_N`). To package a **more complex transformation — an arbitrary `Sample → Sample` DAG with fan-out and `Mix` fan-in — as one reusable Op**, draw it the normal way (sample wires) and cap it with the **Extract as Op** node (`Taidal/FluxStudio`). It compiles the whole upstream sub-pipeline into a single `dataflux.ops.transform_chain.TransformChain` and emits it on an **`op`** output (`DATAFLUX_OP`):
+
+```
+(subgraph input: DATAFLUX_SAMPLE)
+   │
+   ▼
+ RescaleOp ─┬─→ StandardizeOp ─┐
+            └─→ GainOp ────────┤ (fan-out → Mix)
+                            Mix Samples
+                               │ sample
+                               ▼
+                        Extract as Op ──op──► (promote to subgraph boundary)
+```
+
+Inside a **ComfyUI native subgraph**, build the inner pipeline starting from the subgraph's `DATAFLUX_SAMPLE` input boundary, drop **Extract as Op** at the end, and *promote its `op` output to the subgraph boundary*. The subgraph instance then exposes a **`DATAFLUX_OP` output** and behaves as:
+
+- **an Op** — wire that output into any op slot (`Parallel`/`Tee`/`Enable` `op_N`, `ConfigureOp.target`/`RandomApply.op`, or another op-list); the subgraph *is* the transformation, reusable across the canvas;
+- **a graph** — run a sample through the subgraph's sample boundary inline (the normal native-subgraph use).
+
+The DAG→sequential translation (fan-out → auto `Stash`/`Unstash`, `Mix` → fan-in) is the same compiler used by the ops-export below, so a subgraph-Op exports faithfully: a consumer fed by it embeds a nested `!class:…TransformChain` whose `ops:` is the flattened inner pipeline. **Extract as Op** also works on the flat canvas (no subgraph required) — it always compiles its own upstream cone.
+
+> **How it works (no extra wiring).** The node is self-contained: at run time it reads ComfyUI's hidden `PROMPT` (the flat graph — native subgraphs are already expanded by the frontend, so the inner op DAG is present) plus its own `UNIQUE_ID`, and compiles its sample-ancestor cone via `fluxstudio.export`. No snapshot widget, no extra route. An unwired terminator is the identity (`TransformChain([])`).
+>
+> **Scope (v1).** The *ops-export* (next section) compiles a subgraph-Op into its nested `TransformChain`. The **whole-graph** export (*Export Graph → Taidal YAML*) does **not** yet compile the terminator — it skips it with a comment (use the ops-export for subgraph-Ops).
 
 ## Exporting ops to a Flux
 
@@ -226,6 +291,7 @@ The compiler converts the whole **op DAG** of every Taidal/FluxStudio node into 
 | A value node **without** the `constant` mark | omitted + a note nudging you to tag the class `constant=True` |
 | An op node's `op` value output wired into a **single-op param** (`RandomApply.op`, `ConfigureOp.target`) or an `op_N` list | embedded as a nested `!class:` instance |
 | An ***op-chain → Extract(input) → Math → widget*** value chain rooted at the consumer's own sample feed | **auto-compiled to a `ConfigureOp`**: the chain ops + a `FormulaOp` (the Math formula) re-run per sample inside the wrap and inject the result as the param (the helios *Configure* pattern — e.g. `ThresholdOp.low_level = max * 0.2`); a PURE chain leaves the op schedule entirely |
+| An op's **`@output`** socket (e.g. `NoiseFloorOp.applied_snr_db`) wired into a LATER op's param, where the producer is on the consumer's **sample-ancestor** path | **auto-compiled to a `CaptureOutputOp` + `ConfigureOp(UnstashInputOp)`**: the producer's ACTUAL `@output` value is recorded into metadata after it runs (stochastic-safe — captured, not recomputed) and injected into the param per sample. A cross-branch producer (not an ancestor) instead gets the omit note below |
 | Anything else (a runtime value the compiler can't relate to the consumer's sample) | omitted (the op keeps its constructor default) + a note pointing at the sanctioned mechanisms — wire it through `ConfigureOp` yourself, or, for `str`-capable params, set the widget to a `'{meta_key}'` **metadata expression** an upstream op writes |
 
 A hoisted constant exports like this — the *settings* survive, not just their effect:
@@ -247,15 +313,33 @@ ops:
 
 Three ways to keep canvas plumbing out of the YAML:
 
-- **The export-skip mark — "runs on canvas, excluded from export".** Right-click any node → **"Taidal: exclude from export"** (`web/export_skip.js`). The node dims AND gets a red **NOT EXPORTED** badge on its title bar (drawn from the property every frame, so it survives reloads and color edits); the mark is `properties["taidal_export"] = "skip"` — persisted in the saved workflow. On export, the marked node **and everything data-downstream of it** (sample wires, Mix arguments) is left out, with a note in the document's comment block. This is the tool for visualization helpers (`RenderSignalPlotOp`, preview spectrogram branches, `RenderOverlaysOp` tails): they keep executing on the canvas, but the exported pipeline doesn't carry them. Marking a **subgraph instance** excludes the whole instance. Toggle again ("Taidal: include in export") to restore.
+- **The export-skip mark — "runs on canvas, excluded from export".** Right-click any node → **"Taidal: exclude from export"** (`web/export_skip.js`). The node dims AND gets a red **NOT EXPORTED** badge on its title bar (drawn from the property every frame, so it survives reloads and color edits); the mark is `properties["taidal_export"] = "skip"` — persisted in the saved workflow. On export, the marked node and **everything data-downstream of it** (sample wires, Mix arguments) are left out, with a note in the document's comment block. The closure is **forward-only**: it prunes the nodes *behind* the mark, never the ones before it — marking the node right after a Mix exports the full pipeline up to and including the Mix. To drop an entire side branch (a preview spectrogram and the ops feeding it), mark the branch's **head**. Config value nodes feeding *only* excluded nodes through widget wires don't linger: the ops-export folds constants consumer-driven (no surviving consumer → no hoist), and the whole-graph export prunes such non-sample feeders explicitly. This is the tool for visualization helpers (`RenderSignalPlotOp`, preview branches, `RenderOverlaysOp` tails): they keep executing on the canvas, but the exported pipeline stops where the marks start. Marking a **subgraph instance** excludes the whole instance, and a mark placed on a node **inside** a subgraph is honoured too — the marks are read in Python from the posted workflow (`export.collect_export_marks`), which sees nodes inside subgraph definitions (the browser collector used to miss them). Toggle again ("Taidal: include in export") to restore.
+- **The export-target mark — "export exactly what computes THIS".** Right-click → **"Taidal: set as export target"** (teal **EXPORT TARGET** badge; mutually exclusive with the skip mark per node). When any target is set, the selection inverts from opt-out to opt-in: the ops-export emits **one document per target**, each containing exactly the ops in that target's data **ancestor cone** (the target is the final op) — side branches and viewer helpers simply aren't scheduled, no per-helper skip marks needed. On the impairments graph, targeting the *Mix Samples* node exports the production pipeline and drops all three preview branches in one move. The whole-graph export restricts its op surface to the union of the target cones (`outside the export-target cone` in the comment block). CLI twin: `fluxstudio export graph.json --target 60` (repeatable). Skip and target compose naturally: the forward-only skip closure trims nodes *after* its mark, the cone selects the nodes computing the target — marking the node after a target as skip still exports the full cone. A skip mark placed directly **on** a node inside a target's cone contradicts the target (it's needed to compute it) and errors — clear one of the two marks. A target placed on a node **inside a subgraph** works the same: the mark is read from the posted workflow and resolved to the expanded prompt node (`371` → `378:368:371`), so you can target a node within a *Spectral Analysis* / *Spectrogram* subgraph and export exactly its ancestor cone.
 - **ComfyUI mute (Ctrl+M) / bypass (Ctrl+B)** — the native modes already work: the frontend drops muted nodes and reroutes bypassed ones *before* the API prompt reaches the exporter, so a muted branch never exports. Unlike the mark, these also stop the node from running on the canvas.
-- **Offline CLI**: an API-format file carries no node properties, so name the ids explicitly — `fluxstudio export graph.json --skip 87 --skip 61` (repeatable; a subgraph-instance id excludes the inlined instance).
+- **Offline CLI**: an API-format file carries no node properties, so name the ids explicitly — `fluxstudio export graph.json --skip 87 --skip 61` / `--target 60` (both repeatable). Each id is matched against the expanded prompt path by **segment**, so a subgraph-instance id excludes its whole subtree and a subgraph-**inner** id like `--target 371` resolves to its expanded node (`378:368:371`). (The canvas button collects marks automatically — Python reads them from the workflow.)
 
 The whole-graph export (**Export Graph → Taidal YAML**) honors the same mark: marked nodes (and their sample-descendants) land in the skipped-nodes comment block instead of the config. Nodes marked *inside* a subgraph definition are honored there too; marking a subgraph *instance* is currently ops-export only.
 
 **Still unsupported** (`UnsupportedTopologyError`, HTTP 400 from the route): cycles, an unresolvable op node, the *Compose Sample* adapter (its "metadata from C only" semantics needs a metadata stash/restore — follow-up), and a component merging **distinct sample streams** (two different sources fanning into one Mix — a sequential op-list carries exactly one stream; use `JointFlux` by hand). The strict single-component API forms `compile_ops` / `export_ops_yaml` additionally reject a multi-component graph — use `compile_op_chains` / `export_ops_yamls` for the per-component behaviour.
 
 **Approximations** (documented, deliberate): branch metadata shares one dict (per-branch deletions/conflicting writes differ from canvas isolation; union *priority* is preserved), and the inserted `__taidal_stash_*` keys stay on the sample.
+
+### Importing an `ops.yaml` back to the canvas
+
+The same `ops.yaml` round-trips back to a connected graph — the **inverse** of the DAG→sequential compiler. Use **Taidal → "Import Taidal YAML → Graph"** on the canvas, or the offline CLI:
+
+```bash
+fluxstudio import ops.yaml -o workflow.json     # then drag workflow.json onto the canvas
+```
+
+`fluxstudio import` auto-detects an ops-export document (a top-level `ops:` list) and rebuilds the op graph:
+
+- **The sequential op-list is replayed into real wiring.** Each op's `sample` input is reconnected to the live predecessor; an op restored to an earlier node becomes a **fan-out** of it. A **`Mix Samples`** fan-in is *rebuilt* (the export erased it) by tracking the `input` / `target` / `metadata` lineages separately: when a one-shot side branch leaves different metadata on the bus and the input/target are restored to a fork — the impairments pattern where `CropSignalLengthOp`'s input/target merge with the region-detection branch's `predicted_regions` — a `Mix(input←fork, target←fork, metadata←branch tail)` is reconstructed. (A branch that was itself stashed for a *later* Mix is a plain fan-out restart and does **not** spawn a spurious Mix.)
+- **Auto-inserted `__taidal_stash_*` ops are removed** (their fan-out / Mix structure is reconstructed instead). A **user** stash op — any `Stash*Op` whose key is *not* `__taidal_stash_*`-namespaced (e.g. `StashInputOp(key="mask")`) — is a real pipeline op and is **kept**.
+- **Hoisted `constant=True` value nodes** (e.g. `ImpairmentsTxConfig`) are placed and their dotted `!ref:<name>.<output>` consumers are re-wired from the value node's output.
+- **Dead-end taps are coloured** — a sample-chain op whose own sample output feeds nothing, excluding the pipeline's final output. With Mix-rebuild a re-joining branch feeds a Mix (so it isn't a dead-end); colouring is the residual for a genuinely unconsumed branch.
+
+The source is intentionally left unattached (the ops-doc contract — wire your own `Source → Walk` into the head op). **Lossy point carried over from the export** (documented): a metadata-only `Mix` (input==target==metadata, no divergence) the exporter already discarded is not recovered. `--as group` wraps the result in one box; `--as subgraph` degrades to `graph` for an ops-doc (no natural boundary inputs). Backed by `fluxstudio.graphio.ops_yaml_to_workflow`.
 
 ## Importing & exporting whole pipelines (Taidal YAML ↔ canvas)
 
@@ -267,13 +351,14 @@ The converter lives in `fluxstudio.graphio` (`yaml_to_workflow` / `workflow_to_y
 
 | Command | What it does |
 |---|---|
-| **Import Taidal YAML → Graph** | Pick a `.yaml`; its nodes + wiring are laid out on the active canvas. |
-| **Import Taidal YAML → Subgraph** | Same, but packaged as a reusable `definitions.subgraphs[]` blueprint + an instance node. |
-| **Import Taidal YAML → Group** | Same as Graph, wrapped in one visual group box (titled by the file). |
+| **Import Taidal YAML → Graph** | Pick a `.yaml`; its nodes + wiring are laid out flat and **inserted into the current graph**. |
+| **Import Taidal YAML → Subgraph** | Pick a `.yaml`; it is packaged as a reusable `definitions.subgraphs[]` blueprint + an instance node and **inserted into the current graph**. |
+| **Import Taidal YAML → Group** | Pick a `.yaml`; its nodes are wrapped in one visual group box (titled by the file) and **inserted into the current graph**. |
+| **Import Taidal YAML → New Graph** | Pick a `.yaml`; load it as its **own workflow** (a fresh tab) instead of merging — the standalone escape hatch. |
 | **Export Graph → Taidal YAML** | Serialize the whole active graph and download the hoisted-`!ref:` YAML. |
 | **Export Taidal Ops → Confluid YAML** | (above) the ops-only op-list. |
 
-The import commands operate on the **active** graph, so they work inside a subgraph too. Backed by the `/taidal/import_yaml` and `/taidal/export_workflow` routes (`web/import_yaml.js`, `web/export_workflow.js`).
+**Where the import lands:** **Graph**, **Subgraph**, and **Group** **paste-merge into the active graph** — the imported nodes are added to what you are building (at the canvas mouse position, selected, in one undo step, leaving your own clipboard untouched) rather than replacing it / opening a separate tab, using the same litegraph clipboard/paste path as ComfyUI's node-template insertion. So you can import several configs side by side, and the commands also work while you are editing inside a subgraph. **New Graph** is the escape hatch for when you'd rather open the config standalone (it loads as its own workflow / a fresh tab — the three merge commands also fall back to this on a ComfyUI build without `pasteFromClipboard`). Backed by the `/taidal/import_yaml` and `/taidal/export_workflow` routes (`web/import_yaml.js`, `web/export_workflow.js`).
 
 ### Offline CLI
 
@@ -321,7 +406,7 @@ FluxStudio never hand-defines a node. At ComfyUI startup, `_discover_and_registe
 2. For each module, `dataflux.discovery.scan_module` finds the compatible callables.
 3. `register_module_nodes` / `create_comfy_node` (`fluxstudio/bridge.py`) classify each callable (Source / Op / Generic — see *Building a pipeline*) and wrap it in a ComfyUI node class, keyed by `_node_key` as `Taidal_<package>_<category>[_<group>]_<callable>` (globally unique, so a same-named class in two modules — e.g. numpy's vs torch's `RescaleOp` — doesn't clobber its twin) and filed under a `Taidal/<Package>/<Category>[/<group>]` palette path (built by `_node_category`: top-level package via `_PACKAGE_DISPLAY_NAMES` for canonical casing, then the `@configurable` category, then the optional `group` tag). The displayed name stays the verbatim class name.
 
-Registration is a **positive allowlist**: a class becomes a node only if its `@configurable` category is one of `{op, source, engine}`. So the palette is exactly the deliberately-tagged ops, sources, and engines. The generic dataflux **engines** (`Flux` / `JointFlux`, `category="engine"`) and the source-view `DatasetSplit` (`category="source"`) **are** buildable on the canvas: their source-typed constructor params render as wired sockets — a single `source` → a `DATAFLUX_SOURCE` input, a source-list (`fluxes`) → dynamic `source_N` inputs, an op-list (`ops`) → dynamic `op_N` `DATAFLUX_OP` inputs — so a Source/Op node (which already outputs *itself* as `DATAFLUX_SOURCE` / `DATAFLUX_OP`) wires straight into them. Excluded *by construction*: the **raw-callable op wrappers** (`FilterOp` / `WrappedOp`) — UNcategorised (bare `@configurable`), since they take a raw Python callable nothing a widget or socket supplies (so they stay out even with `engine` allowed); **task datasets** (`*_dataset`, e.g. `classification_dataset`) — a trainer-config concept navigaitor cares about, but a canvas only needs a `source` to yield Samples; uncategorised module-level helper functions; and raw sinks. You can build a dataset by wiring `Source → Op → …` *or* by feeding a `Source`/`Op` into a `Flux` / `DatasetSplit` engine node. (To surface another role, add its category to `_NODE_CATEGORIES` in `bridge.py` and tag the classes. Note: ops-export compiles the op DAG — fan-out, *Mix Samples* fan-in, `op_N` op-values — but engine-node graphs (`Flux`/`JointFlux` built on the canvas) still aren't exportable through it; use the whole-graph export for those.)
+Registration is a **positive allowlist**: a class becomes a node only if its `@configurable` category is one of `{op, source, engine, sink}`. So the palette is exactly the deliberately-tagged ops, sources, engines, and sinks. The generic dataflux **engines** (`Flux` / `JointFlux`, `category="engine"`) and the source-view `DatasetSplit` (`category="source"`) **are** buildable on the canvas: their source-typed constructor params render as wired sockets — a single `source` → a `DATAFLUX_SOURCE` input, a source-list (`fluxes`) → dynamic `source_N` inputs, an op-list (`ops`) → dynamic `op_N` `DATAFLUX_OP` inputs — so a Source/Op node (which already outputs *itself* as `DATAFLUX_SOURCE` / `DATAFLUX_OP`) wires straight into them. The DataFlux storage **sinks** (`category="sink"` — `HDF5Sink` / `ZarrGroupSink` / `ZarrBatchSink` / `DirectorySink` / `JsonSink` / `JsonPerWindowSink` / `LabelStudioImportSink` / `YoloSink`) become **object-member producer** nodes (two outputs, `instance` + `class`, on a role-qualified `DATAFLUX_OBJECT:sink` wire) that dock into a `DatasetProcessor` runnable node's `sink` slot — wire `Source → Flux → DatasetProcessor(flux, sink)` and queue it to write the dataset, or export the graph to a `marainer convert` YAML. Excluded *by construction*: the **raw-callable op wrappers** (`FilterOp` / `WrappedOp`) — UNcategorised (bare `@configurable`), since they take a raw Python callable nothing a widget or socket supplies (so they stay out even with `engine` allowed); **task datasets** (`*_dataset`, e.g. `classification_dataset`) — a trainer-config concept navigaitor cares about, but a canvas only needs a `source` to yield Samples; uncategorised module-level helper functions; and an **UNtagged sink** (a raw `Storage` subclass without `category="sink"`, including the `write(prediction, metadata)` **prediction** sinks `DetectionPredictionsSink` / `ClassificationPredictionsSink`, which aren't Sample sinks). You can build a dataset by wiring `Source → Op → …` *or* by feeding a `Source`/`Op` into a `Flux` / `DatasetSplit` engine node. (To surface another role, add its category to `_NODE_CATEGORIES` in `bridge.py` and tag the classes. Note: ops-export compiles the op DAG — fan-out, *Mix Samples* fan-in, `op_N` op-values — but engine-node graphs (`Flux`/`JointFlux` built on the canvas) and sink/`DatasetProcessor` nodes aren't exportable through it; use the whole-graph export for those.)
 
 A module that fails to import or scan is skipped at `debug` level, so one package's missing optional dependency never empties the palette.
 

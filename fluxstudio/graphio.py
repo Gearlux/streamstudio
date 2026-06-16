@@ -30,10 +30,11 @@ inlines any saved subgraph back into the flat hoisted YAML.
 from __future__ import annotations
 
 import copy
+import math
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union, cast
 
-from confluid import Class, Instance, LazyClass, Reference
+from confluid import Class, Fluid, Instance, LazyClass, Reference
 from confluid import dump as _confluid_dump
 from confluid import get_configurable_attrs
 from confluid import load as _confluid_load
@@ -41,24 +42,55 @@ from confluid import resolve as _confluid_resolve
 from confluid.registry import resolve_class
 from dataflux import Flux
 from dataflux.discovery import resolve_callable
+from dataflux.ops.capture import CaptureOutputOp
 from dataflux.ops.configure import ConfigureOp
 from dataflux.ops.formula import FormulaOp
+from dataflux.ops.stash import StashInputOp, StashTargetOp, UnstashInputOp, UnstashTargetOp
 from dataflux.ops.tee import Tee
 from logflow import get_logger
 
-from fluxstudio.bridge import _OP_LIST_PARAMS, _SOURCE_LIST_PARAMS, OBJECT_TYPE, OP_TYPE, SOURCE_TYPE, _coerce_kwargs
+from fluxstudio.bridge import (
+    _OP_LIST_PARAMS,
+    _SOURCE_LIST_PARAMS,
+    OBJECT_TYPE,
+    OP_TYPE,
+    SAMPLE_TYPE,
+    SOURCE_TYPE,
+    _coerce_kwargs,
+)
 from fluxstudio.export import (
     _EXPORT_SKIP_PROPERTY,
     _EXPORT_SKIP_VALUE,
+    _EXPORT_TARGET_VALUE,
+    _MIX_ARGS,
+    _MIX_CLASS_TYPE,
     _PRIMITIVE_VALUE_NODES,
     _SAMPLE_INPUT,
+    _STASH_KEY_PREFIX,
     UnsupportedTopologyError,
+    _collect_output_captures,
     _collect_value_chains,
     _id_sort_key,
     _is_link,
     _marker,
+    _node_kind,
     _snake,
 )
+
+# The four auto-inserted stash/unstash op classes the ops-export emits to sequentialize a
+# branchy canvas (see export._compile_component). On IMPORT they are recognised by class AND
+# the ``__taidal_stash_`` key namespace: an op of one of these classes whose ``key`` carries
+# that prefix is auto-inserted (interpreted into fan-out/Mix wiring, emitted as NO node); any
+# OTHER key (e.g. a user's own ``StashInputOp(key="mask")``) is a real pipeline op, kept as a node.
+_STASH_CLASSES = (StashInputOp, StashTargetOp, UnstashInputOp, UnstashTargetOp)
+_STASH_INPUT_CLASSES = (StashInputOp, UnstashInputOp)
+_STASH_WRITE_CLASSES = (StashInputOp, StashTargetOp)
+
+# Distinct node colours for a reconstructed DEAD-END TAP — a sample-chain op whose own sample
+# output feeds nothing (a viewer/analysis branch that forks off and is never reused), excluding
+# the pipeline's final output. Title bar + body, in ComfyUI's ``color``/``bgcolor`` convention.
+_DEAD_END_COLOR = "#4a234a"
+_DEAD_END_BGCOLOR = "#331833"
 
 logger = get_logger(__name__)
 
@@ -410,6 +442,64 @@ class _WorkflowBuilder:
         self._next_link += 1
         return self._next_link
 
+    def spawn(self, node_key: str) -> int:
+        """Create a bare hand-authored node (its wire sockets + outputs, no widget wiring).
+
+        Used by the ops-doc importer to materialise a ``Taidal_MixSamples`` fan-in node — a
+        node not present as a marker in the document but reconstructed from the unstash pattern.
+        Mirrors the node-dict shape :meth:`emit` builds (so layout / finalize treat it alike).
+        """
+        node_cls = self.node_mappings[node_key]
+        node_id = self._alloc_node()
+        self._providers[node_id] = set()
+        _widgets, socket_names = _widget_and_socket_params(node_cls)
+        node: Dict[str, Any] = {
+            "id": node_id,
+            "type": node_key,
+            "pos": [0, 0],
+            "size": list(_DEFAULT_SIZE),
+            "flags": {},
+            "order": node_id,
+            "mode": 0,
+            "inputs": [{"name": n, "type": t, "link": None} for n, t in socket_names.items()],
+            "outputs": self._build_outputs(node_cls),
+            "properties": {"Node name for S&R": node_key},
+            "widgets_values": [],
+        }
+        self.nodes.append(node)
+        self.by_id[node_id] = node
+        return node_id
+
+    def connect(
+        self, src_id: int, src_slot: int, dst_id: int, input_name: str, socket_type: str, *, as_widget: bool = False
+    ) -> None:
+        """Wire ``src_id``'s output ``src_slot`` into ``dst_id``'s ``input_name`` socket.
+
+        Ensures the destination socket exists (creating it if the consumer declares the param
+        only as a widget — ``as_widget`` marks it as a converted-from-widget input, the shape
+        ComfyUI uses for a value wired into a widget-backed param). Updates the link table, both
+        endpoints' link references, and the layout provider set. Mirrors :meth:`emit`'s internal
+        ``_wire_into`` so hand-authored wiring (sample chain, Mix, constant refs) lays out alike.
+        """
+        dst = self.by_id[dst_id]
+        idx = next((i for i, inp in enumerate(dst["inputs"]) if inp["name"] == input_name), None)
+        if idx is None:
+            idx = len(dst["inputs"])
+            inp: Dict[str, Any] = {"name": input_name, "type": socket_type, "link": None}
+            if as_widget:
+                inp["widget"] = {"name": input_name}
+            dst["inputs"].append(inp)
+        elif as_widget:
+            dst["inputs"][idx]["type"] = socket_type
+            dst["inputs"][idx].setdefault("widget", {"name": input_name})
+        link_id = self._alloc_link()
+        src = self.by_id[src_id]
+        self.links.append([link_id, src_id, src_slot, dst_id, idx, socket_type])
+        if 0 <= src_slot < len(src["outputs"]):
+            src["outputs"][src_slot]["links"].append(link_id)
+        dst["inputs"][idx]["link"] = link_id
+        self._providers[dst_id].add(src_id)
+
     def _layout(self) -> None:
         """Longest-path layering: depth = 1 + max(provider depth); sources left, runnable right."""
         depth: Dict[int, int] = {}
@@ -473,6 +563,21 @@ def yaml_to_workflow(
         A ComfyUI UI-format workflow dict (``nodes`` / ``links`` / ``groups`` / ``version`` …),
         ready to write to a ``.json`` and open on the canvas.
     """
+    # An OPS document (the ops-export shape ``{…constants…, ops: [op markers]}``) is a SEQUENTIAL
+    # op-list, not a graph of node-valued top-level keys — its ``ops:`` list would be silently
+    # dropped by the whole-graph walk below (a list is not a node value). Detect it on a raw
+    # marker parse (``flow=False`` keeps ``!ref`` links intact) and dispatch to the dedicated
+    # importer. Restricted to path/text inputs (where the ops docs actually arrive — the CLI passes
+    # a path, the route raw YAML) so the probe never mutates a caller-owned dict; any parse failure
+    # or non-ops shape falls through to the whole-graph path unchanged.
+    if isinstance(doc, (str, Path)):
+        try:
+            raw = _confluid_load(doc, flow=False)
+        except Exception:  # pragma: no cover - defensive: the whole-graph path re-parses and reports
+            raw = None
+        if _is_ops_document(raw):
+            return ops_yaml_to_workflow(raw, node_mappings, as_=as_, name=name)
+
     # instantiate=True → live-but-inert objects (load parses the file/string THEN materialises with
     # the expensive solidify suppressed); else → the un-instantiated broadcast-resolved marker graph.
     graph = _confluid_load(doc, solidify=False) if instantiate else _confluid_resolve(doc)
@@ -487,6 +592,219 @@ def yaml_to_workflow(
     if as_ == "subgraph":
         return _wrap_in_subgraph(workflow, builder.free_inputs, name)
     return workflow
+
+
+# =======================================================================================
+# Import: ops.yaml (the sequential ops-export document) → workflow.json
+# =======================================================================================
+
+
+def _is_ops_document(doc: Any) -> bool:
+    """True if ``doc`` is a parsed ops-export document: a dict with a top-level ``ops`` LIST.
+
+    The ops-export emits ``{…hoisted constants…, ops: [!class:Op() …]}``; the whole-graph export
+    hoists every node to its OWN top-level key and never carries a top-level ``ops`` list, so this
+    is an unambiguous discriminator. A non-empty ``ops`` must hold Fluid markers (op instances).
+    """
+    if not isinstance(doc, dict) or not isinstance(doc.get("ops"), list):
+        return False
+    ops = doc["ops"]
+    return all(isinstance(item, Fluid) for item in ops) if ops else True
+
+
+def ops_yaml_to_workflow(
+    doc: Union[str, Path, Dict[str, Any]],
+    node_mappings: Dict[str, Any],
+    *,
+    as_: str = "graph",
+    name: str = "Imported",
+) -> Dict[str, Any]:
+    """Convert a FluxStudio **ops-export** YAML (``{…constants…, ops: [...]}``) into a workflow.json.
+
+    The inverse of :func:`fluxstudio.export.export_ops_yamls`: the sequential op-list is replayed
+    into a connected canvas graph. The AUTO-INSERTED ``__taidal_stash_*`` snapshot ops (which the
+    exporter adds to linearize a branchy DAG) are CONSUMED — not placed as nodes — and the fan-out
+    / Mix fan-in they encode is reconstructed as real wiring:
+
+    * each op's ``sample`` input is wired from the currently-live node; an ``Unstash`` that restores
+      an earlier node makes a later op FORK from it (fan-out);
+    * a **Mix Samples** fan-in is REBUILT (the export erased the node) by tracking THREE live lineages —
+      ``input`` / ``target`` / ``metadata`` (only a real op resets all three; an ``Unstash`` moves only
+      its own). A Mix is reconstructed whenever they diverge: the export's classic input≠target merge,
+      AND the input==target case where a ONE-SHOT side branch left different metadata on the bus — the
+      impairments ``107`` pattern, where ``CropSignalLengthOp``'s input/target are merged with the
+      region-detection branch's ``predicted_regions`` (``Mix(input←K, target←K, metadata←branch tail)``).
+      A branch whose tail was itself STASHED (a tap reused by a *later* Mix) is a plain fan-out restart,
+      NOT a merge, so it does not spawn a spurious Mix;
+    * a hoisted ``constant=True`` value node (e.g. ``ImpairmentsTxConfig``) is placed and its dotted
+      ``!ref:<name>.<output>`` consumers are wired from its output;
+    * a real USER stash op (any ``Stash*Op`` whose ``key`` is NOT ``__taidal_stash_*``-namespaced,
+      e.g. ``StashInputOp(key="mask")``) is KEPT as an ordinary node — only auto-inserted stashes go;
+    * a **dead-end tap** — a sample-chain op whose own sample output feeds nothing, excluding the
+      pipeline's final output — is given a distinct colour. (With Mix-rebuild, re-joining branches feed
+      a Mix and so are not dead-ends; colouring is the residual for a genuinely unconsumed branch.)
+
+    The source is intentionally left unattached (the ops-doc contract — the user reattaches their own
+    source). Lossy, documented point carried over from the export: a metadata-only Mix the exporter
+    discarded (input==target==metadata, no divergence) is not recovered.
+
+    Args:
+        doc: An ops-doc as a YAML path / string, or an already-parsed raw-marker dict.
+        node_mappings: FluxStudio's ``NODE_CLASS_MAPPINGS``.
+        as_: ``"graph"`` (default) lays the nodes out; ``"group"`` additionally wraps them in one
+            visual box. ``"subgraph"`` has no natural ops-doc boundary and degrades to ``"graph"``.
+        name: Title for the group box.
+
+    Returns:
+        A ComfyUI UI-format workflow dict, JSON-safe (non-finite widget values nulled).
+    """
+    raw = doc if _is_ops_document(doc) else _confluid_load(doc, flow=False)
+    if not isinstance(raw, dict) or not _is_ops_document(raw):  # pragma: no cover - caller detected an ops-doc
+        raise UnsupportedTopologyError("ops_yaml_to_workflow expects an ops-export document (a top-level 'ops:' list).")
+    builder = _WorkflowBuilder(node_mappings)
+
+    # 1. Hoisted constants → value nodes (document key -> node id), for dotted-!ref wiring below.
+    const_nodes: Dict[str, int] = {}
+    for key, marker in raw.items():
+        if key == "ops" or not _is_node_value(marker):
+            continue
+        res = builder.emit(marker)
+        if res is not None:
+            const_nodes[key] = res[0]
+
+    # 2. Replay the op-list, tracking THREE live lineages — the node currently feeding the sample's
+    #    `input`, `target`, AND `metadata` — plus the stash snapshots. The export's Mix fan-in restores
+    #    only `input`/`target` (via `Unstash{Input,Target}Op`) and lets `metadata` ACCUMULATE on the bus
+    #    (the metadata branch ran last), so its `metadata_sample` source is whatever was live just before
+    #    the restore. Tracking metadata as its own lineage — reset only by a real op, never by an unstash —
+    #    is what lets the importer rebuild a Mix even when input==target (both restored to one node K while
+    #    the metadata came from a side branch — e.g. CropSignalLengthOp's input/target merged with the
+    #    region-detection branch's `predicted_regions`). There is no metadata stash/unstash (the export
+    #    never emits one), so `stash` stays input/target only.
+    live: Dict[str, Optional[int]] = {"input": None, "target": None, "metadata": None}  # node id per lineage
+    stash: Dict[str, Dict[str, Optional[int]]] = {"input": {}, "target": {}}  # key -> snapshotted node id
+    stashed_nodes: set = set()  # every node ever auto-stashed (a saved FORK, reused later — see below)
+    op_node_ids: List[int] = []  # real op nodes, in schedule order (last = deepest sink = final output)
+
+    for marker in raw["ops"]:
+        spec = _target_and_kwargs(marker)
+        if spec is None:
+            continue
+        cls, _is_lazy, kwargs = spec
+        key_value = kwargs.get("key")
+        if cls in _STASH_CLASSES and isinstance(key_value, str) and key_value.startswith(_STASH_KEY_PREFIX):
+            # An auto-inserted snapshot op: update the input/target lineage, place NO node. The
+            # metadata lineage is deliberately untouched (the export never restores it).
+            field = "input" if cls in _STASH_INPUT_CLASSES else "target"
+            if cls in _STASH_WRITE_CLASSES:
+                stash[field][key_value] = live[field]
+                if live[field] is not None:
+                    stashed_nodes.add(live[field])
+            elif key_value in stash[field]:
+                live[field] = stash[field][key_value]
+            continue
+
+        # A real op node (incl. a user Stash*Op with a non-namespaced key).
+        res = builder.emit(marker)
+        if res is None:
+            continue
+        nid = res[0]
+        i, t, m = live["input"], live["target"], live["metadata"]
+        if i == t == m or (i == t and m in stashed_nodes):
+            # Plain chain, OR a fan-out branch RESTART: input/target converged to a fork node and the
+            # lingering metadata branch is itself a SAVED fork (a tap reused by a later Mix, not a
+            # one-shot contributor) — so this is just a new branch off the fork, NOT a merge. (The
+            # bus-carried metadata is an export artifact here; the original graph had no Mix.)
+            if i is not None:
+                builder.connect(i, 0, nid, _SAMPLE_INPUT, SAMPLE_TYPE)
+        else:
+            # A genuine Mix Samples fan-in (the export erased the node): input/target restored to the
+            # stashed node(s), metadata from a ONE-SHOT branch the bus carried (e.g. CropSignalLengthOp's
+            # input/target merged with the region-detection branch's `predicted_regions`).
+            mix_id = builder.spawn(_MIX_CLASS_TYPE)
+            for arg, lineage in zip(_MIX_ARGS, (i, t, m)):
+                if lineage is not None:
+                    builder.connect(lineage, 0, mix_id, arg, SAMPLE_TYPE)
+            builder.connect(mix_id, 0, nid, _SAMPLE_INPUT, SAMPLE_TYPE)
+        live["input"] = live["target"] = live["metadata"] = nid
+        op_node_ids.append(nid)
+
+    # 3. Wire dotted-!ref free inputs (constant.output -> consumer param) to the constant nodes.
+    _wire_constant_refs(builder, const_nodes)
+
+    # 4. Colour the dead-end taps (sample-chain leaves that are not the final output).
+    _color_dead_end_taps(builder, op_node_ids)
+
+    # 5. JSON-safety: a non-finite widget value (e.g. ThresholdOp.high_level=NaN) would emit a bare
+    #    ``NaN`` token that the browser's JSON.parse rejects — null it.
+    _sanitize_widget_values(builder)
+
+    workflow = builder.finalize()
+    if as_ == "group":
+        return _wrap_in_group(workflow, name)
+    # "subgraph" degrades to "graph" — an ops-doc has no natural !ref-boundary inputs to promote.
+    return workflow
+
+
+def _wire_constant_refs(builder: "_WorkflowBuilder", const_nodes: Dict[str, int]) -> None:
+    """Connect each unresolved dotted ``!ref:<name>.<output>`` free input to its constant node.
+
+    :meth:`_WorkflowBuilder.emit` records a ``Reference`` kwarg as a free input carrying the ref
+    target string (``"impairments_tx_config.disabled"``). Here the ``<name>`` prefix is matched to a
+    hoisted constant node and the ``<output>`` suffix to that node's output slot (by ``RETURN_NAMES``
+    /output name), and the two are wired (the consumer param shown as a converted-from-widget input).
+    A ref whose prefix names no constant is left free (a genuine subgraph boundary).
+    """
+    for node_id, _idx, ref_target, fallback_type in builder.free_inputs:
+        head, _dot, tail = ref_target.partition(".")
+        src_id = const_nodes.get(head)
+        if src_id is None:
+            continue
+        src = builder.by_id[src_id]
+        slot = next((i for i, out in enumerate(src["outputs"]) if out.get("name") == tail), 0)
+        out_type = src["outputs"][slot]["type"] if slot < len(src["outputs"]) else fallback_type
+        input_name = builder.by_id[node_id]["inputs"][_idx]["name"]
+        builder.connect(src_id, slot, node_id, input_name, out_type, as_widget=True)
+
+
+def _color_dead_end_taps(builder: "_WorkflowBuilder", op_node_ids: List[int]) -> None:
+    """Tint every dead-end tap — a sample-chain op whose sample output feeds nothing — distinctly.
+
+    "Sample-chain op" = has an incoming ``sample`` wire (so a config-only node like a ``MaxOp`` feeding
+    a ``ConfigureOp`` via its ``op`` output, with no sample input, is NOT a tap). "Feeds nothing" = no
+    outgoing ``DATAFLUX_SAMPLE`` wire from any output (so an op feeding a Mix or a later op is live).
+    The single last-scheduled op (the deepest sink = the pipeline's final output) is exempt.
+    """
+    if not op_node_ids:
+        return
+    final = op_node_ids[-1]
+    has_sample_in: set = set()
+    produces_sample: set = set()
+    for _lid, src_id, _src_slot, dst_id, dst_idx, ltype in builder.links:
+        if ltype != SAMPLE_TYPE:
+            continue
+        produces_sample.add(src_id)
+        dst = builder.by_id[dst_id]
+        if dst_idx < len(dst["inputs"]) and dst["inputs"][dst_idx].get("name") == _SAMPLE_INPUT:
+            has_sample_in.add(dst_id)
+    for nid in op_node_ids:
+        if nid != final and nid in has_sample_in and nid not in produces_sample:
+            node = builder.by_id[nid]
+            node["color"] = _DEAD_END_COLOR
+            node["bgcolor"] = _DEAD_END_BGCOLOR
+
+
+def _sanitize_widget_values(builder: "_WorkflowBuilder") -> None:
+    """Replace non-finite floats (``NaN`` / ``±inf``) in every node's ``widgets_values`` with ``None``.
+
+    aiohttp / ``json.dumps`` serialise these as bare ``NaN`` / ``Infinity`` tokens that the browser's
+    ``JSON.parse`` rejects, corrupting the whole import response (the same failure class the histogram
+    payload guards against). ``None`` round-trips as ``null`` and the widget falls back to its default.
+    """
+    for node in builder.nodes:
+        values = node.get("widgets_values")
+        if isinstance(values, list):
+            node["widgets_values"] = [None if isinstance(v, float) and not math.isfinite(v) else v for v in values]
 
 
 # --- groups & subgraphs ----------------------------------------------------------------
@@ -624,6 +942,77 @@ def _wrap_in_subgraph(
         "extra": {},
         "version": _WORKFLOW_VERSION,
         "definitions": {"subgraphs": [subgraph_def]},
+    }
+
+
+# =======================================================================================
+# Export: extract the op DAG as a standalone workflow.json (the raw graph, no compilation)
+# =======================================================================================
+
+
+def extract_ops_workflow(workflow: Dict[str, Any], node_mappings: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract JUST the op-DAG nodes from a UI ``workflow.json`` as a standalone ``workflow.json``.
+
+    The GRAPH counterpart of :func:`fluxstudio.export.export_ops_yamls`: the SAME node set (every
+    ``TAIDAL_NODE_KIND == "op"`` node plus the ``Taidal_MixSamples`` fan-in nodes — the ops-export's
+    schedule universe), but emitted as the RAW DAG *as drawn* rather than compiled. Positions, widget
+    values, and the wiring AMONG those nodes are preserved verbatim; there is NO DAG→sequential
+    compilation (no auto Stash/Unstash, no Mix folding, no constant hoisting — that is the YAML
+    ops-export's job). Every non-op node is dropped: the source, the Walk/Extract adapters, viewers,
+    runnables, value/config feeders, and native ComfyUI nodes. A link is kept only when BOTH of its
+    endpoints survive; a kept node's input wired from a dropped node is detached (``link = None``, so
+    the op falls back to its widget default), and node ids are kept VERBATIM (the result is a subset,
+    so no id remap is needed).
+
+    v1 limit: only TOP-LEVEL nodes are scanned — op nodes nested inside a ComfyUI subgraph instance
+    are not extracted (the instance's ``type`` is a UUID, a non-op node, so it is dropped). Flatten
+    the subgraph first if you need its ops. Groups are dropped (they reference node geometry, not ids).
+
+    Args:
+        workflow: the UI ``workflow.json`` dict (``app.graphToPrompt().workflow``).
+        node_mappings: FluxStudio's ``NODE_CLASS_MAPPINGS`` (read for each node's ``TAIDAL_NODE_KIND``).
+
+    Returns:
+        A ``workflow.json`` dict holding only the op-DAG nodes + the links between them.
+    """
+
+    def _is_op_node(node: Dict[str, Any]) -> bool:
+        class_type = str(node.get("type", ""))
+        return class_type == _MIX_CLASS_TYPE or _node_kind(class_type, node_mappings) == "op"
+
+    kept_nodes = [copy.deepcopy(n) for n in (workflow.get("nodes") or []) if _is_op_node(n)]
+    kept_ids = {n.get("id") for n in kept_nodes}
+
+    # Keep only links whose BOTH endpoints survive. _link_six normalises 6-arrays AND the dict form
+    # ComfyUI sometimes writes → [id, origin_id, origin_slot, target_id, target_slot, type].
+    kept_links: List[List[Any]] = []
+    kept_link_ids: set = set()
+    for raw in workflow.get("links") or []:
+        link = _link_six(raw)
+        if link is not None and link[1] in kept_ids and link[3] in kept_ids:
+            kept_links.append(link)
+            kept_link_ids.add(link[0])
+
+    # Detach any input/output link ref pointing at a dropped node so the result stays self-consistent.
+    for node in kept_nodes:
+        for inp in node.get("inputs") or []:
+            if inp.get("link") not in kept_link_ids:
+                inp["link"] = None
+        for out in node.get("outputs") or []:
+            if out.get("links") is not None:
+                out["links"] = [link_id for link_id in out["links"] if link_id in kept_link_ids]
+
+    last_node_id = max((nid for nid in kept_ids if isinstance(nid, int)), default=0)
+    last_link_id = max((lid for lid in kept_link_ids if isinstance(lid, int)), default=0)
+    return {
+        "last_node_id": last_node_id,
+        "last_link_id": last_link_id,
+        "nodes": kept_nodes,
+        "links": kept_links,
+        "groups": [],
+        "config": {},
+        "extra": {},
+        "version": _WORKFLOW_VERSION,
     }
 
 
@@ -779,13 +1168,14 @@ def _normalize_workflow(graph: Dict[str, Any], node_mappings: Dict[str, Any]) ->
 
 
 class _PNode:
-    __slots__ = ("class_type", "widgets", "links", "export_skip")
+    __slots__ = ("class_type", "widgets", "links", "export_skip", "export_target")
 
     def __init__(self, class_type: str) -> None:
         self.class_type = class_type
         self.widgets: Dict[str, Any] = {}
         self.links: Dict[str, Tuple[str, int]] = {}  # input_name -> (src_node_id, src_slot)
         self.export_skip = False  # properties["taidal_export"] == "skip" (UI workflows only)
+        self.export_target = False  # properties["taidal_export"] == "target" (UI workflows only)
 
 
 def _normalize_ui_workflow(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> Dict[str, "_PNode"]:
@@ -801,7 +1191,9 @@ def _normalize_ui_workflow(graph: Dict[str, Any], node_mappings: Dict[str, Any])
         node_id = str(node["id"])
         class_type = node["type"]
         pnode = _PNode(class_type)
-        pnode.export_skip = (node.get("properties") or {}).get(_EXPORT_SKIP_PROPERTY) == _EXPORT_SKIP_VALUE
+        mark = (node.get("properties") or {}).get(_EXPORT_SKIP_PROPERTY)
+        pnode.export_skip = mark == _EXPORT_SKIP_VALUE
+        pnode.export_target = mark == _EXPORT_TARGET_VALUE
         node_cls = node_mappings.get(class_type)
         if node_cls is not None:
             widget_names, _ = _widget_and_socket_params(node_cls)
@@ -912,21 +1304,93 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
     if not pnodes:
         return _confluid_dump({})
 
+    # Export-target cones come FIRST: a target's data ancestor cone (sample wires + Mix
+    # args) is immune to the skip closures below — a skip mark downstream of a target
+    # means "this node and everything after it"; the cone before it must survive, or the
+    # target itself would be erased by the upstream-dependency pruning (its only consumer
+    # being the marked node). A DIRECT skip mark inside a cone is a contradiction and
+    # raises, mirroring the ops-export.
+    marked = {nid for nid, pnode in pnodes.items() if pnode.export_skip}
+    target_marks = {nid for nid, pnode in pnodes.items() if pnode.export_target}
+    cones: set = set()
+    if target_marks:
+        stack = list(target_marks)
+        while stack:
+            cur = stack.pop()
+            if cur in cones or cur not in pnodes:
+                continue
+            cones.add(cur)
+            pnode = pnodes[cur]
+            arg_names = _MIX_ARGS if pnode.class_type == _MIX_CLASS_TYPE else (_SAMPLE_INPUT,)
+            stack.extend(pnode.links[arg][0] for arg in arg_names if arg in pnode.links)
+        conflicts = sorted(marked & cones)
+        if conflicts:
+            raise UnsupportedTopologyError(
+                f"Export-skip mark(s) on {conflicts} conflict with the export target(s) "
+                f"{sorted(target_marks)} — the marked node(s) are inside a target's "
+                "dependency cone (needed to compute it). Clear one of the two marks."
+            )
+
     # The export-skip mark (canvas-only nodes) closes over sample wires: everything fed
     # from a marked node has no exportable feed either, so the whole branch is left out
-    # instead of degenerating into junk pipeline_N fragments.
-    export_skipped = {nid for nid, pnode in pnodes.items() if pnode.export_skip}
+    # instead of degenerating into junk pipeline_N fragments. The closure is FORWARD-ONLY
+    # on the sample path — a skip mark means "this node and everything behind it; the
+    # nodes before it still export" (marking the node after a Mix must never erase the
+    # Mix). The only upstream pruning is of NON-SAMPLE feeders — a config value node /
+    # op-value producer that fed excluded nodes exclusively through widget/op wires would
+    # otherwise linger as a junk standalone entry. A node consumed via ANY sample-flow
+    # socket anywhere is part of the data path and never pruned. Pruning is scoped to
+    # ancestors of the explicitly MARKED nodes, so feeders of collaterally-excluded
+    # downstream nodes survive; target cones are immune to both rules.
+    export_skipped = set(marked)
+    consumers_all: Dict[str, List[str]] = {}
+    sample_feeders: set = set()
+    for nid, pnode in pnodes.items():
+        sample_args = _MIX_ARGS if pnode.class_type == _MIX_CLASS_TYPE else (_SAMPLE_INPUT,)
+        for name, (src_id, _slot) in pnode.links.items():
+            consumers_all.setdefault(src_id, []).append(nid)
+            if name in sample_args:
+                sample_feeders.add(src_id)
+    dependency_candidates: Dict[str, bool] = {}
+    stack = list(marked)
+    while stack:
+        cur = stack.pop()
+        if cur in dependency_candidates or cur not in pnodes:
+            continue
+        dependency_candidates[cur] = True
+        stack.extend(src for src, _slot in pnodes[cur].links.values())
     while True:
         grew = False
         for nid, pnode in pnodes.items():
-            if nid in export_skipped:
+            if nid in export_skipped or nid in cones:
                 continue
             pred = pnode.links.get(_SAMPLE_INPUT)
             if pred is not None and pred[0] in export_skipped:
                 export_skipped.add(nid)
                 grew = True
+                continue
+            node_consumers = consumers_all.get(nid, [])
+            if (
+                nid in dependency_candidates
+                and nid not in sample_feeders
+                and node_consumers
+                and all(consumer in export_skipped for consumer in node_consumers)
+            ):
+                export_skipped.add(nid)
+                grew = True
         if not grew:
             break
+
+    # Export-target marks invert the selection for the OP surface: only ops inside the
+    # cone union stay; the rest are skipped-with-reason. Non-op entries (sources,
+    # configs) are untouched — they export when referenced, like always.
+    target_excluded: set = set()
+    if target_marks:
+        for nid, pnode in pnodes.items():
+            kind = getattr(node_mappings.get(pnode.class_type), "TAIDAL_NODE_KIND", None)
+            is_flow_node = kind == "op" or pnode.class_type == _MIX_CLASS_TYPE
+            if is_flow_node and nid not in cones and nid not in export_skipped:
+                target_excluded.add(nid)
 
     # Value chains (op-chain → Extract(field=input) → Math → widget) compile to ConfigureOp
     # wraps, mirroring the ops-export — the shared tracer consumes a prompt-shaped view of
@@ -945,9 +1409,28 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
     compiled_adapters = {
         aid for chain_list in configure_specs.values() for _param, chain in chain_list for aid in chain.adapter_ids
     }
+    # A value-chain member feeding a SURVIVING consumer rides along inside its ConfigureOp
+    # wrap even when it sits outside a target cone (the cone follows sample wires only) —
+    # listing it as "outside the cone" would contradict the doc that embeds it.
+    for consumer, chain_list in configure_specs.items():
+        if consumer not in target_excluded and consumer not in export_skipped:
+            for _param, chain in chain_list:
+                target_excluded.difference_update(chain.op_ids)
+                target_excluded.difference_update(chain.adapter_ids)
+
+    # op-@output → param captures (e.g. NoiseFloorOp.applied_snr_db → another op's param): the producer
+    # is wrapped in CaptureOutputOp (records the value into metadata) and the consumer in
+    # ConfigureOp(UnstashInputOp). Producer + consumer are sample-chained (the ancestor constraint), so
+    # both land inside the SAME folded Flux pipeline (see _chain_op_instance) and the metadata bus
+    # carries the value between them. `captures_by_producer` is the reverse map (producer → captures).
+    output_captures = _collect_output_captures(prompt_view, node_mappings)
+    captures_by_producer: Dict[str, Dict[str, str]] = {}
+    for _consumer, cap_list in output_captures.items():
+        for _param, cap in cap_list:
+            captures_by_producer.setdefault(cap.producer_id, {})[cap.output_name] = cap.stash_key
 
     def _wrap_configured(nid: str, marker: Any, eager: bool) -> Any:
-        """Wrap a consumer marker in ConfigureOp(s) for its compiled value chains."""
+        """Wrap a consumer marker in ConfigureOp(s) for its value chains AND op-@output captures."""
         for param, chain in configure_specs.get(nid, []):
             try:
                 compute: List[Any] = []
@@ -963,6 +1446,12 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
                     f"workflow_to_yaml: could not compile the value chain for {nid}.{param} "
                     f"({type(e).__name__}: {e}); the param keeps its default."
                 )
+        for param, cap in output_captures.get(nid, []):
+            marker = _marker(
+                Instance if eager else Class,
+                ConfigureOp,
+                {"ops": [_marker(Instance, UnstashInputOp, {"key": cap.stash_key})], "target": marker, "param": param},
+            )
         return marker
 
     # Recover a Fluid spec per node + which output slot each consumer wired (for object lazy/instance).
@@ -974,6 +1463,9 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
         if nid in export_skipped:
             logger.debug(f"workflow_to_yaml: skipping node {nid} ({pnode.class_type}) — export-skip mark.")
             skipped.append((nid, pnode.class_type, "excluded by export-skip mark (canvas-only)"))
+        elif nid in target_excluded:
+            logger.debug(f"workflow_to_yaml: skipping node {nid} ({pnode.class_type}) — outside the target cone.")
+            skipped.append((nid, pnode.class_type, "outside the export-target cone"))
         elif nid in vc_excluded:
             logger.debug(f"workflow_to_yaml: node {nid} ({pnode.class_type}) re-runs inside a ConfigureOp compute.")
         elif nid in compiled_adapters:
@@ -1011,7 +1503,7 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
     # Fold sample-chained ops into Flux pipeline entries so the canvas WIRING survives in the
     # YAML: each chain becomes `pipeline: !class:Flux` with `source: !ref:<source>` (traced
     # through a skipped adapter like Walk) and an ordered `ops:` list, fan-out as a nested Tee.
-    chain_specs, chain_heads, op_succs = _collect_op_chains(pnodes, specs, node_mappings)
+    chain_specs, chain_heads, op_succs = _collect_op_chains(pnodes, specs, node_mappings, output_captures)
 
     names = _assign_ref_names(pnodes, specs, node_mappings)
 
@@ -1038,6 +1530,7 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
     for nid, (cls, is_lazy, kwargs) in specs.items():
         pnode = pnodes[nid]
         configured = {param for param, _chain in configure_specs.get(nid, [])}
+        configured |= {param for param, _cap in output_captures.get(nid, [])}  # capture wraps inject these
         wired: Dict[str, List[Tuple[str, str, int]]] = {}
         for input_name, (src_id, src_slot) in pnode.links.items():
             base = _strip_index(input_name)
@@ -1072,6 +1565,7 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
         cls, _lazy, kwargs = chain_specs[nid]
         kwargs = dict(kwargs)
         configured = {param for param, _chain in configure_specs.get(nid, [])}
+        configured |= {param for param, _cap in output_captures.get(nid, [])}  # capture wraps inject these
         for input_name, (src_id, src_slot) in pnodes[nid].links.items():
             base = _strip_index(input_name)
             if base == _SAMPLE_INPUT:
@@ -1088,7 +1582,12 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
                     continue
                 src_type = pnodes[src_id].class_type if src_id in pnodes else "unknown"
                 dropped_wires.append((f"{chain_key}[{cls.__name__}]", base, src_id, src_type))
-        return cast(Instance, _wrap_configured(nid, _marker(Instance, cls, kwargs), eager=True))
+        instance = _wrap_configured(nid, _marker(Instance, cls, kwargs), eager=True)
+        # If this chained op's @output is captured downstream, wrap it so its value lands in metadata.
+        produced = captures_by_producer.get(nid)
+        if produced:
+            instance = _marker(Instance, CaptureOutputOp, {"op": instance, "captures": dict(produced)})
+        return cast(Instance, instance)
 
     def _fold_chain(nid: str, chain_key: str) -> List[Any]:
         """Linearize a chain into inline op Instances; fan-out becomes a nested Tee (ops-export shape)."""
@@ -1123,7 +1622,10 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
 
 
 def _collect_op_chains(
-    pnodes: Dict[str, "_PNode"], specs: Dict[str, Tuple[type, bool, Dict[str, Any]]], node_mappings: Dict[str, Any]
+    pnodes: Dict[str, "_PNode"],
+    specs: Dict[str, Tuple[type, bool, Dict[str, Any]]],
+    node_mappings: Dict[str, Any],
+    output_captures: Optional[Dict[str, List[Tuple[str, Any]]]] = None,
 ) -> Tuple[Dict[str, Tuple[type, bool, Dict[str, Any]]], List[Tuple[str, Optional[str]]], Dict[str, List[str]]]:
     """Identify sample-chained op nodes and POP them out of ``specs`` for Flux folding.
 
@@ -1154,13 +1656,22 @@ def _collect_op_chains(
 
     # An op pulled by its DATAFLUX_OP value output into an exported node (op_N lists of a
     # higher-order op / engine) is referenced BY NAME — its chain cannot fold away.
+    captures = output_captures or {}
     consumed_as_value: set = set()
     for cnid, pnode in pnodes.items():
         if cnid not in specs:
             continue
+        captured_params = {param for param, _cap in captures.get(cnid, [])}
         for input_name, (src_id, _slot) in pnode.links.items():
-            if _strip_index(input_name) != _SAMPLE_INPUT and src_id in op_ids:
-                consumed_as_value.add(src_id)
+            base = _strip_index(input_name)
+            if base == _SAMPLE_INPUT or src_id not in op_ids:
+                continue
+            # A capture wire (op-@output → param) is NOT an op-value reference: the producer stays
+            # folded in the pipeline (CaptureOutputOp + the metadata bus carry the value to the
+            # consumer's ConfigureOp). Only true DATAFLUX_OP value wires force a standalone entry.
+            if base in captured_params:
+                continue
+            consumed_as_value.add(src_id)
 
     def _members(head: str) -> List[str]:
         out, stack, seen = [], [head], set()
@@ -1332,4 +1843,4 @@ def _scalar_of(value: Any) -> Any:
     return value
 
 
-__all__ = ["yaml_to_workflow", "workflow_to_yaml"]
+__all__ = ["yaml_to_workflow", "ops_yaml_to_workflow", "workflow_to_yaml", "extract_ops_workflow"]

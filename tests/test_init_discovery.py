@@ -177,6 +177,27 @@ def test_prune_default_comfy_nodes_keeps_only_custom_nodes() -> None:
     assert set(displays) == {"ThirdParty"}
 
 
+def test_prune_default_comfy_nodes_spares_keep_list(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The keep-list (PreviewImage/PreviewAny always, + the config file's keep_nodes) survives the prune
+    # even though those are built-ins — so the native viewers the user relies on stay available.
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("keep_nodes: [MaskToImage]\n")
+    monkeypatch.setenv("FLUXSTUDIO_CONFIG", str(cfg))
+    preview_img = type("PreviewImage", (), {})  # built-in (default "nodes" module)
+    preview_any = type("PreviewAny", (), {})  # built-in
+    mask = type("MaskToImage", (), {"RELATIVE_PYTHON_MODULE": "comfy_extras.nodes_mask"})  # extra, but kept
+    ksampler = type("KSampler", (), {})  # built-in, NOT kept
+    mappings = {"PreviewImage": preview_img, "PreviewAny": preview_any, "MaskToImage": mask, "KSampler": ksampler}
+    displays = {k: k for k in mappings}
+
+    fake_nodes = _fake_comfy_nodes(mappings, displays)
+    with patch.dict(sys.modules, {"nodes": fake_nodes}):
+        removed = fluxstudio._prune_default_comfy_nodes()
+
+    assert removed == 1  # only KSampler pruned
+    assert set(mappings) == {"PreviewImage", "PreviewAny", "MaskToImage"}
+
+
 def test_import_block_prunes_when_hide_env_set(monkeypatch: pytest.MonkeyPatch) -> None:
     """With FLUXSTUDIO_HIDE_DEFAULT_NODES set, the in-ComfyUI import block prunes the default nodes."""
     monkeypatch.setenv("FLUXSTUDIO_HIDE_DEFAULT_NODES", "1")
