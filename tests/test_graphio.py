@@ -10,6 +10,7 @@ annotation objects (mirrors ``tests/test_export.py``).
 """
 
 import json
+import math
 from pathlib import Path
 from typing import Any, Dict
 
@@ -17,19 +18,26 @@ import confluid
 import pytest
 from confluid import Class, Instance, LazyClass, Reference
 from dataflux import Flux
+from dataflux.ops.stash import StashInputOp
 from dataflux.ops.torch import RescaleOp
 from dataflux.sources import HuggingFaceSource
-from test_export import AddOp, ChainLikeOp, ConstTxConfig, ThresholdLikeOp  # local @configurable fixtures
+
+# local @configurable fixtures + the shared op node_mappings helper
+from test_export import AddOp, ChainLikeOp, ConstTxConfig, EmitOp, ThresholdLikeOp, _op_mappings
 
 from fluxstudio.bridge import create_comfy_node
+from fluxstudio.export import UnsupportedTopologyError, export_ops_yaml
 from fluxstudio.graphio import (
+    _is_ops_document,
     _kwarg_to_widget,
     _node_key_for_class,
     _output_slot,
     _strip_index,
+    ops_yaml_to_workflow,
     workflow_to_yaml,
     yaml_to_workflow,
 )
+from fluxstudio.nodes import MixSamplesNode
 
 _WORKSPACE = Path(__file__).resolve().parents[2]
 _MNIST_CFG = _WORKSPACE / "sonair" / "examples" / "train_efficientvit_b0_mnist.yaml"
@@ -116,6 +124,47 @@ def test_engine_pipeline_round_trips_to_yaml() -> None:
     # the Flux references its source + carries one op
     assert "source" in flux.kwargs
     assert isinstance(flux.kwargs.get("ops"), list) and len(flux.kwargs["ops"]) == 1
+
+
+def test_dataset_processor_sink_round_trips_to_yaml() -> None:
+    """A ``DatasetProcessor(flux, sink)`` — the ``marainer convert`` shape — round-trips through the
+    EXISTING whole-graph converter (no graphio change): the sink imports as an object-member node
+    wired into the runnable's ``sink`` slot, and re-exports as a ``!class:`` sink the role-less
+    ``dataset_processor`` root references. This is what makes a canvas sink pipeline serializable."""
+    from dataflux.storage.hdf5 import HDF5Sink
+    from marainer.processing import DatasetProcessor
+
+    nm = {
+        "proc": create_comfy_node(DatasetProcessor, "proc"),
+        "flux": create_comfy_node(Flux, "flux"),
+        "src": create_comfy_node(HuggingFaceSource, "src"),
+        "sink": create_comfy_node(HDF5Sink, "sink"),
+    }
+    doc = {
+        "dataset_processor": Class(DatasetProcessor, flux=Reference("flux"), sink=Reference("sink")),
+        "flux": Class(Flux, source=Reference("raw"), ops=[Instance(RescaleOp, in_min=0.0, in_max=2.0)]),
+        "raw": Instance(HuggingFaceSource, path="mnist"),
+        "sink": Class(HDF5Sink, path="/tmp/out.h5"),
+    }
+    wf = yaml_to_workflow(doc, nm)
+    # All four node types present; the sink is wired into the processor on a DATAFLUX_OBJECT:sink wire
+    # and the flux on a DATAFLUX_SOURCE wire (the two dock contracts the bridge establishes).
+    assert sorted(n["type"] for n in wf["nodes"]) == ["flux", "proc", "sink", "src"]
+    link_socket_types = {link[5] for link in wf["links"]}
+    assert "DATAFLUX_OBJECT:sink" in link_socket_types
+    assert "DATAFLUX_SOURCE" in link_socket_types
+
+    # Export back: the role-less processor root references a flux + a !class: sink it carries.
+    yaml_text = workflow_to_yaml(wf, nm)
+    graph = confluid.resolve(yaml_text)
+    assert isinstance(graph, dict)
+    proc_markers = [
+        v for v in graph.values() if isinstance(v, (Class, Instance)) and "DatasetProcessor" in str(v.target)
+    ]
+    assert len(proc_markers) == 1
+    assert "flux" in proc_markers[0].kwargs and "sink" in proc_markers[0].kwargs
+    sink_markers = [v for v in graph.values() if isinstance(v, (Class, Instance)) and "HDF5Sink" in str(v.target)]
+    assert len(sink_markers) == 1  # the sink survives as its own !class: node
 
 
 def test_strip_index_maps_list_sockets_to_param() -> None:
@@ -981,6 +1030,40 @@ def test_value_chain_compiles_to_configure_op_in_pipeline() -> None:
     assert "FormulaOp" in str(compute[1].target)
 
 
+def test_output_capture_compiles_to_configure_op_in_pipeline() -> None:
+    # The whole-graph export compiles an op-@output → param wire (within one pipeline) like the
+    # ops-export: a CaptureOutputOp on the producer + a ConfigureOp(UnstashInputOp) on the consumer,
+    # both folded into the SAME Flux pipeline so the captured value rides the metadata bus between them.
+    nm = {
+        "src": create_comfy_node(HuggingFaceSource, "src"),
+        "emit": create_comfy_node(EmitOp, "emit"),
+        "threshold": create_comfy_node(ThresholdLikeOp, "threshold"),
+    }
+    prompt = {
+        "1": {"class_type": "src", "inputs": {"path": "mnist"}},
+        "2": {"class_type": "emit", "inputs": {"sample": ["1", 0], "base": 100.0}},
+        "3": {"class_type": "threshold", "inputs": {"sample": ["2", 0], "low_level": ["2", 2], "gain": 1.5}},
+    }
+    yaml_text = workflow_to_yaml(prompt, nm)
+    assert "!class:dataflux.ops.capture.CaptureOutputOp" in yaml_text
+    assert "!class:dataflux.ops.configure.ConfigureOp" in yaml_text
+    assert "!class:dataflux.ops.stash.UnstashInputOp" in yaml_text
+    assert "__taidal_output_2_emitted" in yaml_text
+    assert ".low_level" not in yaml_text  # the wire compiled — no dropped-wire comment
+
+    graph = confluid.resolve(yaml_text)
+    flux = next(v for v in graph.values() if isinstance(v, (Class, Instance)) and "Flux" in str(v.target))
+    ops = flux.kwargs["ops"]
+    assert len(ops) == 2  # producer (CaptureOutputOp wrapping EmitOp) + consumer (ConfigureOp)
+    assert "CaptureOutputOp" in str(ops[0].target)
+    assert "EmitOp" in str(ops[0].kwargs["op"].target)
+    assert ops[0].kwargs["captures"] == {"emitted": "__taidal_output_2_emitted"}
+    wrap = ops[1]
+    assert "ConfigureOp" in str(wrap.target) and wrap.kwargs["param"] == "low_level"
+    assert "ThresholdLikeOp" in str(wrap.kwargs["target"].target)
+    assert "UnstashInputOp" in str(wrap.kwargs["ops"][0].target)
+
+
 def test_value_chain_wraps_standalone_op_entry() -> None:
     # A consumer with no sample wiring (a configured op-value) wraps as its standalone entry.
     nm = {
@@ -1001,8 +1084,10 @@ def test_value_chain_wraps_standalone_op_entry() -> None:
 def test_export_skip_property_skips_node_and_downstream() -> None:
     # The canvas-only mark (properties["taidal_export"]=="skip") excludes the node AND its
     # sample-descendants from the whole-graph export, with the reason in the comment block.
+    # The closure is forward-only on the sample path: the source feeding the marked op
+    # sits BEFORE the mark and still exports.
     nm = _engine_mappings()
-    wf = {
+    wf: Dict[str, Any] = {
         "nodes": [
             {"id": 1, "type": "src", "widgets_values": ["mnist"], "inputs": [], "outputs": []},
             {
@@ -1027,7 +1112,112 @@ def test_export_skip_property_skips_node_and_downstream() -> None:
     assert "excluded by export-skip mark" in yaml_text
     assert "node 2" in yaml_text and "node 3" in yaml_text  # the descendant is skipped too
     assert "!class:dataflux.ops.torch.RescaleOp" not in yaml_text  # neither op exports
-    assert "hugging_face_source:" in yaml_text  # the source itself still exports
+    assert "hugging_face_source:" in yaml_text  # the sample path before the mark survives
+
+
+def test_export_skip_prunes_only_non_sample_feeders() -> None:
+    # A config VALUE node feeding the marked op exclusively through a WIDGET wire is a
+    # pure dependency of the dead branch — it would linger as a junk standalone entry, so
+    # it is pruned. (Sample feeders are never pruned — see the test above.)
+    nm = _value_mappings()
+    wf: Dict[str, Any] = {
+        "nodes": [
+            {"id": 1, "type": "src", "widgets_values": ["mnist"], "inputs": [], "outputs": []},
+            {"id": 9, "type": "txcfg", "widgets_values": [], "inputs": [], "outputs": []},
+            {
+                "id": 3,
+                "type": "chain",
+                "widgets_values": [],
+                "inputs": [
+                    {"name": "sample", "type": "DATAFLUX_SAMPLE", "link": 1},
+                    {"name": "tx_disabled", "type": "*", "link": 2},
+                ],
+                "outputs": [],
+                "properties": {"taidal_export": "skip"},
+            },
+        ],
+        "links": [[1, 1, 0, 3, 0, "DATAFLUX_SAMPLE"], [2, 9, 0, 3, 1, "*"]],
+    }
+    yaml_text = workflow_to_yaml(wf, nm)
+    assert "const_tx_config:" not in yaml_text  # pruned with its only (marked) consumer
+    assert "hugging_face_source:" in yaml_text  # the sample feeder stays
+
+    # A second SURVIVING consumer of the config keeps it exported (shared dependency).
+    wf["nodes"].append(
+        {
+            "id": 4,
+            "type": "chain",
+            "widgets_values": [],
+            "inputs": [
+                {"name": "sample", "type": "DATAFLUX_SAMPLE", "link": 3},
+                {"name": "tx_disabled", "type": "*", "link": 4},
+            ],
+            "outputs": [],
+        }
+    )
+    wf["links"].extend([[3, 1, 0, 4, 0, "DATAFLUX_SAMPLE"], [4, 9, 0, 4, 1, "*"]])
+    yaml_text = workflow_to_yaml(wf, nm)
+    assert "const_tx_config:" in yaml_text
+    assert "!ref 'const_tx_config.disabled'" in yaml_text
+
+
+def test_export_target_property_restricts_to_cone() -> None:
+    # An export-target mark restricts the OP surface to the target's data ancestor cone:
+    # the viewer branch off the fork is skipped-with-reason; the cone exports normally.
+    nm = _engine_mappings()
+    wf: Dict[str, Any] = {
+        "nodes": [
+            {"id": 1, "type": "src", "widgets_values": ["mnist"], "inputs": [], "outputs": []},
+            {
+                "id": 2,
+                "type": "rescale",
+                "widgets_values": [],
+                "inputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "link": 1}],
+                "outputs": [],
+            },
+            {
+                "id": 3,  # the target
+                "type": "rescale",
+                "widgets_values": [],
+                "inputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "link": 2}],
+                "outputs": [],
+                "properties": {"taidal_export": "target"},
+            },
+            {
+                "id": 4,  # viewer branch off the fork — outside the cone
+                "type": "rescale",
+                "widgets_values": [],
+                "inputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "link": 3}],
+                "outputs": [],
+            },
+        ],
+        "links": [
+            [1, 1, 0, 2, 0, "DATAFLUX_SAMPLE"],
+            [2, 2, 0, 3, 0, "DATAFLUX_SAMPLE"],
+            [3, 2, 0, 4, 0, "DATAFLUX_SAMPLE"],
+        ],
+    }
+    yaml_text = workflow_to_yaml(wf, nm)
+    assert "node 4 (rescale): outside the export-target cone" in yaml_text
+    graph = confluid.resolve(yaml_text)
+    flux = next(v for v in graph.values() if isinstance(v, (Class, Instance)) and "Flux" in str(v.target))
+    assert len(flux.kwargs["ops"]) == 2  # exactly the cone: nodes 2 and 3
+
+    # The reported scenario: the node AFTER the target carries the skip mark. The cone is
+    # immune to the skip closures (downstream + exclusive-dependency pruning) — without
+    # the protection the pruning cascaded back through the target and erased the export.
+    wf["nodes"][3]["properties"] = {"taidal_export": "skip"}
+    yaml_text = workflow_to_yaml(wf, nm)
+    assert "node 4 (rescale): excluded by export-skip mark" in yaml_text
+    graph = confluid.resolve(yaml_text)
+    flux = next(v for v in graph.values() if isinstance(v, (Class, Instance)) and "Flux" in str(v.target))
+    assert len(flux.kwargs["ops"]) == 2  # the cone survives intact
+
+    # A DIRECT skip mark inside the cone contradicts the target and raises.
+    wf["nodes"][3]["properties"] = {}
+    wf["nodes"][1]["properties"] = {"taidal_export": "skip"}  # node 2 — inside 3's cone
+    with pytest.raises(UnsupportedTopologyError, match="conflict with the export target"):
+        workflow_to_yaml(wf, nm)
 
 
 def test_import_of_hoisted_constant_evaluates_consumer_and_places_config_node() -> None:
@@ -1044,3 +1234,214 @@ def test_import_of_hoisted_constant_evaluates_consumer_and_places_config_node() 
     assert types == ["chain", "txcfg"]
     chain_node = next(n for n in wf["nodes"] if n["type"] == "chain")
     assert "QuantizeOp" in str(chain_node["widgets_values"])
+
+
+def test_subgraph_op_terminator_skipped_gracefully_in_whole_graph_export() -> None:
+    # The "subgraph as an Op" terminator (Taidal_SubgraphOp) has no TAIDAL_CALLABLE_PATH, so the
+    # WHOLE-graph export skips it with a comment instead of crashing — the subgraph-as-op is
+    # compiled by the OPS export (export.py), not the whole-graph exporter. (v1 limit, documented.)
+    from fluxstudio.nodes import SubgraphOpExtractNode
+
+    workflow = {
+        "nodes": [
+            {
+                "id": 1,
+                "type": "Taidal_SubgraphOp",
+                "widgets_values": [],
+                "inputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "link": None}],
+            },
+        ],
+        "links": [],
+    }
+    yaml_text = workflow_to_yaml(workflow, {"Taidal_SubgraphOp": SubgraphOpExtractNode})
+    assert "node 1 (Taidal_SubgraphOp)" in yaml_text
+    assert "canvas-only Taidal adapter" in yaml_text
+
+
+# =======================================================================================
+# ops.yaml → workflow.json (the inverse of the ops-export; ``ops_yaml_to_workflow``)
+# =======================================================================================
+
+_WALK = {"class_type": "WalkDatasetNode", "inputs": {}}
+
+
+def _ops_import_mappings() -> Dict[str, Any]:
+    """The ops-export node_mappings + the Mix fan-in node and a real StashInputOp op node."""
+    nm = dict(_op_mappings())
+    nm["Taidal_MixSamples"] = MixSamplesNode
+    nm["Taidal_StashInputOp"] = create_comfy_node(StashInputOp, "Taidal_StashInputOp")
+    return nm
+
+
+def _sample_consumers(wf: Dict[str, Any]) -> tuple:
+    """``(nodes_by_id, {src_id: [dst_id, …]})`` over the reconstructed ``sample`` wires only."""
+    nodes = {n["id"]: n for n in wf["nodes"]}
+    consumers: Dict[int, list] = {}
+    for _lid, src, _sslot, dst, didx, ltype in wf["links"]:
+        if ltype == "DATAFLUX_SAMPLE" and nodes[dst]["inputs"][didx].get("name") == "sample":
+            consumers.setdefault(src, []).append(dst)
+    return nodes, consumers
+
+
+def _types(wf: Dict[str, Any]) -> list:
+    return [n["type"] for n in wf["nodes"]]
+
+
+def test_is_ops_document_discriminates_ops_from_whole_graph() -> None:
+    assert _is_ops_document({"ops": [Instance(AddOp)]})
+    assert _is_ops_document({"const": Class(ConstTxConfig), "ops": [Instance(AddOp)]})
+    assert _is_ops_document({"ops": []})  # an empty pipeline is still an ops-doc
+    # whole-graph (hoisted nodes, no top-level ops list) and non-dicts are NOT ops-docs
+    assert not _is_ops_document({"trainer": Class(AddOp), "model": Class(RescaleOp)})
+    assert not _is_ops_document({"ops": "not-a-list"})
+    assert not _is_ops_document({"ops": [1, 2, 3]})  # a list, but not of Fluid markers
+    assert not _is_ops_document("some: yaml")
+    assert not _is_ops_document(None)
+
+
+def test_ops_import_linear_chain_connects_in_order() -> None:
+    prompt = {
+        "1": _WALK,
+        "2": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["1", 0], "amount": 1.0}},
+        "3": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["2", 0], "amount": 2.0}},
+        "4": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["3", 0], "amount": 3.0}},
+    }
+    nm = _ops_import_mappings()
+    wf = ops_yaml_to_workflow(export_ops_yaml(prompt, nm), nm)
+    assert _types(wf).count("Taidal_AddOp") == 3
+    nodes, consumers = _sample_consumers(wf)
+    # exactly two sample wires, forming a single chain op2->op3->op4
+    chain_links = [(s, consumers[s]) for s in consumers]
+    assert sum(len(c) for _s, c in chain_links) == 2
+    assert all(len(c) == 1 for _s, c in chain_links)  # no fan-out in a linear chain
+
+
+def test_ops_import_fanout_reconstructs_branches_and_mix_drops_autostash() -> None:
+    # node 2 forks to 3 and 4; 5 (Mix) merges them with diverging input/target lineages.
+    prompt = {
+        "1": _WALK,
+        "2": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["1", 0], "amount": 1.0}},
+        "3": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["2", 0], "amount": 2.0}},
+        "4": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["2", 0], "amount": 3.0}},
+        "5": {
+            "class_type": "Taidal_MixSamples",
+            "inputs": {"input_sample": ["3", 0], "target_sample": ["4", 0], "metadata_sample": ["4", 0]},
+        },
+        "6": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["5", 0], "amount": 4.0}},
+    }
+    nm = _ops_import_mappings()
+    doc = export_ops_yaml(prompt, nm)
+    assert "StashInputOp" in doc  # the export DID insert auto-stashes to sequentialize the fork
+    wf = ops_yaml_to_workflow(doc, nm)
+    types = _types(wf)
+    assert types.count("Taidal_AddOp") == 4
+    assert types.count("Taidal_MixSamples") == 1  # the Mix fan-in is reconstructed
+    assert not any("Stash" in t for t in types)  # every auto-inserted stash/unstash is gone
+    nodes, consumers = _sample_consumers(wf)
+    # the fork node (AddOp amount=1) feeds two branches; the Mix feeds the tail op
+    fork = next(nid for nid, n in nodes.items() if n["type"] == "Taidal_AddOp" and 1.0 in n["widgets_values"])
+    assert len(consumers[fork]) == 2
+    mix = next(nid for nid, n in nodes.items() if n["type"] == "Taidal_MixSamples")
+    assert len(consumers.get(mix, [])) == 1
+
+
+def test_ops_import_hoisted_constant_node_wired_via_dotted_ref() -> None:
+    prompt = {
+        "1": _WALK,
+        "163": {"class_type": "Taidal_ConstTxConfig", "inputs": {"quantize": False, "clock_drift": True}},
+        "2": {"class_type": "Taidal_ChainLikeOp", "inputs": {"sample": ["1", 0], "tx_disabled": ["163", 0]}},
+    }
+    nm = _ops_import_mappings()
+    doc = export_ops_yaml(prompt, nm)
+    assert "const_tx_config:" in doc and "!ref 'const_tx_config.disabled'" in doc
+    wf = ops_yaml_to_workflow(doc, nm)
+    nodes = {n["id"]: n for n in wf["nodes"]}
+    const_id = next(nid for nid, n in nodes.items() if n["type"] == "Taidal_ConstTxConfig")
+    chain_id = next(nid for nid, n in nodes.items() if n["type"] == "Taidal_ChainLikeOp")
+    # a wire from the constant's `disabled` output (slot 0) into ChainLikeOp.tx_disabled
+    wires = [
+        ln
+        for ln in wf["links"]
+        if ln[1] == const_id and ln[3] == chain_id and nodes[chain_id]["inputs"][ln[4]]["name"] == "tx_disabled"
+    ]
+    assert len(wires) == 1
+    assert nodes[const_id]["outputs"][wires[0][2]]["name"] == "disabled"
+
+
+def test_ops_import_keeps_user_stash_op_but_drops_auto_stash() -> None:
+    # A user StashInputOp(key="mask") (NON-namespaced key) is a real pipeline op and must survive.
+    prompt = {
+        "1": _WALK,
+        "2": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["1", 0], "amount": 1.0}},
+        "3": {"class_type": "Taidal_StashInputOp", "inputs": {"sample": ["2", 0], "key": "mask"}},
+        "4": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["3", 0], "amount": 2.0}},
+    }
+    nm = _ops_import_mappings()
+    doc = export_ops_yaml(prompt, nm)
+    assert "key: mask" in doc and "__taidal_stash_" not in doc  # user key kept, no auto-stash (linear)
+    wf = ops_yaml_to_workflow(doc, nm)
+    stash = [n for n in wf["nodes"] if n["type"] == "Taidal_StashInputOp"]
+    assert len(stash) == 1
+    assert "mask" in stash[0]["widgets_values"]  # the user's key
+    # it is chained in the middle (has a sample-in and a sample-out consumer)
+    _nodes, consumers = _sample_consumers(wf)
+    assert stash[0]["id"] in consumers  # feeds the next op
+
+
+def test_ops_import_rebuilds_mix_for_a_restored_one_shot_branch() -> None:
+    # "Always rebuild a Mix": a fork's ONE-SHOT side branch re-joins the main flow via a reconstructed
+    # Mix Samples node (input/target from the fork, metadata from the branch tail) instead of being a
+    # dead-end tap — this is the impairments `107` pattern (the detection branch merged back by Mix).
+    prompt = {
+        "1": _WALK,
+        "2": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["1", 0], "amount": 1.0}},  # fork
+        "3": {"class_type": "Taidal_EmitOp", "inputs": {"sample": ["2", 0], "base": 100.0}},  # one-shot branch
+        "4": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["2", 0], "amount": 2.0}},  # continuation
+    }
+    nm = _ops_import_mappings()
+    wf = ops_yaml_to_workflow(export_ops_yaml(prompt, nm), nm)
+    nodes = {n["id"]: n for n in wf["nodes"]}
+    assert _types(wf).count("Taidal_MixSamples") == 1  # the branch re-joins via a Mix, not a dead end
+    emit = next(nid for nid, n in nodes.items() if n["type"] == "Taidal_EmitOp")
+    mix = next(nid for nid, n in nodes.items() if n["type"] == "Taidal_MixSamples")
+    # EmitOp (the branch tail) feeds the Mix's metadata_sample — so it is NOT a colored dead end
+    meta = [
+        ln
+        for ln in wf["links"]
+        if ln[1] == emit and ln[3] == mix and nodes[mix]["inputs"][ln[4]]["name"] == "metadata_sample"
+    ]
+    assert len(meta) == 1
+    assert not nodes[emit].get("color")  # re-joined via the Mix, no longer a dead-end tap
+
+
+def test_ops_import_is_json_safe_with_non_finite_widget() -> None:
+    doc = "ops:\n- !class:test_export.AddOp()\n  amount: .nan\n"
+    wf = ops_yaml_to_workflow(doc, _ops_import_mappings())
+    json.dumps(wf, allow_nan=False)  # must NOT raise (a bare NaN token would break browser JSON.parse)
+    add = next(n for n in wf["nodes"] if n["type"] == "Taidal_AddOp")
+    assert not any(isinstance(v, float) and math.isnan(v) for v in add["widgets_values"])
+
+
+def test_yaml_to_workflow_dispatches_ops_documents() -> None:
+    # The public entry point (used by the CLI + the import route) auto-detects an ops-doc.
+    prompt = {
+        "1": _WALK,
+        "2": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["1", 0], "amount": 1.0}},
+        "3": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["2", 0], "amount": 2.0}},
+    }
+    nm = _ops_import_mappings()
+    wf = yaml_to_workflow(export_ops_yaml(prompt, nm), nm)  # NOT ops_yaml_to_workflow — the dispatch
+    assert _types(wf).count("Taidal_AddOp") == 2
+    assert len(wf["links"]) == 1
+
+
+def test_ops_import_group_mode_wraps_in_one_box() -> None:
+    prompt = {
+        "1": _WALK,
+        "2": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["1", 0], "amount": 1.0}},
+        "3": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["2", 0], "amount": 2.0}},
+    }
+    nm = _ops_import_mappings()
+    wf = ops_yaml_to_workflow(export_ops_yaml(prompt, nm), nm, as_="group", name="my_pipeline")
+    assert len(wf["groups"]) == 1
+    assert wf["groups"][0]["title"] == "my_pipeline"

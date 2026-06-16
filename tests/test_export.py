@@ -26,22 +26,29 @@ import torch
 from confluid import configurable, output
 from confluid.fluid import Instance, Reference
 from dataflux import Flux, Sample
+from dataflux.ops.capture import CaptureOutputOp
 from dataflux.ops.configure import ConfigureOp
 from dataflux.ops.formula import FormulaOp
+from dataflux.ops.parallel import Parallel
 from dataflux.ops.stash import StashInputOp, StashTargetOp, UnstashInputOp, UnstashTargetOp
 from dataflux.ops.tee import Tee
 from dataflux.ops.torch import RescaleOp
+from dataflux.ops.transform_chain import TransformChain
 from dataflux.sources import HuggingFaceSource
 
 from fluxstudio.bridge import create_comfy_node
 from fluxstudio.export import (
     UnsupportedTopologyError,
+    _marked_ids,
+    _resolve_marked,
     chain_output_paths,
+    collect_export_marks,
     compile_op_chains,
     compile_ops,
     export_ops_yaml,
     export_ops_yamls,
 )
+from fluxstudio.nodes import SubgraphOpExtractNode
 
 # A non-op boundary node class (stands in for WalkDatasetNode / a source): no TAIDAL_NODE_KIND.
 _BoundaryNode = type("WalkDatasetNode", (object,), {})
@@ -232,6 +239,32 @@ class SetTargetOp:
         return sample._replace(target=self.value)
 
 
+@configurable(category="op", group="test_export")
+class EmitOp:
+    """A sample-transforming op that records a per-call value as an ``@output`` (the NoiseFloorOp
+    ``applied_snr_db`` shape — the value is set DURING the call, so it must be captured, not recomputed).
+
+    Args:
+        base: Base added to the seen input to form the recorded value.
+        amount: Added to ``sample.input`` (the op's actual transform).
+    """
+
+    def __init__(self, base: float = 100.0, amount: float = 0.0) -> None:
+        self.base = base
+        self.amount = amount
+        self._emitted: Optional[float] = None
+
+    @property
+    @output
+    def emitted(self) -> Optional[float]:
+        """The value recorded on the last call (``base + the input seen``)."""
+        return self._emitted
+
+    def __call__(self, sample: Sample) -> Sample:
+        self._emitted = self.base + sample.input
+        return sample._replace(input=sample.input + self.amount)
+
+
 def _op_mappings() -> Dict[str, Any]:
     """node_mappings with the generated op/value nodes the tests wire up + a boundary node."""
     return {
@@ -246,7 +279,10 @@ def _op_mappings() -> Dict[str, Any]:
         "Taidal_AddOp": create_comfy_node(AddOp, "Taidal_AddOp"),
         "Taidal_WriteMetaOp": create_comfy_node(WriteMetaOp, "Taidal_WriteMetaOp"),
         "Taidal_SetTargetOp": create_comfy_node(SetTargetOp, "Taidal_SetTargetOp"),
+        "Taidal_EmitOp": create_comfy_node(EmitOp, "Taidal_EmitOp"),
         "Taidal_ConfigureOp": create_comfy_node(ConfigureOp, "Taidal_ConfigureOp"),
+        "Taidal_Parallel": create_comfy_node(Parallel, "Taidal_Parallel"),
+        "Taidal_SubgraphOp": SubgraphOpExtractNode,
         "WalkDatasetNode": _BoundaryNode,
     }
 
@@ -324,6 +360,25 @@ def test_export_yaml_contains_class_tags() -> None:
     doc = export_ops_yaml(prompt, _op_mappings())
     assert "ops:" in doc
     assert "!class:dataflux.ops.torch.RescaleOp()" in doc
+
+
+def test_sink_node_is_ignored_by_ops_export() -> None:
+    """A sink is an OBJECT-kind node, not an op — the ops-export (which compiles only op-kind nodes
+    into ``{ops:[...]}`` for ``Flux.from_ops_yaml``) ignores it. Sinks serialize via the whole-graph
+    ``DatasetProcessor`` path (graphio), never the op-list; this pins that boundary so a sink can
+    never leak into an op-list (which ``Flux`` would reject)."""
+    from dataflux.storage.hdf5 import HDF5Sink
+
+    nm = {**_op_mappings(), "Taidal_HDF5Sink": create_comfy_node(HDF5Sink, "Taidal_HDF5Sink")}
+    prompt = {
+        "1": {"class_type": "WalkDatasetNode", "inputs": {}},
+        "2": _rescale_node(["1", 0], in_min=0.0, in_max=255.0),
+        "9": {"class_type": "Taidal_HDF5Sink", "inputs": {"path": "/tmp/out.h5"}},  # disconnected object node
+    }
+    docs = export_ops_yamls(prompt, nm)
+    assert len(docs) == 1  # only the op chain forms a component
+    assert "RescaleOp" in docs[0]
+    assert "HDF5Sink" not in docs[0]  # the sink never appears in the op-list
 
 
 def test_fan_out_compiles_to_flat_stash_sequence() -> None:
@@ -856,6 +911,77 @@ def test_impure_value_chain_keeps_branch_and_wraps() -> None:
     assert wraps[0].kwargs["ops"][0].kwargs["amount"] == 5.0  # and embedded in the compute
 
 
+def _output_capture_prompt() -> Dict[str, Any]:
+    """Node 2's @output (``emitted``, slot 2) wired into node 3's ``low_level`` param.
+
+    Node 2 is a sample-ancestor of node 3 (3.sample ← 2), so the capture is on the bus when 3 reads it.
+    """
+    return {
+        "1": {"class_type": "WalkDatasetNode", "inputs": {}},
+        "2": {"class_type": "Taidal_EmitOp", "inputs": {"sample": ["1", 0], "base": 100.0, "amount": 0.0}},
+        "3": {
+            "class_type": "Taidal_ThresholdLikeOp",
+            "inputs": {"sample": ["2", 0], "low_level": ["2", 2], "gain": 1.5},
+        },
+    }
+
+
+def test_output_capture_compiles_to_configure_with_unstash() -> None:
+    """An op-@output → param wire compiles to CaptureOutputOp (producer) + ConfigureOp(UnstashInputOp)
+    (consumer); the captured value reaches the param per sample, and the param is not baked."""
+    notes: List[List[str]] = []
+    chains = compile_op_chains(_output_capture_prompt(), _op_mappings(), chain_notes=notes)
+    assert len(chains) == 1 and notes[0] == []  # the wire compiled — no omission note
+    ops = chains[0]
+    assert [op.target for op in ops] == [CaptureOutputOp, ConfigureOp]
+    cap = ops[0]
+    assert cap.kwargs["op"].target is EmitOp
+    assert cap.kwargs["captures"] == {"emitted": "__taidal_output_2_emitted"}
+    cfg = ops[1]
+    assert cfg.kwargs["param"] == "low_level"
+    assert cfg.kwargs["target"].target is ThresholdLikeOp
+    assert cfg.kwargs["target"].kwargs == {"gain": 1.5}  # low_level NOT baked — injected per sample
+    unstash = cfg.kwargs["ops"][0]
+    assert unstash.target is UnstashInputOp and unstash.kwargs["key"] == "__taidal_output_2_emitted"
+
+    # Round-trip + parity: EmitOp(base=100) on input 1.0 records 101 -> ThresholdLikeOp.low_level := 101.
+    loaded = _load_ops(export_ops_yamls(_output_capture_prompt(), _op_mappings())[0])
+    out = list(Flux(source=[Sample(input=1.0, target=None, metadata={})], ops=loaded))[0]
+    assert out.meta["low_level"] == pytest.approx(101.0)
+    assert loaded[1].target.low_level == pytest.approx(101.0)
+
+
+def test_output_capture_cross_branch_keeps_note() -> None:
+    """A producer that is NOT a sample-ancestor of the consumer (separate branches off the source)
+    can't put its value on the consumer's bus — the wire drops with a sample-ancestor note."""
+    prompt = {
+        "1": {"class_type": "WalkDatasetNode", "inputs": {}},
+        "2": {"class_type": "Taidal_EmitOp", "inputs": {"sample": ["1", 0]}},
+        "3": {"class_type": "Taidal_ThresholdLikeOp", "inputs": {"sample": ["1", 0], "low_level": ["2", 2]}},
+    }
+    notes: List[List[str]] = []
+    chains = compile_op_chains(prompt, _op_mappings(), chain_notes=notes)
+    all_notes = [n for chain_notes_list in notes for n in chain_notes_list]
+    assert any("'low_level'" in n and "sample-ancestor" in n for n in all_notes)
+    assert all(op.target is not ConfigureOp for chain in chains for op in chain)  # no capture wrap emitted
+
+
+def test_output_capture_producer_and_consumer_chain() -> None:
+    """A node may be BOTH a capture consumer (its param configured from an upstream @output) AND a
+    capture producer (its own @output captured downstream): the producer CaptureOutputOp reads the
+    inner op's @output through the consumer ConfigureOp's .target wrapper. End-to-end parity."""
+    prompt = {
+        "1": {"class_type": "WalkDatasetNode", "inputs": {}},
+        "2": {"class_type": "Taidal_EmitOp", "inputs": {"sample": ["1", 0], "base": 100.0}},
+        "3": {"class_type": "Taidal_EmitOp", "inputs": {"sample": ["2", 0], "base": ["2", 2]}},
+        "4": {"class_type": "Taidal_ThresholdLikeOp", "inputs": {"sample": ["3", 0], "low_level": ["3", 2]}},
+    }
+    loaded = _load_ops(export_ops_yamls(prompt, _op_mappings())[0])
+    out = list(Flux(source=[Sample(input=1.0, target=None, metadata={})], ops=loaded))[0]
+    # node2 records 100+1=101; node3.base := 101 -> records 101+1=102; node4.low_level := 102.
+    assert out.meta["low_level"] == pytest.approx(102.0)
+
+
 def test_op_value_links_embed_into_higher_order_op() -> None:
     # Node 8 is consumed as a DATAFLUX_OP value (op_0) and has no sample wiring — it embeds
     # as a nested instance inside Tee.branches instead of joining the sample sequence.
@@ -1034,6 +1160,8 @@ def test_export_skip_mark_drops_node_and_downstream() -> None:
 
 def test_export_skip_subgraph_prefix_excludes_inlined_instance() -> None:
     # Marking a subgraph-INSTANCE id ("142") excludes every inlined inner node ("142:...").
+    # The closure is forward-only: node 2 fed the marked instance but sits BEFORE it on
+    # the sample path, so it still exports.
     prompt = {
         "1": {"class_type": "WalkDatasetNode", "inputs": {}},
         "2": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["1", 0], "amount": 10.0}},
@@ -1042,6 +1170,31 @@ def test_export_skip_subgraph_prefix_excludes_inlined_instance() -> None:
     }
     chains = compile_op_chains(prompt, _op_mappings(), skip_ids=["142"])
     assert [op.kwargs.get("amount") for op in chains[0]] == [10.0]
+
+    # A second consumer of node 2 just continues the line — still one flat chain.
+    prompt["5"] = {"class_type": "Taidal_AddOp", "inputs": {"sample": ["2", 0], "amount": 2.0}}
+    chains = compile_op_chains(prompt, _op_mappings(), skip_ids=["142"])
+    assert [op.kwargs.get("amount") for op in chains[0]] == [10.0, 2.0]
+
+
+def test_export_skip_never_prunes_before_the_mark() -> None:
+    # A skip mark means "this node and everything BEHIND it" — never the nodes before.
+    # Node 3 feeds ONLY the marked node 4, but it sits before the mark on the sample
+    # path, so it stays in the schedule (a dangling branch is faithful; to drop the
+    # whole branch, mark its head — see test_export_skip_mark_drops_node_and_downstream).
+    prompt = {
+        "1": {"class_type": "WalkDatasetNode", "inputs": {}},
+        "2": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["1", 0], "amount": 10.0}},
+        "3": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["2", 0], "amount": 1.0}},  # feeder of 4
+        "4": {"class_type": "Taidal_WriteMetaOp", "inputs": {"sample": ["3", 0], "key": "viz"}},  # marked
+        "5": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["2", 0], "amount": 2.0}},  # main line
+    }
+    notes: List[List[str]] = []
+    chains = compile_op_chains(prompt, _op_mappings(), chain_notes=notes, skip_ids=["4"])
+    amounts = [op.kwargs.get("amount") for op in chains[0] if op.target is AddOp]
+    assert amounts == [10.0, 1.0, 2.0]  # node 3 survives; only the marked node is gone
+    skip_notes = [note for note in notes[0] if "export-skip mark" in note]
+    assert skip_notes and "node 4" in skip_notes[0] and "node 3" not in skip_notes[0]
 
 
 def test_export_skip_closure_through_mix() -> None:
@@ -1053,6 +1206,193 @@ def test_export_skip_closure_through_mix() -> None:
     assert "MixSamplesNode" not in str(targets)
     flat = [op for op in chains[0] if op.target is AddOp]
     assert [op.kwargs["amount"] for op in flat] == [10.0, 100.0]  # the X branch survives; tail (post-Mix) gone
+
+
+def test_export_skip_after_mix_keeps_the_mix() -> None:
+    # The reported scenario, no target mark involved: skipping the node right AFTER the
+    # Mix prunes the tail only — the Mix and the whole pipeline computing it still export
+    # ("prune all nodes that are behind the mark, NOT before").
+    prompt = dict(_mix_prompt())
+    chains = compile_op_chains(prompt, _op_mappings(), skip_ids=["7"])  # the post-Mix tail
+    assert len(chains) == 1
+    amounts = [op.kwargs.get("amount") for op in chains[0] if op.target is AddOp]
+    assert amounts == [10.0, 100.0, 1.0]  # full Mix recipe; only the +1000 tail is gone
+
+    ops = _load_ops(export_ops_yamls(prompt, _op_mappings(), skip_ids=["7"])[0])
+    out = list(Flux(source=[Sample(input=1.0, target=None, metadata={})], ops=ops))[0]
+    assert out.input == 111.0 and out.target == 42.0 and out.meta["regions"] == 12.0
+
+
+# --------------------------------------------------------------------------- export targets
+
+
+def test_target_mode_exports_ancestor_cone() -> None:
+    # Selecting the Mix as the export target inverts the selection: the doc contains
+    # exactly the ops that COMPUTE it — the post-Mix tail and any side branch off the
+    # fork are simply not scheduled (no marks needed on each viz helper).
+    prompt = dict(_mix_prompt())
+    prompt["90"] = {"class_type": "Taidal_WriteMetaOp", "inputs": {"sample": ["2", 0], "key": "viz"}}  # side branch
+    notes: List[List[str]] = []
+    chains = compile_op_chains(prompt, _op_mappings(), chain_notes=notes, target_ids=["60"])
+    assert len(chains) == 1
+    amounts = [op.kwargs.get("amount") for op in chains[0] if op.target is AddOp]
+    assert amounts == [10.0, 100.0, 1.0]  # the cone — no +1000 tail
+    assert not any(op.target is WriteMetaOp and op.kwargs.get("key") == "viz" for op in chains[0])
+    assert any("compiled for export target: node 60" in note for note in notes[0])
+
+    # Execution: the document's final state IS the Mix result.
+    ops = _load_ops(export_ops_yamls(prompt, _op_mappings(), target_ids=["60"])[0])
+    out = list(Flux(source=[Sample(input=1.0, target=None, metadata={})], ops=ops))[0]
+    assert out.input == 111.0 and out.target == 42.0 and out.meta["regions"] == 12.0
+
+
+def test_target_mode_one_doc_per_target() -> None:
+    # Two targets → two complete documents, each that target's own recipe (the shared
+    # prefix is duplicated — every doc stands alone).
+    prompt = {
+        "1": {"class_type": "WalkDatasetNode", "inputs": {}},
+        "2": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["1", 0], "amount": 10.0}},
+        "3": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["2", 0], "amount": 1.0}},
+        "4": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["2", 0], "amount": 2.0}},
+    }
+    chains = compile_op_chains(prompt, _op_mappings(), target_ids=["3", "4"])
+    assert len(chains) == 2
+    assert [op.kwargs["amount"] for op in chains[0]] == [10.0, 1.0]
+    assert [op.kwargs["amount"] for op in chains[1]] == [10.0, 2.0]
+
+
+def test_target_mode_keeps_value_chain_folding() -> None:
+    # The cone restricts only the SCHEDULE — value chains, constants, and op-values still
+    # resolve from the full prompt (the ConfigureOp wrap survives target mode).
+    chains = compile_op_chains(_value_chain_prompt(), _op_mappings(), target_ids=["6"])
+    assert [op.target for op in chains[0]] == [AddOp, ConfigureOp]
+
+
+def test_target_unknown_or_cone_conflict_raises() -> None:
+    prompt = dict(_mix_prompt())
+    with pytest.raises(UnsupportedTopologyError, match="not found in the graph"):
+        compile_op_chains(prompt, _op_mappings(), target_ids=["999"])
+    # Node 4 is INSIDE the Mix's dependency cone — skip-marking it contradicts the target.
+    with pytest.raises(UnsupportedTopologyError, match="conflict with the export target"):
+        compile_op_chains(prompt, _op_mappings(), skip_ids=["4"], target_ids=["60"])
+
+
+def test_skip_downstream_of_target_keeps_cone() -> None:
+    # The reported scenario: MixSamples is the target, the NEXT node (the tail) carries
+    # the skip mark. The cone is immune to the skip closures — "not exported" means the
+    # marked node and everything after it; the nodes before it (the cone) still export.
+    prompt = dict(_mix_prompt())
+    notes: List[List[str]] = []
+    chains = compile_op_chains(prompt, _op_mappings(), chain_notes=notes, skip_ids=["7"], target_ids=["60"])
+    assert len(chains) == 1
+    amounts = [op.kwargs.get("amount") for op in chains[0] if op.target is AddOp]
+    assert amounts == [10.0, 100.0, 1.0]  # the full cone — no +1000 tail
+    assert any("export-skip mark" in note and "node 7" in note for note in notes[0])
+    assert any("compiled for export target: node 60" in note for note in notes[0])
+
+    # Execution parity: identical to the plain target export — the Mix result is final.
+    ops = _load_ops(export_ops_yamls(prompt, _op_mappings(), skip_ids=["7"], target_ids=["60"])[0])
+    out = list(Flux(source=[Sample(input=1.0, target=None, metadata={})], ops=ops))[0]
+    assert out.input == 111.0 and out.target == 42.0 and out.meta["regions"] == 12.0
+
+
+def test_collect_export_marks_reads_top_level_and_subgraph_inner_nodes() -> None:
+    # The marks live in node.properties — the ops-export PROMPT strips those, so they are read
+    # from the UI workflow (top-level AND every subgraph definition's inner nodes). This mirrors
+    # the reported case: an export-target placed on a node INSIDE a subgraph.
+    workflow = {
+        "nodes": [
+            {"id": 61, "type": "Taidal_AddOp", "properties": {"taidal_export": "skip"}},
+            {"id": 7, "type": "Taidal_AddOp", "properties": {}},  # unmarked
+        ],
+        "definitions": {
+            "subgraphs": [
+                {
+                    "id": "sg-uuid",
+                    "nodes": [
+                        {"id": 371, "type": "Taidal_AddOp", "properties": {"taidal_export": "target"}},
+                        {"id": 372, "type": "Taidal_AddOp", "properties": {"taidal_export": "skip"}},
+                    ],
+                }
+            ]
+        },
+    }
+    skip, target = collect_export_marks(workflow)
+    assert sorted(skip) == ["372", "61"]  # top-level AND subgraph-inner skip marks
+    assert target == ["371"]  # the inner target mark is collected (the bug: it used to be missed)
+
+
+def test_collect_export_marks_handles_propertyless_and_non_dict_inputs() -> None:
+    # A prompt-form dict (no properties) and a non-dict both yield no marks — never raises.
+    assert collect_export_marks({"1": {"class_type": "Taidal_AddOp", "inputs": {}}}) == ([], [])
+    assert collect_export_marks(None) == ([], [])
+    assert collect_export_marks({"nodes": [{"id": 1}]}) == ([], [])  # node without properties
+
+
+def test_resolve_marked_matches_subgraph_path_segments() -> None:
+    # A subgraph instance expands to ':'-joined prompt ids; a mark resolves by SEGMENT match,
+    # so it reaches a node wherever it sits on the instance path.
+    prompt: Dict[str, Any] = {"378:368:371": {}, "378:368:373": {}, "61": {}, "2": {}}
+    assert _resolve_marked({"371"}, prompt) == {"378:368:371"}  # node INSIDE a (nested) subgraph
+    assert _resolve_marked({"378"}, prompt) == {"378:368:371", "378:368:373"}  # whole INSTANCE subtree
+    assert _resolve_marked({"368"}, prompt) == {"378:368:371", "378:368:373"}  # a nested instance
+    assert _resolve_marked({"61"}, prompt) == {"61"}  # a plain top-level node
+    assert _resolve_marked({"999"}, prompt) == set()  # unknown id matches nothing
+    # _marked_ids (skip path) uses the same resolution
+    assert _marked_ids(["371"], prompt) == {"378:368:371"}
+
+
+def test_target_inside_subgraph_restricts_to_its_cone() -> None:
+    # The reported bug, end to end: a target placed INSIDE a subgraph (the prompt id carries the
+    # instance prefix '9:') must export ONLY its ancestor cone — the sibling taps off the same fork
+    # and the unrelated branch are NOT scheduled. Target given by the inner id, as collect_* returns.
+    prompt = {
+        "1": {"class_type": "WalkDatasetNode", "inputs": {}},
+        "2": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["1", 0], "amount": 1.0}},  # the fork
+        "9:3": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["2", 0], "amount": 2.0}},  # TARGET (inner)
+        "9:4": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["2", 0], "amount": 3.0}},  # sibling tap
+        "5": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["2", 0], "amount": 4.0}},  # other branch
+    }
+    chains = compile_op_chains(prompt, _op_mappings(), target_ids=["3"])
+    assert len(chains) == 1
+    assert [op.kwargs["amount"] for op in chains[0]] == [1.0, 2.0]  # only 9:3 and its ancestor 2
+    # the deepest node IS the target (the cone's final op)
+    ops = _load_ops(export_ops_yamls(prompt, _op_mappings(), target_ids=["3"])[0])
+    out = list(Flux(source=[Sample(input=0.0, target=None, metadata={})], ops=ops))[0]
+    assert out.input == 3.0  # 0 +1 (fork) +2 (target) — the sibling +3 / branch +4 are absent
+
+
+def test_target_downstream_of_mix_includes_metadata_sample_branch() -> None:
+    # A target DOWNSTREAM of a Mix Samples node must pull in the metadata_sample branch too — the
+    # cone follows ALL THREE Mix args (input/target/metadata), so a detection/regions branch that
+    # reaches the target only through the Mix's metadata_sample IS exported (the regions producer is
+    # an ancestor via the Mix). Mirrors the impairments graph: RegionPowerAnalysisOp reads regions
+    # the Signal-Regions branch wrote, merged in by Mix Samples.
+    prompt = {
+        "1": {"class_type": "WalkDatasetNode", "inputs": {}},
+        "2": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["1", 0], "amount": 1.0}},  # shared upstream
+        "det": {"class_type": "Taidal_WriteMetaOp", "inputs": {"sample": ["2", 0], "key": "regions"}},  # detection
+        "60": {
+            "class_type": "Taidal_MixSamples",
+            "inputs": {"input_sample": ["2", 0], "target_sample": ["2", 0], "metadata_sample": ["det", 0]},
+        },
+        "371": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["60", 0], "amount": 2.0}},  # TARGET, post-Mix
+    }
+    chains = compile_op_chains(prompt, _op_mappings(), target_ids=["371"])
+    targets = [op.target for chain in chains for op in chain]
+    assert WriteMetaOp in targets  # the metadata producer (the regions branch) is in the cone
+
+
+def test_skip_subgraph_inner_id_excludes_that_node_and_downstream() -> None:
+    # A skip mark on a node inside a subgraph (inner id '3' → prompt '9:3') is honoured the same way.
+    prompt = {
+        "1": {"class_type": "WalkDatasetNode", "inputs": {}},
+        "2": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["1", 0], "amount": 1.0}},
+        "9:3": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["2", 0], "amount": 2.0}},  # SKIP (inner)
+        "9:5": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["9:3", 0], "amount": 3.0}},  # downstream
+    }
+    chains = compile_op_chains(prompt, _op_mappings(), skip_ids=["3"])
+    assert [op.kwargs["amount"] for chain in chains for op in chain] == [1.0]  # only the pre-mark op survives
 
 
 def test_component_merging_two_streams_raises() -> None:
@@ -1068,3 +1408,96 @@ def test_component_merging_two_streams_raises() -> None:
     }
     with pytest.raises(UnsupportedTopologyError, match="distinct sample streams"):
         compile_op_chains(prompt, _op_mappings())
+
+
+# --------------------------------------------------------------------------- subgraph-as-op
+
+
+def _subgraph_op_into_parallel_prompt() -> Dict[str, Any]:
+    """source(1) → AddOp(2,+1) → AddOp(3,+2) → terminator(4); Parallel(5) applies the cone op."""
+    return {
+        "1": {"class_type": "WalkDatasetNode", "inputs": {}},
+        "2": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["1", 0], "amount": 1.0}},
+        "3": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["2", 0], "amount": 2.0}},
+        "4": {"class_type": "Taidal_SubgraphOp", "inputs": {"sample": ["3", 0]}},
+        "5": {"class_type": "Taidal_Parallel", "inputs": {"sample": ["1", 0], "op_0": ["4", 0]}},
+    }
+
+
+def test_subgraph_op_into_parallel_embeds_a_transformchain() -> None:
+    chains = compile_op_chains(_subgraph_op_into_parallel_prompt(), _op_mappings())
+    # ONE pipeline (the Parallel consumer): the terminator's cone ops are NOT scheduled standalone.
+    assert len(chains) == 1
+    assert len(chains[0]) == 1
+    parallel = chains[0][0]
+    assert parallel.target is Parallel
+    embedded = parallel.kwargs["ops"]
+    assert len(embedded) == 1
+    chain = embedded[0]
+    assert chain.target is TransformChain
+    inner = chain.kwargs["ops"]
+    assert [op.target for op in inner] == [AddOp, AddOp]
+    assert [op.kwargs["amount"] for op in inner] == [1.0, 2.0]
+
+
+def test_subgraph_op_round_trip_applies_the_inner_pipeline() -> None:
+    ops = _load_ops(export_ops_yaml(_subgraph_op_into_parallel_prompt(), _op_mappings()))
+    out = list(Flux(source=[Sample(input=0.0, target=None, metadata={})], ops=ops))[0]
+    # Parallel applied per-sample runs its op inline: TransformChain([+1, +2]) → 0 + 1 + 2.
+    assert out.input == 3.0
+
+
+def test_subgraph_op_into_configure_target_embeds_a_transformchain() -> None:
+    # The terminator's op output wired into a SINGLE-op slot (ConfigureOp.target).
+    prompt = {
+        "1": {"class_type": "WalkDatasetNode", "inputs": {}},
+        "2": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["1", 0], "amount": 5.0}},
+        "4": {"class_type": "Taidal_SubgraphOp", "inputs": {"sample": ["2", 0]}},
+        "5": {
+            "class_type": "Taidal_ConfigureOp",
+            "inputs": {"sample": ["1", 0], "target": ["4", 0], "param": "amount", "key": "k"},
+        },
+    }
+    chains = compile_op_chains(prompt, _op_mappings())
+    assert len(chains) == 1
+    cfg = chains[0][0]
+    assert cfg.target is ConfigureOp
+    chain = cfg.kwargs["target"]
+    assert chain.target is TransformChain
+    assert [op.kwargs["amount"] for op in chain.kwargs["ops"]] == [5.0]
+
+
+def test_subgraph_op_fan_out_inner_dag_flattens_with_stash() -> None:
+    # An inner fork (node 2 → 3 and 4) reconverged by Mix → the embedded TransformChain carries
+    # the auto-inserted stash/unstash sequence (DAG→sequential inside the subgraph too).
+    prompt = {
+        "1": {"class_type": "WalkDatasetNode", "inputs": {}},
+        "2": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["1", 0], "amount": 1.0}},
+        "3": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["2", 0], "amount": 2.0}},
+        "4": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["2", 0], "amount": 3.0}},
+        "5": {
+            "class_type": "Taidal_MixSamples",
+            "inputs": {"input_sample": ["3", 0], "target_sample": ["4", 0], "metadata_sample": ["3", 0]},
+        },
+        "6": {"class_type": "Taidal_SubgraphOp", "inputs": {"sample": ["5", 0]}},
+        "7": {"class_type": "Taidal_Parallel", "inputs": {"sample": ["1", 0], "op_0": ["6", 0]}},
+    }
+    chains = compile_op_chains(prompt, _op_mappings())
+    assert len(chains) == 1
+    inner = chains[0][0].kwargs["ops"][0].kwargs["ops"]
+    targets = [op.target for op in inner]
+    assert AddOp in targets and StashInputOp in targets and UnstashInputOp in targets
+
+
+def test_subgraph_op_unconsumed_terminator_schedules_inner_as_a_graph() -> None:
+    # No consumer of the terminator's op output → the inner ops compile as an ordinary pipeline
+    # (the "use the subgraph as a graph" path), NOT excluded.
+    prompt = {
+        "1": {"class_type": "WalkDatasetNode", "inputs": {}},
+        "2": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["1", 0], "amount": 1.0}},
+        "3": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["2", 0], "amount": 2.0}},
+        "4": {"class_type": "Taidal_SubgraphOp", "inputs": {"sample": ["3", 0]}},
+    }
+    chains = compile_op_chains(prompt, _op_mappings())
+    assert len(chains) == 1
+    assert [op.target for op in chains[0]] == [AddOp, AddOp]

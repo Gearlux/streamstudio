@@ -16,7 +16,10 @@ entry-point discovery, so the converters work WITHOUT a running ComfyUI):
   op chains writes one file per chain (``ops_1.yaml`` …) / a ``---``-separated stream on stdout.
 * ``import``: convert a Confluid YAML config into a ComfyUI ``workflow.json``
   (``fluxstudio import config.yaml -o workflow.json [--as graph|group|subgraph]``) — the offline
-  twin of the canvas "Import Taidal YAML" menu command. Uses :func:`fluxstudio.graphio.yaml_to_workflow`.
+  twin of the canvas "Import Taidal YAML" menu command. Uses :func:`fluxstudio.graphio.yaml_to_workflow`,
+  which AUTO-DETECTS an ops-export document (a ``{…constants…, ops: [...]}`` file from ``export`` /
+  the canvas Export-Ops button) and rebuilds the connected op graph — the auto-inserted
+  ``__taidal_stash_*`` ops are removed (fan-out / Mix fan-in reconstructed) and dead-end taps coloured.
 * ``export-workflow``: convert a WHOLE ``workflow.json`` (UI or API form) into a hoisted-``!ref:``
   YAML (``fluxstudio export-workflow workflow.json -o config.yaml``) — the twin of the canvas
   "Export Graph → Taidal YAML". Uses :func:`fluxstudio.graphio.workflow_to_yaml`.
@@ -195,10 +198,24 @@ def _run(args: argparse.Namespace) -> None:
     # env var is the channel). fluxstudio's import inside ComfyUI reads FLUXSTUDIO_HIDE_DEFAULT_NODES
     # to (a) prune ComfyUI's built-in nodes and (b) surface the Taidal nodes at the palette root.
     # Set explicitly ("0" / "1") so the flag wins over any ambient shell export of the var.
-    env = {**os.environ, "FLUXSTUDIO_HIDE_DEFAULT_NODES": "0" if args.default_nodes else "1"}
+    only_taidal = getattr(args, "only_taidal_nodes", False)
+    hide_defaults = (not args.default_nodes) or only_taidal  # only-Taidal mode implies hiding built-ins
+    # The palette keep-list lives in the config FILE (keep_nodes:), not an env var — pass only its
+    # LOCATION (explicitly, so --config wins over any ambient FLUXSTUDIO_CONFIG; empty ⇒ the bridge's
+    # default ~/.fluxstudio/config.yaml).
+    if args.config is not None and not args.config.exists():
+        logger.warning(f"--config file not found: {args.config} (PreviewImage/PreviewAny are still kept).")
+    env = {
+        **os.environ,
+        "FLUXSTUDIO_HIDE_DEFAULT_NODES": "1" if hide_defaults else "0",
+        "FLUXSTUDIO_ONLY_TAIDAL_NODES": "1" if only_taidal else "0",
+        "FLUXSTUDIO_CONFIG": str(args.config) if args.config is not None else "",
+    }
     logger.info("🚀 Launching FluxStudio (ComfyUI) 🚀")
-    if not args.default_nodes:
-        logger.info("Hiding ComfyUI's built-in nodes — only Taidal nodes will appear (at the palette root).")
+    if only_taidal:
+        logger.info("Showing ONLY Taidal nodes (+ kept defaults) — hiding built-ins and other custom packs.")
+    elif not args.default_nodes:
+        logger.info("Hiding ComfyUI's built-in nodes — Taidal + other custom nodes appear (at the palette root).")
     try:
         subprocess.run([sys.executable, "main.py"], cwd=comfy_dir, env=env)
     except KeyboardInterrupt:
@@ -228,7 +245,12 @@ def _export(args: argparse.Namespace) -> None:
     # ``--skip`` mirrors the canvas export-skip mark; an API-format file carries no node
     # properties, so the marked ids must be named explicitly here (getattr: tolerate
     # programmatic Namespace callers that predate the flag).
-    yaml_docs = export_ops_yamls(prompt, fluxstudio.NODE_CLASS_MAPPINGS, skip_ids=getattr(args, "skip", None))
+    yaml_docs = export_ops_yamls(
+        prompt,
+        fluxstudio.NODE_CLASS_MAPPINGS,
+        skip_ids=getattr(args, "skip", None),
+        target_ids=getattr(args, "target", None),
+    )
 
     if len(yaml_docs) > 1:
         logger.info(f"Graph contains {len(yaml_docs)} independent op chains — exporting each individually.")
@@ -300,8 +322,28 @@ def main() -> None:
         default=True,
         help=(
             "Show ComfyUI's built-in nodes alongside the Taidal nodes (default). "
-            "Use --no-default-nodes to hide them so only Taidal nodes appear, surfaced at the "
-            "palette root rather than under a Taidal/ folder."
+            "Use --no-default-nodes to hide them (keeping other custom nodes + the keep-list), "
+            "surfaced at the palette root rather than under a Taidal/ folder."
+        ),
+    )
+    parser.add_argument(
+        "--only-taidal-nodes",
+        action="store_true",
+        help=(
+            "Show ONLY Taidal/FluxStudio nodes — hide ComfyUI's built-ins AND every other "
+            "third-party custom-node pack. Implies --no-default-nodes. Extra nodes to keep are listed "
+            "in the config file's keep_nodes (PreviewImage and PreviewAny are always kept)."
+        ),
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        metavar="FILE",
+        help=(
+            "Palette config file (YAML). Its 'keep_nodes:' list names extra default/custom nodes to "
+            "KEEP when hiding the palette (PreviewImage / PreviewAny are always kept). "
+            "Defaults to ~/.fluxstudio/config.yaml when omitted."
         ),
     )
     parser.add_argument(
@@ -353,6 +395,17 @@ def main() -> None:
         ),
     )
     export_parser.add_argument(
+        "--target",
+        action="append",
+        metavar="NODE_ID",
+        default=None,
+        help=(
+            "Export ONLY the ops that compute this node (its data ancestor cone; the node is the "
+            "final op) — the CLI twin of the canvas export-target mark; repeatable (one document "
+            "per target)."
+        ),
+    )
+    export_parser.add_argument(
         "--skip",
         action="append",
         metavar="NODE_ID",
@@ -364,8 +417,16 @@ def main() -> None:
         ),
     )
 
-    import_parser = sub.add_parser("import", help="Convert a Confluid YAML config into a ComfyUI workflow.json.")
-    import_parser.add_argument("config", type=Path, help="Confluid YAML config to import.")
+    import_parser = sub.add_parser(
+        "import",
+        help=(
+            "Convert a Confluid YAML config into a ComfyUI workflow.json. Auto-detects an ops-export "
+            "document ({...,ops:[...]}) and rebuilds the connected op graph (auto-stash removed, taps coloured)."
+        ),
+    )
+    import_parser.add_argument(
+        "config", type=Path, help="Confluid YAML config (whole-graph OR ops-export doc) to import."
+    )
     import_parser.add_argument(
         "-o", "--output", type=Path, default=None, help="Write the workflow JSON here (default: stdout)."
     )

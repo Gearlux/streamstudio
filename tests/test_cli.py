@@ -217,6 +217,51 @@ def test_main_no_default_nodes_exports_env_one(
     assert any("Hiding ComfyUI's built-in nodes" in i for i in infos)
 
 
+def test_main_config_exports_config_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, logger_mock: MagicMock
+) -> None:
+    # --config <file> is forwarded as FLUXSTUDIO_CONFIG (the PATH; the keep-list lives IN the file).
+    comfy = tmp_path / "ComfyUI"
+    comfy.mkdir()
+    cfg = tmp_path / "palette.yaml"
+    cfg.write_text("keep_nodes: [MaskToImage]\n")
+    monkeypatch.setattr(sys, "argv", ["fluxstudio", "--comfy-dir", str(comfy), "--config", str(cfg)])
+    with patch("subprocess.run") as run_mock:
+        cli.main()
+    assert run_mock.call_args.kwargs["env"]["FLUXSTUDIO_CONFIG"] == str(cfg)
+
+
+def test_main_no_config_clears_config_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, logger_mock: MagicMock
+) -> None:
+    # Without --config the flag is authoritative: FLUXSTUDIO_CONFIG is set to "" (clearing any ambient
+    # export) so the bridge uses its default ~/.fluxstudio/config.yaml.
+    comfy = tmp_path / "ComfyUI"
+    comfy.mkdir()
+    monkeypatch.setenv("FLUXSTUDIO_CONFIG", "/ambient/leak.yaml")
+    monkeypatch.setattr(sys, "argv", ["fluxstudio", "--comfy-dir", str(comfy)])
+    with patch("subprocess.run") as run_mock:
+        cli.main()
+    assert run_mock.call_args.kwargs["env"]["FLUXSTUDIO_CONFIG"] == ""
+
+
+def test_main_only_taidal_nodes_exports_both_envs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, logger_mock: MagicMock
+) -> None:
+    # --only-taidal-nodes sets FLUXSTUDIO_ONLY_TAIDAL_NODES=1 AND implies hiding built-ins
+    # (FLUXSTUDIO_HIDE_DEFAULT_NODES=1) so the backend prunes defaults + the palette roots.
+    comfy = tmp_path / "ComfyUI"
+    comfy.mkdir()
+    monkeypatch.setattr(sys, "argv", ["fluxstudio", "--comfy-dir", str(comfy), "--only-taidal-nodes"])
+    with patch("subprocess.run") as run_mock:
+        cli.main()
+    env = run_mock.call_args.kwargs["env"]
+    assert env["FLUXSTUDIO_ONLY_TAIDAL_NODES"] == "1"
+    assert env["FLUXSTUDIO_HIDE_DEFAULT_NODES"] == "1"
+    infos = [str(c.args[0]) for c in logger_mock.info.call_args_list]
+    assert any("ONLY Taidal nodes" in i for i in infos)
+
+
 def test_module_run_as_script_invokes_main(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # Exercise the ``if __name__ == "__main__": main()`` entry guard.
     comfy = tmp_path / "ComfyUI"
