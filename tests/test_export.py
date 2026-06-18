@@ -41,6 +41,7 @@ from fluxstudio.export import (
     UnsupportedTopologyError,
     _marked_ids,
     _resolve_marked,
+    _subgraph_cone_excluded,
     chain_output_paths,
     collect_export_marks,
     compile_op_chains,
@@ -265,9 +266,53 @@ class EmitOp:
         return sample._replace(input=sample.input + self.amount)
 
 
+@configurable(category="op", group="test_export")
+class ConfigureLikeOp:
+    """Two single-op slots named the HELIOS way (compute/target) — surfaced via the __taidal_op_params__
+    stamp, NOT the dataflux name allowlist. Applies compute then target so a round-trip run is meaningful.
+    """
+
+    def __init__(self, compute: Optional[object] = None, target: Optional[object] = None, key: str = "k") -> None:
+        self.compute, self.target, self.key = compute, target, key
+
+    def __call__(self, sample: Sample) -> Sample:
+        if self.compute is not None:
+            sample = self.compute(sample)  # type: ignore[operator]
+        if self.target is not None:
+            sample = self.target(sample)  # type: ignore[operator]
+        return sample
+
+
+ConfigureLikeOp.__taidal_op_params__ = ("compute", "target")  # type: ignore[attr-defined]
+ConfigureLikeOp.__taidal_op_list_params__ = ()  # type: ignore[attr-defined]
+
+
+@configurable(category="op", group="test_export")
+class IfLikeOp:
+    """Two op-LIST slots named the HELIOS way (true/false_transforms) — surfaced via the
+    __taidal_op_list_params__ stamp (param-name-prefixed socket families). Applies both lists in order.
+    """
+
+    def __init__(
+        self, true_transforms: Optional[List[object]] = None, false_transforms: Optional[List[object]] = None
+    ) -> None:
+        self.true_transforms, self.false_transforms = true_transforms, false_transforms
+
+    def __call__(self, sample: Sample) -> Sample:
+        for op in (self.true_transforms or []) + (self.false_transforms or []):
+            sample = op(sample)  # type: ignore[operator]
+        return sample
+
+
+IfLikeOp.__taidal_op_params__ = ()  # type: ignore[attr-defined]
+IfLikeOp.__taidal_op_list_params__ = ("true_transforms", "false_transforms")  # type: ignore[attr-defined]
+
+
 def _op_mappings() -> Dict[str, Any]:
     """node_mappings with the generated op/value nodes the tests wire up + a boundary node."""
     return {
+        "Taidal_ConfigureLikeOp": create_comfy_node(ConfigureLikeOp, "Taidal_ConfigureLikeOp"),
+        "Taidal_IfLikeOp": create_comfy_node(IfLikeOp, "Taidal_IfLikeOp"),
         "Taidal_RescaleOp": create_comfy_node(RescaleOp, "Taidal_RescaleOp"),
         "Taidal_Tee": create_comfy_node(Tee, "Taidal_Tee"),
         "Taidal_ConstTxConfig": create_comfy_node(ConstTxConfig, "Taidal_ConstTxConfig"),
@@ -409,7 +454,42 @@ def test_fan_out_compiles_to_flat_stash_sequence() -> None:
     # One fork → per-field stash keys, each restore matching its snapshot.
     assert ops[1].kwargs["key"] == "__taidal_stash_2_input" == ops[4].kwargs["key"]
     assert ops[2].kwargs["key"] == "__taidal_stash_2_target" == ops[5].kwargs["key"]
+    # The single (final) unstash of each key removes it (default remove=True → no explicit kwarg).
+    assert ops[4].kwargs.get("remove", True) is True
+    assert ops[5].kwargs.get("remove", True) is True
     assert any("stash/unstash" in note for note in notes[0])
+
+
+def test_fan_out_non_final_unstash_keeps_key_final_removes() -> None:
+    # 3-way fork: the fork is restored before branches 4 AND 5 → TWO unstashes per field. The
+    # non-final unstash must KEEP the key (remove=False) or branch 5 can't restore the fork; the
+    # final unstash removes it (default remove=True), so the __taidal_stash_* snapshot is cleaned up.
+    prompt = {
+        "1": {"class_type": "WalkDatasetNode", "inputs": {}},
+        "2": _rescale_node(["1", 0], in_min=0.0, in_max=255.0),
+        "3": _rescale_node(["2", 0], in_min=0.0, in_max=1.0, out_max=10.0),
+        "4": _rescale_node(["2", 0], in_min=0.0, in_max=1.0, out_max=20.0),
+        "5": _rescale_node(["2", 0], in_min=0.0, in_max=1.0, out_max=30.0),
+    }
+    ops = compile_op_chains(prompt, _op_mappings())[0]
+    in_unstash = [op for op in ops if op.target is UnstashInputOp and op.kwargs["key"] == "__taidal_stash_2_input"]
+    assert len(in_unstash) == 2
+    assert in_unstash[0].kwargs.get("remove") is False  # non-final keeps the key
+    assert in_unstash[1].kwargs.get("remove", True) is True  # final removes it (default)
+
+
+def test_compiled_fan_out_removes_stash_keys_from_metadata() -> None:
+    # End-to-end: after running the compiled fan-out, the internal __taidal_stash_* snapshots are
+    # gone from the sample metadata, so they never leak into a downstream sink.
+    prompt = {
+        "1": {"class_type": "WalkDatasetNode", "inputs": {}},
+        "2": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["1", 0], "amount": 1.0}},
+        "3": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["2", 0], "amount": 2.0}},
+        "4": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["2", 0], "amount": 3.0}},
+    }
+    ops = _load_ops(export_ops_yaml(prompt, _op_mappings()))
+    out = list(Flux(source=[Sample(input=0.0, target=0.0, metadata={})], ops=ops))[0]
+    assert not any(str(k).startswith("__taidal_stash_") for k in out.meta)
 
 
 # --------------------------------------------------------------------------- multiple chains
@@ -820,6 +900,64 @@ def test_configure_op_single_op_wire_embeds_nested_target() -> None:
     out = list(Flux(source=[Sample(input=3.0, target=None, metadata={})], ops=ops))[0]
     assert out.meta["low_level"] == 8.0
     assert type(ops[0].target).__name__ == "ThresholdLikeOp" and ops[0].target.low_level == 8.0
+
+
+def test_stamped_single_op_wires_embed_both_compute_and_target() -> None:
+    """A bridged-helios composite's TWO single-op slots (compute AND target — named the helios way,
+    surfaced via the __taidal_op_params__ stamp) each embed as a nested instance on export."""
+    prompt = {
+        "1": {"class_type": "WalkDatasetNode", "inputs": {}},
+        "2": {"class_type": "Taidal_AddOp", "inputs": {"amount": 1.0}},  # compute op-value
+        "3": {"class_type": "Taidal_AddOp", "inputs": {"amount": 10.0}},  # target op-value
+        "4": {
+            "class_type": "Taidal_ConfigureLikeOp",
+            "inputs": {"sample": ["1", 0], "compute": ["2", 1], "target": ["3", 1], "key": "k"},
+        },
+    }
+    notes: List[List[str]] = []
+    chains = compile_op_chains(prompt, _op_mappings(), chain_notes=notes)
+    assert len(chains) == 1 and len(chains[0]) == 1 and notes[0] == []
+    cfg = chains[0][0]
+    assert cfg.target is ConfigureLikeOp
+    assert cfg.kwargs["compute"].target is AddOp and cfg.kwargs["compute"].kwargs["amount"] == 1.0
+    assert cfg.kwargs["target"].target is AddOp and cfg.kwargs["target"].kwargs["amount"] == 10.0
+
+    # Round-trip + execution parity: 0 → compute +1 → target +10 = 11.
+    ops = _load_ops(export_ops_yamls(prompt, _op_mappings())[0])
+    out = list(Flux(source=[Sample(input=0.0, target=None, metadata={})], ops=ops))[0]
+    assert out.input == 11.0
+
+
+def test_stamped_op_list_families_embed_into_named_kwargs() -> None:
+    """A bridged-helios composite with TWO op-LIST families (true_transforms_N / false_transforms_N)
+    embeds each family into its OWN constructor kwarg on export (not a single shared op-list)."""
+    prompt = {
+        "1": {"class_type": "WalkDatasetNode", "inputs": {}},
+        "2": {"class_type": "Taidal_AddOp", "inputs": {"amount": 1.0}},
+        "3": {"class_type": "Taidal_AddOp", "inputs": {"amount": 2.0}},
+        "4": {"class_type": "Taidal_AddOp", "inputs": {"amount": 10.0}},
+        "5": {
+            "class_type": "Taidal_IfLikeOp",
+            "inputs": {
+                "sample": ["1", 0],
+                "true_transforms_0": ["2", 1],
+                "true_transforms_1": ["3", 1],
+                "false_transforms_0": ["4", 1],
+            },
+        },
+    }
+    notes: List[List[str]] = []
+    chains = compile_op_chains(prompt, _op_mappings(), chain_notes=notes)
+    assert len(chains) == 1 and len(chains[0]) == 1 and notes[0] == []
+    iff = chains[0][0]
+    assert iff.target is IfLikeOp
+    assert [o.kwargs["amount"] for o in iff.kwargs["true_transforms"]] == [1.0, 2.0]
+    assert [o.kwargs["amount"] for o in iff.kwargs["false_transforms"]] == [10.0]
+
+    # Round-trip + execution parity: 0 → (+1 +2) then (+10) = 13.
+    ops = _load_ops(export_ops_yamls(prompt, _op_mappings())[0])
+    out = list(Flux(source=[Sample(input=0.0, target=None, metadata={})], ops=ops))[0]
+    assert out.input == 13.0
 
 
 def _value_chain_prompt(**threshold_extra: Any) -> Dict[str, Any]:
@@ -1501,3 +1639,50 @@ def test_subgraph_op_unconsumed_terminator_schedules_inner_as_a_graph() -> None:
     chains = compile_op_chains(prompt, _op_mappings())
     assert len(chains) == 1
     assert [op.target for op in chains[0]] == [AddOp, AddOp]
+
+
+def _subgraph_op_target_mode_prompt() -> Dict[str, Any]:
+    """The compile-its-OWN-cone case (what ``compile_subgraph_ops`` does): terminator(5) whose
+    ``op`` output IS consumed (Parallel 6), compiled in TARGET MODE for the terminator.
+
+    Cone ops 2 and 4 also have their sample read by OFF-CONE viewer nodes (8, 9), so
+    ``_sample_consumed_outside`` keeps them while the connective op 3 is self-excluded — so WITHOUT
+    the target exemption the cone fragments into ``{2}`` and ``{4}`` (2 components) and the strict
+    ``export_ops_yaml`` raises ``Found 2 independent op components``. This is the minimal form of
+    the user's real impairments graph (where the off-cone consumer is the Spectral-Analysis viewer
+    branch and the self-excluded backbone is Squeeze→Crop→…→NoiseFloor).
+    """
+    return {
+        "1": {"class_type": "WalkDatasetNode", "inputs": {}},
+        "2": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["1", 0], "amount": 1.0}},
+        "3": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["2", 0], "amount": 2.0}},
+        "4": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["3", 0], "amount": 3.0}},
+        "5": {"class_type": "Taidal_SubgraphOp", "inputs": {"sample": ["4", 0]}},
+        "6": {"class_type": "Taidal_Parallel", "inputs": {"sample": ["1", 0], "op_0": ["5", 0]}},
+        "8": {"class_type": "WalkDatasetNode", "inputs": {"sample": ["2", 0]}},  # off-cone viewer
+        "9": {"class_type": "WalkDatasetNode", "inputs": {"sample": ["4", 0]}},  # off-cone viewer
+    }
+
+
+def test_subgraph_op_target_mode_compiles_full_cone_despite_self_exclusion() -> None:
+    # `compile_subgraph_ops` compiles the terminator's OWN cone via target mode. Even though the
+    # terminator's `op` output is consumed (Parallel 6) — which normally drops its cone from the
+    # standalone schedule — the target exemption keeps the cone, so it compiles to ONE chain
+    # instead of fragmenting into the `Found N independent op components` error.
+    prompt = _subgraph_op_target_mode_prompt()
+    chains = compile_op_chains(prompt, _op_mappings(), target_ids=["5"])
+    assert len(chains) == 1
+    assert [op.target for op in chains[0]] == [AddOp, AddOp, AddOp]
+    # End-to-end: the cone applies in order, 0 +1 +2 +3 = 6.
+    ops = _load_ops(export_ops_yaml(prompt, _op_mappings(), target_ids=["5"]))
+    out = list(Flux(source=[Sample(input=0.0, target=None, metadata={})], ops=ops))[0]
+    assert out.input == 6.0
+
+
+def test_subgraph_cone_exclusion_applies_only_when_terminator_is_not_the_target() -> None:
+    # Scope guard: the SAME consumed terminator, compiled WITHOUT naming it a target (the
+    # whole-graph standalone path), still excludes its cone (it embeds in the Parallel) — the
+    # exemption must not leak into the non-target compile.
+    prompt = _subgraph_op_target_mode_prompt()
+    assert "3" in _subgraph_cone_excluded(prompt, _op_mappings())  # no exempt → connective op excluded
+    assert "3" not in _subgraph_cone_excluded(prompt, _op_mappings(), exempt={"5"})  # exempt target → kept

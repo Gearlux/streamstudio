@@ -252,6 +252,13 @@ def test_extract_text_summary_for_pythontype_and_anytype() -> None:
     assert none_text == "AnyType"
 
 
+def test_extract_none_sample_raises_legible_error() -> None:
+    # A None sample (upstream op produced nothing) must give an actionable message, not a bare
+    # ``AttributeError: 'NoneType' object has no attribute 'input'``.
+    with pytest.raises(ValueError, match="empty sample"):
+        SampleExtractorNode().extract(None, field="input")
+
+
 # --------------------------------------------------------------------------- #
 # ArrayHistogramViewerNode
 # --------------------------------------------------------------------------- #
@@ -597,6 +604,15 @@ def test_subgraph_op_registered_and_socket_shape() -> None:
     assert types["optional"]["sample"][0] == SAMPLE_TYPE
     # Hidden PROMPT + UNIQUE_ID are what let execute() compile its own ancestor cone.
     assert types["hidden"] == {"prompt": "PROMPT", "unique_id": "UNIQUE_ID"}
+
+
+def test_subgraph_op_sample_input_is_lazy_and_never_requested() -> None:
+    # The terminator compiles statically from the PROMPT and never reads the runtime sample, so its
+    # ``sample`` input MUST be lazy + ``check_lazy_status`` MUST return [] — otherwise ComfyUI would
+    # eagerly execute the (sourceless) upstream op cone and crash a downstream viewer on a None sample.
+    types = SubgraphOpExtractNode.INPUT_TYPES()
+    assert types["optional"]["sample"][1].get("lazy") is True
+    assert SubgraphOpExtractNode().check_lazy_status(sample=None, prompt={"x": 1}, unique_id="4") == []
 
 
 def test_compile_subgraph_ops_linear_chain_matches_direct_application() -> None:

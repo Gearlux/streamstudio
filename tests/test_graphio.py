@@ -23,7 +23,7 @@ from dataflux.ops.torch import RescaleOp
 from dataflux.sources import HuggingFaceSource
 
 # local @configurable fixtures + the shared op node_mappings helper
-from test_export import AddOp, ChainLikeOp, ConstTxConfig, EmitOp, ThresholdLikeOp, _op_mappings
+from test_export import AddOp, ChainLikeOp, ConstTxConfig, EmitOp, IfLikeOp, ThresholdLikeOp, _op_mappings
 
 from fluxstudio.bridge import create_comfy_node
 from fluxstudio.export import UnsupportedTopologyError, export_ops_yaml
@@ -339,6 +339,205 @@ def test_export_skips_native_and_adapter_nodes_with_comment() -> None:
     graph = confluid.resolve(yaml_text)
     assert "HuggingFaceSource" in str(graph["hugging_face_source"].target)
     assert "Flux" in str(graph["pipeline"].target) and "Flux" in str(graph["pipeline_2"].target)
+
+
+def test_extract_ops_workflow_keeps_only_op_nodes() -> None:
+    # The op-DAG graph export keeps ONLY the op-kind nodes (the rescale ops 3/4/7) and drops the
+    # source, the Walk/Extract adapters, and the PreviewImage viewer — the RAW DAG as drawn, no
+    # compilation. Only links between two surviving nodes are kept; an input from a dropped node is
+    # detached. (Same node set as the YAML ops-export, emitted as a graph instead of a compiled list.)
+    from fluxstudio.graphio import extract_ops_workflow
+
+    graph = extract_ops_workflow(_canvas_workflow(), _canvas_mappings())
+    assert {n["id"] for n in graph["nodes"]} == {3, 4, 7}
+    assert graph["links"] == [[3, 3, 0, 4, 0, "DATAFLUX_SAMPLE"]]  # only op(3)→op(4) survives
+    by_id = {n["id"]: n for n in graph["nodes"]}
+    assert by_id[3]["inputs"][0]["link"] is None  # was fed by the (dropped) Walk adapter
+    assert by_id[4]["inputs"][0]["link"] == 3  # fed by op(3), which survives
+    assert by_id[7]["inputs"][0]["link"] is None  # the 2nd chain's Walk source was dropped
+    assert by_id[3]["widgets_values"] == [0.0, 255.0, 0.0, 1.0, False]  # widgets preserved verbatim
+    assert graph["last_node_id"] == 7 and graph["last_link_id"] == 3
+    assert graph["groups"] == []
+
+
+def test_extract_ops_workflow_includes_mix_fan_in() -> None:
+    # The Mix fan-in node IS part of the op DAG (the ops-export schedule universe), so it is kept;
+    # the source feeding the ops is not an op node and is dropped (its links go with it).
+    from fluxstudio.graphio import extract_ops_workflow
+
+    workflow = {
+        "nodes": [
+            {"id": 1, "type": "src", "inputs": []},
+            {"id": 2, "type": "rescale", "inputs": [{"name": "sample", "link": 1}]},
+            {"id": 3, "type": "rescale", "inputs": [{"name": "sample", "link": 4}]},
+            {
+                "id": 4,
+                "type": "Taidal_MixSamples",
+                "inputs": [{"name": "input_sample", "link": 2}, {"name": "target_sample", "link": 3}],
+            },
+        ],
+        "links": [
+            [1, 1, 0, 2, 0, "DATAFLUX_SOURCE"],  # src → op2  (src dropped → link drops too)
+            [4, 1, 0, 3, 0, "DATAFLUX_SOURCE"],  # src → op3
+            [2, 2, 0, 4, 0, "DATAFLUX_SAMPLE"],  # op2 → Mix.input
+            [3, 3, 0, 4, 1, "DATAFLUX_SAMPLE"],  # op3 → Mix.target
+        ],
+    }
+    graph = extract_ops_workflow(workflow, _canvas_mappings())
+    assert {n["id"] for n in graph["nodes"]} == {2, 3, 4}  # Mix(4) kept, src(1) dropped
+    assert sorted(link[0] for link in graph["links"]) == [2, 3]  # both op→Mix links survive
+
+
+def _op_through_subgraph_workflow() -> Dict[str, Any]:
+    """src → rescale(op) → [sg-chain subgraph instance] → rescale(op): the pipeline flows THROUGH a
+    subgraph — the real-world shape that the naive op-only filter severed (it dropped the instance)."""
+    return {
+        "nodes": [
+            {
+                "id": 1,
+                "type": "src",
+                "inputs": [],
+                "outputs": [{"name": "source", "type": "DATAFLUX_SOURCE", "links": [1]}],
+            },
+            {
+                "id": 2,
+                "type": "rescale",
+                "widgets_values": [0.0, 255.0, 0.0, 1.0, False],
+                "inputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "link": 1}],
+                "outputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "links": [2]}],
+            },
+            {
+                "id": 3,
+                "type": "sg-chain",  # a subgraph instance (its type is the definition id)
+                "inputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "link": 2}],
+                "outputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "links": [3]}],
+            },
+            {
+                "id": 4,
+                "type": "rescale",
+                "widgets_values": [0.0, 255.0, 0.0, 1.0, False],
+                "inputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "link": 3}],
+                "outputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "links": []}],
+            },
+        ],
+        "links": [
+            [1, 1, 0, 2, 0, "DATAFLUX_SOURCE"],
+            [2, 2, 0, 3, 0, "DATAFLUX_SAMPLE"],
+            [3, 3, 0, 4, 0, "DATAFLUX_SAMPLE"],
+        ],
+        "definitions": {"subgraphs": [_chain_subgraph_def("sg-chain")]},
+    }
+
+
+def test_extract_ops_workflow_keep_subgraphs_intact() -> None:
+    # flatten=False keeps the subgraph INSTANCE (a real waypoint of the pipeline) + its definition,
+    # so an op → [subgraph] → op pipeline stays CONNECTED. (Dropping the instance was the bug that
+    # severed the impairments graph into disconnected islands.)
+    from fluxstudio.graphio import extract_ops_workflow
+
+    g = extract_ops_workflow(_op_through_subgraph_workflow(), _canvas_mappings(), flatten=False)
+    assert {n["id"] for n in g["nodes"]} == {2, 3, 4}  # op(2) + subgraph instance(3) + op(4); src dropped
+    assert {lk[0] for lk in g["links"]} == {2, 3}  # op→instance AND instance→op survive → connected
+    assert g["definitions"]["subgraphs"][0]["id"] == "sg-chain"  # the instance's definition is carried
+    assert {n["id"]: n for n in g["nodes"]}[2]["inputs"][0]["link"] is None  # src dropped → detached
+
+
+def test_extract_ops_workflow_flatten_inlines_subgraph_ops() -> None:
+    # flatten=True inlines the subgraph: its two inner rescale ops surface and the whole chain
+    # (outer op → inner op → inner op → outer op) is connected, with NO subgraph instances/defs left.
+    from fluxstudio.graphio import extract_ops_workflow
+
+    g = extract_ops_workflow(_op_through_subgraph_workflow(), _canvas_mappings(), flatten=True)
+    assert "definitions" not in g  # fully flattened
+    assert len(g["nodes"]) == 4 and all("rescale" in str(n["type"]) for n in g["nodes"])  # 4 ops
+    deg = {n["id"]: 0 for n in g["nodes"]}
+    for lk in g["links"]:
+        deg[lk[1]] += 1
+        deg[lk[3]] += 1
+    assert all(d > 0 for d in deg.values())  # every op connected — no isolated nodes
+
+
+def test_extract_ops_workflow_flatten_contracts_through_dropped_node() -> None:
+    # flatten=True reconnects two ops separated by a DROPPED non-op node (a Reroute), instead of
+    # severing them — the contraction that keeps the op DAG connected.
+    from fluxstudio.graphio import extract_ops_workflow
+
+    workflow = {
+        "nodes": [
+            {
+                "id": 1,
+                "type": "rescale",
+                "inputs": [],
+                "outputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "links": [1]}],
+            },
+            {
+                "id": 2,
+                "type": "Reroute",
+                "inputs": [{"name": "", "type": "*", "link": 1}],
+                "outputs": [{"name": "", "type": "*", "links": [2]}],
+            },
+            {
+                "id": 3,
+                "type": "rescale",
+                "inputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "link": 2}],
+                "outputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "links": []}],
+            },
+        ],
+        "links": [[1, 1, 0, 2, 0, "DATAFLUX_SAMPLE"], [2, 2, 0, 3, 0, "DATAFLUX_SAMPLE"]],
+    }
+    g = extract_ops_workflow(workflow, _canvas_mappings(), flatten=True)
+    assert {n["id"] for n in g["nodes"]} == {1, 3}  # the Reroute is dropped
+    assert len(g["links"]) == 1 and g["links"][0][1] == 1 and g["links"][0][3] == 3  # op(1) → op(3) direct
+
+
+def test_extract_ops_workflow_honors_target_mark_and_keeps_config() -> None:
+    # An export-TARGET mark restricts the graph to the target's data ancestor cone — so a dead-end
+    # side-tap OUTSIDE the cone is dropped — and the value/config feeders of cone ops ride along.
+    # This is the impairments-graph fix: the user's target mark was ignored, so config got dropped
+    # and the off-cone Spectral-Analysis taps were kept. Pipeline: op1 → op2[TARGET]; op1 → tap3;
+    # cfg4 → op2 (a value/config producer feeding the target op).
+    from fluxstudio.graphio import extract_ops_workflow
+
+    class _FakeValueNode:  # a value/config producer (kind="value"), like ImpairmentsTxConfig
+        TAIDAL_NODE_KIND = "value"
+
+    workflow = {
+        "nodes": [
+            {
+                "id": 1,
+                "type": "rescale",
+                "inputs": [],
+                "outputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "links": [1, 2]}],
+            },
+            {
+                "id": 2,
+                "type": "rescale",
+                "properties": {"taidal_export": "target"},
+                "inputs": [
+                    {"name": "sample", "type": "DATAFLUX_SAMPLE", "link": 1},
+                    {"name": "in_max", "type": "STRING", "link": 3},
+                ],
+                "outputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "links": []}],
+            },
+            {
+                "id": 3,  # a dead-end tap off op1 — NOT an ancestor of the target → must be dropped
+                "type": "rescale",
+                "inputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "link": 2}],
+                "outputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "links": []}],
+            },
+            {"id": 4, "type": "cfg", "inputs": [], "outputs": [{"name": "value", "type": "STRING", "links": [3]}]},
+        ],
+        "links": [
+            [1, 1, 0, 2, 0, "DATAFLUX_SAMPLE"],  # op1 → target op2
+            [2, 1, 0, 3, 0, "DATAFLUX_SAMPLE"],  # op1 → tap op3 (off-cone)
+            [3, 4, 0, 2, 1, "STRING"],  # cfg4 → target op2 (config feeder)
+        ],
+    }
+    nm = {**_canvas_mappings(), "cfg": _FakeValueNode}
+    for flatten in (False, True):
+        ids = {n["id"] for n in extract_ops_workflow(workflow, nm, flatten=flatten)["nodes"]}
+        assert {1, 2, 4} <= ids, f"flatten={flatten}: target cone + config must survive, got {ids}"
+        assert 3 not in ids, f"flatten={flatten}: the off-cone dead-end tap must be dropped, got {ids}"
 
 
 def test_export_folds_sample_chains_into_flux_pipelines() -> None:
@@ -1237,9 +1436,11 @@ def test_import_of_hoisted_constant_evaluates_consumer_and_places_config_node() 
 
 
 def test_subgraph_op_terminator_skipped_gracefully_in_whole_graph_export() -> None:
-    # The "subgraph as an Op" terminator (Taidal_SubgraphOp) has no TAIDAL_CALLABLE_PATH, so the
-    # WHOLE-graph export skips it with a comment instead of crashing — the subgraph-as-op is
-    # compiled by the OPS export (export.py), not the whole-graph exporter. (v1 limit, documented.)
+    # An UNCONSUMED "subgraph as an Op" terminator (Taidal_SubgraphOp whose `op` output feeds
+    # nothing) has no compile target, so the WHOLE-graph export skips it with a comment instead
+    # of crashing — same `_op_value_consumed` gate the ops-export uses. (A terminator that DOES
+    # feed a Flux's op list IS compiled into the chain — see
+    # test_converter_subgraph_op_compiles_into_flux_ops.)
     from fluxstudio.nodes import SubgraphOpExtractNode
 
     workflow = {
@@ -1422,6 +1623,48 @@ def test_ops_import_is_json_safe_with_non_finite_widget() -> None:
     assert not any(isinstance(v, float) and math.isnan(v) for v in add["widgets_values"])
 
 
+def test_complete_widget_input_slots_restores_full_list_and_remaps_links() -> None:
+    # The ops-import slot fix: a node built with only its socket + the WIRED widget (a hoisted constant
+    # wired into a widget param — e.g. ImpairmentsChain.tx_disabled) is padded to the FULL ComfyUI slot
+    # list (all widgets, class order) and the link is remapped to the wired widget's real slot index, so
+    # ComfyUI renders the connection (was: "the ImpairmentsXxConfig nodes are not connected").
+    from fluxstudio.graphio import _complete_widget_input_slots
+
+    class _FakeOp:
+        @staticmethod
+        def INPUT_TYPES() -> Dict[str, Any]:
+            return {
+                "required": {"a": ("FLOAT", {}), "b": ("STRING", {}), "c": ("INT", {})},
+                "optional": {"sample": ("DATAFLUX_SAMPLE",)},
+            }
+
+    workflow: Dict[str, Any] = {
+        "nodes": [
+            {"id": 1, "type": "val", "inputs": [], "outputs": [{"name": "out", "type": "STRING", "links": [5]}]},
+            {
+                "id": 2,
+                "type": "fakeop",
+                "inputs": [  # INCOMPLETE: only the socket + the one wired widget `b` (at slot 1)
+                    {"name": "sample", "type": "DATAFLUX_SAMPLE", "link": None},
+                    {"name": "b", "type": "STRING", "link": 5, "widget": {"name": "b"}},
+                ],
+                "widgets_values": [1.0, "x", 3],  # a, b, c
+            },
+        ],
+        "links": [[5, 1, 0, 2, 1, "STRING"]],  # node1.out → node2 slot 1 (b)
+    }
+    _complete_widget_input_slots(workflow, {"fakeop": _FakeOp})
+
+    n2 = workflow["nodes"][1]
+    names = [i["name"] for i in n2["inputs"]]
+    assert names == ["sample", "a", "b", "c"]  # socket first, then ALL widgets in INPUT_TYPES order
+    b_slot = names.index("b")
+    assert b_slot == 2 and n2["inputs"][b_slot]["link"] == 5  # `b` at its class index, link preserved
+    assert workflow["links"][0][4] == 2  # link target_slot remapped 1 → 2 (matches `b`'s new index)
+    a_slot = n2["inputs"][names.index("a")]  # an unwired widget is now a widget-input with its real type
+    assert a_slot["type"] == "FLOAT" and a_slot.get("widget") == {"name": "a"} and a_slot["link"] is None
+
+
 def test_yaml_to_workflow_dispatches_ops_documents() -> None:
     # The public entry point (used by the CLI + the import route) auto-detects an ops-doc.
     prompt = {
@@ -1445,3 +1688,137 @@ def test_ops_import_group_mode_wraps_in_one_box() -> None:
     wf = ops_yaml_to_workflow(export_ops_yaml(prompt, nm), nm, as_="group", name="my_pipeline")
     assert len(wf["groups"]) == 1
     assert wf["groups"][0]["title"] == "my_pipeline"
+
+
+# --- whole-graph "Extract as Op" (SubgraphOp) compilation: naming + converter.json ----------
+
+_CONVERTER_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "converter.json"
+
+
+def test_op_feeding_flux_ops_is_not_named_ops() -> None:
+    """An op wired into a Flux's ``ops`` list must NOT take the top-level key ``ops``.
+
+    Confluid broadcasts a top-level key back INTO any class param of the same name, so a
+    top-level ``ops:`` (one op) would clobber the Flux's explicitly-wired ``ops:`` list —
+    the whole chain replaced by that single op (``'X' object is not iterable`` at run()).
+    The shipped convert_to_ultralytics config names its op list ``detection_ops`` for the
+    same reason. Regression for ``_assign_ref_names`` (list-param collision guard).
+    """
+    nm = _engine_mappings()
+    doc = {
+        "pipeline": Class(
+            Flux,
+            source=Reference("raw"),
+            ops=[Instance(RescaleOp, in_min=0.0, in_max=1.0), Instance(RescaleOp, in_min=0.0, in_max=2.0)],
+        ),
+        "raw": Instance(HuggingFaceSource, path="mnist"),
+    }
+    yaml_text = workflow_to_yaml(yaml_to_workflow(doc, nm), nm)
+    graph = confluid.load(yaml_text, flow=False)
+    assert "ops" not in graph  # the colliding name was avoided (ops named by their class instead)
+    flux = next(v for v in graph.values() if isinstance(v, (Class, Instance)) and "Flux" in str(v.target))
+    flux_ops = flux.kwargs.get("ops")
+    assert isinstance(flux_ops, list) and len(flux_ops) == 2  # the wired chain survived, not clobbered
+
+
+def test_stamped_op_list_branch_ops_not_named_after_their_helios_param() -> None:
+    """A bridged-helios composite's op-LIST branches (``IfLikeOp.true_transforms`` / ``false_transforms``,
+    surfaced via the ``__taidal_op_list_params__`` stamp) round-trip as named refs WITHOUT the producer
+    being named after the list param — same confluid-broadcast collision guard as ``ops`` (now class-aware
+    via ``_op_list_params``), so the wired branch lists survive re-import intact."""
+    nm = dict(_op_mappings())
+    nm["flux"] = create_comfy_node(Flux, "flux")
+    nm["raw_src"] = create_comfy_node(HuggingFaceSource, "raw_src")
+    doc = {
+        "pipeline": Class(
+            Flux,
+            source=Reference("raw"),
+            ops=[
+                Instance(IfLikeOp, true_transforms=[Reference("a"), Reference("b")], false_transforms=[Reference("c")])
+            ],
+        ),
+        "raw": Instance(HuggingFaceSource, path="mnist"),
+        "a": Instance(AddOp, amount=1.0),
+        "b": Instance(AddOp, amount=2.0),
+        "c": Instance(AddOp, amount=10.0),
+    }
+    yaml_text = workflow_to_yaml(yaml_to_workflow(doc, nm), nm)
+    graph = confluid.load(yaml_text, flow=False)
+    # The colliding helios list-param names were avoided (branch ops named by their class instead).
+    assert "true_transforms" not in graph and "false_transforms" not in graph
+    iff = next(v for v in graph.values() if "IfLikeOp" in str(getattr(v, "target", "")))
+    assert len(iff.kwargs["true_transforms"]) == 2 and len(iff.kwargs["false_transforms"]) == 1
+    assert all(isinstance(r, Reference) for r in iff.kwargs["true_transforms"])  # lists preserved as refs
+
+
+def _converter_nodes_available() -> bool:
+    """True iff every modelled node type in converter.json resolves in NODE_CLASS_MAPPINGS.
+
+    The fixture is the real Helios→YOLO converter (waivefront / waivefront-torchsig / raidar /
+    waivefront-helios nodes). CI hosts without those packages skip the integration tests below.
+    """
+    import fluxstudio
+
+    nm = fluxstudio.NODE_CLASS_MAPPINGS
+    wf = json.loads(_CONVERTER_FIXTURE.read_text())
+    types = {n["type"] for n in wf.get("nodes", [])}
+    for sg in wf.get("definitions", {}).get("subgraphs", []):
+        types |= {n["type"] for n in sg.get("nodes", [])}
+    for t in types:
+        if "Reroute" in t or t in ("MaskToImage", "PreviewImage"):
+            continue  # native ComfyUI nodes — never config members
+        if len(t) == 36 and t.count("-") == 4:
+            continue  # UUID subgraph-instance node — inlined before export
+        if t.startswith("Taidal_") and t not in nm:
+            return False
+    return True
+
+
+@pytest.mark.skipif(not _CONVERTER_FIXTURE.exists(), reason="converter.json fixture missing")
+def test_converter_subgraph_op_compiles_into_flux_ops() -> None:
+    """Whole-graph export of an 'Extract as Op' (Taidal_SubgraphOp) feeding a Flux: its
+    ancestor cone compiles into the flux op chain — NO stray ``pipeline_N`` Fluxes, the
+    terminator is NOT dropped into the 'left out' comment block, and no ``ops`` top-level
+    key (which would broadcast-clobber Flux.ops)."""
+    import fluxstudio
+
+    nm = fluxstudio.NODE_CLASS_MAPPINGS
+    if not _converter_nodes_available():
+        pytest.skip("converter.json nodes (waivefront/raidar/helios) not installed")
+    yaml_text = workflow_to_yaml(json.loads(_CONVERTER_FIXTURE.read_text()), nm)
+    graph = confluid.load(yaml_text, flow=False)
+    assert not any(k == "pipeline" or k.startswith("pipeline_") for k in graph)  # no fragmentation
+    assert "ops" not in graph and "branches" not in graph  # no broadcast-clobber keys
+    # the SubgraphOp terminator exported (its cone folded in) — not in the leading skip comment
+    header = yaml_text.split("\nsink:", 1)[0] if "\nsink:" in yaml_text else ""
+    assert "Taidal_SubgraphOp" not in header
+    flux_ops = graph["flux"].kwargs.get("ops")
+    assert isinstance(flux_ops, list) and len(flux_ops) > 10  # cone spliced into the chain
+
+
+@pytest.mark.skipif(not _CONVERTER_FIXTURE.exists(), reason="converter.json fixture missing")
+def test_converter_flux_ops_materialize_with_dotted_constant_refs() -> None:
+    """The exported converter op chain materializes through the real ``marainer convert``
+    consumer path (confluid materialize + liquifai deep-flow under the active context):
+    every inline op builds AND each ImpairmentsChain reads its ``disabled`` tuple from the
+    hoisted ``ImpairmentsTxConfig`` constant via a dotted ``!ref``. Materializes the op LIST
+    only (no source/sink), so it needs no on-disk Helios data."""
+    import fluxstudio
+
+    nm = fluxstudio.NODE_CLASS_MAPPINGS
+    if not _converter_nodes_available():
+        pytest.skip("converter.json nodes (waivefront/raidar/helios) not installed")
+    try:
+        from liquifai.core import _confluid_active_context, _deep_flow, _expand_strings
+    except ImportError:  # pragma: no cover - liquifai always present in this workspace
+        pytest.skip("liquifai consumer helpers unavailable")
+    yaml_text = workflow_to_yaml(json.loads(_CONVERTER_FIXTURE.read_text()), nm)
+    cd = _expand_strings(confluid.load(yaml_text, flow=False))
+    ops_markers = cd["flux"].kwargs["ops"]
+    with _confluid_active_context(cd):
+        ops = list(_deep_flow(confluid.materialize(ops_markers, context=cd)))
+    names = [type(o).__name__ for o in ops]
+    assert names[0] == "SqueezeOp" and names[-1] == "RegionsToDetectionBoxesOp"
+    imps = [o for o in ops if type(o).__name__ == "ImpairmentsChain"]
+    assert imps, "the cone's ImpairmentsChain ops must survive into the chain"
+    assert all(isinstance(o.tx_disabled, tuple) and o.tx_disabled for o in imps)  # dotted refs resolved

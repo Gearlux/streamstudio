@@ -19,7 +19,9 @@ DAG into ONE SEQUENTIAL Confluid ``!class:...()`` op-list per weakly-connected c
   / ``StashTargetOp`` and restored (``Unstash*Op``) before each later branch, so the
   branchy canvas wiring becomes one flat op sequence. ``metadata`` deliberately accumulates
   across branches (the Tee / metadata-bus convention) — per-branch metadata isolation is
-  NOT reproduced, and the inserted ``__taidal_stash_*`` keys remain in metadata.
+  NOT reproduced. The inserted ``__taidal_stash_*`` snapshot is CLEANED UP by its final
+  unstash (``Unstash*Op`` defaults to ``remove=True``; a fan-out's non-final unstashes carry
+  ``remove=False`` so the key survives until the last branch), so it does not linger into a sink.
 * **fan-in** via the canvas ``Mix Samples`` adapter (``Taidal_MixSamples``: input from A,
   target from B, metadata = union of all three) compiles to the equivalent unstashes —
   branches run in Mix-argument order so the metadata-sample branch writes last (matching
@@ -76,7 +78,7 @@ from dataflux.ops.stash import StashInputOp, StashTargetOp, UnstashInputOp, Unst
 from dataflux.ops.transform_chain import TransformChain
 from logflow import get_logger
 
-from fluxstudio.bridge import _SINGLE_OP_PARAMS, _coerce_kwargs, _op_list_param
+from fluxstudio.bridge import _SINGLE_OP_PARAMS, _coerce_kwargs, _op_list_params, _single_op_params
 
 logger = get_logger(__name__)
 
@@ -138,8 +140,56 @@ _EXPORT_TARGET_VALUE = "target"
 # Virtual node id for "the component's incoming sample" (whatever the Flux source feeds).
 _ROOT = "__taidal_root__"
 
-# Dynamic ``DATAFLUX_OP`` value sockets a higher-order op node grows (``web/op_list.js``).
+# Dynamic ``DATAFLUX_OP`` value sockets a higher-order op node grows (``web/op_list.js``). The dataflux
+# higher-order ops use the ``op_N`` family; a waivefront-helios composite can carry SEVERAL families
+# under its own helios param names (``true_transforms_N`` …) — recognised class-aware via
+# :func:`_op_list_socket_param` rather than this fixed pattern (kept as the unstamped fallback).
 _OP_SOCKET_RE = re.compile(r"^op_(\d+)$")
+
+
+def _op_class_of(node_cls: Any) -> Any:
+    """The op CLASS wrapped by a generated op-node class (via ``TAIDAL_CALLABLE_PATH``), or ``None``.
+
+    The op class is the authority on which constructor params accept op VALUES — ``bridge._single_op_params``
+    / ``_op_list_params`` introspect IT (single-op params + the dynamic op-list families, incl. the
+    stamped helios slots ``compute`` / ``true_transforms``). ``None`` when the path is missing/unresolvable
+    (a non-op / native node), so the callers fall back to the dataflux ``op_N`` / ``op`` / ``target`` names.
+    """
+    path = getattr(node_cls, "TAIDAL_CALLABLE_PATH", None)
+    if not path:
+        return None
+    try:
+        return resolve_callable(path)
+    except Exception:  # noqa: BLE001 - an unresolvable path simply means "no op-value introspection"
+        return None
+
+
+def _op_list_socket_param(op_cls: Any, key: str) -> Optional[str]:
+    """The op-LIST constructor param whose dynamic ``<prefix>_N`` socket family ``key`` belongs to, else None.
+
+    Routes each wired op-list socket to the right kwarg even when a node has SEVERAL families
+    (``HeliosIfOp`` → ``true_transforms_N`` + ``false_transforms_N``); the dataflux ``op_N`` family maps
+    to its single op-list param. ``None`` ``op_cls`` (unstamped/native) recognises nothing here.
+    """
+    if op_cls is not None:
+        for param, prefix in _op_list_params(op_cls).items():
+            if key.startswith(prefix + "_") and key[len(prefix) + 1 :].isdigit():
+                return param
+    return None
+
+
+def _is_op_value_key(op_cls: Any, key: str) -> bool:
+    """True if ``key`` is an op-VALUE input socket on ``op_cls`` — a single-op param (``ConfigureOp.target``
+    / a stamped helios ``compute``) or an indexed op-list socket (``op_0`` / ``true_transforms_0``).
+
+    These wires embed through the op-value path (nested ``!class:`` / list kwarg), NOT the widget/value-chain
+    pre-passes — so the pre-passes SKIP them. Falls back to the dataflux name conventions when ``op_cls`` is
+    unavailable.
+    """
+    if op_cls is None:
+        return bool(_OP_SOCKET_RE.match(key)) or key in _SINGLE_OP_PARAMS
+    return key in _single_op_params(op_cls) or _op_list_socket_param(op_cls, key) is not None
+
 
 # The canvas sample→value boundary + scalar-math adapters a VALUE CHAIN walks through
 # (``fluxstudio.nodes.SampleExtractorNode`` / ``MathNode``): an op widget wired from
@@ -389,10 +439,11 @@ def _collect_value_chains(
         inputs = node.get("inputs", {})
         pred = inputs.get(_SAMPLE_INPUT)
         consumer_pred = str(pred[0]) if _is_link(pred) else None
+        op_cls = _op_class_of(node_mappings.get(str(node.get("class_type", ""))))
         for key, value in inputs.items():
             if key == _SAMPLE_INPUT or not _is_link(value):
                 continue
-            if _OP_SOCKET_RE.match(key) or key in _SINGLE_OP_PARAMS:
+            if _is_op_value_key(op_cls, key):
                 continue  # op-value wires embed through their own path
             chain = _trace_value_chain(value, consumer_pred, prompt, node_mappings)
             if chain is None:
@@ -459,10 +510,11 @@ def _collect_output_captures(
     for nid, node in prompt.items():
         if _node_kind(str(node.get("class_type", "")), node_mappings) != "op":
             continue
+        op_cls = _op_class_of(node_mappings.get(str(node.get("class_type", ""))))
         for key, value in node.get("inputs", {}).items():
             if key == _SAMPLE_INPUT or not _is_link(value):
                 continue
-            if _OP_SOCKET_RE.match(key) or key in _SINGLE_OP_PARAMS:
+            if _is_op_value_key(op_cls, key):
                 continue  # op-value wires embed through their own path
             capture = _trace_output_capture(value, str(nid), prompt, node_mappings)
             if capture is not None:
@@ -736,46 +788,46 @@ def _hoist_constant(node_id: str, node: Dict[str, Any], fold: _FoldContext) -> s
 
 
 def _embed_op_values(
-    target: Any,
     class_type: str,
     node_id: str,
-    op_links: List[Tuple[int, str, Any]],
+    op_links: List[Tuple[str, int, Any]],
     fold: _FoldContext,
-) -> Optional[Tuple[str, Any]]:
-    """Compile ``op_N`` links into the higher-order op's op-list constructor kwarg.
+) -> Dict[str, Any]:
+    """Compile each op-list socket family's links into its constructor kwarg → ``{param: value}``.
 
-    Each wired producer must be a generated op node; it embeds as a nested ``!class:``
-    Instance built from its own widgets (its wired widgets fold through the same pass).
-    ``branches`` params get each op wrapped as its own 1-op branch, mirroring the live
-    node (``bridge._build_op_node``). Returns ``(param_name, value)`` or ``None``.
+    ``op_links`` carries ``(param, index, link)`` — the consuming node may have SEVERAL op-list families
+    (a helios ``HeliosIfOp`` → ``true_transforms`` + ``false_transforms``), so links are grouped by param
+    and ordered by socket index within each. Each wired producer embeds as a nested ``!class:`` Instance
+    (its wired widgets fold through the same pass), or — for a Subgraph-Op terminator — its compiled cone
+    as a nested ``TransformChain``. A ``branches`` param wraps each op as its own 1-op branch, mirroring
+    the live node (``bridge._build_op_node``). A family with no valid producer is omitted.
     """
-    param = _op_list_param(target)
-    if param is None:
-        fold.notes.append(
-            f"{class_type} (node {node_id}): has wired op_N inputs but no op-list constructor " "param — omitted"
-        )
-        return None
-    instances: List[Any] = []
-    for _idx, key, link in sorted(op_links, key=lambda item: item[0]):
-        src = str(link[0])
-        upstream = fold.prompt.get(src)
-        upstream_type = str(upstream.get("class_type", "")) if upstream else ""
-        if upstream is not None and upstream_type == _SUBGRAPH_OP_CLASS_TYPE:
-            # A Subgraph-Op terminator in this higher-order op's list (e.g. Parallel(ops=[…]))
-            # → embed its compiled cone as a nested TransformChain (the subgraph as one Op).
-            instances.append(_subgraph_op_instance(src, fold.prompt, fold.node_mappings, fold))
-            continue
-        upstream_cls = fold.node_mappings.get(upstream_type) if upstream else None
-        if upstream is None or getattr(upstream_cls, "TAIDAL_NODE_KIND", None) != "op":
-            fold.notes.append(
-                f"{class_type} (node {node_id}): {key!r} is wired from node {link[0]} — omitted, "
-                "not a generated op node"
-            )
-            continue
-        instances.append(_op_to_instance(src, upstream, fold.node_mappings, dropped_notes=fold.notes, fold=fold))
-    if not instances:
-        return None
-    return param, ([[op] for op in instances] if param == "branches" else instances)
+    by_param: Dict[str, List[Tuple[int, Any]]] = {}
+    for param, idx, link in op_links:
+        by_param.setdefault(param, []).append((idx, link))
+    result: Dict[str, Any] = {}
+    for param, entries in by_param.items():
+        instances: List[Any] = []
+        for _idx, link in sorted(entries, key=lambda item: item[0]):
+            src = str(link[0])
+            upstream = fold.prompt.get(src)
+            upstream_type = str(upstream.get("class_type", "")) if upstream else ""
+            if upstream is not None and upstream_type == _SUBGRAPH_OP_CLASS_TYPE:
+                # A Subgraph-Op terminator in this higher-order op's list (e.g. Parallel(ops=[…]))
+                # → embed its compiled cone as a nested TransformChain (the subgraph as one Op).
+                instances.append(_subgraph_op_instance(src, fold.prompt, fold.node_mappings, fold))
+                continue
+            upstream_cls = fold.node_mappings.get(upstream_type) if upstream else None
+            if upstream is None or getattr(upstream_cls, "TAIDAL_NODE_KIND", None) != "op":
+                fold.notes.append(
+                    f"{class_type} (node {node_id}): {param!r} entry is wired from node {link[0]} — "
+                    "omitted, not a generated op node"
+                )
+                continue
+            instances.append(_op_to_instance(src, upstream, fold.node_mappings, dropped_notes=fold.notes, fold=fold))
+        if instances:
+            result[param] = [[op] for op in instances] if param == "branches" else instances
+    return result
 
 
 def _op_to_instance(
@@ -817,17 +869,19 @@ def _op_to_instance(
     inputs = node.get("inputs", {})
     literal_inputs: Dict[str, Any] = {}
     ref_inputs: Dict[str, Any] = {}
-    op_links: List[Tuple[int, str, Any]] = []
+    op_links: List[Tuple[str, int, Any]] = []  # (op-list param, socket index, link)
     for key, value in inputs.items():
         if key == _SAMPLE_INPUT or key in configured_params or key in captured_params:
             continue  # a configured/captured param is injected per sample by the ConfigureOp wrap below
         if not _is_link(value):
             literal_inputs[key] = value
             continue
-        socket_match = _OP_SOCKET_RE.match(key)
-        if fold is not None and socket_match:
-            op_links.append((int(socket_match.group(1)), key, value))
+        list_param = _op_list_socket_param(target, key) if fold is not None else None
+        if list_param is not None:
+            op_links.append((list_param, int(key.rsplit("_", 1)[1]), value))
             continue
+        # A single-op socket (compute/target/delegate/op) folds through _resolve_widget_link below
+        # (it embeds an op-output wire as a nested instance, key-agnostically).
         note_suffix: Optional[str] = None
         if fold is not None:
             outcome, payload = _resolve_widget_link(target, key, value, fold)
@@ -855,9 +909,7 @@ def _op_to_instance(
     coerced = _coerce_kwargs(target, literal_inputs)
     coerced.update(ref_inputs)
     if op_links and fold is not None:
-        embedded = _embed_op_values(target, class_type, node_id, op_links, fold)
-        if embedded is not None:
-            coerced[embedded[0]] = embedded[1]
+        coerced.update(_embed_op_values(class_type, node_id, op_links, fold))
     # ``target`` is the op's @configurable CLASS; pass the type (not the string path) so the
     # dumper emits the dotted ``!class:module.Qualname()`` form that ``confluid.load`` resolves.
     instance = cast(Instance, _marker(Instance, cast(type, target), coerced))
@@ -883,7 +935,10 @@ def _op_to_instance(
                 Instance,
                 ConfigureOp,
                 {
-                    "ops": [_marker(Instance, UnstashInputOp, {"key": cap.stash_key})],
+                    # remove=False: the captured ``__taidal_output_*`` value may be read by SEVERAL
+                    # consumers of the same producer output, so this unstash must NOT delete the key
+                    # (distinct from the fan-out ``__taidal_stash_*`` keys cleaned up in _compile_component).
+                    "ops": [_marker(Instance, UnstashInputOp, {"key": cap.stash_key, "remove": False})],
                     "target": instance,
                     "param": param,
                 },
@@ -924,11 +979,13 @@ def _subgraph_op_instance(
     return cast(Instance, _marker(Instance, TransformChain, {"ops": ops}))
 
 
-def _op_value_consumed(node_id: str, prompt: Dict[str, Any]) -> bool:
-    """True if some node consumes ``node_id``'s output via an op-value slot (``op_N`` / ``op`` / ``target``)."""
+def _op_value_consumed(node_id: str, prompt: Dict[str, Any], node_mappings: Dict[str, Any]) -> bool:
+    """True if some node consumes ``node_id``'s output via an op-value slot (``op_N`` / ``op`` / ``target``,
+    or a stamped helios slot like ``compute`` / ``true_transforms_0``)."""
     for cnode in prompt.values():
+        op_cls = _op_class_of(node_mappings.get(str(cnode.get("class_type", ""))))
         for key, value in cnode.get("inputs", {}).items():
-            if _is_link(value) and str(value[0]) == node_id and (_OP_SOCKET_RE.match(key) or key in _SINGLE_OP_PARAMS):
+            if _is_link(value) and str(value[0]) == node_id and _is_op_value_key(op_cls, key):
                 return True
     return False
 
@@ -941,7 +998,9 @@ def _sample_consumed_outside(node_id: str, cone: Set[str], prompt: Dict[str, Any
     return False
 
 
-def _subgraph_cone_excluded(prompt: Dict[str, Any]) -> Set[str]:
+def _subgraph_cone_excluded(
+    prompt: Dict[str, Any], node_mappings: Dict[str, Any], exempt: Optional[Set[str]] = None
+) -> Set[str]:
     """Inner ops of each CONSUMED Subgraph-Op terminator → dropped from the standalone schedule.
 
     When a terminator's ``op`` output feeds an op slot, its ancestor cone is embedded as a
@@ -950,12 +1009,25 @@ def _subgraph_cone_excluded(prompt: Dict[str, Any]) -> Set[str]:
     in graph mode) stays scheduled — it is then both embedded and scheduled (the shared-node
     case). A terminator whose ``op`` output is unwired excludes nothing (its inner ops, if any,
     schedule as an ordinary pipeline — the "use the subgraph as a graph" path).
+
+    ``exempt`` lists terminator ids whose cone is itself the COMPILE TARGET (``compile_op_chains``
+    passes the resolved export-target ids). Such a terminator must NOT be excluded: when
+    ``SubgraphOpExtractNode`` compiles its own cone via ``export_ops_yaml(target_ids=[tid])``, the
+    same prompt also has that terminator's ``op`` output consumed (by the Flux it feeds), so
+    WITHOUT this exemption the terminator would exclude its OWN cone — leaving only the few ops
+    whose sample is reused by an off-cone viewer branch, which then fragment into several
+    components and trip the strict single-component ``export_ops_yaml`` ("Found N independent op
+    components"). Exempting the target is the cone-compile analogue of ``_subgraph_op_instance``,
+    which already skips this exclusion entirely ("these cone ops are exactly what we compile").
     """
+    exempt = exempt or set()
     excluded: Set[str] = set()
     for tid, node in prompt.items():
         if str(node.get("class_type", "")) != _SUBGRAPH_OP_CLASS_TYPE:
             continue
-        if not _op_value_consumed(tid, prompt):
+        if tid in exempt:
+            continue
+        if not _op_value_consumed(tid, prompt, node_mappings):
             continue
         cone = _ancestor_cone(tid, prompt)
         for member in cone - {tid}:
@@ -999,8 +1071,9 @@ def _build_graph(
 
     value_consumed: Set[str] = set()
     for node in prompt.values():
+        op_cls = _op_class_of(node_mappings.get(str(node.get("class_type", ""))))
         for key, value in node.get("inputs", {}).items():
-            if _is_link(value) and (_OP_SOCKET_RE.match(key) or key in _SINGLE_OP_PARAMS):
+            if _is_link(value) and _is_op_value_key(op_cls, key):
                 value_consumed.add(str(value[0]))
 
     preds: Dict[str, List[Tuple[str, str]]] = {}
@@ -1198,10 +1271,25 @@ def _compile_component(
     leftover = member_set - emitted
     if leftover:  # pragma: no cover - defensive: every DAG node reaches some sink
         raise UnsupportedTopologyError(f"Op nodes {sorted(leftover, key=_id_sort_key)} are unreachable from any sink.")
+
+    # The Unstash*Op default is remove=True, so each ``__taidal_stash_*`` snapshot is DELETED from the
+    # metadata bus once restored — it never lingers into a downstream sink. But a fan-out restores the
+    # SAME key before each later branch, so EVERY unstash of a key EXCEPT the LAST must keep it
+    # (remove=False) or the next branch can't restore the fork. (copy stays at its default — earlier
+    # unstashes still deepcopy for branch independence.)
+    unstash_indices: Dict[str, List[int]] = {}
+    for i, op in enumerate(ops_out):
+        if isinstance(op, Instance) and op.target in (UnstashInputOp, UnstashTargetOp):
+            unstash_indices.setdefault(str(op.kwargs.get("key")), []).append(i)
+    for indices in unstash_indices.values():
+        for i in indices[:-1]:  # all but the LAST occurrence of each key keep it
+            keep = ops_out[i]
+            ops_out[i] = Instance(keep.target, **{**keep.kwargs, "remove": False})
+
     if inserted:
         fold.notes.append(
             f"branching canvas wiring compiled to a sequential op-list — {inserted} stash/unstash "
-            f"ops inserted (metadata keys '{_STASH_KEY_PREFIX}*' remain on the sample)"
+            f"ops inserted (each '{_STASH_KEY_PREFIX}*' snapshot is removed by its final unstash)"
         )
     return ops_out
 
@@ -1311,8 +1399,11 @@ def compile_op_chains(
     output_captures = _collect_output_captures(prompt, node_mappings)
     # A consumed Subgraph-Op terminator's inner ops embed as a nested TransformChain in the
     # consumer (see _subgraph_op_instance), so they drop from the STANDALONE schedule — but NOT
-    # from the cone compile (fold.excluded carries only the value-chain set).
-    sg_excluded = _subgraph_cone_excluded(prompt)
+    # from the cone compile (fold.excluded carries only the value-chain set). EXEMPT the resolved
+    # targets: when SubgraphOpExtractNode compiles its OWN cone (target_ids=[terminator]), that
+    # terminator's op output is also consumed (by the Flux), so without the exemption it would
+    # exclude its own cone and the remnant fragments into several components (UnsupportedTopology).
+    sg_excluded = _subgraph_cone_excluded(prompt, node_mappings, exempt=set(resolved_targets))
     schedule_excluded = vc_excluded | sg_excluded
 
     def _compile(restrict: Optional[Set[str]], extra_notes: List[str]) -> List[List[Any]]:

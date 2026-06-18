@@ -47,7 +47,9 @@ from fluxstudio.bridge import (
     _literal_options,
     _map_type,
     _node_category,
+    _op_list_params,
     _package_tag,
+    _single_op_params,
     _value_call_signature,
     create_comfy_node,
     hide_default_comfy_nodes,
@@ -1190,6 +1192,24 @@ def test_coerce_kwargs_tuple_accepts_comma_string() -> None:
     assert _coerce_kwargs(fn, {"disabled": "A, B ,C"})["disabled"] == ("A", "B", "C")
 
 
+def test_coerce_kwargs_tuple_accepts_python_literal() -> None:
+    """A Tuple[str, ...] widget that holds a PYTHON tuple literal decodes correctly — crucially the
+    empty-tuple default ``"()"`` must become ``()`` (falsy), NOT ``("()",)``. The latter (a comma-split
+    of ``"()"``) is TRUTHY, which made a helios ``ImpairmentsChain.tx_disabled`` left at its ``()``
+    default OVERRIDE the metadata config stamped by ``ImpairmentsTxConfig`` — silently disabling the
+    whole tx/rx impairment-config mechanism. The documented ``("IQImbalanceOp", "QuantizeOp")`` form
+    must also round-trip."""
+
+    def fn(disabled: Tuple[str, ...] = ()) -> None: ...
+
+    assert _coerce_kwargs(fn, {"disabled": "()"})["disabled"] == ()  # empty tuple repr -> () (falsy!)
+    assert _coerce_kwargs(fn, {"disabled": "( )"})["disabled"] == ()  # whitespace tolerated
+    assert _coerce_kwargs(fn, {"disabled": '("A", "B")'})["disabled"] == ("A", "B")  # documented form
+    assert _coerce_kwargs(fn, {"disabled": "('A',)"})["disabled"] == ("A",)  # single-element literal
+    # A non-literal starting with "(" still falls through to the comma-split (best-effort).
+    assert _coerce_kwargs(fn, {"disabled": "(A, B"})["disabled"] == ("(A", "B")
+
+
 def test_coerce_kwargs_non_json_dict_left_raw() -> None:
     def fn(overrides: Optional[Dict[str, float]] = None) -> None: ...
 
@@ -1197,11 +1217,82 @@ def test_coerce_kwargs_non_json_dict_left_raw() -> None:
     assert _coerce_kwargs(fn, {"overrides": "not json"})["overrides"] == "not json"
 
 
+def test_coerce_kwargs_accepts_python_dict_literal() -> None:
+    # A Dict param typed as a Python dict LITERAL (int keys + single quotes) — natural to type for a
+    # `Dict[int, str]` like YoloSink.class_names but INVALID JSON — is accepted via ast.literal_eval.
+    # Live regression: `class_names must be a non-empty Dict[int, str]` when the user typed
+    # `{0:'BG',1:'5GNR'}` (json.loads rejects it; the value stayed a string and pydantic refused it).
+    def fn(class_names: Optional[Dict[int, str]] = None) -> None: ...
+
+    assert _coerce_kwargs(fn, {"class_names": "{0:'BG',1:'5GNR'}"})["class_names"] == {0: "BG", 1: "5GNR"}
+    # A `{`-leading value that is neither JSON nor a valid Python literal still passes through raw.
+    assert _coerce_kwargs(fn, {"class_names": "{garbage"})["class_names"] == "{garbage"
+
+
 def test_coerce_kwargs_list_still_comma_splits_after_container_branch() -> None:
     # Regression: List/Sequence params keep their comma-split (NOT JSON-decoded).
     def fn(tags: Optional[List[str]] = None) -> None: ...
 
     assert _coerce_kwargs(fn, {"tags": "x, y"})["tags"] == ["x", "y"]
+
+
+# --------------------------------------------------------------------------- #
+# Compound container params (a LIST whose elements are tuples/pairs), e.g. the
+# helios ``Config.keys: str | list[str | tuple[str, str]]`` rename map. ComfyUI
+# shows it as a STRING; the generic decoder accepts a Python/JSON literal OR a
+# friendly comma list with ``src:dst`` renames. See the container-round-trip mandate.
+# --------------------------------------------------------------------------- #
+
+
+def _config_keys_fn(keys: Union[str, List[Union[str, Tuple[str, str]]]] = "") -> None:
+    """Mirrors keysight.ai.transforms.Config.keys (the bridged HeliosConfigOp ``keys`` widget)."""
+
+
+def test_coerce_kwargs_list_of_pairs_python_literal() -> None:
+    # A Python literal with a rename PAIR + a bare key decodes faithfully (real tuples).
+    out = _coerce_kwargs(_config_keys_fn, {"keys": '[("snr_db", "snr"), "noise_power_db"]'})
+    assert out["keys"] == [("snr_db", "snr"), "noise_power_db"]
+
+
+def test_coerce_kwargs_list_of_pairs_json_inner_list_becomes_tuple() -> None:
+    # JSON has no tuples, so a pair arrives as an inner list — normalised back to a tuple so a
+    # pair stays a pair (this is the shape a wired container @output rides as, json.dumps-encoded).
+    out = _coerce_kwargs(_config_keys_fn, {"keys": '[["a", "b"], "c"]'})
+    assert out["keys"] == [("a", "b"), "c"]
+
+
+def test_coerce_kwargs_list_of_pairs_colon_comma_convention() -> None:
+    # The friendly comma list: a bare item stays a string (src==dst); ``src:dst`` is a rename pair.
+    out = _coerce_kwargs(_config_keys_fn, {"keys": "snr_db, noise_power_db:nf, center_freq"})
+    assert out["keys"] == ["snr_db", ("noise_power_db", "nf"), "center_freq"]
+
+
+def test_coerce_kwargs_list_of_pairs_bare_comma_keys() -> None:
+    out = _coerce_kwargs(_config_keys_fn, {"keys": "snr_db, noise_power_db"})
+    assert out["keys"] == ["snr_db", "noise_power_db"]
+
+
+def test_coerce_kwargs_list_of_pairs_blank_omitted() -> None:
+    # Blank ⇒ omit ⇒ the constructor's own default ("") applies (never a forced [""]).
+    assert "keys" not in _coerce_kwargs(_config_keys_fn, {"keys": ""})
+
+
+def test_coerce_kwargs_list_of_pairs_malformed_literal_falls_back_to_comma() -> None:
+    # A "["-leading value that is neither JSON nor a valid Python literal does NOT crash —
+    # it falls through to the comma convention (best-effort, like the flat-tuple branch).
+    out = _coerce_kwargs(_config_keys_fn, {"keys": "[oops"})
+    assert out["keys"] == ["[oops"]
+
+
+def test_coerce_kwargs_compound_branch_leaves_flat_tuple_and_list_unaffected() -> None:
+    # The compound branch is gated on BOTH "list" AND "tuple" in the annotation, so a flat
+    # Tuple[str, ...] and a flat List[str] keep their existing handling (no ":" pair splitting).
+    def flat_tuple(disabled: Tuple[str, ...] = ()) -> None: ...
+
+    def flat_list(names: Optional[List[str]] = None) -> None: ...
+
+    assert _coerce_kwargs(flat_tuple, {"disabled": "a:b, c"})["disabled"] == ("a:b", "c")  # no pair split
+    assert _coerce_kwargs(flat_list, {"names": "a:b, c"})["names"] == ["a:b", "c"]  # no pair split
 
 
 # --------------------------------------------------------------------------- #
@@ -1318,6 +1409,32 @@ def test_nullable_numeric_becomes_blank_string_widget() -> None:
     assert required["n"] == ("INT", {**DEFAULT_WIDGET_CONFIG["INT"], "default": 3})
 
 
+def test_optional_int_or_variadic_tuple_is_nullable_numeric_not_range() -> None:
+    # An Optional param whose annotation ALSO has a variadic Tuple arm — helios
+    # Max/Min/Mean/Squeeze/Reduce ``axis: int | Tuple[int, ...] | None`` (reduce one axis,
+    # several, or ALL when None) — must render the flexible-optional blank-STRING nullable
+    # numeric (like taidal's Optional[int]), NOT a forced ``axis__lo``/``axis__hi`` RANGE pair
+    # that can't be None. ``_map_type`` still returns RANGE_INT for the ``Tuple[int, ...]`` arm,
+    # but a ``None`` default routes it to the nullable widget in ``_widget_for``. A CONCRETE-default
+    # tuple (no None) keeps its RANGE ``__lo``/``__hi`` widgets.
+    def fn(
+        axis: Optional[Union[int, Tuple[int, ...]]] = None,
+        target_length: Union[int, Tuple[int, int]] = 0,
+    ) -> None: ...
+
+    required = create_comfy_node(fn, "Taidal__AxisTuple").INPUT_TYPES().get("required", {})
+    assert required["axis"] == (
+        "STRING",
+        {"default": "", "multiline": False, "taidal_widget": "NULLABLE_NUMERIC", "taidal_numeric": "INT"},
+    )
+    assert "axis__lo" not in required and "axis__hi" not in required
+    # A concrete-default tuple is unchanged — still the RANGE __lo/__hi pair.
+    assert "target_length__lo" in required and "target_length__hi" in required
+    # Coercion: blank -> None (the constructor's "all axes" default); a number -> int.
+    assert _coerce_kwargs(fn, {"axis": ""}) == {"axis": None}
+    assert _coerce_kwargs(fn, {"axis": "0"}) == {"axis": 0}
+
+
 def test_nullable_numeric_validate_inputs_accepts_numeric_wire() -> None:
     # A node with a nullable-numeric param gets a VALIDATE_INPUTS so ComfyUI accepts a FLOAT/INT wire
     # into it (the NoiseFloorOp.applied_snr_db -> noise_power_db case). Without it, the canvas socket
@@ -1393,6 +1510,74 @@ def test_configure_op_node_executes_with_wired_target_and_compute() -> None:
     assert isinstance(op, ConfigureOp)
     assert applied.meta["low_level"] == 6.0
     np.testing.assert_array_equal(applied.input, [False, True, False])
+
+
+# ---- stamped op-value params (the waivefront-helios __taidal_op_*__ contract) ----
+# These mirror what waivefront.helios.bridge stamps on a bridged helios composite — op slots named
+# the helios way (compute/target/delegate/true_transforms/…) that the dataflux name allowlists can't
+# know. Tested with synthetic stamped classes so fluxstudio stays hermetic (no helios dependency).
+
+
+class _HeliosLikeConfigure:
+    """Two single-op slots named the helios way (compute/target) — surfaced only via the stamp."""
+
+    def __init__(self, compute: object = None, target: object = None, key: str = "k") -> None:
+        self.compute, self.target, self.key = compute, target, key
+
+    def __call__(self, sample: Sample) -> Sample:
+        return sample
+
+
+_HeliosLikeConfigure.__taidal_op_params__ = ("compute", "target")  # type: ignore[attr-defined]
+_HeliosLikeConfigure.__taidal_op_list_params__ = ()  # type: ignore[attr-defined]
+
+
+class _HeliosLikeIf:
+    """Two op-LIST slots named the helios way (true/false_transforms) — surfaced only via the stamp."""
+
+    def __init__(self, true_transforms: object = None, false_transforms: object = None) -> None:
+        self.true_transforms, self.false_transforms = true_transforms, false_transforms
+
+    def __call__(self, sample: Sample) -> Sample:
+        return sample
+
+
+_HeliosLikeIf.__taidal_op_params__ = ()  # type: ignore[attr-defined]
+_HeliosLikeIf.__taidal_op_list_params__ = ("true_transforms", "false_transforms")  # type: ignore[attr-defined]
+
+
+def test_stamped_single_op_params_each_get_a_socket() -> None:
+    assert _single_op_params(_HeliosLikeConfigure) == ["compute", "target"]
+    spec = create_comfy_node(_HeliosLikeConfigure, "Taidal_HeliosLikeConfigure").INPUT_TYPES()
+    assert spec["optional"]["compute"] == (OP_TYPE,)
+    assert spec["optional"]["target"] == (OP_TYPE,)
+    assert "compute" not in spec["required"] and "target" not in spec["required"]
+    assert spec["required"]["key"][0] == "STRING"  # the scalar param stays a widget
+
+
+def test_stamped_single_op_params_inject_each_post_construction() -> None:
+    node = create_comfy_node(_HeliosLikeConfigure, "Taidal_HeliosLikeConfigure2")()
+    c, t = object(), object()
+    applied, op = node.execute(sample=None, compute=c, target=t, key="z")["result"]
+    assert applied is None  # sample unconnected -> pure op-value build
+    assert isinstance(op, _HeliosLikeConfigure)
+    assert op.compute is c and op.target is t and op.key == "z"
+
+
+def test_stamped_op_list_params_seed_distinct_families_and_collect() -> None:
+    assert _op_list_params(_HeliosLikeIf) == {
+        "true_transforms": "true_transforms",
+        "false_transforms": "false_transforms",
+    }
+    node = create_comfy_node(_HeliosLikeIf, "Taidal_HeliosLikeIf")
+    spec = node.INPUT_TYPES()
+    assert spec["optional"]["true_transforms_0"] == (OP_TYPE,)
+    assert spec["optional"]["false_transforms_0"] == (OP_TYPE,)
+
+    a, b, c = _FakeOp(), _FakeOp(), _FakeOp()
+    _applied, op = node().execute(sample=None, true_transforms_0=a, true_transforms_1=b, false_transforms_0=c)["result"]
+    assert op.true_transforms == [a, b]
+    assert op.false_transforms == [c]
 
 
 def test_coerce_kwargs_leaves_expression_string_on_float_str_union() -> None:

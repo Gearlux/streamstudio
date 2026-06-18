@@ -178,6 +178,17 @@ class SampleExtractorNode:
         colormap: "Colormap" = "viridis",
         max_size: int = 512,
     ) -> Tuple[Any, ...]:
+        if sample is None:
+            # A required input arriving as None means the upstream op produced no sample (e.g. an
+            # op chain executed with no source feeding it). Fail with a legible message instead of
+            # an opaque ``AttributeError: 'NoneType' object has no attribute 'input'``.
+            raise ValueError(
+                "Extract from Sample received an empty sample (None) — its upstream op produced no "
+                "sample, which usually means the op chain ran with no source. If this viewer sits "
+                "on an op-only path that is compiled by 'Extract as Op' (subgraph-as-an-Op), it does "
+                "not need to run during a pipeline execution; wire it to a live source to preview, "
+                "or move it off the compiled op path."
+            )
         value = sample.input if field == "input" else sample.target
         spec = self._field_spec(sample, field, value)
         scalar = self._scalar(value)
@@ -1005,6 +1016,17 @@ class SubgraphOpExtractNode:
     with Walk/Extract/Mix. Self-contained at runtime: it reads ComfyUI's hidden ``PROMPT`` +
     ``UNIQUE_ID`` and compiles its own ancestor cone (see :func:`compile_subgraph_ops`) — no
     snapshot widget, no compile route.
+
+    The ``sample`` input is **LAZY** (``check_lazy_status`` always returns ``[]``): the node
+    compiles STATICALLY from the ``PROMPT`` and never reads the runtime sample VALUE, so it must
+    never force ComfyUI to execute the upstream op cone. That matters because the cone is an
+    op-only ``Sample -> Sample`` transform with NO source on the canvas (the source feeds the
+    Flux at runtime, not the op chain) — eager evaluation would run the head op on ``None`` and
+    crash a downstream viewer / value-chain ``Extract from Sample``. Lazy gating
+    (``comfy_execution/graph.py``: a lazy link is not added as a dependency unless requested)
+    leaves the whole upstream unexecuted while the ``PROMPT`` still carries the full DAG to
+    compile. Using the subgraph as a *graph* (running a sample through its boundary) is
+    unaffected — that pulls the subgraph's SAMPLE output, not this node's ``op`` output.
     """
 
     __confluid_display_name__ = "Extract as Op"
@@ -1016,11 +1038,19 @@ class SubgraphOpExtractNode:
     @classmethod
     def INPUT_TYPES(cls) -> Dict[str, Any]:
         return {
-            "optional": {"sample": (SAMPLE_TYPE,)},
+            # ``sample`` is LAZY: we compile from PROMPT, never the runtime value, so we must NOT
+            # make ComfyUI execute the (sourceless) upstream op cone just to feed this socket.
+            # See the class docstring + ``check_lazy_status`` below.
+            "optional": {"sample": (SAMPLE_TYPE, {"lazy": True})},
             # PROMPT = the flat API graph (subgraphs already expanded); UNIQUE_ID = this node's
             # id — together they let execute() compile its own upstream cone with no JS/route.
             "hidden": {"prompt": "PROMPT", "unique_id": "UNIQUE_ID"},
         }
+
+    def check_lazy_status(self, sample: Any = None, prompt: Any = None, unique_id: Any = None) -> List[str]:
+        # Never request the lazy ``sample``: compilation reads the static PROMPT, so the runtime
+        # sample value is never needed and the upstream op cone stays unexecuted.
+        return []
 
     def extract(self, sample: Any = None, prompt: Any = None, unique_id: Any = None) -> Tuple[Any, ...]:
         from dataflux.ops.transform_chain import TransformChain
