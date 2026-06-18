@@ -391,6 +391,38 @@ try:
             except Exception as e:
                 return web.json_response({"error": str(e)}, status=500)
 
+    # Extract JUST the op-DAG nodes from the current canvas as a standalone workflow.json — the
+    # GRAPH counterpart of /taidal/export_ops (which compiles them to Confluid YAML). Same node set
+    # (op-kind nodes + the Mix fan-in), but the RAW DAG as drawn (no Stash/Unstash/Mix compilation);
+    # the source / Walk / Extract / viewer / value nodes are dropped. Backs web/export_ops.js's
+    # "Export Taidal Ops → Graph" command, which POSTs ``{workflow: graphToPrompt().workflow}`` and
+    # downloads the returned graph. An optional ``path`` writes it server-side (a future CLI twin).
+    export_ops_graph_route_exists = any(
+        r.path == "/taidal/export_ops_graph" and r.method == "POST" for r in server.PromptServer.instance.routes
+    )
+    if not export_ops_graph_route_exists:
+        from fluxstudio.graphio import extract_ops_workflow
+
+        @server.PromptServer.instance.routes.post("/taidal/export_ops_graph")
+        async def export_ops_graph_handler(request: Any) -> Any:
+            try:
+                body = await request.json()
+                workflow = body.get("workflow") if isinstance(body, dict) else None
+                if not isinstance(workflow, dict):
+                    return web.json_response({"error": "no workflow provided"}, status=400)
+                # flatten=False keeps subgraph instances intact; flatten=True inlines + contracts to raw ops.
+                flatten = bool(body.get("flatten")) if isinstance(body, dict) else False
+                graph = extract_ops_workflow(workflow, NODE_CLASS_MAPPINGS, flatten=flatten)
+                payload: Dict[str, Any] = {"workflow": graph}
+                out_path = body.get("path") if isinstance(body, dict) else None
+                if out_path:
+                    with open(out_path, "w") as fh:
+                        json.dump(graph, fh, indent=2)
+                    payload["path"] = str(out_path)
+                return web.json_response(payload)
+            except Exception as e:
+                return web.json_response({"error": str(e)}, status=500)
+
     # Convert a Confluid YAML config → a whole ComfyUI workflow.json (nodes + links + groups +
     # subgraphs). Backs web/import_yaml.js ("Import Taidal YAML" menu commands). The POST body is
     # ``{yaml: "<text>", as: "graph"|"group"|"subgraph", name?: "<title>"}``.

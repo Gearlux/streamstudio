@@ -32,7 +32,7 @@ from __future__ import annotations
 import copy
 import math
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union, cast
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union, cast
 
 from confluid import Class, Fluid, Instance, LazyClass, Reference
 from confluid import dump as _confluid_dump
@@ -47,6 +47,7 @@ from dataflux.ops.configure import ConfigureOp
 from dataflux.ops.formula import FormulaOp
 from dataflux.ops.stash import StashInputOp, StashTargetOp, UnstashInputOp, UnstashTargetOp
 from dataflux.ops.tee import Tee
+from dataflux.ops.transform_chain import TransformChain
 from logflow import get_logger
 
 from fluxstudio.bridge import (
@@ -57,6 +58,7 @@ from fluxstudio.bridge import (
     SAMPLE_TYPE,
     SOURCE_TYPE,
     _coerce_kwargs,
+    _op_list_params,
 )
 from fluxstudio.export import (
     _EXPORT_SKIP_PROPERTY,
@@ -67,14 +69,21 @@ from fluxstudio.export import (
     _PRIMITIVE_VALUE_NODES,
     _SAMPLE_INPUT,
     _STASH_KEY_PREFIX,
+    _SUBGRAPH_OP_CLASS_TYPE,
     UnsupportedTopologyError,
+    _ancestor_cone,
     _collect_output_captures,
     _collect_value_chains,
+    _FoldContext,
     _id_sort_key,
     _is_link,
     _marker,
     _node_kind,
+    _op_class_of,
+    _op_value_consumed,
     _snake,
+    _subgraph_op_instance,
+    collect_export_marks,
 )
 
 # The four auto-inserted stash/unstash op classes the ops-export emits to sequentialize a
@@ -111,7 +120,10 @@ _HOISTED_VARS: Tuple[str, ...] = ("num_classes", "image_size")
 # Shared: class ↔ node-key index, node introspection, value coercion
 # =======================================================================================
 
-_NODE_INDEX_CACHE: Dict[int, Dict[Callable[..., Any], str]] = {}
+# Cache: {id(node_mappings): (node_mappings, index)}.  The stored reference prevents Python
+# from reusing the same memory address for a *different* dict (id-reuse after GC would cause
+# a stale cache hit — the `is` guard below is the fallback for any entry that slipped through).
+_NODE_INDEX_CACHE: Dict[int, Tuple[Dict[str, Any], Dict[Callable[..., Any], str]]] = {}
 
 
 def _node_index(node_mappings: Dict[str, Any]) -> Dict[Callable[..., Any], str]:
@@ -121,13 +133,16 @@ def _node_index(node_mappings: Dict[str, Any]) -> Dict[Callable[..., Any], str]:
     ``resolve_callable`` turns it back into the target, giving us the target→key direction needed to
     emit a workflow node for a Fluid marker. The target may be a class OR a builder FUNCTION (a
     registered ``role="model"`` torchvision detection builder), so the index keys any callable —
-    matching the bridge's callable-aware object nodes. Cached per ``node_mappings`` identity.
+    matching the bridge's callable-aware object nodes. Cached per ``node_mappings`` identity; the
+    cache entry holds a strong reference to the dict so its ``id`` is never recycled while cached.
     """
     cache_key = id(node_mappings)
-    cached = _NODE_INDEX_CACHE.get(cache_key)
-    if cached is not None:
-        return cached
-    index: Dict[Callable[..., Any], str] = {}
+    entry = _NODE_INDEX_CACHE.get(cache_key)
+    if entry is not None:
+        cached_nm, index = entry
+        if cached_nm is node_mappings:
+            return index
+    index = {}
     for key, node_cls in node_mappings.items():
         path = getattr(node_cls, "TAIDAL_CALLABLE_PATH", None)
         if not path:
@@ -138,7 +153,7 @@ def _node_index(node_mappings: Dict[str, Any]) -> Dict[Callable[..., Any], str]:
             continue
         if callable(target):
             index[target] = key
-    _NODE_INDEX_CACHE[cache_key] = index
+    _NODE_INDEX_CACHE[cache_key] = (node_mappings, index)
     return index
 
 
@@ -234,6 +249,86 @@ def _widget_default(node_cls: Any, name: str) -> Any:
         if isinstance(decl, (tuple, list)) and decl and isinstance(decl[0], list):
             return decl[0][0] if decl[0] else ""  # Literal combo → first option
     return ""
+
+
+def _widget_socket_type(node_cls: Any, name: str) -> Any:
+    """The socket type a widget param would carry as a (converted-to-)input slot — its ``INPUT_TYPES``
+    type (``STRING``/``FLOAT``/``INT``/``BOOLEAN``, or a combo options-list). ``STRING`` if unknown."""
+    spec = node_cls.INPUT_TYPES()
+    for section in ("required", "optional"):
+        decl = spec.get(section, {}).get(name)
+        if decl is not None:
+            return decl[0] if isinstance(decl, (tuple, list)) else decl
+    return "STRING"
+
+
+def _complete_widget_input_slots(workflow: Dict[str, Any], node_mappings: Dict[str, Any]) -> None:
+    """Pad every node's ``inputs`` to the FULL ComfyUI-v0.22 slot list (sockets + EVERY widget param as
+    a widget-input, in class order) and remap link target slots accordingly — in place, TOP-LEVEL and
+    inside every subgraph definition.
+
+    ComfyUI serialises every widget as an input slot (``"widget": {"name": …}``), but its in-memory
+    ``graphToPrompt()`` (and the ops-doc importer) represent a CONVERTED widget as a single input slot and
+    leave the unconverted widgets OFF the input list — so a value wired into a widget (a config's
+    ``disabled`` → ``ImpairmentsChain.tx_disabled``) sits at e.g. slot 1, but ComfyUI rebuilds the node
+    from the class with the widget at slot 3, and the link lands on the WRONG slot → it does not render
+    ("the ImpairmentsXxConfig nodes are not connected"). Restoring the full slot list (matching a real
+    ComfyUI save) fixes BOTH the graph export and the ops-yaml import. Sockets / dynamic ``op_N`` slots
+    keep their leading order; widget slots follow in ``INPUT_TYPES`` order (= the ``widgets_values`` order).
+    Handles both link encodings (top-level 6-arrays; subgraph-definition inner-link dicts).
+    """
+
+    def _target_id(link: Any) -> Any:
+        return link[3] if isinstance(link, list) else link.get("target_id")
+
+    def _target_slot(link: Any) -> Any:
+        return link[4] if isinstance(link, list) else link.get("target_slot")
+
+    def _set_target_slot(link: Any, value: int) -> None:
+        if isinstance(link, list):
+            link[4] = value
+        else:
+            link["target_slot"] = value
+
+    def _complete(nodes: Any, links: Any) -> None:
+        links_by_target: Dict[Any, List[Any]] = {}
+        for link in links or []:
+            links_by_target.setdefault(_target_id(link), []).append(link)
+        for node in nodes or []:
+            node_cls = node_mappings.get(node.get("type"))
+            if node_cls is None or not hasattr(node_cls, "INPUT_TYPES"):  # native / nested-subgraph / non-node
+                continue
+            widget_names, _ = _widget_and_socket_params(node_cls)
+            if not widget_names:  # e.g. Taidal_MixSamples (sockets only) — nothing to complete
+                continue
+            current = node.get("inputs") or []
+            by_name = {inp["name"]: inp for inp in current}
+            sockets = [inp for inp in current if inp["name"] not in widget_names]  # sample / op_N / … stay first
+            widget_slots: List[Dict[str, Any]] = []
+            for name in widget_names:
+                slot = by_name.get(name)
+                if slot is not None:  # already present (wired) → reuse, preserving its link
+                    slot.setdefault("widget", {"name": name})
+                    widget_slots.append(slot)
+                else:
+                    widget_slots.append(
+                        {
+                            "name": name,
+                            "type": _widget_socket_type(node_cls, name),
+                            "link": None,
+                            "widget": {"name": name},
+                        }
+                    )
+            new_inputs = sockets + widget_slots
+            old_name_at = {idx: inp["name"] for idx, inp in enumerate(current)}
+            new_index = {inp["name"]: idx for idx, inp in enumerate(new_inputs)}
+            for link in links_by_target.get(node.get("id"), []):
+                _set_target_slot(link, new_index[old_name_at[_target_slot(link)]])  # remap by name
+            node["inputs"] = new_inputs
+
+    _complete(workflow.get("nodes"), workflow.get("links"))
+    for definition in (workflow.get("definitions") or {}).get("subgraphs") or []:
+        _complete(definition.get("nodes"), definition.get("links"))
 
 
 def _kwarg_to_widget(value: Any) -> Any:
@@ -740,6 +835,9 @@ def ops_yaml_to_workflow(
     _sanitize_widget_values(builder)
 
     workflow = builder.finalize()
+    # 6. Restore each node's FULL widget-input-slot list so a value wired into a widget (a hoisted
+    #    constant → ImpairmentsChain.tx_disabled) lands at the slot index ComfyUI rebuilds from the class.
+    _complete_widget_input_slots(workflow, node_mappings)
     if as_ == "group":
         return _wrap_in_group(workflow, name)
     # "subgraph" degrades to "graph" — an ops-doc has no natural !ref-boundary inputs to promote.
@@ -950,41 +1048,164 @@ def _wrap_in_subgraph(
 # =======================================================================================
 
 
-def extract_ops_workflow(workflow: Dict[str, Any], node_mappings: Dict[str, Any]) -> Dict[str, Any]:
-    """Extract JUST the op-DAG nodes from a UI ``workflow.json`` as a standalone ``workflow.json``.
+def _is_op_node(class_type: str, node_mappings: Dict[str, Any]) -> bool:
+    """An op-DAG member: an op-kind node OR the ``Taidal_MixSamples`` fan-in (the ops-export universe)."""
+    return class_type == _MIX_CLASS_TYPE or _node_kind(class_type, node_mappings) == "op"
 
-    The GRAPH counterpart of :func:`fluxstudio.export.export_ops_yamls`: the SAME node set (every
-    ``TAIDAL_NODE_KIND == "op"`` node plus the ``Taidal_MixSamples`` fan-in nodes — the ops-export's
-    schedule universe), but emitted as the RAW DAG *as drawn* rather than compiled. Positions, widget
-    values, and the wiring AMONG those nodes are preserved verbatim; there is NO DAG→sequential
-    compilation (no auto Stash/Unstash, no Mix folding, no constant hoisting — that is the YAML
-    ops-export's job). Every non-op node is dropped: the source, the Walk/Extract adapters, viewers,
-    runnables, value/config feeders, and native ComfyUI nodes. A link is kept only when BOTH of its
-    endpoints survive; a kept node's input wired from a dropped node is detached (``link = None``, so
-    the op falls back to its widget default), and node ids are kept VERBATIM (the result is a subset,
-    so no id remap is needed).
 
-    v1 limit: only TOP-LEVEL nodes are scanned — op nodes nested inside a ComfyUI subgraph instance
-    are not extracted (the instance's ``type`` is a UUID, a non-op node, so it is dropped). Flatten
-    the subgraph first if you need its ops. Groups are dropped (they reference node geometry, not ids).
+def _detach_dropped_link_refs(nodes: List[Dict[str, Any]], live_link_ids: "set") -> None:
+    """Null out any ``inputs[].link`` / ``outputs[].links`` ref pointing at a dropped link, in place."""
+    for node in nodes:
+        for inp in node.get("inputs") or []:
+            if inp.get("link") not in live_link_ids:
+                inp["link"] = None
+        for out in node.get("outputs") or []:
+            if out.get("links") is not None:
+                out["links"] = [lid for lid in out["links"] if lid in live_link_ids]
+
+
+def _ops_workflow_skeleton(nodes: List[Dict[str, Any]], links: List[List[Any]]) -> Dict[str, Any]:
+    """Wrap kept ``nodes`` + ``links`` in a minimal, loadable ``workflow.json`` envelope."""
+    node_ids = [n.get("id") for n in nodes]
+    last_node = max((i for i in node_ids if isinstance(i, int)), default=0)
+    last_link = max((lk[0] for lk in links if isinstance(lk[0], int)), default=0)
+    return {
+        "last_node_id": last_node,
+        "last_link_id": last_link,
+        "nodes": nodes,
+        "links": links,
+        "groups": [],
+        "config": {},
+        "extra": {},
+        "version": _WORKFLOW_VERSION,
+    }
+
+
+def _data_flow_adjacency(links: Any) -> Tuple[Dict[Any, set], Dict[Any, set]]:
+    """Forward + reverse node-id adjacency over a workflow's links (handles 6-array AND dict links)."""
+    fwd: Dict[Any, set] = {}
+    rev: Dict[Any, set] = {}
+    for raw in links or []:
+        link = _link_six(raw)
+        if link is not None:
+            fwd.setdefault(link[1], set()).add(link[3])
+            rev.setdefault(link[3], set()).add(link[1])
+    return fwd, rev
+
+
+def _reachable(starts: Any, adjacency: Dict[Any, set]) -> set:
+    """All nodes reachable from ``starts`` (inclusive) following ``adjacency`` (fwd or rev)."""
+    seen = set(starts)
+    stack = list(starts)
+    while stack:
+        for nxt in adjacency.get(stack.pop(), ()):
+            if nxt not in seen:
+                seen.add(nxt)
+                stack.append(nxt)
+    return seen
+
+
+def _marks_to_top_level(workflow: Dict[str, Any], marked_ids: set, def_by_id: Dict[Any, Any]) -> set:
+    """Resolve marked ids (which may name a SUBGRAPH-INNER node) to TOP-LEVEL node ids.
+
+    A mark on a node INSIDE a subgraph definition resolves to the top-level INSTANCE(s) of that
+    definition — so the cone/skip is computed against the instance the user actually sees.
+    """
+    top_ids = {n.get("id") for n in workflow.get("nodes") or []}
+    resolved: set = set()
+    for mid in marked_ids:
+        direct = next((t for t in top_ids if str(t) == str(mid)), None)
+        if direct is not None:
+            resolved.add(direct)
+            continue
+        for did, definition in def_by_id.items():  # an inner mark → the instance(s) of its definition
+            if any(str(inner.get("id")) == str(mid) for inner in definition.get("nodes") or []):
+                resolved |= {n.get("id") for n in workflow.get("nodes") or [] if str(n.get("type")) == str(did)}
+    return resolved
+
+
+def _keep_universe(all_ids: Any, fwd: Dict[Any, set], rev: Dict[Any, set], targets: set, skips: set) -> set:
+    """The node-id set surviving the export marks: a TARGET restricts to the union of its data
+    ancestor cones; a SKIP removes the marked nodes + their data-downstream closure; neither = all."""
+    universe = _reachable(targets, rev) if targets else set(all_ids)
+    if skips:
+        universe -= _reachable(skips, fwd)
+    return universe
+
+
+def extract_ops_workflow(
+    workflow: Dict[str, Any], node_mappings: Dict[str, Any], *, flatten: bool = False
+) -> Dict[str, Any]:
+    """Extract the op-DAG of a UI ``workflow.json`` as a standalone, CONNECTED ``workflow.json``.
+
+    The GRAPH counterpart of :func:`fluxstudio.export.export_ops_yamls` — emitted as the RAW DAG
+    *as drawn* (positions / widgets / wiring preserved, NO Stash/Unstash/Mix/constant compilation),
+    but obeying the SAME `export-skip` / `export-target` marks (`properties["taidal_export"]`) the
+    YAML ops-export uses (read via the shared :func:`fluxstudio.export.collect_export_marks`): a
+    **target** mark restricts the export to the union of the targets' data ancestor cones (so the
+    dead-end viewer/analysis side-branches the user did NOT target are dropped); a **skip** mark
+    removes the marked nodes + their downstream. With NO marks the whole op graph is kept. The
+    config/value nodes (`@configurable(constant=True)` producers like `ImpairmentsTxConfig`) are
+    KEPT — they are ancestors of the ops they configure, so they ride along in the cone.
+
+    Two modes, because a real pipeline routes the sample THROUGH ComfyUI subgraph instances (which
+    are not op nodes), so a naive "keep op nodes + links between them" would sever the pipeline:
+
+    * ``flatten=False`` (**subgraphs intact**): keep op + Mix + value/config nodes **AND the subgraph
+      INSTANCE nodes** (plus the transitive ``definitions.subgraphs`` they reference) that fall in the
+      kept universe; the pipeline stays connected because the instances (its real waypoints) survive
+      as black boxes. Marks naming a subgraph-inner node resolve to the containing instance. Node ids
+      + links are preserved VERBATIM (a subset, no remap).
+    * ``flatten=True`` (**raw ops**): inline every subgraph (``_inline_subgraphs``) so the inner op
+      nodes surface, keep op + Mix + value nodes, and **reconnect them through the dropped nodes** (a
+      transitive contraction through chains of dropped pass-throughs — Reroute / Extract / boundaries
+      — emitting a direct edge). Marks survive inlining as node properties, matched there directly.
 
     Args:
-        workflow: the UI ``workflow.json`` dict (``app.graphToPrompt().workflow``).
+        workflow: the UI ``workflow.json`` dict (``app.graphToPrompt().workflow``) — carries the marks.
         node_mappings: FluxStudio's ``NODE_CLASS_MAPPINGS`` (read for each node's ``TAIDAL_NODE_KIND``).
+        flatten: ``False`` keeps subgraph instances as black boxes; ``True`` inlines + contracts to raw ops.
 
     Returns:
-        A ``workflow.json`` dict holding only the op-DAG nodes + the links between them.
+        A connected ``workflow.json`` dict of the (marked) op DAG.
     """
+    skip_marks, target_marks = collect_export_marks(workflow)
+    if flatten:
+        result = _extract_ops_flattened(workflow, node_mappings, set(skip_marks), set(target_marks))
+    else:
+        result = _extract_ops_keep_subgraphs(workflow, node_mappings, set(skip_marks), set(target_marks))
+    # NORMALISE widget-input slots: ComfyUI's in-memory graphToPrompt() represents a converted widget as a
+    # single input slot and omits unconverted widgets, so a value wired into a widget (config → tx_disabled)
+    # would land at the wrong slot index when ComfyUI rebuilds the node from the class. Pad to the full slot
+    # list so the re-imported graph renders the connection (the "ImpairmentsXxConfig not connected" fix).
+    _complete_widget_input_slots(result, node_mappings)
+    return result
 
-    def _is_op_node(node: Dict[str, Any]) -> bool:
+
+def _extract_ops_keep_subgraphs(
+    workflow: Dict[str, Any], node_mappings: Dict[str, Any], skip_marks: set, target_marks: set
+) -> Dict[str, Any]:
+    """``flatten=False``: keep op + Mix + value + subgraph-instance nodes in the marked universe."""
+    defs = list((workflow.get("definitions") or {}).get("subgraphs") or [])
+    def_by_id = {d.get("id"): d for d in defs}
+    nodes = workflow.get("nodes") or []
+    fwd, rev = _data_flow_adjacency(workflow.get("links"))
+    targets = _marks_to_top_level(workflow, target_marks, def_by_id)
+    skips = _marks_to_top_level(workflow, skip_marks, def_by_id)
+    universe = _keep_universe([n.get("id") for n in nodes], fwd, rev, targets, skips)
+
+    def _keep(node: Dict[str, Any]) -> bool:
         class_type = str(node.get("type", ""))
-        return class_type == _MIX_CLASS_TYPE or _node_kind(class_type, node_mappings) == "op"
+        # op / Mix, a subgraph instance (a real pipeline waypoint), or a value/config producer.
+        return (
+            _is_op_node(class_type, node_mappings)
+            or class_type in def_by_id
+            or _node_kind(class_type, node_mappings) == "value"
+        )
 
-    kept_nodes = [copy.deepcopy(n) for n in (workflow.get("nodes") or []) if _is_op_node(n)]
+    kept_nodes = [copy.deepcopy(n) for n in nodes if n.get("id") in universe and _keep(n)]
     kept_ids = {n.get("id") for n in kept_nodes}
 
-    # Keep only links whose BOTH endpoints survive. _link_six normalises 6-arrays AND the dict form
-    # ComfyUI sometimes writes → [id, origin_id, origin_slot, target_id, target_slot, type].
     kept_links: List[List[Any]] = []
     kept_link_ids: set = set()
     for raw in workflow.get("links") or []:
@@ -992,28 +1213,95 @@ def extract_ops_workflow(workflow: Dict[str, Any], node_mappings: Dict[str, Any]
         if link is not None and link[1] in kept_ids and link[3] in kept_ids:
             kept_links.append(link)
             kept_link_ids.add(link[0])
+    _detach_dropped_link_refs(kept_nodes, kept_link_ids)
 
-    # Detach any input/output link ref pointing at a dropped node so the result stays self-consistent.
-    for node in kept_nodes:
-        for inp in node.get("inputs") or []:
-            if inp.get("link") not in kept_link_ids:
-                inp["link"] = None
-        for out in node.get("outputs") or []:
-            if out.get("links") is not None:
-                out["links"] = [link_id for link_id in out["links"] if link_id in kept_link_ids]
+    # A kept subgraph instance is unloadable without its definition — keep the transitive closure of
+    # referenced defs (a definition's inner nodes can themselves be nested subgraph instances).
+    needed = {str(n.get("type", "")) for n in kept_nodes if str(n.get("type", "")) in def_by_id}
+    frontier = list(needed)
+    while frontier:
+        for inner in def_by_id.get(frontier.pop(), {}).get("nodes", []) or []:
+            inner_type = str(inner.get("type", ""))
+            if inner_type in def_by_id and inner_type not in needed:
+                needed.add(inner_type)
+                frontier.append(inner_type)
 
-    last_node_id = max((nid for nid in kept_ids if isinstance(nid, int)), default=0)
-    last_link_id = max((lid for lid in kept_link_ids if isinstance(lid, int)), default=0)
-    return {
-        "last_node_id": last_node_id,
-        "last_link_id": last_link_id,
-        "nodes": kept_nodes,
-        "links": kept_links,
-        "groups": [],
-        "config": {},
-        "extra": {},
-        "version": _WORKFLOW_VERSION,
+    out = _ops_workflow_skeleton(kept_nodes, kept_links)
+    kept_defs = [copy.deepcopy(d) for d in defs if d.get("id") in needed]
+    if kept_defs:
+        out["definitions"] = {"subgraphs": kept_defs}
+    return out
+
+
+def _extract_ops_flattened(
+    workflow: Dict[str, Any], node_mappings: Dict[str, Any], skip_marks: set, target_marks: set
+) -> Dict[str, Any]:
+    """``flatten=True``: inline subgraphs, keep op + Mix + value in the marked universe, contract."""
+    flat = _inline_subgraphs(workflow)
+    nodes_by_id = {n.get("id"): n for n in flat.get("nodes") or []}
+    # Marks survive inlining as node PROPERTIES (inner ids are renumbered, so match by property here
+    # rather than by id — this is why the mark is read from each inlined node, not from collect()).
+    targets = {
+        i
+        for i, n in nodes_by_id.items()
+        if (n.get("properties") or {}).get(_EXPORT_SKIP_PROPERTY) == _EXPORT_TARGET_VALUE
     }
+    skips = {
+        i
+        for i, n in nodes_by_id.items()
+        if (n.get("properties") or {}).get(_EXPORT_SKIP_PROPERTY) == _EXPORT_SKIP_VALUE
+    }
+    fwd, rev = _data_flow_adjacency(flat.get("links"))
+    universe = _keep_universe(nodes_by_id.keys(), fwd, rev, targets, skips)
+
+    def _keep_op_or_value(node: Dict[str, Any]) -> bool:
+        class_type = str(node.get("type", ""))
+        return _is_op_node(class_type, node_mappings) or _node_kind(class_type, node_mappings) == "value"
+
+    kept_ids = {nid for nid in universe if _keep_op_or_value(nodes_by_id[nid])}
+
+    # Per-link out-adjacency (with slots) over ALL inlined nodes, for the contraction.
+    adjacency: Dict[Any, List[Any]] = {}
+    for raw in flat.get("links") or []:
+        link = _link_six(raw)
+        if link is not None:
+            adjacency.setdefault(link[1], []).append((link[3], link[5], link[2], link[4]))
+
+    kept_nodes = [copy.deepcopy(nodes_by_id[nid]) for nid in nodes_by_id if nid in kept_ids]
+    by_id = {n.get("id"): n for n in kept_nodes}
+    for node in kept_nodes:  # rebuild every link ref from the contracted edge set below
+        for inp in node.get("inputs") or []:
+            inp["link"] = None
+        for out in node.get("outputs") or []:
+            if "links" in out:
+                out["links"] = []
+
+    # Contraction: for each kept node, walk its data wires through chains of DROPPED nodes to the
+    # next kept node and emit a direct edge (keeping the source's output slot + the final input slot).
+    edges: set = set()
+    for origin in kept_ids:
+        seen: set = set()
+        stack = list(adjacency.get(origin, []))
+        while stack:
+            target, link_type, origin_slot, target_slot = stack.pop()
+            if (target, target_slot) in seen:
+                continue
+            seen.add((target, target_slot))
+            if target in kept_ids:
+                edges.add((origin, origin_slot, target, target_slot, link_type))
+            else:  # pass through the dropped node, preserving the source's output slot + type
+                for nxt_target, _t, _os, nxt_slot in adjacency.get(target, []):
+                    stack.append((nxt_target, link_type, origin_slot, nxt_slot))
+
+    links: List[List[Any]] = []
+    for next_id, (origin, origin_slot, target, target_slot, link_type) in enumerate(sorted(edges), start=1):
+        links.append([next_id, origin, origin_slot, target, target_slot, link_type])
+        onode, tnode = by_id.get(origin), by_id.get(target)
+        if onode is not None and isinstance(origin_slot, int) and 0 <= origin_slot < len(onode.get("outputs") or []):
+            onode["outputs"][origin_slot].setdefault("links", []).append(next_id)
+        if tnode is not None and isinstance(target_slot, int) and 0 <= target_slot < len(tnode.get("inputs") or []):
+            tnode["inputs"][target_slot]["link"] = next_id
+    return _ops_workflow_skeleton(kept_nodes, links)
 
 
 # =======================================================================================
@@ -1282,6 +1570,68 @@ def _build_fluid(pnode: "_PNode", node_mappings: Dict[str, Any]) -> Tuple[type, 
     return cls, is_lazy, coerced
 
 
+def _collapse_reroutes(prompt: Dict[str, Any]) -> Dict[str, Any]:
+    """A prompt-view with ``Reroute`` (rgthree / native) pass-throughs collapsed out.
+
+    ComfyUI's frontend treats a Reroute as a VIRTUAL node — the live API prompt the ops-export
+    sees has them collapsed (a consumer wires straight to the Reroute's source). But the
+    whole-graph export works on the saved WORKFLOW, where Reroutes are real nodes that sit in the
+    sample chain — and they break the Subgraph-Op cone compile's one-stream check (an op's
+    ``sample`` resolves to a Reroute, a separate "feed", so a fan-in looks like two streams). So
+    for the Subgraph-Op compile we reproduce the frontend's collapse: drop every Reroute and
+    re-point each surviving link THROUGH it to the real producer. Node ids are otherwise unchanged,
+    so the resulting cone ids still match the pnodes.
+    """
+
+    def _is_reroute(nid: str) -> bool:
+        node = prompt.get(nid)
+        return node is not None and "reroute" in str(node.get("class_type", "")).lower()
+
+    def _resolve(src_id: str, src_slot: int, seen: Tuple[str, ...] = ()) -> List[Any]:
+        if not _is_reroute(src_id) or src_id in seen:  # real node, or a Reroute cycle — stop
+            return [src_id, src_slot]
+        for value in prompt[src_id].get("inputs", {}).values():  # a Reroute passes its single input
+            if _is_link(value):
+                return _resolve(str(value[0]), int(value[1]), seen + (src_id,))
+        return [src_id, src_slot]  # unconnected Reroute — leave it (becomes a boundary feed)
+
+    out: Dict[str, Any] = {}
+    for nid, node in prompt.items():
+        if _is_reroute(nid):
+            continue
+        inputs = {
+            name: (_resolve(str(v[0]), int(v[1])) if _is_link(v) else v) for name, v in node.get("inputs", {}).items()
+        }
+        out[nid] = {**node, "inputs": inputs}
+    return out
+
+
+def _forward_sample_closure(roots: Set[str], prompt: Dict[str, Any]) -> Set[str]:
+    """Nodes reachable FORWARD from ``roots`` along sample wires (Mix args included), EXCLUDING the
+    roots themselves. Used to find a Subgraph-Op cone's dead-end viewer side-taps (RenderSignalPlot /
+    preview ConvertToImage / Extract→MaskToImage): they consume a cone op's sample but never reach
+    the terminator, so the cone compile drops them — they must drop from the whole-graph surface too,
+    or they fold into stray ``pipeline_N`` entries. Op-VALUE feeders of the Flux (no sample wire) are
+    NOT reached, so the real downstream ops are untouched."""
+    consumers: Dict[str, List[str]] = {}
+    for nid, node in prompt.items():
+        args = _MIX_ARGS if str(node.get("class_type", "")) == _MIX_CLASS_TYPE else (_SAMPLE_INPUT,)
+        for arg in args:
+            value = node.get("inputs", {}).get(arg)
+            if _is_link(value):
+                consumers.setdefault(str(value[0]), []).append(nid)
+    seen = set(roots)
+    reached: Set[str] = set()
+    stack = list(roots)
+    while stack:
+        for consumer in consumers.get(stack.pop(), []):
+            if consumer not in seen:
+                seen.add(consumer)
+                reached.add(consumer)
+                stack.append(consumer)
+    return reached
+
+
 def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> str:
     """Convert a ComfyUI workflow (UI or prompt form) into a hoisted-``!ref:`` Confluid YAML.
 
@@ -1429,6 +1779,38 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
         for _param, cap in cap_list:
             captures_by_producer.setdefault(cap.producer_id, {})[cap.output_name] = cap.stash_key
 
+    # WHOLE-GRAPH "Subgraph as an Op" support: a ``Taidal_SubgraphOp`` terminator (Extract as Op)
+    # has no ``TAIDAL_CALLABLE_PATH``, so on its own it would be skipped — but its ``op`` output
+    # (consumed by e.g. a ``Flux``'s ``op_N``) IS the subgraph's inner cone compiled to ONE
+    # ``TransformChain``. Reuse the SHARED ops-export compiler (:func:`export._subgraph_op_instance`)
+    # so the whole-graph export EMBEDS that chain in the consumer's op-list instead of dropping the
+    # wire and fragmenting the inner ops into stray ``pipeline_N`` entries. All terminators share ONE
+    # ``fold`` so a ``constant=True`` config (``ImpairmentsTx/RxConfig``) hoists exactly once.
+    sg_prompt = _collapse_reroutes(prompt_view)  # Reroutes break the one-stream check (see helper)
+    sg_fold = _FoldContext(sg_prompt, node_mappings, [], configure_specs, vc_excluded, output_captures)
+    subgraph_op_instances: Dict[str, Any] = {}
+    sg_cone_excluded: set = set()
+    for tid, pnode in pnodes.items():
+        if pnode.class_type != _SUBGRAPH_OP_CLASS_TYPE or tid in export_skipped:
+            continue
+        if not _op_value_consumed(tid, sg_prompt, node_mappings):
+            continue  # unconsumed terminator → its inner ops compile as an ordinary pipeline (graph mode)
+        try:
+            subgraph_op_instances[tid] = _subgraph_op_instance(tid, sg_prompt, node_mappings, sg_fold)
+            cone = _ancestor_cone(tid, sg_prompt)
+            sg_cone_excluded |= cone - {tid}
+            # Also drop the cone's dead-end viewer side-taps (forward sample-closure) so they don't
+            # fold into stray pipeline_N entries (see _forward_sample_closure).
+            sg_cone_excluded |= _forward_sample_closure(cone, sg_prompt)
+        except Exception as e:  # pragma: no cover - defensive: fall back to skip-with-comment
+            logger.warning(
+                f"workflow_to_yaml: could not compile Subgraph-Op {tid} into a TransformChain "
+                f"({type(e).__name__}: {e}); it is skipped-with-comment (use the ops-export instead)."
+            )
+    # The hoisted constants' source nodes are emitted by the fold (top-level + dotted refs), so drop
+    # them from graphio's own node surface to avoid double-emitting them.
+    sg_cone_excluded |= set(sg_fold._hoisted)
+
     def _wrap_configured(nid: str, marker: Any, eager: bool) -> Any:
         """Wrap a consumer marker in ConfigureOp(s) for its value chains AND op-@output captures."""
         for param, chain in configure_specs.get(nid, []):
@@ -1470,6 +1852,14 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
             logger.debug(f"workflow_to_yaml: node {nid} ({pnode.class_type}) re-runs inside a ConfigureOp compute.")
         elif nid in compiled_adapters:
             logger.debug(f"workflow_to_yaml: node {nid} ({pnode.class_type}) compiled into a ConfigureOp value chain.")
+        elif nid in sg_cone_excluded:
+            logger.debug(
+                f"workflow_to_yaml: node {nid} ({pnode.class_type}) compiled into a Subgraph-Op TransformChain."
+            )
+        elif nid in subgraph_op_instances:
+            logger.debug(
+                f"workflow_to_yaml: Subgraph-Op {nid} compiled to a TransformChain (embedded in its consumer)."
+            )
         elif getattr(node_cls, "TAIDAL_CALLABLE_PATH", None):
             try:
                 specs[nid] = _build_fluid(pnode, node_mappings)
@@ -1523,6 +1913,15 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
                 return Reference(f"{names[src_id]}.{return_names[src_slot]}")
         return Reference(names[src_id])
 
+    def _op_value_for(src_id: str, src_slot: int) -> Any:
+        """The value for a SINGLE op-slot wire (``op``/``target``): a Subgraph-Op terminator
+        embeds its compiled ``TransformChain`` inline; every other source is a plain/dotted
+        ``!ref:`` to its node. (For sequential op-LISTs the cone ops are spliced inline instead
+        — see the list branch below.)"""
+        if src_id in subgraph_op_instances:
+            return subgraph_op_instances[src_id]
+        return _node_reference(src_id, src_slot)
+
     # Build a Fluid marker per node, wiring links as References and list-params as Reference lists.
     fluids: Dict[str, Any] = {}
     referenced: set = set()
@@ -1541,6 +1940,11 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
             if base in configured:
                 continue  # injected per sample by the ConfigureOp wrap
             if src_id not in specs:
+                if src_id in subgraph_op_instances:
+                    # A Subgraph-Op terminator feeding this op slot → embed its compiled
+                    # TransformChain inline (not dropped); _op_value_for resolves it below.
+                    wired.setdefault(base, []).append((input_name, src_id, src_slot))
+                    continue
                 literal = _primitive_literal(src_id, pnodes)
                 if literal is not _MISSING:
                     kwargs[base] = literal  # a native primitive pass-through → inline its widget
@@ -1552,10 +1956,23 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
             wired.setdefault(base, []).append((input_name, src_id, src_slot))
         for base, items in wired.items():
             if len(items) == 1 and items[0][0] == base:
-                kwargs[base] = _node_reference(items[0][1], items[0][2])
+                kwargs[base] = _op_value_for(items[0][1], items[0][2])
             else:  # dynamic op_N / source_N → a list, ordered by slot index
                 ordered = sorted(items, key=lambda it: _index_of(it[0]))
-                kwargs[base] = [_node_reference(src, slot) for _n, src, slot in ordered]
+                sequential = base == "ops" and isinstance(cls, type) and issubclass(cls, (Flux, TransformChain))
+                value_list: List[Any] = []
+                for _n, src, slot in ordered:
+                    if sequential and src in subgraph_op_instances:
+                        # A sequential op-list (Flux/TransformChain ``ops``) makes a nested
+                        # ``TransformChain`` equivalent to its ops SPLICED inline — and inline
+                        # Instance ops materialize cleanly via ``DatasetProcessor.run()``'s per-op
+                        # ``flow()``, whereas a nested deferred ``TransformChain`` marker left in
+                        # ``flux.ops`` does NOT (the Flux rejects it when it iterates ``ops``).
+                        # Fan-out containers (Parallel/Tee) keep the single embedded chain.
+                        value_list.extend(subgraph_op_instances[src].kwargs.get("ops", []))
+                    else:
+                        value_list.append(_op_value_for(src, slot))
+                kwargs[base] = value_list
         # _marker: kwargs set post-construction — a param literally named `target` (ConfigureOp)
         # collides with the Fluid ctor's own first parameter.
         fluids[nid] = _wrap_configured(nid, _marker(LazyClass if is_lazy else Class, cls, kwargs), eager=False)
@@ -1616,6 +2033,11 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
         chain_entries.append((key, Class(Flux, **flux_kwargs)))
 
     document = _hoist_document(fluids, names, referenced, specs)
+    # `constant=True` configs hoisted while compiling the Subgraph-Op TransformChain(s) — emit them
+    # as top-level entries so the nested chain's dotted `!ref:<name>.<output>` consumers resolve
+    # against the same document (the ops-export shape).
+    for cname, cval in sg_fold.constants.items():
+        document.setdefault(cname, cval)
     for key, value in chain_entries:  # pipelines last — they are the roots of the config
         document[key] = value
     return _skipped_comment_block(skipped, dropped_wires) + _confluid_dump(document)
@@ -1758,6 +2180,20 @@ def _assign_ref_names(
                 continue
             src_cls = node_mappings.get(pnodes[src_id].class_type) if src_id in pnodes else None
             if getattr(src_cls, "TAIDAL_NODE_KIND", None) == "value":
+                continue
+            consumer_op_cls = _op_class_of(node_mappings.get(pnode.class_type))
+            if (
+                base in _OP_LIST_PARAMS
+                or base in _SOURCE_LIST_PARAMS
+                or (consumer_op_cls is not None and base in _op_list_params(consumer_op_cls))
+            ):
+                # A node feeding a LIST param (ops / branches / transforms / fluxes / sources, OR a
+                # stamped helios op-list like ``true_transforms``) must NOT be NAMED after it: confluid
+                # broadcasts a top-level key back INTO any class param of the same name, so a top-level
+                # ``ops:`` (one op) would clobber the Flux's explicitly-wired ``ops:`` list — the whole
+                # op chain replaced by a single op (``'ConvertToImageOp' object is not iterable`` at
+                # run()). Fall back to the class name so the ref stays collision-free (the shipped
+                # convert_to_ultralytics config names its op list ``detection_ops``, never ``ops``).
                 continue
             if src_id in specs and src_id not in fed_as:
                 fed_as[src_id] = base

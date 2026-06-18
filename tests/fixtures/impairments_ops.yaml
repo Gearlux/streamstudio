@@ -1,0 +1,206 @@
+# NOTE: ops-export compilation notes:
+#   - compiled for export target: node 378:371 (Taidal_waivefront_op_regions_RegionPowerAnalysisOp)
+#   - branching canvas wiring compiled to a sequential op-list — 4 stash/unstash ops inserted (metadata keys '__taidal_stash_*' remain on the sample)
+impairments_tx_config: !class:waivefront.torchsig.processing.ImpairmentsTxConfig
+  quantize: true
+  quantize_probability: null
+  clock_drift: false
+  clock_drift_probability: null
+  clock_jitter: false
+  clock_jitter_probability: null
+  passband_ripple: true
+  passband_ripple_probability: null
+  iq_imbalance: true
+  iq_imbalance_probability: null
+  carrier_phase_noise: false
+  carrier_phase_noise_probability: null
+  carrier_frequency_drift: false
+  carrier_frequency_drift_probability: null
+  carrier_phase_offset: false
+  carrier_phase_offset_probability: null
+  intermodulation_products: true
+  intermodulation_products_probability: null
+  nonlinear_amplifier: false
+  nonlinear_amplifier_probability: null
+  spurs: true
+  spurs_probability: null
+  fading: true
+  fading_probability: null
+impairments_rx_config: !class:waivefront.torchsig.processing.ImpairmentsRxConfig
+  intermodulation_products: false
+  intermodulation_products_probability: null
+  nonlinear_amplifier: false
+  nonlinear_amplifier_probability: null
+  coarse_gain_change: false
+  coarse_gain_change_probability: null
+  spurs: false
+  spurs_probability: null
+  iq_imbalance: false
+  iq_imbalance_probability: null
+  carrier_phase_noise: false
+  carrier_phase_noise_probability: null
+  carrier_frequency_drift: false
+  carrier_frequency_drift_probability: null
+  carrier_phase_offset: false
+  carrier_phase_offset_probability: null
+  passband_ripple: false
+  passband_ripple_probability: null
+  clock_drift: false
+  clock_drift_probability: null
+  clock_jitter: false
+  clock_jitter_probability: null
+  quantize: false
+  quantize_probability: null
+  digital_agc: false
+  digital_agc_probability: null
+impairments_tx_config_2: !class:waivefront.torchsig.processing.ImpairmentsTxConfig
+  quantize: false
+  quantize_probability: null
+  clock_drift: false
+  clock_drift_probability: null
+  clock_jitter: false
+  clock_jitter_probability: null
+  passband_ripple: false
+  passband_ripple_probability: null
+  iq_imbalance: false
+  iq_imbalance_probability: null
+  carrier_phase_noise: false
+  carrier_phase_noise_probability: null
+  carrier_frequency_drift: false
+  carrier_frequency_drift_probability: null
+  carrier_phase_offset: false
+  carrier_phase_offset_probability: null
+  intermodulation_products: false
+  intermodulation_products_probability: null
+  nonlinear_amplifier: false
+  nonlinear_amplifier_probability: null
+  spurs: false
+  spurs_probability: null
+  fading: false
+  fading_probability: null
+impairments_rx_config_2: !class:waivefront.torchsig.processing.ImpairmentsRxConfig
+  intermodulation_products: true
+  intermodulation_products_probability: null
+  nonlinear_amplifier: false
+  nonlinear_amplifier_probability: null
+  coarse_gain_change: true
+  coarse_gain_change_probability: null
+  spurs: true
+  spurs_probability: null
+  iq_imbalance: true
+  iq_imbalance_probability: null
+  carrier_phase_noise: false
+  carrier_phase_noise_probability: null
+  carrier_frequency_drift: false
+  carrier_frequency_drift_probability: null
+  carrier_phase_offset: false
+  carrier_phase_offset_probability: null
+  passband_ripple: true
+  passband_ripple_probability: null
+  clock_drift: false
+  clock_drift_probability: null
+  clock_jitter: false
+  clock_jitter_probability: null
+  quantize: false
+  quantize_probability: null
+  digital_agc: true
+  digital_agc_probability: null
+ops:
+- !class:dataflux.ops.torch.SqueezeOp()
+  dim: 0
+- !class:waivefront.processing.CropSignalLengthOp()
+  length: 10ms
+  mode: front
+  seed: null
+- !class:dataflux.ops.stash.StashInputOp()
+  key: __taidal_stash_107_input
+- !class:dataflux.ops.stash.StashTargetOp()
+  key: __taidal_stash_107_target
+- !class:waivefront.spectrogram.SpectrogramOp()
+  fft_size: 1024
+  hop_size: 512
+  spectrogram_type: time_y_bottom
+  window: hann
+  window_param: null
+  periodic: false
+  scaling: none
+  sample_rate: null
+- !class:waivefront.spectrogram.MagnitudeOp()
+  eps: 1.0e-12
+  to_db: true
+  floor_db: null
+- !class:dataflux.ops.configure.ConfigureOp()
+  ops:
+  - !class:dataflux.ops.numpy.MaxOp()
+    axis: null
+    keepdims: false
+  - !class:dataflux.ops.formula.FormulaOp()
+    formula: a * 0.2
+    var: a
+  target: !class:dataflux.ops.numpy.ThresholdOp()
+    high_level: NaN
+    low_op: '>'
+    high_op: <
+  param: low_level
+- !class:dataflux.ops.stash.StashInputOp()
+  key: mask
+  copy: false
+- !class:dataflux.ops.numpy.ConnectedComponentsOp()
+  min_area_bins: 10
+  connectivity: 4
+- !class:waivefront.spectrogram.BboxesToRegionsOp()
+  role: predicted
+  label: 5GNR
+- !class:dataflux.ops.stash.UnstashInputOp()
+  key: __taidal_stash_107_input
+- !class:dataflux.ops.stash.UnstashTargetOp()
+  key: __taidal_stash_107_target
+- !class:waivefront.torchsig.processing.ImpairmentsChain()
+  probability: 1
+  impairment_level: 2
+  tx_probability_overrides: null
+  rx_probability_overrides: null
+  random_state: null
+  tx_disabled: !ref 'impairments_tx_config.disabled'
+  rx_disabled: !ref 'impairments_rx_config.disabled'
+- !class:waivefront.torchsig.processing.NoiseFloorOp()
+  noise_power_db: null
+  noise_power_db_min: -120.0
+  noise_power_db_max: -80.0
+  snr_db: null
+  snr_db_min: 5.0
+  snr_db_max: 40.0
+  scale_signal: true
+  snr_reference: mask_mean
+  fft_size: null
+  fft_stride: null
+  random_state: null
+  window_param: null
+  periodic: false
+  scaling: power
+  band_dynamic_range_db: 50
+  mask_key: mask
+- !class:waivefront.torchsig.processing.ImpairmentsChain()
+  probability: 1
+  impairment_level: 1
+  tx_probability_overrides: null
+  rx_probability_overrides: null
+  random_state: null
+  tx_disabled: !ref 'impairments_tx_config_2.disabled'
+  rx_disabled: !ref 'impairments_rx_config_2.disabled'
+- !class:waivefront.spectrogram.SpectrogramOp()
+  fft_size: 1024
+  hop_size: 512
+  spectrogram_type: time_y_bottom
+  window: hann
+  window_param: null
+  periodic: false
+  scaling: power
+  sample_rate: null
+- !class:waivefront.spectrogram.MagnitudeOp()
+  eps: 1.0e-12
+  to_db: true
+  floor_db: null
+- !class:waivefront.spectrogram.RegionPowerAnalysisOp()
+  regions_key: predicted_regions
+  linear: false

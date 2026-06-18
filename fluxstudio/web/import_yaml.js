@@ -16,11 +16,11 @@ console.log("ComfyFlux: Loaded Taidal.ImportYaml extension");
 // CLI still package a config as a subgraph blueprint / group box, but those modes are no longer their
 // own menu commands — after a merge import you can use ComfyUI's native group / "Convert to Subgraph".
 
-function pickYamlFile() {
+function pickFile(accept) {
     return new Promise((resolve) => {
         const input = document.createElement("input");
         input.type = "file";
-        input.accept = ".yaml,.yml";
+        input.accept = accept;
         input.onchange = () => {
             const file = input.files && input.files[0];
             if (!file) {
@@ -81,7 +81,7 @@ function pasteIntoCurrentGraph(wf) {
 }
 
 async function importYaml(as_, { merge = true } = {}) {
-    const picked = await pickYamlFile();
+    const picked = await pickFile(".yaml,.yml");
     if (!picked) return;
     try {
         const res = await api.fetchApi("/taidal/import_yaml", {
@@ -108,6 +108,30 @@ async function importYaml(as_, { merge = true } = {}) {
     }
 }
 
+// Import a ComfyUI workflow .json (e.g. the output of "Export Taidal Ops → Graph") and MERGE it into
+// the active graph — the same paste path as "Import Taidal YAML → Current Graph", but a .json IS already
+// a workflow, so there is NO backend conversion (ComfyUI's native open/drag-drop loads a .json as its own
+// workflow; this is the merge-into-current variant it lacks). Falls back to a full load if pasteFromClipboard
+// is unavailable.
+async function importJsonGraph() {
+    const picked = await pickFile(".json");
+    if (!picked) return;
+    let workflow;
+    try {
+        workflow = JSON.parse(picked.text);
+    } catch (err) {
+        alert("Import Graph JSON failed: not valid JSON\n\n" + err);
+        return;
+    }
+    if (!workflow || !Array.isArray(workflow.nodes)) {
+        alert("Import Graph JSON failed: this file is not a ComfyUI workflow (no `nodes` array).");
+        return;
+    }
+    if (!pasteIntoCurrentGraph(workflow)) {
+        await app.loadGraphData(workflow);
+    }
+}
+
 app.registerExtension({
     name: "Taidal.ImportYaml",
     commands: [
@@ -121,12 +145,17 @@ app.registerExtension({
             label: "Import Taidal YAML → New Graph",
             function: () => importYaml("graph", { merge: false }),
         },
+        {
+            id: "taidal.importJsonGraphCurrent",
+            label: "Import Graph JSON → Current Graph",
+            function: importJsonGraph,
+        },
     ],
     // Surfaced under the top-level "Taidal" menu (same place as Export Taidal Ops).
     menuCommands: [
         {
             path: ["Taidal"],
-            commands: ["taidal.importYamlCurrentGraph", "taidal.importYamlNewGraph"],
+            commands: ["taidal.importYamlCurrentGraph", "taidal.importYamlNewGraph", "taidal.importJsonGraphCurrent"],
         },
     ],
 });

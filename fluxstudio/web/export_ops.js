@@ -3,14 +3,18 @@ import { api } from "../../scripts/api.js";
 
 console.log("ComfyFlux: Loaded Taidal.ExportOps extension");
 
-// Canvas-side companion to the /taidal/export_ops backend route + the `fluxstudio export` CLI.
-// Compiles the current graph's OPS (dropping the source + Walk/Extract adapter nodes) into
-// Confluid YAML op-lists and downloads them, so they can be reattached to any source via
-// Flux.from_ops_yaml / confluid.materialize(confluid.load(path)["ops"]). A graph holding
-// several disconnected op chains downloads ONE file per chain (ops_1.yaml … ops_N.yaml).
+// Canvas-side companion to the /taidal/export_ops + /taidal/export_ops_graph backend routes + the
+// `fluxstudio export` CLI. TWO commands export the current graph's OPS (the op-kind nodes + the Mix
+// fan-in, dropping the source + Walk/Extract/viewer adapters), differing only in the OUTPUT format:
+//   * → Confluid YAML — COMPILE the op DAG to sequential Confluid op-list YAML(s) (auto Stash/Unstash
+//     + Mix folding + constant hoisting); ONE file per disconnected chain (ops_1.yaml … ops_N.yaml).
+//     Reattach to any source via Flux.from_ops_yaml / confluid.materialize(confluid.load(p)["ops"]).
+//   * → Graph         — extract the RAW op DAG *as drawn* into ONE ComfyUI workflow.json (no
+//     compilation — positions/widgets/wiring preserved), for saving or sharing the op subgraph.
+//     Downloaded as ops_graph.json.
 
-function downloadYaml(text, filename) {
-    const blob = new Blob([text], { type: "text/yaml" });
+function downloadBlob(text, filename, mime) {
+    const blob = new Blob([text], { type: mime });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
@@ -45,14 +49,45 @@ async function exportOps() {
         // One doc per independent op chain (`yamls`; `yaml` is the older single-doc field).
         const docs = data.yamls || [data.yaml];
         if (docs.length === 1) {
-            downloadYaml(docs[0], "ops.yaml");
+            downloadBlob(docs[0], "ops.yaml", "text/yaml");
         } else {
             // The browser may ask once to allow multiple downloads — expected.
-            docs.forEach((doc, i) => downloadYaml(doc, `ops_${i + 1}.yaml`));
+            docs.forEach((doc, i) => downloadBlob(doc, `ops_${i + 1}.yaml`, "text/yaml"));
         }
     } catch (err) {
         console.error("ExportOps: request failed", err);
         alert("Export ops failed: " + err);
+    }
+}
+
+// Export the op DAG as a raw ComfyUI workflow.json (NOT the compiled ops-yaml). Posts the full UI
+// `workflow` (positions + widgets + wiring); the backend extracts the op-DAG nodes. Because a real
+// pipeline routes the sample THROUGH subgraph instances (not op nodes), there are two modes:
+//   * flatten=false — keep the subgraph instances intact (as black boxes, with their definitions),
+//     so the pipeline stays connected; downloads `ops_graph.json`.
+//   * flatten=true  — inline every subgraph and keep ONLY op nodes, reconnecting the pipeline through
+//     the dropped pass-throughs; downloads `ops_graph_flat.json`.
+async function exportOpsGraph(flatten) {
+    const { workflow } = await app.graphToPrompt();
+    try {
+        const res = await api.fetchApi("/taidal/export_ops_graph", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ workflow, flatten: !!flatten }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+            alert("Export ops graph failed:\n\n" + (data.error || res.statusText));
+            return;
+        }
+        downloadBlob(
+            JSON.stringify(data.workflow, null, 2),
+            flatten ? "ops_graph_flat.json" : "ops_graph.json",
+            "application/json",
+        );
+    } catch (err) {
+        console.error("ExportOpsGraph: request failed", err);
+        alert("Export ops graph failed: " + err);
     }
 }
 
@@ -64,7 +99,22 @@ app.registerExtension({
             label: "Export Taidal Ops → Confluid YAML",
             function: exportOps,
         },
+        {
+            id: "taidal.exportOpsGraphSubgraphs",
+            label: "Export Taidal Ops → Graph (subgraphs intact)",
+            function: () => exportOpsGraph(false),
+        },
+        {
+            id: "taidal.exportOpsGraphFlat",
+            label: "Export Taidal Ops → Graph (flattened)",
+            function: () => exportOpsGraph(true),
+        },
     ],
     // Surfaced under a top-level "Taidal" menu (newer ComfyUI menu API).
-    menuCommands: [{ path: ["Taidal"], commands: ["taidal.exportOps"] }],
+    menuCommands: [
+        {
+            path: ["Taidal"],
+            commands: ["taidal.exportOps", "taidal.exportOpsGraphSubgraphs", "taidal.exportOpsGraphFlat"],
+        },
+    ],
 });

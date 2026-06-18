@@ -28,6 +28,7 @@ sockets iff their type strings are equal — which is what lets ops chain (via `
 compose into higher-order ops (via ``DATAFLUX_OP``).
 """
 
+import ast
 import collections.abc as cabc
 import importlib
 import inspect
@@ -717,12 +718,23 @@ def _widget_for(param: inspect.Parameter, owner: Optional[Callable] = None) -> T
     # (The str-capable ``Optional[Union[float, int, str]] = None`` params — ``ThresholdOp.low_level``
     # with its ``"{meta}"`` expression support — map to STRING above and never reach here, so their
     # blank-STRING-and-stays-STRING behaviour is unchanged.)
-    if param.default is None and comfy_type in ("INT", "FLOAT"):
+    #
+    # The RANGE_* arms cover an Optional param whose annotation ALSO has a (variadic) tuple arm —
+    # e.g. helios ``Max.axis: int | Tuple[int, ...] | None`` (reduce one axis, several axes, or ALL
+    # when None). ``_map_type`` returns RANGE_INT for the ``Tuple[int, ...]`` arm (→ a forced
+    # ``axis__lo``/``axis__hi`` pair that can't be None), but a ``None`` default means "flexible
+    # optional": render the same blank-STRING nullable scalar taidal gives ``Optional[int]/[float]``
+    # (``"" → None`` = the constructor default / "all axes"; ``"0" → 0``). The rarer multi-axis tuple
+    # form isn't expressible on a single widget — wire a value or pass it in the constructor. A
+    # tuple param with a CONCRETE default (``model_order=(3, 5)``, ``target_length: int | Tuple[int,
+    # int] = 0``) is NOT None-defaulted, so it keeps its RANGE ``__lo``/``__hi`` widgets.
+    if param.default is None and comfy_type in ("INT", "FLOAT", "RANGE_INT", "RANGE_FLOAT"):
+        numeric = "FLOAT" if comfy_type.endswith("FLOAT") else "INT"
         return "STRING", {
             "default": "",
             "multiline": False,
             "taidal_widget": "NULLABLE_NUMERIC",
-            "taidal_numeric": comfy_type,
+            "taidal_numeric": numeric,
         }
 
     # Nullable bool (e.g. ``Optional[bool] = None`` like ``pl.Trainer.enable_progress_bar`` /
@@ -940,7 +952,56 @@ def _coerce_kwargs(func: Callable, kwargs: Dict[str, Any]) -> Dict[str, Any]:
                         continue
                     except (ValueError, TypeError):
                         pass
-                out[key] = value  # not JSON — leave the raw string for the constructor to handle
+                    # Not strict JSON — accept a Python dict LITERAL too: `{0:'BG',1:'5GNR'}` (int
+                    # keys + single quotes) is natural to type for a `Dict[int, str]` param like
+                    # YoloSink.class_names but is invalid JSON. ast.literal_eval is safe (literals
+                    # only, no code execution) and yields the real int-keyed dict the ctor wants.
+                    try:
+                        parsed_dict = ast.literal_eval(stripped)
+                        if isinstance(parsed_dict, dict):
+                            out[key] = parsed_dict
+                            continue
+                    except (ValueError, SyntaxError, TypeError):
+                        pass
+                out[key] = value  # not JSON/literal — leave the raw string for the constructor to handle
+                continue
+            # A structured/COMPOUND container — a LIST whose elements are themselves tuples/pairs
+            # (or a Union of those), e.g. ``Config.keys: str | list[str | tuple[str, str]]`` (a
+            # rename map: a bare key is src==dst, a ``(src, dst)`` pair renames). ComfyUI can only
+            # render it as a STRING, and the flat ``Tuple``/``List`` branches below can't reconstruct
+            # a list OF tuples — so this generic branch (keyed off the annotation SHAPE — ``list`` AND
+            # ``tuple`` — never a class name) accepts EITHER a Python/JSON literal (faithful to any
+            # nesting) OR a friendly comma list with ``src:dst`` renames. It MUST precede the flat
+            # ``Tuple`` branch (which also matches "tuple") and the flat ``List`` branch.
+            if "list" in ann_low and "tuple" in ann_low and "float" not in ann_low and "int" not in ann_low:
+                # 1) A literal container — ``[("a", "b"), "c"]`` (Python) or ``[["a", "b"], "c"]``
+                #    (JSON). ``ast`` first (handles the tuples/parens JSON can't); a JSON inner list
+                #    is normalised to a tuple so a pair stays a pair.
+                if stripped[:1] in "[(":
+                    for _parse in (ast.literal_eval, json.loads):
+                        try:
+                            parsed = _parse(stripped)
+                        except (ValueError, SyntaxError, TypeError):
+                            continue
+                        if isinstance(parsed, (list, tuple)):
+                            out[key] = [tuple(e) if isinstance(e, (list, tuple)) else e for e in parsed]
+                            break
+                    if key in out:
+                        continue
+                # 2) Friendly comma list: ``"snr_db, noise_power_db:nf"`` -> ``["snr_db",
+                #    ("noise_power_db", "nf")]``. A bare item stays a string (src==dst); an item with
+                #    ``:`` becomes a ``(src, dst)`` rename pair. (Also the fallback for a malformed literal.)
+                items: List[Any] = []
+                for raw_item in stripped.split(","):
+                    item = raw_item.strip()
+                    if not item:
+                        continue
+                    if ":" in item:
+                        src, dst = (part.strip() for part in item.split(":", 1))
+                        items.append((src, dst))
+                    else:
+                        items.append(item)
+                out[key] = items
                 continue
             if "tuple" in ann_low and "float" not in ann_low and "int" not in ann_low:
                 if stripped.startswith("["):
@@ -949,6 +1010,22 @@ def _coerce_kwargs(func: Callable, kwargs: Dict[str, Any]) -> Dict[str, Any]:
                         out[key] = tuple(parsed) if isinstance(parsed, list) else (parsed,)
                         continue
                     except (ValueError, TypeError):
+                        pass
+                if stripped.startswith("("):
+                    # A Python TUPLE LITERAL — the empty-tuple default ``()`` (the repr of an empty
+                    # ``Tuple[str, ...]`` param) AND the docstring-documented ``("IQImbalanceOp",
+                    # "QuantizeOp")`` form. Without this, ``"()"`` comma-splits to ``("()",)`` (a
+                    # one-element tuple of the literal string) — TRUTHY, so a helios
+                    # ``ImpairmentsChain.tx_disabled`` widget left at its ``()`` default would OVERRIDE
+                    # the metadata config stamped by ``ImpairmentsTxConfig`` (``self.tx_disabled or
+                    # metadata[...]``), silently disabling the whole tx/rx config mechanism. ``ast``
+                    # is literals-only (safe). Falls through to the comma-split on a non-literal.
+                    try:
+                        parsed = ast.literal_eval(stripped)
+                        if isinstance(parsed, (tuple, list)):
+                            out[key] = tuple(parsed)
+                            continue
+                    except (ValueError, SyntaxError, TypeError):
                         pass
                 # A hand-typed comma-separated value (e.g. ``QuantizeOp, SpursOp``) → a tuple of strings.
                 out[key] = tuple(item.strip() for item in stripped.split(",") if item.strip())
@@ -1124,39 +1201,65 @@ def _safe_callable_path(func: Callable) -> Optional[str]:
         return None
 
 
+def _op_list_params(cls: Any) -> Dict[str, str]:
+    """Map each op-LIST constructor param → its dynamic socket-family prefix.
+
+    A param accepts a LIST of ops when its NAME is in ``_OP_LIST_PARAMS`` with a ``list`` annotation
+    (``Enable.ops`` / ``Tee.branches`` / a helios ``*transforms`` variadic mirror) OR it is stamped
+    ``__taidal_op_list_params__`` by the waivefront-helios bridge (a ``List[Transform]`` slot whose
+    helios name — ``true_transforms`` / ``default_transforms`` — the dataflux-tuned allowlist can't
+    know). The family prefix is ``"op"`` for the original name-set params (so existing ``op_N``
+    graphs/exports keep working unchanged) and the PARAM NAME otherwise — letting ONE node carry
+    SEVERAL independent op-list families (``HeliosIfOp``'s ``true_transforms_N`` + ``false_transforms_N``),
+    each grown by ``web/op_list.js``. Detected by name/stamp, NEVER per-class.
+    """
+    result: Dict[str, str] = {}
+    try:
+        sig = inspect.signature(cls)
+    except (ValueError, TypeError):  # pragma: no cover - defensive
+        return result
+    stamped = set(getattr(cls, "__taidal_op_list_params__", ()) or ())
+    for pname, param in sig.parameters.items():
+        by_name = pname in _OP_LIST_PARAMS and "list" in str(param.annotation).lower()
+        if by_name or pname in stamped:
+            result[pname] = "op" if pname in _OP_LIST_PARAMS else pname
+    return result
+
+
 def _op_list_param(cls: Any) -> Optional[str]:
-    """Name of a higher-order op's op-list constructor param (``ops`` / ``branches``), or ``None``.
+    """The FIRST op-list param name (single-family compat shim over :func:`_op_list_params`).
 
-    Detected by name (``_OP_LIST_PARAMS``) + a ``List``/``list`` annotation — e.g. ``Enable(ops:
-    list)``, ``Parallel(ops: List[Any], …)``, ``Tee(branches: List[List[Any]])``. Such a param holds
-    OTHER ops, so it rides ``DATAFLUX_OP`` sockets instead of becoming a STRING widget.
+    Used where exactly one op-list family is expected (the engine ``_build_source_node`` — ``Flux.ops``
+    — and the export embedder); the full multi-family map is :func:`_op_list_params`.
+    """
+    return next(iter(_op_list_params(cls)), None)
+
+
+def _single_op_params(cls: Any) -> List[str]:
+    """An op's SINGLE-op constructor params (each holds ONE op VALUE, not a list), in signature order.
+
+    A param holds one op when its NAME is in ``_SINGLE_OP_PARAMS`` with a non-scalar annotation
+    (``RandomApply.op`` / ``ConfigureOp.target``) OR it is stamped ``__taidal_op_params__`` by the
+    waivefront-helios bridge (a single ``Transform`` slot — ``Configure.compute``/``.target``,
+    ``Config.delegate`` — whose helios name the allowlist can't know). Each rides ONE optional
+    ``DATAFLUX_OP`` input socket instead of a STRING widget. Op-LIST params (``_op_list_params``) are
+    excluded (a list wins). Returning SEVERAL is what surfaces BOTH ``HeliosConfigureOp.compute`` and
+    ``.target`` — the old single-name helper exposed only the first.
     """
     try:
         sig = inspect.signature(cls)
     except (ValueError, TypeError):  # pragma: no cover - defensive
-        return None
+        return []
+    stamped = set(getattr(cls, "__taidal_op_params__", ()) or ())
+    list_params = set(_op_list_params(cls))
+    result: List[str] = []
     for pname, param in sig.parameters.items():
-        if pname in _OP_LIST_PARAMS and "list" in str(param.annotation).lower():
-            return pname
-    return None
-
-
-def _single_op_param(cls: Any) -> Optional[str]:
-    """Name of an op's SINGLE-op constructor param (``op`` / ``target``), or ``None``.
-
-    Detected by name (``_SINGLE_OP_PARAMS``) + a non-scalar annotation — e.g.
-    ``RandomApply(op: Optional[object])``, ``ConfigureOp(target: Optional[object])``. Such a
-    param holds ANOTHER op, so it rides ONE optional ``DATAFLUX_OP`` input socket instead of
-    a STRING widget (the single-op counterpart of :func:`_op_list_param`'s ``op_N`` family).
-    """
-    try:
-        sig = inspect.signature(cls)
-    except (ValueError, TypeError):  # pragma: no cover - defensive
-        return None
-    for pname, param in sig.parameters.items():
-        if pname in _SINGLE_OP_PARAMS and not _is_scalar_anno(param.annotation):
-            return pname
-    return None
+        if pname in list_params:
+            continue
+        by_name = pname in _SINGLE_OP_PARAMS and not _is_scalar_anno(param.annotation)
+        if by_name or pname in stamped:
+            result.append(pname)
+    return result
 
 
 def _collect_ops(kwargs: Dict[str, Any]) -> List[Any]:
@@ -1464,40 +1567,50 @@ def _build_op_node(cls: Callable, name: str, category: str) -> Type:
     The op node both APPLIES the op (the ``sample`` input chained to the ``sample`` output, today's
     linear-pipeline UX) AND exposes the constructed op on the ``op`` output (``DATAFLUX_OP``), so it
     can feed a higher-order op. ``sample`` is OPTIONAL: leave it unconnected to use the node purely
-    as an op-value. Higher-order ops (op-list constructor param) gain dynamic ``op_*`` inputs.
+    as an op-value. Op-VALUED constructor params ride ``DATAFLUX_OP`` sockets instead of STRING
+    widgets: each single-op param (``_single_op_params``) is one static socket, and each op-LIST param
+    (``_op_list_params``) a dynamic ``<prefix>_N`` family. A node may carry SEVERAL of each — e.g.
+    ``HeliosConfigureOp`` sockets BOTH ``compute`` and ``target``; ``HeliosIfOp`` carries the
+    ``true_transforms_N`` and ``false_transforms_N`` families.
 
     Any ``@output`` properties declared on the op class (e.g. ``applied_impairments``) become extra
     output sockets appended after ``(sample, op)`` — read from the live op instance after
     ``__call__`` completes (or their pre-call default when ``sample`` is unconnected).
     """
     accepts = getattr(cls, "ACCEPTS", None)
-    op_list_param = _op_list_param(cls)
-    single_op_param = _single_op_param(cls)
+    op_list_params = _op_list_params(cls)  # {param: socket-family prefix}
+    single_op_params = _single_op_params(cls)  # [param, …] — each ONE op VALUE
+    list_prefixes = sorted(set(op_list_params.values()))
     # Config widgets EXCLUDING the op-typed params (they ride DATAFLUX_OP sockets, not widgets).
     _strict = getattr(cls, "__confluid_strict_typing__", False)
-    _socketed = {p for p in (op_list_param, single_op_param) if p is not None}
+    _socketed = set(op_list_params) | set(single_op_params)
     required, nullable_opts, _split_map = _build_config_inputs(cls, skip=_socketed or None, strict_typing=_strict)
     optional: Dict[str, Any] = {"sample": (SAMPLE_TYPE,), **nullable_opts}
-    if op_list_param is not None:
-        optional["op_0"] = (OP_TYPE,)  # seed; web/op_list.js grows op_1, op_2, … as they fill
-    if single_op_param is not None:
-        optional[single_op_param] = (OP_TYPE,)  # one op VALUE (RandomApply.op / ConfigureOp.target)
+    for prefix in list_prefixes:
+        optional[f"{prefix}_0"] = (OP_TYPE,)  # seed; web/op_list.js grows <prefix>_1, _2, … per family
+    for pname in single_op_params:
+        # one op VALUE each (RandomApply.op / ConfigureOp.target / helios compute/target/delegate/…)
+        optional[pname] = (OP_TYPE,)
 
     # Collect any @output properties declared on this op class.
     out_specs = list(output_specs(cast(type, cls)))
     out_sockets = [_output_socket_type(s["name"], _output_return_anno(cls, s["name"])) for s in out_specs]
 
     def execute(self: Any, sample: Any = None, **kwargs: Any) -> Tuple[Any, ...]:
-        if op_list_param is not None:
-            ops = _collect_ops(kwargs)
-            kwargs = {k: v for k, v in kwargs.items() if not (k.startswith("op_") and k[3:].isdigit())}
-            # ``Tee.branches`` is a list of op-LISTS; v1 makes each connected op its own 1-op branch.
-            kwargs[op_list_param] = [[o] for o in ops] if op_list_param == "branches" else ops
-        wired_op = kwargs.pop(single_op_param, None) if single_op_param is not None else None
+        if op_list_params:
+            list_values: Dict[str, Any] = {}
+            for pname, prefix in op_list_params.items():
+                ops = _collect_indexed(kwargs, prefix)
+                # ``Tee.branches`` is a list of op-LISTS; v1 makes each connected op its own 1-op branch.
+                list_values[pname] = [[o] for o in ops] if pname == "branches" else ops
+            kwargs = {k: v for k, v in kwargs.items() if not _is_indexed_key(k, set(list_prefixes))}
+            kwargs.update(list_values)
+        # Post-construction injection (the confluid paradigm) of each wired single-op DATAFLUX_OP value.
+        wired_singles = {p: kwargs.pop(p, None) for p in single_op_params}
         op = cls(**_coerce_kwargs(cls, kwargs))
-        if single_op_param is not None and wired_op is not None:
-            # Post-construction injection (the confluid paradigm) — the wired DATAFLUX_OP value.
-            setattr(op, single_op_param, wired_op)
+        for pname, wired in wired_singles.items():
+            if wired is not None:
+                setattr(op, pname, wired)
         applied: Any = None
         if sample is not None:
             # Runtime accept-check (authoritative) before applying — see the type-spec mandate.

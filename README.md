@@ -125,6 +125,17 @@ Node labels are the **verbatim** callable name (underscores become spaces; capit
 
 **Numeric widget ranges.** Every INT/FLOAT widget carries explicit full-range bounds (without them the ComfyUI frontend clamps input to `[0, 2048]` — negative dB values would be unenterable). An op can declare a *real* range on the parameter itself with a PEP-593 mark — `Annotated[float, Interval(ge=-200.0, le=50.0)]` (`annotated_types`) — which the bridge renders as the widget's `min`/`max` (a marked `Tuple[float, float]` range bounds both its `__lo`/`__hi` widgets), and the **same mark** flows into navigaitor's JSON schema via `confluid.to_pydantic`. Reference aliases: `waivefront.torchsig.processing.DbPower` / `DbSnr` / `Probability` / `WattRange` / `DbRange`.
 
+**Container / structured widgets.** A constructor param whose type is a container that has no scalar widget renders as a `STRING` you type into, and the bridge decodes it back to the real Python value at run time:
+
+| Param annotation | Type into the widget | Decodes to |
+|---|---|---|
+| `List[str]` | `a, b, c` (comma-separated) | `["a", "b", "c"]` |
+| `Tuple[str, ...]` | `A, B` or `("A", "B")` | `("A", "B")` |
+| `Dict[int, str]` | `{0: "BG", 1: "5GNR"}` (Python/JSON literal) | `{0: "BG", 1: "5GNR"}` |
+| `list[str \| tuple[str, str]]` (a rename map, e.g. the helios **Config**'s `keys`) | `snr_db, noise_power_db:nf` *or* `[("snr_db","snr"), "noise_power_db"]` | `["snr_db", ("noise_power_db", "nf")]` |
+
+For the last (a *list of pairs*) you can use either a **friendly comma list** — items split on `,`, and each item split on `:` into a `(src, dst)` rename pair (a bare item stays a plain key, i.e. `src == dst`) — or a full **Python/JSON literal** for any nesting. This is generic for any list-of-pairs/compound param; it's handled in the bridge's `_coerce_kwargs`, so it works for every such node and the value round-trips through the YAML exporters too.
+
 Three adapter nodes (under `Taidal/FluxStudio`) let you step through a dataset and view samples with **native** ComfyUI viewers (plus one interactive value inspector):
 
 - **Walk Dataset (by index)** — takes a `DATAFLUX_SOURCE` and an `index`, and outputs the `Sample` at that index (`source[index]`). The `index` widget uses ComfyUI's `control_after_generate`, **defaulting to *increment*** so each **Queue Prompt** advances to the next sample in order — set the control to *fixed* (or `index` `0`) to reset, or *randomize* to sample at random. `wrap` cycles modulo the dataset length.
@@ -185,7 +196,7 @@ Walk ──────────sample┘
 
 `Parallel(ops=[RescaleOp, StandardizeOp])` applies both to the incoming sample. Leave a higher-order op's `sample` unconnected and take *its* `op` output to nest it inside another higher-order op.
 
-**Single-op params** work the same way with ONE socket instead of a list: a constructor param named `op` or `target` (`RandomApply.op`, `ConfigureOp.target`) renders as one optional `DATAFLUX_OP` input. The canonical use is **`ConfigureOp`** (dataflux, the helios *Configure* pattern) — a per-sample parameter injector: wire the value-computing ops into its `op_N` inputs, the op to configure into `target`, and name the attribute in `param`:
+**Single-op params** work the same way with ONE socket instead of a list: a constructor param named `op` or `target` (`RandomApply.op`, `ConfigureOp.target`) renders as one optional `DATAFLUX_OP` input. A node may have **several** — a bridged-helios composite's op slots (named the helios way and surfaced via the bridge's `__taidal_op_params__` stamp) all become sockets, so `HeliosConfigureOp` exposes BOTH `compute` and `target`, and `HeliosConfigOp.delegate` / `HeliosApplyToTargetOp.transform` are wireable too. The canonical use is **`ConfigureOp`** (dataflux, the helios *Configure* pattern) — a per-sample parameter injector: wire the value-computing ops into its `op_N` inputs, the op to configure into `target`, and name the attribute in `param`:
 
 ```
 MaxOp        ──op──→ (op_0)   ConfigureOp(param="low_level")  ─sample→ …
@@ -201,7 +212,7 @@ Any op's scalar parameter (a number you'd normally type, e.g. `noise_power_db`) 
 
 What you can wire in, and how each compiles, is the [DAG → sequential](#dag--sequential) table below — a fixed value from a **Primitive** node inlines as a literal, a same-sample **Extract → Math** derivation becomes a `ConfigureOp`, and **another op's `@output`** (e.g. one `NoiseFloorOp`'s `applied_snr_db` into a later op's `noise_power_db`) becomes a `CaptureOutputOp` + `ConfigureOp` pair as long as the producing op is upstream on the same sample path.
 
-> **Scope.** Works for any op whose constructor takes an `ops`/`branches` list or an `op`/`target` single-op param. `Tee` (a list of *branches*) v1 treats each connected op as its own single-op branch — multi-op branches mean pre-composing a branch into one op (future). `FilterOp`/`WrappedOp` wrap a *raw Python callable*, so they aren't canvas nodes at all (bare `@configurable`, i.e. UNcategorised — neither `op` nor `engine`).
+> **Scope.** Works for any op whose constructor takes an `ops`/`branches` op-list or an `op`/`target` single-op param — and, for bridged-helios composites, the slots named the helios way (`compute`/`delegate`/`true_transforms`/…) that the bridge stamps as op-valued (an op-list slot under a helios name grows its own `<param>_N` family, e.g. `HeliosIfOp.true_transforms_N` + `false_transforms_N`). `Tee` (a list of *branches*) v1 treats each connected op as its own single-op branch — multi-op branches mean pre-composing a branch into one op (future). `FilterOp`/`WrappedOp` wrap a *raw Python callable*, so they aren't canvas nodes at all (bare `@configurable`, i.e. UNcategorised — neither `op` nor `engine`).
 
 ## Subgraph as an Op
 
@@ -228,7 +239,9 @@ The DAG→sequential translation (fan-out → auto `Stash`/`Unstash`, `Mix` → 
 
 > **How it works (no extra wiring).** The node is self-contained: at run time it reads ComfyUI's hidden `PROMPT` (the flat graph — native subgraphs are already expanded by the frontend, so the inner op DAG is present) plus its own `UNIQUE_ID`, and compiles its sample-ancestor cone via `fluxstudio.export`. No snapshot widget, no extra route. An unwired terminator is the identity (`TransformChain([])`).
 >
-> **Scope (v1).** The *ops-export* (next section) compiles a subgraph-Op into its nested `TransformChain`. The **whole-graph** export (*Export Graph → Taidal YAML*) does **not** yet compile the terminator — it skips it with a comment (use the ops-export for subgraph-Ops).
+> **Why the `sample` input is lazy.** Because the node compiles from the static `PROMPT` and never reads the runtime sample, its `sample` input is a **lazy** ComfyUI input — running the graph (e.g. Queueing a `DatasetProcessor` fed by the Flux) does **not** execute the op chain feeding it. That matters: when you use a subgraph purely as an Op, the op chain has **no source on the canvas** (the source feeds the `Flux` directly, and the ops arrive via the compiled `TransformChain`), so forcing it to run would push a `None` sample through the head op and crash a downstream viewer or value-chain `Extract from Sample`. The lazy input avoids that entirely. Running a sample *through* the subgraph's boundary (using it as a graph, not an Op) is unaffected.
+>
+> **Both exporters compile it.** The *ops-export* (next section) embeds a subgraph-Op as a nested `TransformChain` in its consumer. The **whole-graph** export (*Export Graph → Taidal YAML*) now compiles it too: when the terminator feeds a `Flux`'s op list, its cone is compiled (same DAG→sequential compiler, same constant-hoisting) and **spliced inline** into the Flux's `ops:` — a sequential op-list makes a nested chain equivalent to its ops spliced, and inline ops survive `marainer convert`'s deep-flow where a nested deferred chain marker would not. An **unwired** terminator (used as a graph, or floating) has nothing to compile and is skipped-with-comment as before.
 
 ## Exporting ops to a Flux
 
@@ -351,14 +364,17 @@ The converter lives in `fluxstudio.graphio` (`yaml_to_workflow` / `workflow_to_y
 
 | Command | What it does |
 |---|---|
-| **Import Taidal YAML → Graph** | Pick a `.yaml`; its nodes + wiring are laid out flat and **inserted into the current graph**. |
-| **Import Taidal YAML → Subgraph** | Pick a `.yaml`; it is packaged as a reusable `definitions.subgraphs[]` blueprint + an instance node and **inserted into the current graph**. |
-| **Import Taidal YAML → Group** | Pick a `.yaml`; its nodes are wrapped in one visual group box (titled by the file) and **inserted into the current graph**. |
-| **Import Taidal YAML → New Graph** | Pick a `.yaml`; load it as its **own workflow** (a fresh tab) instead of merging — the standalone escape hatch. |
+| **Import Taidal YAML → Current Graph** | Pick a `.yaml`; its nodes + wiring are **merged into the active graph** (added to what you're building). |
+| **Import Taidal YAML → New Graph** | Pick a `.yaml`; load it as its **own workflow** (a fresh tab) instead of merging. |
+| **Import Graph JSON → Current Graph** | Pick a ComfyUI `workflow.json` (e.g. an "Export Ops → Graph" file) and **merge it into the active graph** — the merge variant ComfyUI's native open lacks. |
 | **Export Graph → Taidal YAML** | Serialize the whole active graph and download the hoisted-`!ref:` YAML. |
-| **Export Taidal Ops → Confluid YAML** | (above) the ops-only op-list. |
+| **Export Taidal Ops → Confluid YAML** | Compile the op DAG to a sequential Confluid op-list YAML (one file per disconnected chain). |
+| **Export Taidal Ops → Graph (subgraphs intact)** | Extract the op DAG as a raw ComfyUI `workflow.json` **as drawn**, keeping your subgraph instances as black boxes (so the pipeline stays connected). Downloads `ops_graph.json`. |
+| **Export Taidal Ops → Graph (flattened)** | Same, but **inline every subgraph** so the inner ops surface, and reconnect the pipeline through the dropped adapters. Downloads `ops_graph_flat.json`. |
 
-**Where the import lands:** **Graph**, **Subgraph**, and **Group** **paste-merge into the active graph** — the imported nodes are added to what you are building (at the canvas mouse position, selected, in one undo step, leaving your own clipboard untouched) rather than replacing it / opening a separate tab, using the same litegraph clipboard/paste path as ComfyUI's node-template insertion. So you can import several configs side by side, and the commands also work while you are editing inside a subgraph. **New Graph** is the escape hatch for when you'd rather open the config standalone (it loads as its own workflow / a fresh tab — the three merge commands also fall back to this on a ComfyUI build without `pasteFromClipboard`). Backed by the `/taidal/import_yaml` and `/taidal/export_workflow` routes (`web/import_yaml.js`, `web/export_workflow.js`).
+**Where the import lands:** **Current Graph** **paste-merges into the active graph** — the imported nodes are added to what you are building (at the canvas mouse position, selected, in one undo step, leaving your own clipboard untouched) rather than replacing it / opening a separate tab, using the same litegraph clipboard/paste path as ComfyUI's node-template insertion. So you can import several configs side by side, and it also works while you are editing inside a subgraph. **New Graph** loads the config standalone (its own workflow / a fresh tab — Current Graph also falls back to this on a ComfyUI build without `pasteFromClipboard`). (The `subgraph` / `group` packaging modes are still available from the `fluxstudio import --as subgraph|group` CLI; after a Current-Graph import you can also use ComfyUI's native grouping / *Convert to Subgraph*.) Backed by the `/taidal/import_yaml` and `/taidal/export_workflow` routes (`web/import_yaml.js`, `web/export_workflow.js`).
+
+**Exporting the ops — YAML vs. graph.** All three operate on the op-kind nodes + the *Mix Samples* fan-in (dropping the source + Walk/Extract/viewer adapters) and **honor the same `export-skip` / `export-target` marks** you set for the YAML export (right-click a node → *Set as export target* / *Skip export*). **→ Confluid YAML** *compiles* the DAG into a sequential op-list (auto Stash/Unstash, Mix folding, constant hoisting) you reattach to any source. The two **→ Graph** commands *extract* the raw DAG into a `workflow.json` (positions, widgets, wiring preserved, nothing compiled). Because a real pipeline routes the sample *through* subgraph instances and past viewer/analysis side-taps, the graph export: (1) **honors a target mark** — restricting the output to that target's data ancestor cone, so the dead-end analysis branches you didn't target are dropped (mark the node you care about, exactly as for the YAML export); (2) **keeps the config/value nodes** (`ImpairmentsTxConfig` etc.) that feed the kept ops; and (3) treats **subgraphs** two ways — **subgraphs intact** keeps the instances as black boxes (with their nested definitions), while **flattened** inlines every subgraph so the inner ops surface and reconnects through the dropped pass-throughs (Reroute/Extract/boundaries). Both produce a connected graph. Backed by the `/taidal/export_ops` and `/taidal/export_ops_graph` (`flatten` flag) routes (`web/export_ops.js`). *Note:* flattened mode keeps the inlined nodes' own positions, which can overlap — auto-arrange on load.
 
 ### Offline CLI
 

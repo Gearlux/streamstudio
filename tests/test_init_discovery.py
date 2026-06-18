@@ -291,6 +291,7 @@ class _FakeRoutes:
         if self._existing:
             yield SimpleNamespace(path="/taidal/choose_directory", method="POST")
             yield SimpleNamespace(path="/taidal/export_ops", method="POST")
+            yield SimpleNamespace(path="/taidal/export_ops_graph", method="POST")
             yield SimpleNamespace(path="/taidal/import_yaml", method="POST")
             yield SimpleNamespace(path="/taidal/export_workflow", method="POST")
             yield SimpleNamespace(path="/taidal/hf_datasets", method="GET")
@@ -428,6 +429,32 @@ def test_export_ops_route_returns_yaml() -> None:
     assert "RescaleOp" in data["yaml"]
     # A single chain → exactly one doc; `yaml` mirrors it for older clients of the route.
     assert data["yamls"] == [data["yaml"]]
+
+
+def test_export_ops_graph_route_returns_op_workflow() -> None:
+    # The /taidal/export_ops_graph POST handler extracts JUST the op-DAG nodes from the posted UI
+    # workflow into a standalone workflow.json (the raw graph as drawn, no compilation).
+    from dataflux.ops.torch import RescaleOp
+
+    from fluxstudio.bridge import create_comfy_node
+
+    with _fake_comfy() as (routes, web):
+        handler = routes.post_handlers.get("/taidal/export_ops_graph")
+        assert handler is not None
+        fluxstudio.NODE_CLASS_MAPPINGS["rescale"] = create_comfy_node(RescaleOp, "rescale")
+        workflow = {
+            "nodes": [
+                {"id": 1, "type": "src", "inputs": []},  # a non-op node (unmapped) → dropped
+                {"id": 2, "type": "rescale", "inputs": [{"name": "sample", "link": 1}]},
+            ],
+            "links": [[1, 1, 0, 2, 0, "DATAFLUX_SOURCE"]],
+        }
+        asyncio.run(handler(_json_request({"workflow": workflow})))
+    data, _kwargs = web.calls[-1]
+    assert "workflow" in data
+    assert [n["id"] for n in data["workflow"]["nodes"]] == [2]  # only the op node survives
+    assert data["workflow"]["links"] == []  # the src→op link drops with the source
+    assert data["workflow"]["nodes"][0]["inputs"][0]["link"] is None  # detached input
 
 
 def test_import_yaml_route_returns_workflow() -> None:
