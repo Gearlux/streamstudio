@@ -13,6 +13,7 @@ provides the index-walk stepper.
 import base64
 import ctypes
 import io
+import json
 import math as _math_module
 import re
 import string
@@ -531,6 +532,113 @@ class ArrayHistogramViewerNode:
         return None
 
 
+def _parse_class_names(raw: Any) -> Optional[List[str]]:
+    """Parse a class-names input — a JSON list ``["a","b"]`` or a comma string ``a, b`` — to a list.
+
+    Returns ``None`` for an empty/blank input (the payload builder then defaults to indices).
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, (list, tuple)):
+        return [str(x) for x in raw]
+    text = str(raw).strip()
+    if not text:
+        return None
+    if text.startswith("["):
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, list):
+                return [str(x) for x in parsed]
+        except (ValueError, TypeError):
+            pass
+    return [part.strip() for part in text.split(",") if part.strip()]
+
+
+def _build_confusion_payloads(metrics: Any, matrix: Any, class_names: Any) -> List[Dict[str, Any]]:
+    """Build the LIST of confusion-matrix payloads the viewer ships to ``web/confusion_matrix.js``.
+
+    The extraction + normalization MATH lives in dataflux (``confusion_matrices_payload`` — finds every
+    square-2D entry in a metrics result, builds raw counts + the three ``true``/``pred``/``all``
+    normalizations per matrix); this is thin glue. Inputs (first non-empty wins): ``metrics`` = an
+    evaluator's ``all_metrics`` JSON dict (every metric — the CMs are extracted by shape, not name),
+    else a standalone raw ``matrix`` array. ``[]`` when nothing usable is wired (the JS shows a hint).
+    """
+    from dataflux.ops.image import confusion_matrices_payload
+
+    names = _parse_class_names(class_names)
+    if metrics is not None and str(metrics).strip() not in ("", "{}", "[]"):
+        try:
+            doc = json.loads(metrics) if isinstance(metrics, str) else metrics
+        except (ValueError, TypeError):
+            doc = None
+        if doc is not None:
+            payloads = confusion_matrices_payload(doc, class_names=names)
+            if payloads:
+                return payloads
+    if matrix is not None:
+        return confusion_matrices_payload(matrix, class_names=names)
+    return []
+
+
+class ConfusionMatrixViewerNode:
+    """Display confusion matrices ON THE NODE: a class-labeled grid, normalize toggle, and hover readout.
+
+    Wire the **``all_metrics``** output of a classification evaluator (a JSON ``STRING`` of every metric)
+    — or a standalone raw ``N×N`` matrix on the ``matrix`` (``DATAFLUX_ARRAY``) input plus optional
+    ``class_names`` — into this node and **Queue Prompt**. It extracts EVERY confusion matrix (the
+    square-2D metrics — there can be several) and renders one at a time, on the node's own canvas:
+
+    * a **class-labeled grid** — rows = true class, columns = predicted class, cells coloured by value
+      (the diagonal = correct predictions), with the class names down the left and across the top;
+    * a **matrix selector** (when several matrices are present, an on-canvas button cycles between them);
+    * a **normalize toggle** (an on-canvas button cycling ``none`` → ``true`` (row) → ``pred`` (col) →
+      ``all``), display-only — the three normalizations are precomputed, so toggling never re-runs; and
+    * a **hover readout** — move the cursor over a cell to read ``true=<class>, pred=<class>`` and the
+      count / fraction under the pointer.
+
+    A sanctioned custom in-canvas VIEWER node (see the *Adapter Nodes Are Glue* mandate): the extraction
+    + normalization MATH lives in dataflux (``confusion_matrices_payload``) — the evaluator output stays
+    GENERIC (all metrics, no "which is the confusion matrix" knowledge); this node only ships the
+    JSON-safe payloads to ``web/confusion_matrix.js`` to draw. It works regardless of
+    ``--no-default-nodes`` (no native viewer needed). The first matrix's counts pass through the
+    ``matrix`` output so the node can sit inline.
+    """
+
+    __confluid_display_name__ = "Confusion Matrix"
+    CATEGORY = _FLUXSTUDIO_CATEGORY
+    RETURN_TYPES = (ARRAY_TYPE,)
+    RETURN_NAMES = ("matrix",)
+    FUNCTION = "view"
+    OUTPUT_NODE = True
+
+    @classmethod
+    def INPUT_TYPES(cls) -> Dict[str, Any]:
+        return {
+            "required": {},
+            "optional": {
+                # The evaluator's `all_metrics` @output (a JSON STRING of every metric). forceInput =>
+                # an input socket, not a widget, so the evaluator's STRING output wires straight in.
+                "metrics": ("STRING", {"forceInput": True}),
+                # Standalone use: a raw N×N matrix + optional labels (JSON list or comma string).
+                "matrix": (ARRAY_TYPE,),
+                "class_names": ("STRING", {"forceInput": True}),
+            },
+        }
+
+    def view(
+        self,
+        metrics: Any = None,
+        matrix: Any = None,
+        class_names: Any = None,
+    ) -> Dict[str, Any]:
+        payloads = _build_confusion_payloads(metrics, matrix, class_names)
+        logger.debug(f"ConfusionMatrixViewerNode: {len(payloads)} confusion matrix(es) extracted")
+        # `ui` drives web/confusion_matrix.js (re-delivered on workflow re-open); `result` passes the
+        # FIRST matrix's raw counts through so the viewer can sit inline.
+        out = np.asarray(payloads[0]["counts"], dtype=np.int64) if payloads and payloads[0].get("counts") else None
+        return {"ui": {"taidal_confusion_matrix": payloads}, "result": (out,)}
+
+
 def _processing_interrupted() -> bool:
     """Whether the user pressed ComfyUI's interrupt button.
 
@@ -664,6 +772,32 @@ def _send_run_output(unique_id: Optional[str], text: str) -> None:
         pass
 
 
+def _make_progress_bar(unique_id: Optional[str]) -> Any:
+    """ComfyUI's native per-node ``ProgressBar`` for ``unique_id`` (the green node overlay), or ``None``.
+
+    Lazy + guarded like :func:`_send_run_output`: ``comfy.utils`` only exists INSIDE a running ComfyUI,
+    and a missing ``unique_id`` (fluxstudio's own test/dev env) ⇒ ``None`` so the runner proceeds with
+    no native bar (the streamed text widget still works). The ``node_id`` is passed EXPLICITLY because
+    the runnable's ``run()`` executes on a WORKER thread (:func:`run_runnable`) that does NOT inherit
+    ComfyUI's ``executing_context`` contextvar — without an explicit id the progress hook can't infer
+    which node to fill. Falls back to the older no-``node_id`` constructor (then relying on the server's
+    last-executing-node, which IS our node during ``execute``) so an older ComfyUI still shows a bar.
+    """
+    if unique_id is None:
+        return None
+    try:
+        from comfy.utils import ProgressBar  # type: ignore[import-not-found]
+    except Exception:  # noqa: BLE001 - not inside ComfyUI ⇒ no native bar
+        return None
+    try:
+        return ProgressBar(1, node_id=unique_id)
+    except TypeError:  # pragma: no cover - older ComfyUI: ProgressBar(total) without node_id
+        try:
+            return ProgressBar(1)
+        except Exception:  # noqa: BLE001
+            return None
+
+
 def run_runnable(runnable: Any, unique_id: Optional[str] = None) -> str:
     """Run a built trainer / evaluator / processor and return its captured stdout/stderr.
 
@@ -703,6 +837,26 @@ def run_runnable(runnable: Any, unique_id: Optional[str] = None) -> str:
     # the correct context inside the worker.
     was_inference = torch.is_inference_mode_enabled()
     holder: Dict[str, BaseException] = {}
+
+    # Native ComfyUI per-node progress bar (the green overlay). A runnable that supports the
+    # comfy-free marainer.progress.ProgressReporting protocol records its latest (value, total) into
+    # `progress` from the WORKER thread (just a dict write); the poll loop below drives the ProgressBar
+    # from THIS (calling) thread — so all websocket I/O stays on the same thread as _send_run_output,
+    # with no new cross-thread send concerns. Absent comfy / no unique_id ⇒ progress_bar is None.
+    progress_bar = _make_progress_bar(unique_id)
+    progress: Dict[str, float] = {"value": 0.0, "total": 0.0}
+
+    def _on_progress(value: float, total: float, desc: str = "") -> None:
+        progress["value"] = value
+        progress["total"] = total
+
+    set_progress_callback = getattr(runnable, "set_progress_callback", None)
+    if callable(set_progress_callback):
+        set_progress_callback(_on_progress)
+
+    def _drive_progress_bar() -> None:
+        if progress_bar is not None and progress["total"] > 0:
+            progress_bar.update_absolute(progress["value"], progress["total"])
 
     def _target() -> None:
         try:
@@ -748,6 +902,8 @@ def run_runnable(runnable: Any, unique_id: Optional[str] = None) -> str:
             if snapshot != last_sent:
                 last_sent = snapshot
                 _send_run_output(unique_id, snapshot)
+            # Drive ComfyUI's native green progress bar from the runnable's reported (value, total).
+            _drive_progress_bar()
     finally:
         sys.stdout, sys.stderr = old_out, old_err
 
@@ -760,6 +916,10 @@ def run_runnable(runnable: Any, unique_id: Optional[str] = None) -> str:
     if exc is not None:
         raise exc
     text = captured.strip() or f"{type(runnable).__name__}.run() complete"
+    # Fill the native progress bar to 100% on a clean finish (the last poll may have caught the run
+    # mid-step). ComfyUI's executor also calls finish_progress for this node, so this is belt-and-braces.
+    if progress_bar is not None and progress["total"] > 0:
+        progress_bar.update_absolute(progress["total"], progress["total"])
     # Final live push (covers any output produced after the last poll).
     _send_run_output(unique_id, text)
     return text
@@ -1576,6 +1736,7 @@ NODE_CLASS_MAPPINGS: Dict[str, Type] = {
     "Taidal_WalkDataset": WalkDatasetNode,
     "Taidal_ExtractSample": SampleExtractorNode,
     "Taidal_ArrayHistogram": ArrayHistogramViewerNode,
+    "Taidal_ConfusionMatrix": ConfusionMatrixViewerNode,
     "Taidal_DisplayAny": DisplayAnyNode,
     "Taidal_ApplyTextTemplate": ApplyTextTemplateNode,
     "Taidal_DrawText": DrawTextNode,

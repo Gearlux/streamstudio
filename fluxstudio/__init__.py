@@ -54,6 +54,25 @@ def list_cached_hf_datasets() -> list:
         return []
 
 
+def list_melody_datasets(server: str = "PROD") -> list:
+    """Return the names of datasets available on the Melody/MAF platform (sorted).
+
+    Backs the ``/taidal/melody_datasets`` route + the Melody dataset-id picker
+    (``web/melody_dataset_chooser.js``). Delegates to helios's
+    ``keysight.ai.helios.data.melody_dataset.list_melody_datasets`` (which needs
+    ``maf_client`` + credentials in the environment). Degrades to an empty list on
+    ANY failure (helios absent, no credentials, platform unreachable) — the picker
+    is a convenience over the free-text field, so it must never break the editor.
+    """
+    try:
+        from keysight.ai.helios.data.melody_dataset import list_melody_datasets as _list
+
+        return list(_list(server=server))
+    except Exception as e:
+        logger.debug(f"list_melody_datasets: returning [] ({type(e).__name__}: {e})")
+        return []
+
+
 def list_hf_dataset_features(path: str, name: Optional[str] = None, split: Optional[str] = None) -> List[str]:
     """Return the feature/column names of a HuggingFace dataset (e.g. ``["image", "label"]``).
 
@@ -293,6 +312,32 @@ try:
         @server.PromptServer.instance.routes.get("/taidal/hf_datasets")
         async def hf_datasets_handler(request: Any) -> Any:
             return web.json_response({"datasets": list_cached_hf_datasets()})
+
+    # List the datasets available on the Melody/MAF platform so the Melody dataset-id picker
+    # (web/melody_dataset_chooser.js) can offer them instead of free-text. Optional `server` query
+    # param (PROD/DEV/STAGING); needs maf_client + credentials in the environment, [] otherwise.
+    melody_route_exists = any(
+        r.path == "/taidal/melody_datasets" and r.method == "GET" for r in server.PromptServer.instance.routes
+    )
+    if not melody_route_exists:
+
+        @server.PromptServer.instance.routes.get("/taidal/melody_datasets")
+        async def melody_datasets_handler(request: Any) -> Any:
+            # ``list_melody_datasets`` contacts the MAF platform and can BLOCK (network /
+            # device-auth) when it is unreachable — so run it in a thread with a timeout to keep
+            # ComfyUI's event loop responsive, degrading to [] (the picker is a convenience).
+            import asyncio
+
+            srv = request.query.get("server") or "PROD"
+            loop = asyncio.get_event_loop()
+            try:
+                datasets = await asyncio.wait_for(
+                    loop.run_in_executor(None, lambda: list_melody_datasets(server=srv)), timeout=20.0
+                )
+            except Exception as e:  # noqa: BLE001 — timeout/connection error → empty picker
+                logger.debug(f"melody_datasets route: returning [] ({type(e).__name__}: {e})")
+                datasets = []
+            return web.json_response({"datasets": datasets})
 
     # List the feature/column names of the dataset named in a node's HF dataset-id field so the
     # feature picker (web/hf_feature_chooser.js) can offer them for input_feature / target_feature
