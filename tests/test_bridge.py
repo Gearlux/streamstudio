@@ -38,6 +38,7 @@ from fluxstudio.bridge import (
     SAMPLE_TYPE,
     SOURCE_TYPE,
     _coerce_kwargs,
+    _has_bare_scalar_union_arm,
     _humanize_node_name,
     _is_hf_dataset_id_param,
     _is_hf_feature_param,
@@ -1234,6 +1235,43 @@ def test_coerce_kwargs_list_still_comma_splits_after_container_branch() -> None:
     def fn(tags: Optional[List[str]] = None) -> None: ...
 
     assert _coerce_kwargs(fn, {"tags": "x, y"})["tags"] == ["x", "y"]
+
+
+def test_has_bare_scalar_union_arm_detects_str_int_arms() -> None:
+    # A Union with a bare str/int arm (the value is a scalar, NOT a list to split).
+    assert _has_bare_scalar_union_arm(Union[List[int], str, int]) is True
+    assert _has_bare_scalar_union_arm(Union[List[int], str]) is True
+    assert _has_bare_scalar_union_arm(int | str) is True  # PEP 604
+    # Pure list params (incl. Optional) have NO bare scalar arm -> still split.
+    assert _has_bare_scalar_union_arm(List[str]) is False
+    assert _has_bare_scalar_union_arm(Optional[List[str]]) is False
+    assert _has_bare_scalar_union_arm(None) is False
+
+
+def test_coerce_kwargs_union_with_str_arm_passes_string_through_not_split() -> None:
+    # A Union[List[int], str, int] STRING widget value (devices='auto', or the comma-string
+    # '1,2,3' the library parses itself) MUST pass through VERBATIM — NOT comma-split into
+    # ['auto'] / ['1','2','3'], a "sequence of str" Lightning rejects. The default-graph crash.
+    def fn(devices: Union[List[int], str, int] = "auto") -> None: ...
+
+    assert _coerce_kwargs(fn, {"devices": "auto"})["devices"] == "auto"
+    assert _coerce_kwargs(fn, {"devices": "1,2,3"})["devices"] == "1,2,3"
+    assert _coerce_kwargs(fn, {"devices": "1"})["devices"] == "1"
+
+
+def test_real_lightning_trainer_devices_default_builds() -> None:
+    # Regression on the actual pl.Trainer: the DEFAULT-valued node must build. ``devices``'s
+    # default ('auto') is a STRING widget whose annotation (list[int] | str | int) contains
+    # "list" — it must NOT be comma-split into ['auto'] (the "you passed a sequence of str"
+    # crash that broke every freshly-created Trainer graph). It passes through and constructs.
+    import marainer.configurables  # noqa: F401
+    import pytorch_lightning as pl
+
+    required = create_comfy_node(pl.Trainer, "PLTrainerDevices").INPUT_TYPES()["required"]
+    assert required["devices"][1]["default"] == "auto"
+    coerced = _coerce_kwargs(pl.Trainer, {"devices": "auto"})
+    assert coerced["devices"] == "auto"
+    pl.Trainer(**coerced)  # the live-instance build no longer raises
 
 
 # --------------------------------------------------------------------------- #

@@ -313,6 +313,12 @@ _SOURCE_LIST_PARAMS = {"fluxes", "sources"}
 # ``HuggingFaceClassificationDataset`` calls it ``repo_id``.
 _HF_DATASET_ID_PARAMS = {"path", "repo_id"}
 
+# Constructor param that names a Melody/MAF dataset *identifier* (a platform dataset name) — NOT a
+# filesystem path. Recognised only on a Melody value-producer node (see ``_is_melody_dataset_id_param``,
+# gated on the ``Melody`` class-name convention — matches the bridged ``HeliosMelodyDataset``). Rendered
+# as a free-text STRING + an optional platform-dataset picker (``web/melody_dataset_chooser.js``).
+_MELODY_DATASET_ID_PARAMS = {"name", "dataset"}
+
 # Constructor params (on HuggingFace dataset sources) that name a dataset *feature/column* to map
 # onto a Sample field — ``HuggingFaceSource.input_feature`` / ``target_feature``. Rendered as a
 # free-text STRING (so any column name still types in) tagged ``taidal_widget="HF_FEATURE"``, which
@@ -368,7 +374,7 @@ _HF_METADATA_PARAM = "metadata_features"
 #   * uncategorised module-level helper functions (no ``__confluid_category__``); an UNtagged sink
 #     (a raw ``Storage`` subclass without ``category="sink"``) is likewise excluded.
 # To surface another role add it here AND tag the classes.
-_NODE_CATEGORIES = {"op", "source", "engine", "sink"}
+_NODE_CATEGORIES = {"op", "model", "source", "engine", "sink", "value"}
 
 
 # The CLI's ``--no-default-nodes`` flag exports this so the fluxstudio import inside ComfyUI knows
@@ -487,6 +493,21 @@ def _is_hf_dataset_id_param(param_name: str, owner: Optional[Callable]) -> bool:
         and owner is not None
         and inspect.isclass(owner)
         and owner.__name__.startswith("HuggingFace")
+    )
+
+
+def _is_melody_dataset_id_param(param_name: str, owner: Optional[Callable]) -> bool:
+    """True when ``param_name`` is the dataset-id arg of a Melody/MAF dataset value node.
+
+    Gated on the ``Melody`` class-name convention (matches the bridged ``HeliosMelodyDataset``
+    value-producer) — a naming rule, not a per-node special-case — so a like-named ``name`` param
+    on an unrelated class stays a plain STRING widget.
+    """
+    return (
+        param_name in _MELODY_DATASET_ID_PARAMS
+        and owner is not None
+        and inspect.isclass(owner)
+        and "Melody" in owner.__name__
     )
 
 
@@ -658,6 +679,13 @@ def _widget_for(param: inspect.Parameter, owner: Optional[Callable] = None) -> T
     if _is_hf_dataset_id_param(param.name, owner):
         default = param.default if has_default and isinstance(param.default, str) else ""
         return "STRING", {"default": default, "taidal_widget": "HF_DATASET_ID"}
+
+    # Melody/MAF dataset identifier: a free-text STRING (the platform dataset name) tagged for the
+    # platform-dataset picker (web/melody_dataset_chooser.js) — selecting one fills the field, which
+    # stays editable. The downloaded directory is exposed on this node's ``directory`` @output.
+    if _is_melody_dataset_id_param(param.name, owner):
+        default = param.default if has_default and isinstance(param.default, str) else ""
+        return "STRING", {"default": default, "taidal_widget": "MELODY_DATASET_ID"}
 
     # HuggingFace feature/column selector (input_feature / target_feature): a free-text STRING
     # (any column name still types in) tagged for the column picker (web/hf_feature_chooser.js),
@@ -878,6 +906,25 @@ def _build_config_inputs(
     return required, nullable_optionals, split_map
 
 
+def _has_bare_scalar_union_arm(annotation: Any) -> bool:
+    """True if ``annotation`` is a ``Union`` (or ``X | Y``) with a top-level ``str``/``int`` arm.
+
+    A param like ``pytorch_lightning.Trainer.devices: list[int] | str | int`` accepts a BARE scalar
+    (``"auto"``, ``1``) AND the library parses the string form itself (``"auto"``, the comma-string
+    ``"1,2,3"``). So a STRING widget value is that scalar arm and must pass through ``_coerce_kwargs``
+    VERBATIM — never be comma-split into a list (which yielded ``["auto"]``, a "sequence of str" that
+    Lightning rejects, the canonical "the default graph won't even build" footgun). A pure
+    ``List[str]`` / ``Optional[List[str]]`` has NO such arm (its only non-``None`` member is the list),
+    so it still splits. Inspect the Union ARGS, not the annotation string — ``str(List[str])`` itself
+    contains the substring ``"str"``.
+    """
+    if get_origin(annotation) is Annotated:
+        annotation = get_args(annotation)[0]
+    if get_origin(annotation) in (Union, _types.UnionType):
+        return any(arg in (str, int) for arg in get_args(annotation))
+    return False
+
+
 def _coerce_kwargs(func: Callable, kwargs: Dict[str, Any]) -> Dict[str, Any]:
     """Coerce ComfyUI widget values into constructor-ready Python values.
 
@@ -1030,7 +1077,13 @@ def _coerce_kwargs(func: Callable, kwargs: Dict[str, Any]) -> Dict[str, Any]:
                 # A hand-typed comma-separated value (e.g. ``QuantizeOp, SpursOp``) → a tuple of strings.
                 out[key] = tuple(item.strip() for item in stripped.split(",") if item.strip())
                 continue
-            if "list" in ann_low or "sequence" in ann_low:
+            # A pure ``List``/``Sequence`` param: comma-split the STRING widget into a list. But a
+            # Union with a bare ``str``/``int`` arm (``devices: list[int] | str | int``) takes the
+            # scalar VERBATIM — the library parses ``"auto"`` / ``"1,2,3"`` itself; splitting it into
+            # ``["auto"]`` is the "sequence of str" Lightning rejects (see _has_bare_scalar_union_arm).
+            if ("list" in ann_low or "sequence" in ann_low) and not _has_bare_scalar_union_arm(
+                param.annotation if param is not None else None
+            ):
                 out[key] = [item.strip() for item in stripped.split(",") if item.strip()]
                 continue
             # Cast a filled nullable-bool 3-state combo value (``true``/``false``) back to a real bool.
@@ -1656,6 +1709,61 @@ def _build_op_node(cls: Callable, name: str, category: str) -> Type:
     )
 
 
+def _build_model_node(cls: Callable, name: str, category: str) -> Type:
+    """Build a MODEL node: ``(SAMPLE?, config) -> (SAMPLE, OBJECT:model[, @output…])``.
+
+    A model node is "like an op, but a bit different": it RUNS inference rather than applying a
+    deterministic transform. Like :func:`_build_op_node` it takes an optional ``sample`` and config
+    widgets and outputs the applied ``sample``, but its SECOND output is the constructed model on a
+    role-qualified ``DATAFLUX_OBJECT:model`` socket (it outputs ITSELF as the model object — so it can
+    also dock into a downstream evaluator's ``model`` slot) rather than a ``DATAFLUX_OP``. The wrapped
+    class must be callable as ``model(sample) -> sample`` (the waivefront-helios bridge generates such a
+    wrapper around a helios ``infer``). ``@output`` properties, if any, are appended as extra sockets.
+    """
+    required, nullable_opts, _split_map = _build_config_inputs(
+        cls, strict_typing=getattr(cls, "__confluid_strict_typing__", False)
+    )
+    optional: Dict[str, Any] = {"sample": (SAMPLE_TYPE,), **nullable_opts}
+    out_specs = list(output_specs(cast(type, cls)))
+    out_sockets = [_output_socket_type(s["name"], _output_return_anno(cls, s["name"])) for s in out_specs]
+    model_socket = _object_socket("model")
+
+    def execute(self: Any, sample: Any = None, **kwargs: Any) -> Tuple[Any, ...]:
+        model = cls(**_coerce_kwargs(cls, kwargs))
+        applied: Any = None
+        if sample is not None:
+            applied = model(sample)
+            if applied is None:
+                raise RuntimeError(
+                    f"{getattr(cls, '__name__', 'model')} returned None for the sample; nothing to " "pass downstream."
+                )
+        extra_outs: List[Any] = []
+        for spec, socket in zip(out_specs, out_sockets):
+            try:
+                value = getattr(model, spec["name"])
+            except Exception as exc:
+                logger.debug("{}: output {!r} unavailable ({}); emitting None.", name, spec["name"], exc)
+                value = None
+            extra_outs.append(_coerce_output_value(value, socket))
+        return (applied, model, *extra_outs)
+
+    return _node_class(
+        name,
+        category,
+        required,
+        (SAMPLE_TYPE, model_socket, *out_sockets),
+        execute,
+        return_names=("sample", "model", *[s["name"] for s in out_specs]),
+        optional_inputs=optional,
+        accepts=_spec_to_dict(cls, "ACCEPTS"),
+        produces=_spec_to_dict(cls, "PRODUCES"),
+        kind="model",
+        callable_path=_safe_callable_path(cls),
+        is_random=getattr(cls, "__confluid_random__", False),
+        split_map=_split_map or None,
+    )
+
+
 def _build_value_node(cls: Callable, name: str, category: str) -> Type:
     """Build a VALUE-producer node: ``(config widgets) -> (@output sockets…)``.
 
@@ -1867,7 +1975,11 @@ def _output_socket_type(prop_name: str, anno: Any) -> str:
     if prop_name in _DATASET_MEMBER_PARAMS:
         return SOURCE_TYPE
     if _is_scalar_anno(anno):
-        return _map_type(prop_name, anno)
+        socket = _map_type(prop_name, anno)
+        # An OUTPUT is never a directory picker: a path-named scalar output (e.g. a value
+        # producer's ``directory``) rides a plain ``STRING`` socket so it wires into a reader's
+        # path/directory widget (which is itself STRING-backed, converted to a STRING input).
+        return "STRING" if socket == "PATH" else socket
     if get_origin(anno) in (dict, list, set, tuple):
         return "STRING"  # container -> JSON STRING socket (wire into a native Show Text node)
     role = _infer_member_role(prop_name)
@@ -2187,6 +2299,11 @@ def create_comfy_node(
     """
     if _is_runnable(func):
         return _build_runnable_node(func, name, category)
+    # A MODEL node (``category="model"``) also has ``__call__(self, sample)`` — so it must be
+    # dispatched BEFORE the op check, which would otherwise build it as an op (a model RUNS
+    # inference and additionally exposes its model object; see :func:`_build_model_node`).
+    if getattr(func, "__confluid_category__", None) == "model":
+        return _build_model_node(func, name, category)
     if _op_call_signature(func) is not None:
         return _build_op_node(func, name, category)
     if _is_source(func) or _is_dataset_member_class(func):

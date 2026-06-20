@@ -12,6 +12,7 @@ import sys
 import threading
 import time
 from types import ModuleType
+from typing import Any
 from unittest.mock import patch
 
 import numpy as np
@@ -31,6 +32,7 @@ from fluxstudio.nodes import (
     ApplyTextTemplateNode,
     ArrayHistogramViewerNode,
     ComposeSampleNode,
+    ConfusionMatrixViewerNode,
     DisplayAnyNode,
     DrawTextNode,
     ImageGridNode,
@@ -40,11 +42,13 @@ from fluxstudio.nodes import (
     SubgraphOpExtractNode,
     WalkDatasetNode,
     YamlDumpNode,
+    _build_confusion_payloads,
     _build_histogram_payload,
     _collect_images,
     _colormap_choices,
     _describe_any,
     _letterbox,
+    _parse_class_names,
     _text_positions,
     _to_yaml_str,
     compile_subgraph_ops,
@@ -337,6 +341,80 @@ def test_array_histogram_large_gray_image_does_not_raise() -> None:
     assert len(payload["histogram"]["counts"]) == 256
     assert payload["stats"]["count"] == 256 * 256
     assert payload["image"].startswith("data:image/png;base64,")
+
+
+# --------------------------------------------------------------------------- #
+# ConfusionMatrixViewerNode
+# --------------------------------------------------------------------------- #
+
+
+def test_confusion_matrix_input_types_and_outputs() -> None:
+    types = ConfusionMatrixViewerNode.INPUT_TYPES()
+    optional = types["optional"]
+    # The evaluator's generic `all_metrics` @output (JSON STRING) wires in via forceInput.
+    assert optional["metrics"][0] == "STRING" and optional["metrics"][1]["forceInput"] is True
+    assert optional["matrix"] == (ARRAY_TYPE,)
+    assert optional["class_names"][1]["forceInput"] is True
+    assert ConfusionMatrixViewerNode.RETURN_TYPES == (ARRAY_TYPE,)
+    assert ConfusionMatrixViewerNode.RETURN_NAMES == ("matrix",)
+    assert ConfusionMatrixViewerNode.OUTPUT_NODE is True
+    assert "unique_id" not in types.get("hidden", {})
+
+
+def test_confusion_matrix_registered() -> None:
+    assert NODE_CLASS_MAPPINGS["Taidal_ConfusionMatrix"] is ConfusionMatrixViewerNode
+    assert NODE_DISPLAY_NAME_MAPPINGS["Taidal_ConfusionMatrix"] == "Confusion Matrix"
+
+
+def test_confusion_matrix_view_extracts_all_cms_from_all_metrics() -> None:
+    # The evaluator's `all_metrics` JSON: every metric. The viewer extracts EVERY confusion matrix
+    # (square-2D), ignoring scalars/vectors, and ships ONE payload per matrix.
+    am = json.dumps(
+        {
+            "test/acc": 0.93,
+            "test/cm_a": [[50, 2, 1], [3, 47, 0], [0, 1, 49]],
+            "test/per_class": [0.9, 0.8, 0.95],  # vector, not a CM
+            "test/cm_b": [[5, 1], [0, 4]],
+        }
+    )
+    out = ConfusionMatrixViewerNode().view(metrics=am, class_names='["cat", "dog", "fox"]')
+    assert set(out) == {"ui", "result"}
+    payloads = out["ui"]["taidal_confusion_matrix"]
+    assert [(p["name"], p["n_classes"]) for p in payloads] == [("test/cm_a", 3), ("test/cm_b", 2)]
+    assert out["result"][0].shape == (3, 3)  # first matrix's counts pass through
+    json.dumps(out["ui"], allow_nan=False)  # JSON-safe for the websocket
+
+
+def test_confusion_matrix_view_from_raw_array_and_comma_labels() -> None:
+    out = ConfusionMatrixViewerNode().view(matrix=np.array([[5, 1], [0, 4]]), class_names="a, b")
+    payloads = out["ui"]["taidal_confusion_matrix"]
+    assert len(payloads) == 1 and payloads[0]["class_names"] == ["a", "b"]
+    # The payload rounds to 6 decimals for compactness, so compare with a matching tolerance.
+    assert payloads[0]["normalized"]["true"][0] == [pytest.approx(5 / 6, abs=1e-5), pytest.approx(1 / 6, abs=1e-5)]
+
+
+def test_confusion_matrix_view_empty_when_nothing_wired() -> None:
+    out = ConfusionMatrixViewerNode().view()
+    assert out["ui"]["taidal_confusion_matrix"] == []
+    assert out["result"][0] is None
+
+
+def test_confusion_matrix_view_empty_when_metrics_has_no_cm() -> None:
+    out = ConfusionMatrixViewerNode().view(metrics=json.dumps({"acc": 0.9, "vec": [1, 2, 3]}))
+    assert out["ui"]["taidal_confusion_matrix"] == []
+
+
+def test_parse_class_names_handles_json_comma_and_blank() -> None:
+    assert _parse_class_names('["x", "y"]') == ["x", "y"]
+    assert _parse_class_names("p, q, r") == ["p", "q", "r"]
+    assert _parse_class_names("") is None and _parse_class_names(None) is None
+
+
+def test_build_confusion_payloads_is_json_safe() -> None:
+    # An empty-row matrix normalizes to None (not NaN) so the payload survives JSON encoding.
+    payloads = _build_confusion_payloads(json.dumps({"cm": [[0, 0], [1, 3]]}), None, None)
+    json.dumps(payloads, allow_nan=False)
+    assert payloads[0]["normalized"]["true"][0] == [None, None]
 
 
 def test_array_histogram_select_channel_payload() -> None:
@@ -763,6 +841,74 @@ def test_send_run_output_is_a_safe_noop_without_comfyui() -> None:
 
     _send_run_output(None, "anything")  # unique_id None: returns immediately
     _send_run_output("1", "anything")  # server absent: guarded try/except swallows the import error
+
+
+def test_make_progress_bar_is_a_safe_noop_without_comfyui() -> None:
+    # No unique_id, and no importable `comfy.utils` in the dev env -> None (no native bar), never raising.
+    from fluxstudio.nodes import _make_progress_bar
+
+    assert _make_progress_bar(None) is None  # no node id
+    assert _make_progress_bar("1") is None  # comfy.utils absent in the fluxstudio test env
+
+
+def test_run_runnable_drives_native_progress_bar(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A runnable that supports the comfy-free marainer.progress protocol (set_progress_callback)
+    # drives ComfyUI's native per-node ProgressBar: the poll loop forwards the reported (value, total)
+    # to update_absolute, and the bar is filled to 100% on a clean finish.
+    import time
+
+    from fluxstudio import nodes as nodes_mod
+    from fluxstudio.nodes import run_runnable
+
+    updates: list = []
+
+    class _FakeBar:
+        def update_absolute(self, value: float, total: float | None = None, preview: object = None) -> None:
+            updates.append((value, total))
+
+    monkeypatch.setattr(nodes_mod, "_make_progress_bar", lambda uid: _FakeBar())
+
+    class _Reporting:
+        def __init__(self) -> None:
+            self._cb: Any = None
+
+        def set_progress_callback(self, cb: Any) -> None:
+            self._cb = cb
+
+        def run(self) -> None:
+            for i in range(1, 4):
+                self._cb(float(i), 3.0, "Training")
+                time.sleep(0.12)  # span several 0.1s poll ticks so the loop forwards mid-run
+
+    run_runnable(_Reporting(), unique_id="7")
+
+    assert updates, "the native progress bar was never driven"
+    # Every drive carried the reported total (the loop skips while total is still 0), and the bar
+    # was completed to 100% on finish.
+    assert all(total == 3.0 for _, total in updates)
+    assert updates[-1] == (3.0, 3.0)
+
+
+def test_run_runnable_without_progress_support_leaves_bar_untouched(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A runnable with no set_progress_callback runs normally and never drives the bar (total stays 0).
+    from fluxstudio import nodes as nodes_mod
+    from fluxstudio.nodes import run_runnable
+
+    updates: list = []
+
+    class _FakeBar:
+        def update_absolute(self, *args: object, **kwargs: object) -> None:
+            updates.append(args)
+
+    monkeypatch.setattr(nodes_mod, "_make_progress_bar", lambda uid: _FakeBar())
+
+    class _Plain:
+        def run(self) -> None:
+            print("done")
+
+    text = run_runnable(_Plain(), unique_id="7")
+    assert "done" in text
+    assert updates == []
 
 
 def test_run_runnable_rejects_non_runnable() -> None:
