@@ -36,6 +36,7 @@ import json
 import os
 import time
 import types as _types
+import typing
 from pathlib import Path
 from typing import (
     AbstractSet,
@@ -60,6 +61,7 @@ import datasets
 from annotated_types import Ge, Gt, Interval, Le, Lt
 from confluid import mandatory_param_names, output_specs, parse_param_docs
 from dataflux.discovery import get_callable_path, resolve_callable, scan_module
+from dataflux.sample import Sample as _Sample
 from dataflux.typespec import infer_sample_type
 from logflow import get_logger
 
@@ -94,6 +96,11 @@ OBJECT_TYPE = "DATAFLUX_OBJECT"
 # ADAPTER socket only (``nodes.py``); deliberately NOT in ``TYPE_MAP`` — no op-param annotation maps
 # to it, so auto-generated op nodes are unaffected (an ``np.ndarray`` param stays a STRING widget).
 ARRAY_TYPE = "DATAFLUX_ARRAY"
+# An arbitrary structured Python VALUE (a list of boxes, a list of lists, a dict of containers) ridden
+# as a wire. A constructor param whose type is a NESTED container can't be sensibly typed into a single
+# widget, so it renders as an OPTIONAL ``DATAFLUX_VALUE`` input socket (``_needs_value_socket``) fed by
+# the hand-written **Value** node (``nodes.py``), which parses a Python/JSON literal into the value.
+VALUE_TYPE = "DATAFLUX_VALUE"
 
 # Mapping Python types to ComfyUI widget types.
 TYPE_MAP = {
@@ -124,6 +131,7 @@ _SOCKET_TYPES = {
     RUNNABLE_TYPE,
     OBJECT_TYPE,
     ARRAY_TYPE,
+    VALUE_TYPE,
     "HF_DATASET",
 }
 
@@ -616,52 +624,231 @@ def _interval_bounds(annotation: Any) -> Tuple[Optional[float], Optional[float]]
     return lo, hi
 
 
-def _map_type(param_name: str, annotation: Any) -> str:
-    """Map a Python type annotation to a ComfyUI socket/widget type string."""
+def _range_tuple_type(annotation: Any) -> Optional[str]:
+    """If ``annotation`` is a ``(min, max)`` numeric TUPLE → its RANGE widget type, else ``None``.
+
+    A RANGE pair (the ``__lo``/``__hi`` widget pair) is a TOP-LEVEL ``Tuple`` (after unwrapping
+    ``Annotated`` / ``Optional`` / ``Union``) that is EITHER exactly two numeric elements
+    (``Tuple[int, int]`` / ``Tuple[float, float]`` — the ``(lo, hi)`` pair) OR a variable-length
+    ``Tuple[int, ...]`` / ``Tuple[float, ...]``. It deliberately does NOT match:
+
+    * a ``List`` / ``Sequence`` OF tuples (``OverlayBoxes.boxes: List[Tuple[int, int, int, int]]``) —
+      the nested ``tuple``/``int`` in the type's repr is what fooled the old ``"tuple" in str(anno)``
+      substring heuristic into a bogus ``boxes__lo`` / ``boxes__hi`` pair; nor
+    * a FIXED-arity tuple with a length other than 2 (a 3-tuple ``Color = Tuple[int, int, int]``, a
+      4-tuple ``Box``) — a colour / box is not a min/max range.
+
+    Structural (``get_origin`` / ``get_args``), never a string scan — that is the whole point.
+    """
     if get_origin(annotation) is Annotated:
-        # classify by the underlying type; the metadata (e.g. Interval) is read separately
-        # by _interval_bounds — and its repr must not reach the string heuristics below
-        # ("Interval" contains "int").
+        annotation = get_args(annotation)[0]
+    for arm in _flatten_union(annotation):
+        arm = _strip_annotated(arm)
+        if get_origin(arm) is not tuple and arm is not tuple:
+            continue
+        args = get_args(arm)
+        if len(args) == 2 and args[1] is Ellipsis:  # Tuple[T, ...] — variable-length
+            elems: Tuple[Any, ...] = (args[0],)
+        elif len(args) == 2:  # Tuple[T, T] — the (lo, hi) pair
+            elems = args
+        else:  # 0 / 1 / 3+ fixed elements (a colour, a box) → NOT a range pair
+            continue
+        if all(e is float for e in elems):
+            return "RANGE_FLOAT"
+        if all(e is int for e in elems):
+            return "RANGE_INT"
+    return None
+
+
+def _is_nonrange_container(annotation: Any) -> bool:
+    """True if ``annotation`` is a list / tuple / set / dict / ``Sequence`` container.
+
+    Routes a NON-range container (``List[Box]``, a 3-tuple ``Color``, ``List[int]``, ``Dict[...]``) to a
+    STRING widget instead of letting the bare ``int`` / ``float`` string-heuristics in :func:`_map_type`
+    mis-map it to a single scalar widget because its ELEMENT type's repr contains ``"int"`` / ``"float"``.
+    A genuine 2-element numeric Tuple range is matched by :func:`_range_tuple_type` FIRST, so it never
+    reaches here. ``str`` / ``bytes`` are scalars, not containers.
+    """
+    # A parameterized typing container (``List[X]`` / ``Tuple[...]`` / ``Dict[...]`` / ``Sequence[X]``)
+    # has a CONTAINER ORIGIN — restricted to the standard container abcs, NOT every ``Iterable`` (so a
+    # concrete iterable class used bare as an annotation, e.g. ``datasets.Dataset``, falls through to its
+    # own type heuristic, here ``HF_DATASET``); ``str``/``bytes`` (origin ``None``) are scalars.
+    if get_origin(annotation) is Annotated:
+        annotation = get_args(annotation)[0]
+    return any(_has_container_origin(_strip_annotated(arm)) for arm in _flatten_union(annotation))
+
+
+def _fixed_numeric_tuple_cast(annotation: Any) -> Optional[type]:
+    """If ``annotation`` is a TOP-LEVEL numeric ``Tuple`` (a ``Color`` / ``Box`` — NOT a ``List`` of
+    tuples), return the element cast (``int`` / ``float``) for decoding its STRING widget, else ``None``.
+
+    The 2-element / variable-length numeric RANGE tuples NEVER reach :func:`_coerce_kwargs` (they ride
+    the ``__lo`` / ``__hi`` widget pair, in ``skip_keys``), so any numeric tuple seen there is a
+    non-range FIXED tuple (a 3-tuple colour, a 4-tuple box) that :func:`_map_type` routed to a STRING
+    widget — its ``"(255, 0, 0)"`` value must decode back to a real ``(255, 0, 0)`` tuple, not crash the
+    bare-``int`` cast. A ``List[Tuple[...]]`` has a top-level ``list`` origin → returns ``None`` (it stays
+    a list, decoded by the list branch).
+    """
+    if get_origin(annotation) is Annotated:
+        annotation = get_args(annotation)[0]
+    for arm in _flatten_union(annotation):
+        arm = _strip_annotated(arm)
+        if get_origin(arm) is not tuple and arm is not tuple:
+            continue
+        args = get_args(arm)
+        # A 2-element OR variable-length numeric tuple is a RANGE pair (``__lo``/``__hi`` widgets, in
+        # ``skip_keys``) — it never reaches ``_coerce_kwargs``, so it is NOT a fixed tuple to decode here
+        # (mirrors :func:`_range_tuple_type`). Only a fixed arity != 2 (a 3-tuple colour, a 4-tuple box).
+        if not args or Ellipsis in args or len(args) == 2:
+            continue
+        if all(a is float for a in args):
+            return float
+        if all(a is int for a in args):
+            return int
+    return None
+
+
+# Namespace for resolving a STRINGIZED / forward-ref annotation (``from __future__ import annotations``)
+# to a real typing object, so the classification below can inspect it STRUCTURALLY instead of scanning
+# its repr. Holds the ``typing`` constructs plus the domain types this module classifies. An annotation
+# referencing a name outside it (a custom op alias) is left as a string → the STRING fallback. The real
+# entry point (:func:`_build_config_inputs`) resolves with ``get_type_hints`` against the owner's own
+# namespace first; this is the best-effort safety net for direct / odd calls.
+_ANNOTATION_NS: Dict[str, Any] = {
+    **vars(typing),
+    "datasets": datasets,
+    "Path": Path,
+    "Sample": _Sample,
+    "NoneType": type(None),
+}
+
+
+def _resolve_annotation(annotation: Any) -> Any:
+    """Resolve a stringized / ``ForwardRef`` annotation to a real typing object when possible."""
+    raw: Any = annotation
+    if type(annotation).__name__ == "ForwardRef":
+        raw = getattr(annotation, "__forward_arg__", annotation)
+    if isinstance(raw, str):
+        try:
+            return eval(raw, dict(_ANNOTATION_NS))  # noqa: S307 — controlled typing-only namespace
+        except Exception:  # noqa: BLE001 — an unresolvable name keeps the string → STRING fallback
+            return annotation
+    return annotation
+
+
+def _type_mentions(annotation: Any, target: type) -> bool:
+    """True if ``target`` IS ``annotation`` or appears anywhere in its type arguments (recursively).
+
+    Structural replacement for ``target.__name__ in str(annotation)`` — matches a bare ``Sample``,
+    ``Optional[Sample]``, ``Iterator[Sample]``, ``Union[…, datasets.Dataset]`` by IDENTITY, not repr.
+    """
+    if annotation is target:
+        return True
+    return any(arg is target or _type_mentions(arg, target) for arg in get_args(annotation))
+
+
+def _strip_annotated(t: Any) -> Any:
+    """``Annotated[T, …]`` → ``T`` (one level); anything else unchanged.
+
+    Applied per Union-arm so a nested ``Optional[Annotated[float, Interval(...)]]`` / ``Union[…,
+    Annotated[Tuple[int,int], …]]`` classifies by the real underlying type, not the ``Annotated`` wrapper.
+    """
+    return get_args(t)[0] if get_origin(t) is Annotated else t
+
+
+_CONTAINER_ORIGINS = (list, tuple, set, frozenset, dict)
+
+
+def _has_container_origin(t: Any) -> bool:
+    """True if ``t`` is a typing container (``List``/``Tuple``/``Dict``/``Set``/``Sequence``/…) or a
+    bare builtin container — by ORIGIN, not repr. ``str``/``bytes`` (origin ``None``) are NOT containers."""
+    origin = get_origin(t)
+    if origin in _CONTAINER_ORIGINS:
+        return True
+    if isinstance(origin, type) and issubclass(origin, (cabc.Sequence, cabc.Set, cabc.Mapping)):
+        return True
+    return t in _CONTAINER_ORIGINS
+
+
+def _is_nested_container(t: Any) -> bool:
+    """True if ``t`` is a container whose ELEMENT type is itself a container — a ``List`` of tuples
+    (boxes), a ``List`` of lists, a ``Dict`` with container values, a ``Tuple`` of containers.
+
+    These can't be sensibly typed into a single widget. A FLAT container of scalars (``List[str]`` /
+    ``List[int]``, a fixed numeric tuple ``Color``) is NOT nested — it stays a comma/CSV-typeable widget.
+    """
+    if not _has_container_origin(t):
+        return False
+    args = get_args(t)
+    # ``Dict[K, V]`` nests only on its VALUE type; other containers on any element.
+    elems = [args[1]] if (get_origin(t) is dict and len(args) == 2) else [a for a in args if a is not Ellipsis]
+    return any(_has_container_origin(_strip_annotated(e)) for e in elems)
+
+
+def _needs_value_socket(annotation: Any) -> bool:
+    """True if a param's type can't be a sensible widget and should ride a wired ``DATAFLUX_VALUE``
+    input socket (fed by the **Value** node) — i.e. ANY Union arm is a NESTED container
+    (:func:`_is_nested_container`). A scalar / flat container / numeric tuple stays a widget."""
+    annotation = _resolve_annotation(annotation)
+    if get_origin(annotation) is Annotated:
+        annotation = get_args(annotation)[0]
+    return any(_is_nested_container(_strip_annotated(arm)) for arm in _flatten_union(annotation))
+
+
+def _map_type(param_name: str, annotation: Any) -> str:
+    """Map a Python type annotation to a ComfyUI socket/widget type string — STRUCTURALLY.
+
+    Inspects the resolved type via ``typing`` introspection (``get_origin`` / ``get_args`` / identity),
+    NOT substring matching on ``str(annotation)``. A stringized / forward-ref annotation is resolved
+    first (:func:`_resolve_annotation`). The ONLY name-based rule is the deliberate PATH affordance (a
+    param whose NAME signals a directory → a picker), which is a UX choice, not a type inference.
+    """
+    annotation = _resolve_annotation(annotation)
+
+    # Annotated[T, …] → classify by T (the metadata, e.g. Interval, is read by _interval_bounds).
+    if get_origin(annotation) is Annotated:
         return _map_type(param_name, get_args(annotation)[0])
-    if annotation is datasets.Dataset:
-        return "HF_DATASET"
 
-    str_ann = str(annotation)
-    if "Sample" in str_ann:
+    # DataFlux Sample (bare / Optional[Sample] / Iterator[Sample]) → the sample wire.
+    if _type_mentions(annotation, _Sample):
         return SAMPLE_TYPE
-
-    # Heuristic for directory/file paths -> directory-picker widget (web/directory_chooser.js).
-    if "pathlib.Path" in str_ann or any(x in param_name.lower() for x in ("path", "dir", "root", "folder")):
+    # HuggingFace dataset → the HF_DATASET wire.
+    if _type_mentions(annotation, datasets.Dataset):
+        return "HF_DATASET"
+    # A path: the annotation IS pathlib.Path, OR the param NAME signals a path/dir → directory picker.
+    if _type_mentions(annotation, Path) or any(seg in param_name.lower() for seg in _PATH_NAME_SEGMENTS):
         return "PATH"
 
-    if annotation in TYPE_MAP:
-        return TYPE_MAP[annotation]
-
-    # Unwrap Optional/Union by scanning the annotation string for a scalar type, so numeric/bool
-    # config still gets a real typed widget (not a STRING the constructor would choke on, e.g.
-    # ``count: Optional[int]``).
-    low = str_ann.lower()
-    if "bool" in low:
-        return "BOOLEAN"
-    # Union[int, str] (e.g. SampleSpec) — STRING covers both "1024" and "1ms".
-    # Must precede the bare-int check or the str branch is silently dropped.
-    if "int" in low and "str" in low:
+    # A (min, max) numeric RANGE tuple (2-element OR variadic numeric tuple) → the __lo/__hi pair.
+    range_type = _range_tuple_type(annotation)
+    if range_type is not None:
+        return range_type
+    # A non-range container (List/fixed-!=2-tuple/Dict/Sequence) → STRING (the ctor / _coerce_kwargs
+    # parse it). MUST precede the scalar resolution: a container whose ELEMENT is numeric must not
+    # collapse to a single scalar widget.
+    if _is_nonrange_container(annotation):
         return "STRING"
-    # Tuple[float, float] / Tuple[int, int] / Optional variants → two FLOAT/INT widgets (lo + hi).
-    # Must precede the bare int/float branches so "int"/"float" inside a tuple annotation
-    # doesn't collapse to a single scalar widget that can't hold a pair default.
-    if "tuple" in low:
-        if "float" in low:
-            return "RANGE_FLOAT"
-        if "int" in low:
-            return "RANGE_INT"
-    if "int" in low and "float" not in low:
+
+    # A scalar — resolve the NON-None arms of a Union/Optional structurally (a bare type is one arm),
+    # unwrapping a nested ``Annotated`` per arm (``Optional[Annotated[float, Interval]]`` → ``float``).
+    arms = [_strip_annotated(a) for a in _flatten_union(annotation)]
+    if any(a is bool for a in arms):
+        return "BOOLEAN"
+    has_int = any(a is int for a in arms)
+    has_float = any(a is float for a in arms)
+    if has_int and any(a is str for a in arms):
+        return "STRING"  # Union[int, str] (SampleSpec) — STRING covers "1024" AND "1ms"
+    if has_int and not has_float:
         return "INT"
-    if "float" in low:
+    if has_float:
         return "FLOAT"
-    if "datasets.arrow_dataset.Dataset" in str_ann or "datasets.Dataset" in str_ann:
-        return "HF_DATASET"
-    return "STRING"  # Fallback
+    return "STRING"  # str / unknown / unresolved
+
+
+# The param-NAME segments that signal a directory/file path → a directory-picker widget
+# (``web/directory_chooser.js``). This is a deliberate UX affordance keyed on the NAME, NOT a type
+# inference (a ``str`` named ``output_dir`` SHOULD get the picker), so it stays name-based by design.
+_PATH_NAME_SEGMENTS = ("path", "dir", "root", "folder")
 
 
 def _widget_for(param: inspect.Parameter, owner: Optional[Callable] = None) -> Tuple[Any, Dict[str, Any]]:
@@ -794,6 +981,20 @@ def _widget_for(param: inspect.Parameter, owner: Optional[Callable] = None) -> T
     return comfy_type, config
 
 
+def _resolved_param_hints(func: Callable) -> Dict[str, Any]:
+    """``get_type_hints`` for a callable's params, keyed by name — the PROPER resolution of a
+    ``from __future__ import annotations`` / forward-ref STRING annotation against the owner's own
+    namespace (so the structural classifiers see a real type, not a string). ``{}`` on any failure
+    (an unresolvable forward ref / an odd callable); the caller then keeps the raw annotation, which
+    :func:`_resolve_annotation` best-effort resolves against the typing namespace.
+    """
+    target = func.__init__ if inspect.isclass(func) else func
+    try:
+        return get_type_hints(target, include_extras=True)
+    except Exception:  # noqa: BLE001 — unresolvable forward ref / builtin → fall back to raw annotations
+        return {}
+
+
 def _build_config_inputs(
     func: Callable,
     skip: Optional[AbstractSet[str]] = None,
@@ -830,6 +1031,7 @@ def _build_config_inputs(
     ):  # pragma: no cover - defensive: inspect rejects rare builtins
         return {}, {}, {}
     param_docs = parse_param_docs(func)
+    hints = _resolved_param_hints(func)  # resolve `from __future__ import annotations` string annotations
     required: Dict[str, Any] = {}
     nullable_optionals: Dict[str, Any] = {}
     split_map: Dict[str, Tuple[str, str]] = {}
@@ -842,6 +1044,17 @@ def _build_config_inputs(
             inspect.Parameter.VAR_KEYWORD,
             inspect.Parameter.VAR_POSITIONAL,
         ):
+            continue
+        # Resolve a STRINGIZED annotation to the real type (proper structural inspection downstream).
+        if isinstance(param.annotation, str) and name in hints:
+            param = param.replace(annotation=hints[name])
+        # A NESTED-container type (a list of boxes, a dict of lists) can't be typed into a single widget
+        # → an OPTIONAL ``DATAFLUX_VALUE`` input socket fed by the Value node. Optional so an unwired
+        # socket keeps the constructor default (``boxes=[]``); the wired Python value passes through
+        # ``_coerce_kwargs`` unchanged (it is not a string).
+        if _needs_value_socket(param.annotation):
+            doc = param_docs.get(name)
+            nullable_optionals[name] = (VALUE_TYPE, {"tooltip": doc}) if doc else (VALUE_TYPE,)
             continue
         comfy_type, config = _widget_for(param, owner=func)
         is_nullable_opt = bool(config.pop("_nullable_optional", False))
@@ -1050,6 +1263,19 @@ def _coerce_kwargs(func: Callable, kwargs: Dict[str, Any]) -> Dict[str, Any]:
                         items.append(item)
                 out[key] = items
                 continue
+            # A NON-range NUMERIC tuple (``Color = Tuple[int, int, int]`` / ``Box``) — a STRING widget
+            # since :func:`_map_type` ranges ONLY a 2-element/variable numeric tuple. Decode
+            # ``"(255, 0, 0)"`` / ``"255,0,0"`` / ``"[255,0,0]"`` into a real tuple, casting each element.
+            # Structural (``_fixed_numeric_tuple_cast``), so a ``List[Tuple[int,...]]`` (boxes) is NOT
+            # caught here (top-level ``list`` → the list branch below). MUST precede the bare-``int``/
+            # ``float`` casts, which would otherwise ``int("(255, 0, 0)")`` and crash.
+            tuple_cast = _fixed_numeric_tuple_cast(param.annotation) if param is not None else None
+            if tuple_cast is not None:
+                try:
+                    out[key] = tuple(tuple_cast(p.strip()) for p in stripped.strip("()[] ").split(",") if p.strip())
+                except (ValueError, TypeError):
+                    out[key] = value
+                continue
             if "tuple" in ann_low and "float" not in ann_low and "int" not in ann_low:
                 if stripped.startswith("["):
                     try:
@@ -1084,6 +1310,21 @@ def _coerce_kwargs(func: Callable, kwargs: Dict[str, Any]) -> Dict[str, Any]:
             if ("list" in ann_low or "sequence" in ann_low) and not _has_bare_scalar_union_arm(
                 param.annotation if param is not None else None
             ):
+                # A Python/JSON list LITERAL first — the ``[]`` empty default (the repr of an empty
+                # ``List`` param like ``OverlayBoxes.boxes``) and an explicit ``[(20, 10, 80, 50)]`` box
+                # list; a comma-split of ``"[]"`` would wrongly yield ``["[]"]``. ``ast`` (tuples/parens)
+                # then ``json``; falls back to the comma-split for a plain ``"a, b, c"``.
+                if stripped[:1] in "[(":
+                    for _parse in (ast.literal_eval, json.loads):
+                        try:
+                            parsed = _parse(stripped)
+                        except (ValueError, SyntaxError, TypeError):
+                            continue
+                        if isinstance(parsed, (list, tuple)):
+                            out[key] = [tuple(e) if isinstance(e, (list, tuple)) else e for e in parsed]
+                            break
+                    if key in out:
+                        continue
                 out[key] = [item.strip() for item in stripped.split(",") if item.strip()]
                 continue
             # Cast a filled nullable-bool 3-state combo value (``true``/``false``) back to a real bool.
@@ -1313,6 +1554,24 @@ def _single_op_params(cls: Any) -> List[str]:
         if by_name or pname in stamped:
             result.append(pname)
     return result
+
+
+def _model_params(cls: Any) -> List[str]:
+    """A MODEL node's constructor params that hold a WIRED model object, in signature order.
+
+    Read from the ``__taidal_model_params__`` stamp the waivefront-helios ``bridge_model`` sets on a
+    ``ModelInference``-style class (a ``model``-named, non-scalar ctor param — the wrapped type is
+    deliberately open, so it can't be inferred from the annotation). Each rides ONE optional
+    ``DATAFLUX_OBJECT:model`` INPUT socket (a Loader model node's model output wires straight in)
+    instead of a STRING widget — the model-node analogue of :func:`_single_op_params`. A self-contained
+    model (no ``model`` slot) returns ``[]``, so it keeps the existing widget-only surface.
+    """
+    stamped = getattr(cls, "__taidal_model_params__", ()) or ()
+    try:
+        sig_params = set(inspect.signature(cls).parameters)
+    except (ValueError, TypeError):  # pragma: no cover - defensive
+        return list(stamped)
+    return [p for p in stamped if p in sig_params]
 
 
 def _collect_ops(kwargs: Dict[str, Any]) -> List[Any]:
@@ -1719,17 +1978,32 @@ def _build_model_node(cls: Callable, name: str, category: str) -> Type:
     also dock into a downstream evaluator's ``model`` slot) rather than a ``DATAFLUX_OP``. The wrapped
     class must be callable as ``model(sample) -> sample`` (the waivefront-helios bridge generates such a
     wrapper around a helios ``infer``). ``@output`` properties, if any, are appended as extra sockets.
+
+    A ``model``-typed ctor param (``_model_params`` — the ``ModelInference.model`` loader→runner
+    decoupling, stamped ``__taidal_model_params__`` by the waivefront-helios bridge) rides a wired
+    ``DATAFLUX_OBJECT:model`` INPUT socket instead of a STRING widget, so a Loader model node's model
+    output wires straight in. ``execute`` ``setattr``s each wired model post-construction (the confluid
+    paradigm) — mirroring how :func:`_build_op_node` injects single-op ``DATAFLUX_OP`` values.
     """
+    model_socket = _object_socket("model")
+    model_in_params = _model_params(cls)  # ctor params that take a WIRED model (DATAFLUX_OBJECT:model)
+    # Config widgets EXCLUDING the wired model params (they ride DATAFLUX_OBJECT:model input sockets).
     required, nullable_opts, _split_map = _build_config_inputs(
-        cls, strict_typing=getattr(cls, "__confluid_strict_typing__", False)
+        cls, skip=set(model_in_params) or None, strict_typing=getattr(cls, "__confluid_strict_typing__", False)
     )
     optional: Dict[str, Any] = {"sample": (SAMPLE_TYPE,), **nullable_opts}
+    for pname in model_in_params:
+        optional[pname] = (model_socket,)  # a wired model input (a Loader node's model output docks here)
     out_specs = list(output_specs(cast(type, cls)))
     out_sockets = [_output_socket_type(s["name"], _output_return_anno(cls, s["name"])) for s in out_specs]
-    model_socket = _object_socket("model")
 
     def execute(self: Any, sample: Any = None, **kwargs: Any) -> Tuple[Any, ...]:
+        # Post-construction injection (the confluid paradigm) of each wired DATAFLUX_OBJECT:model value.
+        wired_models = {p: kwargs.pop(p, None) for p in model_in_params}
         model = cls(**_coerce_kwargs(cls, kwargs))
+        for pname, wired in wired_models.items():
+            if wired is not None:
+                setattr(model, pname, wired)
         applied: Any = None
         if sample is not None:
             applied = model(sample)
@@ -2511,5 +2785,13 @@ def register_module_nodes(
             ),
         )
         target_mappings[node_name] = node_class
-        display_name_mappings[node_name] = f"[{_package_tag(module_path, dist_name)}] {_humanize_node_name(name)}"
+        # The palette LABEL is normally the verbatim callable name; a producer may override it with a
+        # ``__taidal_display_name__`` stamp (the waivefront-helios bridge sets it to the class name minus
+        # the leading ``Helios`` — the class NAME keeps the prefix as its flat confluid registry key, only
+        # the label drops it since the ``[PKG]`` tag already disambiguates). The registration KEY
+        # (``node_name`` / ``_node_key``) is unaffected, so saved workflows still resolve.
+        display_label = getattr(target_func, "__taidal_display_name__", None) or name
+        display_name_mappings[node_name] = (
+            f"[{_package_tag(module_path, dist_name)}] {_humanize_node_name(display_label)}"
+        )
         logger.debug(f"ComfyFlux: Registered node {node_name} for {module_path}.{name}")

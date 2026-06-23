@@ -37,6 +37,7 @@ from fluxstudio.bridge import (
     OP_TYPE,
     SAMPLE_TYPE,
     SOURCE_TYPE,
+    VALUE_TYPE,
     _coerce_kwargs,
     _has_bare_scalar_union_arm,
     _humanize_node_name,
@@ -44,9 +45,11 @@ from fluxstudio.bridge import (
     _is_hf_feature_param,
     _is_hf_metadata_param,
     _is_hf_split_param,
+    _is_nested_container,
     _is_socket_type,
     _literal_options,
     _map_type,
+    _needs_value_socket,
     _node_category,
     _op_list_params,
     _package_tag,
@@ -210,6 +213,111 @@ def test_map_type_optional_int_still_int() -> None:
 def test_map_type_union_int_float_still_float() -> None:
     # Union[int, float] has no "str" → falls through to float branch.
     assert _map_type("value", Union[int, float]) == "FLOAT"
+
+
+def test_needs_value_socket_only_for_nested_containers() -> None:
+    # A NESTED container (a container whose element is itself a container) can't be a sensible widget →
+    # a wired DATAFLUX_VALUE socket. A flat container / fixed tuple stays a typeable widget.
+    Box = Tuple[int, int, int, int]
+    Color = Tuple[int, int, int]
+    assert _needs_value_socket(List[Box]) is True  # list of tuples (boxes)
+    assert _needs_value_socket(Optional[Union[Color, List[Color]]]) is True  # list of colours
+    assert _needs_value_socket(Dict[str, List[int]]) is True  # dict of lists
+    assert _needs_value_socket(List[List[int]]) is True
+    # flat / scalar — stay widgets
+    assert _needs_value_socket(Color) is False  # a single 3-tuple
+    assert _needs_value_socket(List[str]) is False
+    assert _needs_value_socket(List[int]) is False
+    assert _needs_value_socket(Dict[str, float]) is False
+    assert _needs_value_socket(Tuple[float, float]) is False  # a range pair
+    assert _needs_value_socket(Optional[int]) is False
+
+
+def test_is_nested_container_shape_rule() -> None:
+    assert _is_nested_container(List[Tuple[int, int]]) is True
+    assert _is_nested_container(List[int]) is False
+    assert _is_nested_container(Dict[str, List[int]]) is True  # nests on the VALUE
+    assert _is_nested_container(Dict[str, float]) is False
+    assert _is_nested_container(int) is False
+
+
+def test_nested_container_param_is_value_socket_not_widget() -> None:
+    # A generated op node renders a nested-container param as an OPTIONAL DATAFLUX_VALUE input socket;
+    # a flat fixed-tuple param stays a widget. Wiring a real value into it passes through to the op.
+    from confluid import configurable as _cfg
+
+    @_cfg(category="op")
+    class _BoxOp:
+        def __init__(self, boxes: List[Tuple[int, int, int, int]] = [], color: Tuple[int, int, int] = (255, 0, 0)):
+            self.boxes = boxes
+            self.color = color
+
+        def __call__(self, sample: Sample) -> Sample:
+            return sample
+
+    node_cls = create_comfy_node(_BoxOp, "Taidal__BoxOp")
+    spec = node_cls.INPUT_TYPES()
+    assert spec["optional"]["boxes"] == (VALUE_TYPE,)  # nested container → wired value socket
+    assert "boxes" not in spec.get("required", {})
+    assert spec["required"]["color"][0] == "STRING"  # flat fixed tuple stays a widget
+    # Wiring a real Python value into the socket flows through to the constructed op.
+    _, op = node_cls().execute(boxes=[(20, 10, 80, 50)])["result"]
+    assert op.boxes == [(20, 10, 80, 50)]
+    # Unwired → the constructor default.
+    _, op2 = node_cls().execute()["result"]
+    assert op2.boxes == []
+
+
+def test_map_type_range_only_for_two_element_or_variadic_numeric_tuple() -> None:
+    # The ``__lo``/``__hi`` RANGE pair is ONLY a TOP-LEVEL 2-element / variable-length numeric tuple —
+    # NOT a List OF tuples (``OverlayBoxes.boxes``) nor a fixed != 2 tuple (a 3-tuple ``Color``, a
+    # 4-tuple ``Box``). The old ``"tuple" in str(anno)`` substring heuristic wrongly ranged all of them
+    # (``boxes__lo``/``boxes__hi``).
+    Box = Tuple[int, int, int, int]
+    Color = Tuple[int, int, int]
+    # legitimate ranges — unchanged
+    assert _map_type("r", Tuple[float, float]) == "RANGE_FLOAT"
+    assert _map_type("r", Tuple[int, int]) == "RANGE_INT"
+    assert _map_type("axis", Tuple[int, ...]) == "RANGE_INT"
+    assert _map_type("axis", Union[int, Tuple[int, ...]]) == "RANGE_INT"
+    # the bug — these are NOT ranges now
+    assert _map_type("boxes", List[Box]) == "STRING"
+    assert _map_type("default_color", Color) == "STRING"
+    assert _map_type("colors", Optional[Union[Color, List[Color]]]) == "STRING"
+
+
+def test_map_type_non_range_container_is_string_not_scalar() -> None:
+    # A container whose ELEMENT type contains "int"/"float" must NOT collapse to a single scalar widget.
+    assert _map_type("ids", List[int]) == "STRING"  # was wrongly INT
+    assert _map_type("ratios", List[float]) == "STRING"  # was wrongly FLOAT
+    assert _map_type("ov", Dict[str, float]) == "STRING"  # was wrongly FLOAT
+    # a concrete iterable class (datasets.Dataset) is NOT a container annotation — keeps its own type
+    assert _map_type("maybe_ds", Optional[datasets.Dataset]) == "HF_DATASET"
+    # scalars unaffected
+    assert _map_type("count", Optional[int]) == "INT"
+    assert _map_type("v", Union[int, float]) == "FLOAT"
+
+
+def test_coerce_kwargs_decodes_fixed_numeric_tuple() -> None:
+    # A non-range numeric tuple (a 3-tuple Color) rides a STRING widget; its "(255, 0, 0)" / "255,0,0"
+    # value decodes back to a real tuple (not int("(255, 0, 0)") crash, not a passed-through string).
+    def fn(color: Tuple[int, int, int] = (255, 0, 0), scale: Tuple[float, float, float] = (1.0, 1.0, 1.0)) -> None: ...
+
+    assert _coerce_kwargs(fn, {"color": "(255, 0, 0)"}) == {"color": (255, 0, 0)}
+    assert _coerce_kwargs(fn, {"color": "255, 0, 0"}) == {"color": (255, 0, 0)}
+    assert _coerce_kwargs(fn, {"color": "[255, 0, 0]"}) == {"color": (255, 0, 0)}
+    assert _coerce_kwargs(fn, {"scale": "(0.5, 0.5, 0.5)"}) == {"scale": (0.5, 0.5, 0.5)}
+
+
+def test_coerce_kwargs_list_branch_parses_literal_then_comma_splits() -> None:
+    # A List param's STRING widget: a "[...]" literal (the empty ``[]`` default + an explicit box list)
+    # parses via ast/json (a bare comma-split of "[]" would yield the junk ``["[]"]``); a plain
+    # comma string still splits.
+    def fn(boxes: List[Tuple[int, int, int, int]] = [], names: List[str] = []) -> None: ...
+
+    assert _coerce_kwargs(fn, {"boxes": "[]"}) == {"boxes": []}
+    assert _coerce_kwargs(fn, {"boxes": "[(20, 10, 80, 50)]"}) == {"boxes": [(20, 10, 80, 50)]}
+    assert _coerce_kwargs(fn, {"names": "a, b, c"}) == {"names": ["a", "b", "c"]}
 
 
 # --------------------------------------------------------------------------- #
@@ -562,6 +670,45 @@ def test_register_module_nodes_preserves_camelcase_display_name() -> None:
             register_module_nodes("fake.mod", mappings, display)
 
     assert display["Taidal_fake_op_HuggingFaceSource"] == "[FAKE] HuggingFaceSource"
+
+
+def test_register_module_nodes_honors_display_name_override() -> None:
+    """A ``__taidal_display_name__`` stamp overrides the palette LABEL; the registration KEY is unaffected.
+
+    The waivefront-helios bridge sets it to the class name minus the leading ``Helios`` so the label reads
+    cleanly (``ThresholdOp``) while the callable name — the confluid registry key AND the node key segment —
+    keeps the prefix (``HeliosThresholdOp``), avoiding a flat-registry collision with the native dataflux op.
+    """
+    mappings: dict = {}
+    display: dict = {}
+    discovered = [{"path": "waivefront.helios.ops:HeliosThresholdOp", "name": "HeliosThresholdOp"}]
+
+    def _helios_threshold(x: int) -> str:
+        return str(x)
+
+    _helios_threshold.__confluid_category__ = "op"  # type: ignore[attr-defined]
+    _helios_threshold.__taidal_display_name__ = "ThresholdOp"  # type: ignore[attr-defined]
+
+    with patch("fluxstudio.bridge.scan_module", return_value=discovered):
+        with patch("fluxstudio.bridge.resolve_callable", return_value=_helios_threshold):
+            register_module_nodes("waivefront.helios.ops", mappings, display, dist_name="waivefront-helios")
+
+    key = "Taidal_waivefront_op_HeliosThresholdOp"  # KEY keeps the prefixed callable name (registry-safe)
+    assert key in display
+    assert display[key] == "[WAIVEFRONT-HELIOS] ThresholdOp"  # LABEL drops the prefix
+
+
+def test_register_module_nodes_label_without_override_uses_callable_name() -> None:
+    """No ``__taidal_display_name__`` stamp → the label is the verbatim callable name (unchanged behaviour)."""
+    mappings: dict = {}
+    display: dict = {}
+    discovered = [{"path": "fake.mod:PlainOp", "name": "PlainOp"}]
+
+    with patch("fluxstudio.bridge.scan_module", return_value=discovered):
+        with patch("fluxstudio.bridge.resolve_callable", return_value=_sample_op):
+            register_module_nodes("fake.mod", mappings, display)
+
+    assert display["Taidal_fake_op_PlainOp"] == "[FAKE] PlainOp"
 
 
 def test_register_module_nodes_skips_private_callables() -> None:
