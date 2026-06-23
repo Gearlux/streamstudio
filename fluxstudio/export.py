@@ -96,6 +96,10 @@ _MIX_ARGS = ("input_sample", "target_sample", "metadata_sample")
 # feeds a consumer's op slot, the export embeds ``TransformChain(ops=<compiled ancestor cone>)``
 # (DAG→sequential, the same compiler) and the cone's inner ops drop from the standalone schedule.
 _SUBGRAPH_OP_CLASS_TYPE = "Taidal_SubgraphOp"
+# The hand-written ``Value`` node (``nodes.ValueNode``): a STRING ``value`` widget echoed to a
+# ``DATAFLUX_VALUE`` output as a parsed Python literal — the producer for a NESTED-container param
+# (``OverlayBoxes.boxes``) that rides a value socket. Folds INLINE as its parsed literal.
+_VALUE_NODE_CLASS_TYPE = "Taidal_Value"
 
 # Native ComfyUI pass-through primitives (``comfy_extras/nodes_primitive.py``): a single
 # ``value`` widget echoed to the output — foldable as that literal. The legacy virtual
@@ -695,6 +699,16 @@ def _resolve_widget_link(target: Any, key: str, link: Any, fold: _FoldContext) -
         if _is_link(value):  # a primitive fed by another node — follow the wire
             return _resolve_widget_link(target, key, value, fold)
         return ("literal", value)
+
+    if class_type == _VALUE_NODE_CLASS_TYPE:
+        # The Value node's STRING literal → the real Python object, inlined as the consumer's kwarg
+        # (a list of boxes, a dict). Lazy import keeps export.py ↔ nodes.py acyclic.
+        from fluxstudio.nodes import parse_value_literal
+
+        value = upstream.get("inputs", {}).get("value")
+        if _is_link(value):
+            return _resolve_widget_link(target, key, value, fold)
+        return ("literal", parse_value_literal(value if isinstance(value, str) else ""))
 
     node_cls = fold.node_mappings.get(class_type)
     kind = getattr(node_cls, "TAIDAL_NODE_KIND", None)

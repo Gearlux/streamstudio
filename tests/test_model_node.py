@@ -5,7 +5,7 @@ A MODEL node (``@configurable(category="model")``) RUNS inference: like an op it
 ``DATAFLUX_OBJECT:model`` socket (dockable into a downstream evaluator).
 """
 
-from typing import Optional
+from typing import Optional, cast
 
 import pytest
 from confluid import configurable
@@ -17,6 +17,7 @@ from fluxstudio.bridge import (
     OBJECT_TYPE,
     SAMPLE_TYPE,
     _is_melody_dataset_id_param,
+    _model_params,
     _object_socket,
     _output_socket_type,
     create_comfy_node,
@@ -43,6 +44,26 @@ class _NoneModel:
 
     def __call__(self, sample: Sample) -> Optional[Sample]:
         return None
+
+
+@configurable(category="model")
+class _FakeInference:
+    """A ``ModelInference``-style node: a WIRED ``model`` (stamped) + config widget, delegating infer.
+
+    Mirrors the waivefront-helios ``HeliosModelInference`` shape — ``__taidal_model_params__`` marks
+    ``model`` as a wired ``DATAFLUX_OBJECT:model`` input; ``__call__`` delegates to it.
+    """
+
+    __taidal_model_params__ = ("model",)
+
+    def __init__(self, model: Optional[object] = None, threshold: float = 0.5) -> None:
+        self.model = model
+        self.threshold = threshold
+
+    def __call__(self, sample: Sample) -> Sample:
+        if self.model is None:
+            raise ValueError("model not wired")
+        return cast(Sample, self.model(sample))  # type: ignore[operator]
 
 
 # --------------------------------------------------------------------- category allowlist + dispatch
@@ -88,6 +109,44 @@ def test_model_node_raises_on_none_result() -> None:
     node = create_comfy_node(_NoneModel, "Taidal__NoneModel")()
     with pytest.raises(RuntimeError):
         node.execute(sample=Sample(input=1, target=None, metadata={}))
+
+
+# --------------------------------------------------- wired model input (ModelInference decoupling)
+
+
+def test_model_params_reads_stamp() -> None:
+    assert _model_params(_FakeInference) == ["model"]
+    assert _model_params(_FakeModel) == []  # self-contained model: no wired model slot
+
+
+def test_model_input_param_is_wired_socket_not_widget() -> None:
+    node = create_comfy_node(_FakeInference, "Taidal__FakeInference")
+    spec = node.INPUT_TYPES()
+    # `model` rides a DATAFLUX_OBJECT:model input socket; it is NOT a widget.
+    assert spec["optional"]["model"] == (_object_socket("model"),)
+    assert "model" not in spec["required"]
+    # Other config params stay widgets.
+    assert spec["required"]["threshold"][0] == "FLOAT"
+    assert spec["optional"]["sample"] == (SAMPLE_TYPE,)
+
+
+def test_model_node_wires_model_and_delegates() -> None:
+    inference = create_comfy_node(_FakeInference, "Taidal__FakeInference")()
+    loader = _FakeModel(model_uri="maf:/X/1.0")  # a Loader node's model output (a model object)
+    s = Sample(input=1, target=None, metadata={})
+    applied, model_obj = inference.execute(sample=s, model=loader, threshold=0.7)["result"]
+    # The wired model ran inference (delegated through _FakeInference.__call__ → loader).
+    assert applied.metadata["detection_labels"] == ["WLAN"]
+    assert isinstance(model_obj, _FakeInference)  # the node outputs ITSELF as the model object
+    assert model_obj.model is loader and model_obj.threshold == 0.7  # wired model set, widget coerced
+
+
+def test_model_node_unwired_model_is_none() -> None:
+    inference = create_comfy_node(_FakeInference, "Taidal__FakeInference")()
+    # No sample wired → no inference attempt; model object built with model=None.
+    applied, model_obj = inference.execute(threshold=0.5)["result"]
+    assert applied is None
+    assert model_obj.model is None
 
 
 # --------------------------------------------------------------------- path-output socket fix

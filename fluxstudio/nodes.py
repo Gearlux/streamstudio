@@ -10,6 +10,7 @@ FluxStudio-only visualizers" mandate); this module only bridges to ComfyUI's ten
 provides the index-walk stepper.
 """
 
+import ast
 import base64
 import ctypes
 import io
@@ -25,7 +26,7 @@ import numpy as np
 import torch
 from logflow import get_logger
 
-from fluxstudio.bridge import ARRAY_TYPE, OP_TYPE, SAMPLE_TYPE, SOURCE_TYPE, node_root
+from fluxstudio.bridge import ARRAY_TYPE, OP_TYPE, SAMPLE_TYPE, SOURCE_TYPE, VALUE_TYPE, node_root
 
 if TYPE_CHECKING:
     from dataflux.ops.image import TextPosition
@@ -95,11 +96,15 @@ class WalkDatasetNode:
                         "control_after_generate": _INDEX_CONTROL_DEFAULT,
                     },
                 ),
+                "step": ("INT", {"default": 1, "min": 1, "max": _MAX_INDEX}),
                 "wrap": ("BOOLEAN", {"default": True}),
             }
         }
 
-    def walk(self, source: Any, index: int, wrap: bool = True) -> Tuple[Any, ...]:
+    def walk(self, source: Any, index: int, step: int = 1, wrap: bool = True) -> Tuple[Any, ...]:
+        # `step` is managed by web/walk_dataset_step.js — it sets index.options.step2 so
+        # ComfyUI's native control_after_generate increments by `step` instead of 1.
+        # Python receives the already-advanced `index` and uses it directly.
         from dataflux.core import Flux
 
         flux = source if isinstance(source, Flux) else Flux.from_source(source)
@@ -115,7 +120,7 @@ class WalkDatasetNode:
             )
         else:
             resolved = index
-        logger.debug(f"WalkDatasetNode: yielding sample {resolved}/{length}")
+        logger.debug(f"WalkDatasetNode: yielding sample {resolved}/{length} (step={step})")
         return (flux[resolved],)
 
 
@@ -146,6 +151,11 @@ class SampleExtractorNode:
       **Array / Tensor Histogram** viewer or any array-consuming node. Unlike
       ``IMAGE``/``MASK`` this is NOT normalized/colormapped — it carries the original
       numbers so a downstream node can inspect or process them.
+    * ``value`` (``DATAFLUX_VALUE``) — the RAW field value VERBATIM (a list, dict, or
+      any structured object — NOT coerced to an ndarray like ``array``), so a
+      list-valued ``input``/``target`` (a list of boxes) wires straight into a
+      nested-container param socket (``OverlayBoxes.boxes``; see
+      ``bridge._needs_value_socket``).
 
     Unlike the removed ``SampleViewerNode`` this is NOT an ``OUTPUT_NODE``: it
     produces typed values for native ComfyUI viewers, so previewing/rendering lives
@@ -154,8 +164,8 @@ class SampleExtractorNode:
 
     __confluid_display_name__ = "Extract from Sample"
     CATEGORY = _FLUXSTUDIO_CATEGORY
-    RETURN_TYPES = ("IMAGE", "MASK", "STRING", "INT", "FLOAT", ARRAY_TYPE)
-    RETURN_NAMES = ("image", "mask", "text", "int", "float", "array")
+    RETURN_TYPES = ("IMAGE", "MASK", "STRING", "INT", "FLOAT", ARRAY_TYPE, VALUE_TYPE)
+    RETURN_NAMES = ("image", "mask", "text", "int", "float", "array", "value")
     FUNCTION = "extract"
 
     @classmethod
@@ -200,7 +210,8 @@ class SampleExtractorNode:
         float_val = float(scalar) if scalar is not None else 0.0
         array_val = self._to_array(value)
         logger.debug(f"SampleExtractorNode: field={field} type={spec} scalar={scalar}")
-        return (image, mask, text, int_val, float_val, array_val)
+        # ``value`` is the RAW field value, verbatim (a list of boxes stays a list) → DATAFLUX_VALUE.
+        return (image, mask, text, int_val, float_val, array_val, value)
 
     # ------------------------------------------------------------------ #
     @staticmethod
@@ -446,6 +457,58 @@ def _build_histogram_payload(
     if hist["count"] == 0:
         payload["message"] = "no finite numeric values to histogram"
     return payload
+
+
+class ExtractMetadataNode:
+    """Extract one entry from a Sample's ``metadata`` by KEY → a wireable value.
+
+    Models / ops stamp structured results into ``sample.metadata`` — a list of detection boxes under
+    ``"detection_boxes"``, per-detection ``"detection_labels"`` / ``"detection_scores"``, an embedding
+    array, a mask. This node pulls ONE entry by ``key`` and emits it on three typed outputs so you wire
+    the one your consumer expects:
+
+    * ``value`` (``DATAFLUX_VALUE``) — the entry VERBATIM (a list of boxes, a dict), to wire straight
+      into a nested-container param socket (``OverlayBoxes.boxes`` — see ``bridge._needs_value_socket``).
+    * ``array`` (``DATAFLUX_ARRAY``) — the entry as an array when it is array-like (a tensor / ndarray
+      passes through, a PIL image becomes an ndarray), for the Array / Tensor Histogram viewer.
+    * ``text`` (``STRING``) — a compact ``repr`` view for inspection (wire into *Display Any* / a sink).
+
+    A missing key yields ``None`` / an empty array / ``""`` (never raises), so a key typo degrades
+    gracefully. Pairs with **Extract from Sample** (which unpacks ``input``/``target``); this unpacks
+    ``metadata[key]`` — the canonical flow ``model → (metadata['detection_boxes']) → OverlayBoxes.boxes``.
+    """
+
+    __confluid_display_name__ = "Extract from Metadata"
+    CATEGORY = _FLUXSTUDIO_CATEGORY
+    RETURN_TYPES = (VALUE_TYPE, ARRAY_TYPE, "STRING")
+    RETURN_NAMES = ("value", "array", "text")
+    FUNCTION = "extract"
+
+    @classmethod
+    def INPUT_TYPES(cls) -> Dict[str, Any]:
+        return {
+            "required": {
+                "sample": (SAMPLE_TYPE,),
+                "key": ("STRING", {"default": "detection_boxes"}),
+            }
+        }
+
+    def extract(self, sample: Any, key: str = "detection_boxes") -> Tuple[Any, Any, str]:
+        if sample is None:
+            raise ValueError(
+                "Extract from Metadata received an empty sample (None) — its upstream op produced no "
+                "sample. Wire it to a live source / model output to read metadata."
+            )
+        meta = getattr(sample, "meta", None)
+        if meta is None:
+            meta = getattr(sample, "metadata", {}) or {}
+        value = meta.get(key) if hasattr(meta, "get") else None
+        array_val = SampleExtractorNode._to_array(value)  # PIL→ndarray; tensor/ndarray/list pass verbatim
+        text = "" if value is None else repr(value)
+        if len(text) > _MAX_DISPLAY_CHARS:
+            text = text[:_MAX_DISPLAY_CHARS] + " …"
+        logger.debug(f"ExtractMetadataNode: key={key!r} found={value is not None} type={type(value).__name__}")
+        return (value, array_val, text)
 
 
 class ArrayHistogramViewerNode:
@@ -1636,6 +1699,56 @@ class ApplyTextTemplateNode:
         return (text,)
 
 
+def parse_value_literal(text: str) -> Any:
+    """Parse a Python / JSON literal STRING into a real Python value (the ``Value`` node + YAML import).
+
+    ``ast.literal_eval`` first — it handles tuples / parens / single quotes that JSON can't (a list of
+    boxes ``[(20, 10, 80, 50), …]``) — then ``json.loads`` as a fallback; a value that is neither parses
+    is returned as the raw (stripped) string. An empty field yields ``None`` (an unset value). Literals
+    only (no code execution).
+    """
+    stripped = (text or "").strip()
+    if not stripped:
+        return None
+    for parse in (ast.literal_eval, json.loads):
+        try:
+            return parse(stripped)
+        except (ValueError, SyntaxError, TypeError):
+            continue
+    return stripped
+
+
+class ValueNode:
+    """Produce a structured Python VALUE (a list of boxes, a list of lists, a dict) from a literal.
+
+    Many constructor params can't be sensibly typed into a single scalar widget — a list of bounding
+    boxes (``[(20, 10, 80, 50), (200, 100, 300, 150)]``), a list of colours, a dict of lists. The bridge
+    renders such a param as a wired ``DATAFLUX_VALUE`` input socket (``bridge._needs_value_socket``);
+    THIS node is its producer: type a **Python or JSON literal** in ``value`` and it parses it (via
+    :func:`parse_value_literal`) into the real object on the ``value`` output, which you wire into the
+    param's socket. Reusable — one Value node can feed several consumers.
+
+    Examples (type into ``value``)::
+
+        [(20, 10, 80, 50), (200, 100, 300, 150)]   # a list of boxes   -> OverlayBoxes.boxes
+        [(255, 0, 0), (0, 255, 0)]                  # a list of colours -> OverlayBoxes.colors
+        {"a": [1, 2], "b": [3, 4]}                  # a dict of lists
+    """
+
+    __confluid_display_name__ = "Value"
+    CATEGORY = _FLUXSTUDIO_CATEGORY
+    RETURN_TYPES = (VALUE_TYPE,)
+    RETURN_NAMES = ("value",)
+    FUNCTION = "produce"
+
+    @classmethod
+    def INPUT_TYPES(cls) -> Dict[str, Any]:
+        return {"required": {"value": ("STRING", {"default": "[]", "multiline": True})}}
+
+    def produce(self, value: str = "") -> Tuple[Any]:
+        return (parse_value_literal(value),)
+
+
 # ---------------------------------------------------------------------------
 # Draw Text to Image
 # ---------------------------------------------------------------------------
@@ -1735,6 +1848,7 @@ class DrawTextNode:
 NODE_CLASS_MAPPINGS: Dict[str, Type] = {
     "Taidal_WalkDataset": WalkDatasetNode,
     "Taidal_ExtractSample": SampleExtractorNode,
+    "Taidal_ExtractMetadata": ExtractMetadataNode,
     "Taidal_ArrayHistogram": ArrayHistogramViewerNode,
     "Taidal_ConfusionMatrix": ConfusionMatrixViewerNode,
     "Taidal_DisplayAny": DisplayAnyNode,
@@ -1747,6 +1861,7 @@ NODE_CLASS_MAPPINGS: Dict[str, Type] = {
     "Taidal_YamlDump": YamlDumpNode,
     "Taidal_Math": MathNode,
     "Taidal_ImageGrid": ImageGridNode,
+    "Taidal_Value": ValueNode,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS: Dict[str, str] = {

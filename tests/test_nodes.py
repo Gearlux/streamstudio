@@ -35,11 +35,13 @@ from fluxstudio.nodes import (
     ConfusionMatrixViewerNode,
     DisplayAnyNode,
     DrawTextNode,
+    ExtractMetadataNode,
     ImageGridNode,
     MixSamplesNode,
     RetagObjectNode,
     SampleExtractorNode,
     SubgraphOpExtractNode,
+    ValueNode,
     WalkDatasetNode,
     YamlDumpNode,
     _build_confusion_payloads,
@@ -116,6 +118,35 @@ def test_walk_accepts_existing_flux() -> None:
     assert sample.target == 1
 
 
+def test_walk_step_widget_config() -> None:
+    # The step widget is an INT, default 1, min 1.
+    # The actual increment is applied by web/walk_dataset_step.js (sets index.options.step2);
+    # Python's walk() receives the already-advanced index and uses it directly.
+    types = WalkDatasetNode.INPUT_TYPES()
+    step_widget = types["required"]["step"]
+    assert step_widget[0] == "INT"
+    assert step_widget[1]["default"] == 1
+    assert step_widget[1]["min"] == 1
+
+
+def test_walk_step_python_uses_index_directly() -> None:
+    # Python ignores step and resolves the index as-is (the JS side advances the index).
+    # So walk(index=15, step=10) returns sample 15, not sample 150.
+    (sample,) = WalkDatasetNode().walk(source=_ImgSource(100), index=15, step=10, wrap=True)
+    assert sample.target == 15
+
+
+def test_walk_step_param_does_not_affect_wrap() -> None:
+    # wrap is still applied to index directly, regardless of step.
+    (sample,) = WalkDatasetNode().walk(source=_ImgSource(10), index=13, step=5, wrap=True)
+    assert sample.target == 3  # 13 % 10
+
+
+def test_walk_step_param_accepted_but_index_governs_out_of_range() -> None:
+    with pytest.raises(IndexError, match="out of range"):
+        WalkDatasetNode().walk(source=_ImgSource(5), index=10, step=3, wrap=False)
+
+
 # --------------------------------------------------------------------------- #
 # SampleExtractorNode
 # --------------------------------------------------------------------------- #
@@ -132,8 +163,16 @@ def test_extractor_input_types_and_outputs() -> None:
     assert "viridis" in colormap_options and "gray" in colormap_options
     assert required["colormap"][1]["default"] == "viridis"
     assert required["max_size"][0] == "INT"
-    assert SampleExtractorNode.RETURN_TYPES == ("IMAGE", "MASK", "STRING", "INT", "FLOAT", "DATAFLUX_ARRAY")
-    assert SampleExtractorNode.RETURN_NAMES == ("image", "mask", "text", "int", "float", "array")
+    assert SampleExtractorNode.RETURN_TYPES == (
+        "IMAGE",
+        "MASK",
+        "STRING",
+        "INT",
+        "FLOAT",
+        "DATAFLUX_ARRAY",
+        "DATAFLUX_VALUE",
+    )
+    assert SampleExtractorNode.RETURN_NAMES == ("image", "mask", "text", "int", "float", "array", "value")
     # NOT an output node — it feeds native ComfyUI viewers.
     assert getattr(SampleExtractorNode, "OUTPUT_NODE", False) is False
 
@@ -155,7 +194,7 @@ def test_colormap_choices_fall_back_when_waivefront_absent() -> None:
 
 def test_extract_input_image_yields_comfy_image() -> None:
     sample = Sample(input=np.zeros((8, 8, 3), dtype="uint8"), target=3, metadata={})
-    image, mask, text, ival, fval, arr = SampleExtractorNode().extract(sample, field="input")
+    image, mask, text, ival, fval, arr, value = SampleExtractorNode().extract(sample, field="input")
     # ComfyUI IMAGE: [B, H, W, 3] float32 in [0, 1].
     assert isinstance(image, torch.Tensor)
     assert image.shape[0] == 1 and image.shape[-1] == 3 and image.dtype == torch.float32
@@ -167,25 +206,27 @@ def test_extract_input_image_yields_comfy_image() -> None:
     # DATAFLUX_ARRAY output passes the raw ndarray field through UNCHANGED (not normalized/colormapped).
     assert isinstance(arr, np.ndarray) and arr.shape == (8, 8, 3)
     assert arr is sample.input
+    # DATAFLUX_VALUE output is the raw field VERBATIM (same object).
+    assert value is sample.input
 
 
 def test_extract_scalar_target_with_label_name() -> None:
     sample = Sample(input=np.zeros((4, 4, 3), dtype="uint8"), target=7, metadata={"label_name": "drone_x"})
-    _image, _mask, text, ival, fval, _arr = SampleExtractorNode().extract(sample, field="target")
+    _image, _mask, text, ival, fval, _arr, _value = SampleExtractorNode().extract(sample, field="target")
     assert text == "drone_x (id=7)"
     assert ival == 7 and fval == 7.0
 
 
 def test_extract_scalar_target_without_label_name() -> None:
     sample = Sample(input=np.zeros((4, 4, 3), dtype="uint8"), target=2, metadata={})
-    _i, _m, text, ival, _f, _arr = SampleExtractorNode().extract(sample, field="target")
+    _i, _m, text, ival, _f, _arr, _value = SampleExtractorNode().extract(sample, field="target")
     assert text == "2"
     assert ival == 2
 
 
 def test_extract_2d_target_yields_comfy_mask() -> None:
     sample = Sample(input=np.zeros((4, 4, 3), dtype="uint8"), target=np.eye(6, dtype=bool), metadata={})
-    _image, mask, _text, _i, _f, _arr = SampleExtractorNode().extract(sample, field="target")
+    _image, mask, _text, _i, _f, _arr, _value = SampleExtractorNode().extract(sample, field="target")
     # ComfyUI MASK: [B, H, W] float32 in [0, 1].
     assert tuple(mask.shape) == (1, 6, 6) and mask.dtype == torch.float32
     assert 0.0 <= float(mask.min()) and float(mask.max()) <= 1.0
@@ -193,13 +234,13 @@ def test_extract_2d_target_yields_comfy_mask() -> None:
 
 def test_extract_torch_scalar_target_is_coerced() -> None:
     sample = Sample(input=np.zeros((4, 4, 3), dtype="uint8"), target=torch.tensor(5, dtype=torch.int64))
-    _i, _m, text, ival, fval, _arr = SampleExtractorNode().extract(sample, field="target")
+    _i, _m, text, ival, fval, _arr, _value = SampleExtractorNode().extract(sample, field="target")
     assert ival == 5 and fval == 5.0 and text == "5"
 
 
 def test_extract_text_summary_is_compact_for_arrays() -> None:
     sample = Sample(input=torch.rand(3, 8, 8), target=0)
-    _i, _m, text, _iv, _fv, arr = SampleExtractorNode().extract(sample, field="input")
+    _i, _m, text, _iv, _fv, arr, _value = SampleExtractorNode().extract(sample, field="input")
     # Compact summary, not the raw ArrayType dataclass repr.
     assert "ArrayType(" not in text
     assert "shape=(3, 8, 8)" in text and "float32" in text
@@ -213,20 +254,20 @@ def test_extract_image_degrades_without_waivefront() -> None:
     empty = ModuleType("waivefront.visualizers")  # lacks value_to_image
     sample = Sample(input=np.zeros((4, 4, 3), dtype="uint8"), target=9, metadata={"label_name": "x"})
     with patch.dict(sys.modules, {"waivefront.visualizers": empty}):
-        image, _mask, text, ival, _f, _arr = SampleExtractorNode().extract(sample, field="target")
+        image, _mask, text, ival, _f, _arr, _value = SampleExtractorNode().extract(sample, field="target")
     assert tuple(image.shape) == (1, 1, 1, 3)
     assert text == "x (id=9)" and ival == 9
 
 
 def test_extract_bool_target_coerces_to_int() -> None:
     sample = Sample(input=np.zeros((4, 4, 3), dtype="uint8"), target=True)
-    _i, _m, text, ival, fval, _arr = SampleExtractorNode().extract(sample, field="target")
+    _i, _m, text, ival, fval, _arr, _value = SampleExtractorNode().extract(sample, field="target")
     assert ival == 1 and fval == 1.0 and text == "1"
 
 
 def test_extract_numpy_scalar_target() -> None:
     sample = Sample(input=np.zeros((4, 4, 3), dtype="uint8"), target=np.int64(5))
-    _i, _m, text, ival, _f, _arr = SampleExtractorNode().extract(sample, field="target")
+    _i, _m, text, ival, _f, _arr, _value = SampleExtractorNode().extract(sample, field="target")
     assert ival == 5 and text == "5"
 
 
@@ -234,7 +275,7 @@ def test_extract_pil_target_yields_mask() -> None:
     from PIL import Image
 
     sample = Sample(input=np.zeros((4, 4, 3), dtype="uint8"), target=Image.new("L", (6, 6)))
-    _image, mask, _text, _i, _f, arr = SampleExtractorNode().extract(sample, field="target")
+    _image, mask, _text, _i, _f, arr, _value = SampleExtractorNode().extract(sample, field="target")
     assert tuple(mask.shape) == (1, 6, 6)
     # A PIL field is converted to an ndarray on the array socket (native mode: "L" -> 2-D).
     assert isinstance(arr, np.ndarray) and arr.shape == (6, 6)
@@ -242,7 +283,7 @@ def test_extract_pil_target_yields_mask() -> None:
 
 def test_extract_string_field_passthrough() -> None:
     sample = Sample(input="hello world", target=0)
-    _i, _m, text, _iv, _fv, _arr = SampleExtractorNode().extract(sample, field="input")
+    _i, _m, text, _iv, _fv, _arr, _value = SampleExtractorNode().extract(sample, field="input")
     assert text == "hello world"
 
 
@@ -261,6 +302,60 @@ def test_extract_none_sample_raises_legible_error() -> None:
     # ``AttributeError: 'NoneType' object has no attribute 'input'``.
     with pytest.raises(ValueError, match="empty sample"):
         SampleExtractorNode().extract(None, field="input")
+
+
+def test_extract_sample_value_output_is_the_raw_list_field() -> None:
+    # A list-valued field (a list of boxes) comes out VERBATIM on the DATAFLUX_VALUE ``value`` output,
+    # so it wires straight into a nested-container param socket (OverlayBoxes.boxes).
+    boxes = [(20, 10, 80, 50), (200, 100, 300, 150)]
+    sample = Sample(input=boxes, target=None, metadata={})
+    value = SampleExtractorNode().extract(sample, field="input")[-1]  # the ``value`` output
+    assert value is boxes
+
+
+# --------------------------------------------------------------------------- #
+# ExtractMetadataNode
+# --------------------------------------------------------------------------- #
+
+
+def test_extract_metadata_input_types_and_outputs() -> None:
+    req = ExtractMetadataNode.INPUT_TYPES()["required"]
+    assert req["sample"] == ("DATAFLUX_SAMPLE",)
+    assert req["key"][0] == "STRING" and req["key"][1]["default"] == "detection_boxes"
+    assert ExtractMetadataNode.RETURN_TYPES == ("DATAFLUX_VALUE", "DATAFLUX_ARRAY", "STRING")
+    assert ExtractMetadataNode.RETURN_NAMES == ("value", "array", "text")
+    assert NODE_CLASS_MAPPINGS["Taidal_ExtractMetadata"] is ExtractMetadataNode
+
+
+def test_extract_metadata_pulls_value_by_key() -> None:
+    # The canonical flow: a model stamps metadata['detection_boxes']; this extracts it as a
+    # DATAFLUX_VALUE to wire into OverlayBoxes.boxes.
+    boxes = [[20, 10, 80, 50], [200, 100, 300, 150]]
+    sample = Sample(input=0, target=None, metadata={"detection_boxes": boxes, "detection_labels": ["WLAN"]})
+    value, array, text = ExtractMetadataNode().extract(sample, key="detection_boxes")
+    assert value == boxes  # verbatim list of boxes on the DATAFLUX_VALUE output
+    assert array == boxes  # a non-array value passes through verbatim too
+    assert "20" in text and "300" in text  # repr view
+    # a different key
+    assert ExtractMetadataNode().extract(sample, key="detection_labels")[0] == ["WLAN"]
+
+
+def test_extract_metadata_missing_key_is_graceful() -> None:
+    sample = Sample(input=0, target=None, metadata={"detection_boxes": [[1, 2, 3, 4]]})
+    value, _array, text = ExtractMetadataNode().extract(sample, key="not_a_key")
+    assert value is None and text == ""
+
+
+def test_extract_metadata_array_value_passes_through() -> None:
+    emb = np.arange(6, dtype="float32").reshape(2, 3)
+    sample = Sample(input=0, target=None, metadata={"detection_embeddings": emb})
+    value, array, _text = ExtractMetadataNode().extract(sample, key="detection_embeddings")
+    assert value is emb and array is emb  # ndarray passes through unchanged on both outputs
+
+
+def test_extract_metadata_none_sample_raises_legible_error() -> None:
+    with pytest.raises(ValueError, match="empty sample"):
+        ExtractMetadataNode().extract(None, key="detection_boxes")
 
 
 # --------------------------------------------------------------------------- #
@@ -473,6 +568,22 @@ def test_apply_text_template_format_spec_and_none() -> None:
 def test_apply_text_template_malformed_is_caught() -> None:
     # A positional {0} (no positional args) must surface as an error string, not crash the node.
     assert ApplyTextTemplateNode().apply(template="{0}", a="x")[0].startswith("<template error")
+
+
+def test_value_node_parses_literals_and_is_registered() -> None:
+    from fluxstudio.bridge import VALUE_TYPE
+    from fluxstudio.nodes import parse_value_literal
+
+    assert NODE_CLASS_MAPPINGS["Taidal_Value"] is ValueNode
+    assert ValueNode.RETURN_TYPES == (VALUE_TYPE,)
+    # Python literal (tuples / parens JSON can't), JSON, and the raw-string / empty fallbacks.
+    assert parse_value_literal("[(20, 10, 80, 50), (200, 100, 300, 150)]") == [(20, 10, 80, 50), (200, 100, 300, 150)]
+    assert parse_value_literal('{"a": [1, 2]}') == {"a": [1, 2]}
+    assert parse_value_literal("[255, 0, 0]") == [255, 0, 0]
+    assert parse_value_literal("") is None
+    assert parse_value_literal("not a literal") == "not a literal"
+    # The node produces the parsed object on its single output.
+    assert ValueNode().produce("[(1, 2, 3, 4)]") == ([(1, 2, 3, 4)],)
 
 
 # --------------------------------------------------------------------------- #
@@ -1122,7 +1233,7 @@ def test_extract_list_target_shows_full_yaml() -> None:
     """_to_text for a list target must show the complete content, not just 'list'."""
     bboxes = [[10, 20, 100, 200], [30, 40, 150, 250]]
     sample = Sample(input=np.zeros((8, 8, 3), dtype="uint8"), target=bboxes, metadata={})
-    _img, _mask, text, _i, _f, _arr = SampleExtractorNode().extract(sample, field="target")
+    _img, _mask, text, _i, _f, _arr, _value = SampleExtractorNode().extract(sample, field="target")
     # Full content present — not just a type summary.
     assert "10" in text and "250" in text
 
@@ -1130,7 +1241,7 @@ def test_extract_list_target_shows_full_yaml() -> None:
 def test_extract_dict_metadata_shows_full_yaml() -> None:
     meta = {"snr_db": 12.5, "modulation": "QPSK", "label": 7}
     sample = Sample(input=np.zeros((4, 4, 3), dtype="uint8"), target=meta, metadata={})
-    _img, _mask, text, _i, _f, _arr = SampleExtractorNode().extract(sample, field="target")
+    _img, _mask, text, _i, _f, _arr, _value = SampleExtractorNode().extract(sample, field="target")
     assert "snr_db" in text and "12.5" in text and "QPSK" in text
 
 

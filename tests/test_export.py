@@ -210,6 +210,21 @@ class AddOp:
 
 
 @configurable(category="op", group="test_export")
+class BoxesLikeOp:
+    """An op with a NESTED-container param (a list of boxes) → a wired DATAFLUX_VALUE socket.
+
+    Args:
+        boxes: A list of (x_min, y_min, x_max, y_max) tuples.
+    """
+
+    def __init__(self, boxes: List[Tuple[int, int, int, int]] = []) -> None:
+        self.boxes = boxes
+
+    def __call__(self, sample: Sample) -> Sample:
+        return sample
+
+
+@configurable(category="op", group="test_export")
 class WriteMetaOp:
     """Write the current ``sample.input`` into ``metadata[key]``.
 
@@ -322,6 +337,7 @@ def _op_mappings() -> Dict[str, Any]:
         "Taidal_ChainLikeOp": create_comfy_node(ChainLikeOp, "Taidal_ChainLikeOp"),
         "Taidal_ThresholdLikeOp": create_comfy_node(ThresholdLikeOp, "Taidal_ThresholdLikeOp"),
         "Taidal_AddOp": create_comfy_node(AddOp, "Taidal_AddOp"),
+        "Taidal_BoxesLikeOp": create_comfy_node(BoxesLikeOp, "Taidal_BoxesLikeOp"),
         "Taidal_WriteMetaOp": create_comfy_node(WriteMetaOp, "Taidal_WriteMetaOp"),
         "Taidal_SetTargetOp": create_comfy_node(SetTargetOp, "Taidal_SetTargetOp"),
         "Taidal_EmitOp": create_comfy_node(EmitOp, "Taidal_EmitOp"),
@@ -857,6 +873,32 @@ def test_primitive_value_nodes_fold_inline() -> None:
     assert chains[0][0].kwargs["low_level"] == "{snr}"
     # A primitive feeding a CONSTANT's widget folds into the hoisted entry too.
     assert constants[0]["const_tx_config"].kwargs["quantize"] is False
+
+
+def test_value_node_folds_literal_into_consumer_kwarg() -> None:
+    # A nested-container param (boxes: List[Tuple]) rides a DATAFLUX_VALUE socket fed by the Value
+    # node; on export the Value node's literal folds INLINE as the consumer's kwarg.
+    prompt = {
+        "1": {"class_type": "WalkDatasetNode", "inputs": {}},
+        "50": {"class_type": "Taidal_Value", "inputs": {"value": "[(20, 10, 80, 50), (200, 100, 300, 150)]"}},
+        "2": {"class_type": "Taidal_BoxesLikeOp", "inputs": {"sample": ["1", 0], "boxes": ["50", 0]}},
+    }
+    notes: List[List[str]] = []
+    chains = compile_op_chains(prompt, _op_mappings(), chain_notes=notes)
+    assert notes[0] == []  # nothing dropped
+    assert chains[0][0].kwargs["boxes"] == [(20, 10, 80, 50), (200, 100, 300, 150)]
+
+
+def test_value_node_round_trips_through_export_ops_yaml() -> None:
+    # The full ops-export materializes the BoxesLikeOp with the parsed list. (YAML has no tuple type,
+    # so each (…) box round-trips as a [list] — functionally identical: a box unpacks the same way.)
+    prompt = {
+        "1": {"class_type": "WalkDatasetNode", "inputs": {}},
+        "50": {"class_type": "Taidal_Value", "inputs": {"value": "[(20, 10, 80, 50)]"}},
+        "2": {"class_type": "Taidal_BoxesLikeOp", "inputs": {"sample": ["1", 0], "boxes": ["50", 0]}},
+    }
+    ops = _load_ops(export_ops_yaml(prompt, _op_mappings()))
+    assert [list(b) for b in ops[0].boxes] == [[20, 10, 80, 50]]
 
 
 def test_primitive_fed_by_primitive_follows_the_wire() -> None:

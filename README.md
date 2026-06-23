@@ -188,11 +188,17 @@ A trainer / evaluator / processor node **runs itself when you Queue the graph** 
 
 ### Running a model (inference)
 
-A **model node** (a class tagged `@configurable(category="model")`, e.g. the helios `ExtendedHeliosModel`
-/ `HeliosExactKnnClassifier` surfaced via `waivefront-helios`) RUNS inference — distinct from a
-deterministic op. Wire a `Sample` into its optional `sample` input and it outputs the applied `sample`
-(with predictions stamped) PLUS the loaded model on a `DATAFLUX_OBJECT:model` output (which you can also
-dock into an evaluator's `model` slot). The model loads lazily on the first run.
+A **model node** (a class tagged `@configurable(category="model")`, e.g. the helios
+`ExtendedHeliosModelLoader` / `HeliosExactKnnClassifier` surfaced via `waivefront-helios`) RUNS inference
+— distinct from a deterministic op. Wire a `Sample` into its optional `sample` input and it outputs the
+applied `sample` (with predictions stamped) PLUS the loaded model on a `DATAFLUX_OBJECT:model` output
+(which you can also dock into an evaluator's `model` slot). The model loads lazily on the first run.
+
+A model node may also TAKE a model on a wired `DATAFLUX_OBJECT:model` **input** — the loader→runner
+decoupling. `HeliosModelInference` holds all config in the **Loader** (`ExtendedHeliosModelLoader`, set
+`model_uri` / `window_ms` / …) and just RUNS it: wire the Loader node's `model` output into the
+`HeliosModelInference` node's `model` input, then feed it a `Sample`. (The same shape is the helios eval
+YAML `model: !class ModelInference(model=!class ExtendedHeliosModelLoader(...))`.)
 
 End-to-end RF detection example (all nodes auto-discovered from `waivefront-helios`):
 
