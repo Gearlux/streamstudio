@@ -313,6 +313,16 @@ _SOURCE_PARAM = "source"
 # ``JointFlux(fluxes: List[Flux])`` uses ``fluxes``.
 _SOURCE_LIST_PARAMS = {"fluxes", "sources"}
 
+# A runnable COMBINATOR's constructor params that hold ANOTHER runnable (a trainer / evaluator /
+# DatasetProcessor / nested combinator), rendered as ``DATAFLUX_RUNNABLE`` INPUT sockets instead of a
+# generic ``DATAFLUX_OBJECT`` socket — the consuming half of the dual-mode runnable node. SINGLE-runnable
+# params get one socket each; LIST params get a dynamic ``<name>_N`` family grown by ``web/runnable_list.js``
+# (collected by :func:`_collect_indexed`). marainer.workflow's ``Conditional.if_true``/``if_false`` +
+# ``Switch.default`` (single) and ``Sequence.steps`` (list). Detected by NAME (like ``_OP_LIST_PARAMS`` /
+# ``_SINGLE_OP_PARAMS``), never per-class — a combinator HOLDS runnables and runs the selected one(s).
+_RUNNABLE_PARAMS = {"if_true", "if_false", "default"}
+_RUNNABLE_LIST_PARAMS = {"steps"}
+
 # Constructor params that name a HuggingFace dataset *identifier* (a hub repo id
 # like ``mnist`` / ``kitofrank/RFUAV``, or optionally a local imagefolder path) —
 # NOT a filesystem directory. Recognised only on HuggingFace dataset sources (see
@@ -2421,6 +2431,54 @@ def _build_object_node(cls: Callable, name: str, category: str) -> Type:
     )
 
 
+def _runnable_consumed_as_instance(
+    prompt: Optional[Dict[str, Any]],
+    unique_id: Optional[Any],
+    node_mappings: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """True if this runnable node's slot-0 ``DATAFLUX_RUNNABLE`` output is wired into ANOTHER node's
+    ``DATAFLUX_RUNNABLE`` input — i.e. it is a BRANCH of a workflow combinator (``Conditional`` /
+    ``Sequence`` / ``Switch``) that will run it, so it must NOT run standalone (no double-run).
+
+    This is the dual-mode switch read inside a runnable node's ``execute``: consumed-as-instance ⇒
+    build the runnable and hand it over (the combinator runs the selected one); NOT consumed ⇒ the
+    node is terminal and runs on execute (the unchanged default). Reads ComfyUI's hidden ``PROMPT``
+    (the flat API graph ``{node_id: {class_type, inputs}}``); a missing prompt / id ⇒ NOT consumed
+    (terminal), so behaviour is identical when the hidden input is absent (older ComfyUI, fluxstudio's
+    own tests). Robust to a dynamic ``<prefix>_N`` runnable slot (``Sequence.steps_3``) — the class
+    only declares the ``<prefix>_0`` seed, so the base seed's type is consulted.
+    """
+    if not prompt or unique_id is None:
+        return False
+    if node_mappings is None:
+        from fluxstudio import NODE_CLASS_MAPPINGS as node_mappings  # the live registry
+    uid = str(unique_id)
+    for node in prompt.values():
+        if not isinstance(node, dict):
+            continue
+        class_type = node.get("class_type")
+        consumer = node_mappings.get(class_type) if (node_mappings and isinstance(class_type, str)) else None
+        if consumer is None or not hasattr(consumer, "INPUT_TYPES"):
+            continue
+        try:
+            spec = consumer.INPUT_TYPES()
+        except Exception:  # pragma: no cover - a node whose INPUT_TYPES raises
+            continue
+        declared = {**spec.get("required", {}), **spec.get("optional", {})}
+        for iname, link in (node.get("inputs", {}) or {}).items():
+            if not (isinstance(link, (list, tuple)) and len(link) == 2):
+                continue  # a literal widget value, not a link
+            if str(link[0]) != uid or link[1] != 0:
+                continue  # not a link to OUR slot-0 (the runnable) output
+            entry = declared.get(iname)
+            if entry is None and "_" in iname:  # a dynamic `<prefix>_N` slot only seeded at `<prefix>_0`
+                entry = declared.get(f"{iname.rsplit('_', 1)[0]}_0")
+            itype = entry[0] if isinstance(entry, (list, tuple)) and entry else entry
+            if _base_socket_type(itype) == RUNNABLE_TYPE:
+                return True
+    return False
+
+
 def _build_runnable_node(cls: Callable, name: str, category: str) -> Type:
     """Build a runnable (trainer / evaluator / processor) node: members as wired INPUT sockets.
 
@@ -2480,10 +2538,15 @@ def _build_runnable_node(cls: Callable, name: str, category: str) -> Type:
     # AGNOSTIC; task survives only as palette/navigaitor guidance). Role-less slots (optimizer /
     # loader / lightning / logger) stay generic ``DATAFLUX_OBJECT``. See :data:`_STRICT_SLOT_ROLES`
     # / :func:`_object_socket`. Mirrors the object-NODE output side (:func:`_object_socket_for_class`).
-    socket_members: Dict[str, str] = {}  # member name -> SOURCE_TYPE | OBJECT_TYPE[:role]
+    socket_members: Dict[str, str] = {}  # member name -> SOURCE_TYPE | OBJECT_TYPE[:role] | RUNNABLE_TYPE
+    runnable_list_members: List[str] = []  # member name -> a dynamic <name>_N DATAFLUX_RUNNABLE family
     for fname, finfo in fields.items():
         anno = getattr(finfo, "annotation", Any)
-        if fname in _DATASET_MEMBER_PARAMS or fname == _SOURCE_PARAM:
+        if fname in _RUNNABLE_LIST_PARAMS:
+            runnable_list_members.append(fname)  # seeded as <name>_0 below, collected in execute
+        elif fname in _RUNNABLE_PARAMS:
+            socket_members[fname] = RUNNABLE_TYPE  # a combinator branch — wired runnable INSTANCE
+        elif fname in _DATASET_MEMBER_PARAMS or fname == _SOURCE_PARAM:
             socket_members[fname] = SOURCE_TYPE
         elif _is_scalar_anno(anno):
             continue  # scalar -> widget (handled by _build_config_inputs below)
@@ -2491,15 +2554,23 @@ def _build_runnable_node(cls: Callable, name: str, category: str) -> Type:
             role = _STRICT_SLOT_ROLES.get(fname)
             socket_members[fname] = _object_socket(role) if role else OBJECT_TYPE
 
-    # Scalars stay widgets; skip the socket members (and any non-ctor body slot, which
-    # _build_config_inputs wouldn't see anyway).
-    required, nullable_opts, _ = _build_config_inputs(cls, skip=set(socket_members) or None)
+    # Scalars stay widgets; skip the socket members + runnable-list members (the dynamic <name>_N
+    # families are seeded below, never a widget) — any non-ctor body slot _build_config_inputs
+    # wouldn't see anyway.
+    required, nullable_opts, _ = _build_config_inputs(
+        cls, skip=set(socket_members) | set(runnable_list_members) or None
+    )
     optional: Dict[str, Any] = {**nullable_opts}
     for member, socket in socket_members.items():
         if member in required_params:
             required[member] = (socket,)
         else:
             optional[member] = (socket,)
+    # A runnable-LIST member (Sequence.steps) seeds ONE optional DATAFLUX_RUNNABLE socket
+    # (``<name>_0``); web/runnable_list.js grows ``<name>_1`` … as branches are wired, and
+    # execute collects the whole family via _collect_indexed.
+    for member in runnable_list_members:
+        optional[f"{member}_0"] = (RUNNABLE_TYPE,)
 
     # EVERY declared @output -> a typed output socket (mapped by _output_socket_type; containers ride a
     # STRING/JSON socket). The node runs before reading them, so they carry live values.
@@ -2508,8 +2579,17 @@ def _build_runnable_node(cls: Callable, name: str, category: str) -> Type:
     extra_types = tuple(out_sockets)
     extra_names = tuple(s["name"] for s in out_specs)
 
-    def execute(self: Any, unique_id: Optional[str] = None, **kwargs: Any) -> Dict[str, Any]:
+    def execute(self: Any, unique_id: Optional[str] = None, prompt: Any = None, **kwargs: Any) -> Dict[str, Any]:
         from fluxstudio.nodes import run_runnable  # lazy: nodes.py imports bridge (avoid an import cycle)
+
+        # Gather each dynamic runnable-LIST family (steps_0/steps_1/…) into its ctor kwarg, dropping the
+        # indexed keys so they don't reach the ctor split as bogus params.
+        for member in runnable_list_members:
+            items = _collect_indexed(kwargs, member)
+            for ik in [k for k in kwargs if _is_indexed_key(k, {member})]:
+                kwargs.pop(ik)
+            if items:
+                kwargs[member] = items
 
         ctor_kwargs: Dict[str, Any] = {}
         post: Dict[str, Any] = {}
@@ -2523,6 +2603,15 @@ def _build_runnable_node(cls: Callable, name: str, category: str) -> Type:
         obj = cls(**_coerce_kwargs(cls, ctor_kwargs))
         for k, v in post.items():
             setattr(obj, k, v)
+
+        # DUAL-MODE: if this runnable's slot-0 output feeds a workflow combinator's DATAFLUX_RUNNABLE
+        # input, it is a BRANCH — hand over the constructed-but-UN-RUN instance and let the combinator
+        # run it (no double-run; only the SELECTED branch ever runs). Otherwise it is the terminal
+        # OUTPUT_NODE and runs on execute (the default, unchanged when not consumed).
+        if _runnable_consumed_as_instance(prompt, unique_id):
+            note = f"{type(obj).__name__}: built as an instance — the consuming workflow runs it."
+            return {"ui": {"text": [note]}, "result": (obj, *([None] * len(out_sockets)))}
+
         # RUN it (this node is the OUTPUT_NODE — there is no separate Run node). run_runnable restores
         # autograd for TorchRunner trainers, honours ComfyUI's interrupt, and live-streams stdout to the
         # node's log widget; it returns the captured text.
@@ -2550,7 +2639,9 @@ def _build_runnable_node(cls: Callable, name: str, category: str) -> Type:
         kind="runnable",
         callable_path=_safe_callable_path(cls),
         output_node=True,
-        hidden={"unique_id": "UNIQUE_ID"},
+        # PROMPT lets execute detect when this node is a combinator BRANCH (dual-mode); UNIQUE_ID
+        # addresses its own live-output widget.
+        hidden={"unique_id": "UNIQUE_ID", "prompt": "PROMPT"},
     )
 
 
