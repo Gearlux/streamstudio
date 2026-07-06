@@ -1,13 +1,13 @@
-"""FluxStudio forces LogFlow console coloring OFF — even if logflow was already
+"""FluxStudio forces Loggair console coloring OFF — even if loggair was already
 configured (with colors) before fluxstudio was imported.
 
-`fluxstudio/__init__.py` calls ``logflow.force_no_color()`` at import, which sets
-the standard ``NO_COLOR=1`` AND reloads logflow when it is already configured.
+`fluxstudio/__init__.py` calls ``loggair.force_no_color()`` at import, which sets
+the standard ``NO_COLOR=1`` AND reloads loggair when it is already configured.
 Merely inheriting/copying the env var is NOT enough once a coloring decision is
 baked into the live console sink — these tests pin the reload, and that a pre-set
 ``NO_COLOR=`` (empty) still re-allows colors.
 
-Each check runs in a SUBPROCESS (isolated logflow state) with ``cwd`` set to a
+Each check runs in a SUBPROCESS (isolated loggair state) with ``cwd`` set to a
 throwaway dir so ``import fluxstudio`` resolves to the installed package (not the
 workspace-root namespace-package shadow). ``PYCHARM_HOSTED=1`` forces loguru's
 color auto-detect ON for the real stderr, so a still-colorized sink is
@@ -20,7 +20,7 @@ import sys
 from pathlib import Path
 
 _SNIPPET = (
-    "from logflow import get_logger\n"
+    "from loggair import get_logger\n"
     "get_logger('early').info('pre-config -> colors baked in')\n"
     "import fluxstudio  # must force colorless via force_no_color()\n"
     "from loguru import logger\n"

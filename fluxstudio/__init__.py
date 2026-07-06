@@ -5,18 +5,18 @@ import json
 import sys
 from typing import Any, Dict, List, Optional
 
-import logflow
+import loggair
 
 # FluxStudio runs inside ComfyUI: its logs land in ComfyUI's own console/log
 # capture, where ANSI color escapes are noise. force_no_color() sets the standard
-# NO_COLOR=1 AND reloads logflow if some earlier ComfyUI import already configured
+# NO_COLOR=1 AND reloads loggair if some earlier ComfyUI import already configured
 # it (inheriting/copying the env is NOT enough once a coloring decision is baked
 # into the console sink). Must run before the get_logger() / fluxstudio.* imports
-# below that pull logflow in. To re-allow colors, pre-set NO_COLOR= (empty).
-# See logflow's force_no_color.
-logflow.force_no_color()
+# below that pull loggair in. To re-allow colors, pre-set NO_COLOR= (empty).
+# See loggair's force_no_color.
+loggair.force_no_color()
 
-from logflow import get_logger  # (import follows force_no_color above)
+from loggair import get_logger  # (import follows force_no_color above)
 
 from fluxstudio.bridge import (
     hide_default_comfy_nodes,
@@ -235,8 +235,8 @@ _discover_and_register_nodes()
 # Re-apply no-color after discovery: some scanned packages (e.g. waivefront-helios / keysight.ai)
 # call logger.remove() + logger.add(colorize=True) at import time, undoing the force_no_color()
 # above.  NO_COLOR=1 is already set; this call only triggers the reconfigure() branch that strips
-# any stray handlers and re-adds logflow's sinks with colorize=False.
-logflow.force_no_color()
+# any stray handlers and re-adds loggair's sinks with colorize=False.
+loggair.force_no_color()
 
 # Merge the statically-defined FluxStudio adapter nodes (dataset walker + sample viewer) on top of
 # the auto-discovered DataFlux/Waivefront nodes.

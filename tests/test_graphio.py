@@ -233,7 +233,7 @@ def test_unmapped_node_is_skipped_not_fatal() -> None:
 def test_dropped_member_warning_is_interpolated() -> None:
     """The 'no FluxStudio node' drop warning must interpolate the class name.
 
-    logflow is loguru-backed, so the message MUST use ``{}`` brace fields — a stdlib
+    loggair is loguru-backed, so the message MUST use ``{}`` brace fields — a stdlib
     ``%s`` template is left verbatim and the args are silently ignored, so the operator
     sees a useless ``Skipping %s.%s`` line. Regression pin for that formatting bug.
     """
