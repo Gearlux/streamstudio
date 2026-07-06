@@ -34,7 +34,7 @@ from collections.abc import Sequence
 from importlib.metadata import entry_points
 from pathlib import Path
 
-from logflow import get_logger
+from loggair import get_logger
 
 from fluxstudio.custom_nodes import COMFYUI_MANAGER_URL  # bundled default; --no-manager filters it
 

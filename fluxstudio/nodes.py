@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
 
 import numpy as np
 import torch
-from logflow import get_logger
+from loggair import get_logger
 
 from fluxstudio.bridge import ARRAY_TYPE, OP_TYPE, SAMPLE_TYPE, SOURCE_TYPE, VALUE_TYPE, node_root
 
@@ -935,7 +935,7 @@ def run_runnable(runnable: Any, unique_id: Optional[str] = None) -> str:
             holder["exc"] = exc
 
     worker = threading.Thread(target=_target, name=f"run_runnable-{type(runnable).__name__}", daemon=True)
-    # Tee stdout/stderr for the run window: the worker's prints/progress/logflow lines mirror to the
+    # Tee stdout/stderr for the run window: the worker's prints/progress/loggair lines mirror to the
     # live console AND accumulate in `buffer` for the node's log widget. Restored in finally BEFORE any
     # interrupt/error re-raise so a failure never leaves the streams swapped.
     buffer = io.StringIO()

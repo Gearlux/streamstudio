@@ -48,7 +48,7 @@ from dataflux.ops.formula import FormulaOp
 from dataflux.ops.stash import StashInputOp, StashTargetOp, UnstashInputOp, UnstashTargetOp
 from dataflux.ops.tee import Tee
 from dataflux.ops.transform_chain import TransformChain
-from logflow import get_logger
+from loggair import get_logger
 
 from fluxstudio.bridge import (
     _OP_LIST_PARAMS,

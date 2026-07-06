@@ -467,7 +467,7 @@ Registration is a **positive allowlist**: a class becomes a node only if its `@c
 
 A module that fails to import or scan is skipped at `debug` level, so one package's missing optional dependency never empties the palette.
 
-> **Entry points live in installed metadata.** Discovery reads `importlib.metadata`, so editable installs *freeze* the entry-point table at install time. After adding or changing a `[project.entry-points."confluid.configurables"]` declaration in any workspace package, reinstall that editable (e.g. `aisland setup`) or its nodes silently vanish from the palette. Do **not** use `--reinstall` / `--force-reinstall` — that re-resolves the internal deps (confluid, logflow, …) from PyPI, where they don't exist.
+> **Entry points live in installed metadata.** Discovery reads `importlib.metadata`, so editable installs *freeze* the entry-point table at install time. After adding or changing a `[project.entry-points."confluid.configurables"]` declaration in any workspace package, reinstall that editable (e.g. `aisland setup`) or its nodes silently vanish from the palette. Do **not** use `--reinstall` / `--force-reinstall` — that re-resolves the internal deps (confluid, loggair, …) from PyPI, where they don't exist.
 
 ## Type mapping
 
@@ -527,7 +527,7 @@ Specs come exclusively from dataflux/waivefront — to fix or add a contract, ed
 | `confluid` | `confluid.configurables` entry-point group that drives discovery. |
 | `datasets` | HuggingFace `Dataset` ↔ `HF_DATASET` socket. |
 | `liquifai` | App / CLI framework. |
-| `logflow` | Logging. |
+| `loggair` | Logging. |
 | `waivefront` *(optional `[waivefront]` extra)* | RF-domain ops + visualizers (spectrogram, IQ time/freq). |
 
 ## Development

@@ -60,7 +60,7 @@ def _hermetic_declared_nodes(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def logger_mock(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
-    """Silence logflow output and expose the logger for message assertions."""
+    """Silence loggair output and expose the logger for message assertions."""
     m = MagicMock()
     monkeypatch.setattr(cli, "logger", m)
     return m
@@ -268,7 +268,7 @@ def test_module_run_as_script_invokes_main(tmp_path: Path, monkeypatch: pytest.M
     comfy.mkdir()
     monkeypatch.setattr(sys, "argv", ["fluxstudio", "--comfy-dir", str(comfy)])
 
-    with patch("logflow.get_logger", return_value=MagicMock()), patch("subprocess.run"), patch("os.symlink"):
+    with patch("loggair.get_logger", return_value=MagicMock()), patch("subprocess.run"), patch("os.symlink"):
         runpy.run_path(cli.__file__, run_name="__main__")
 
 

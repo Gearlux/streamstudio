@@ -63,7 +63,7 @@ from confluid import mandatory_param_names, output_specs, parse_param_docs
 from dataflux.discovery import get_callable_path, resolve_callable, scan_module
 from dataflux.sample import Sample as _Sample
 from dataflux.typespec import infer_sample_type
-from logflow import get_logger
+from loggair import get_logger
 
 logger = get_logger(__name__)
 
