@@ -11,12 +11,13 @@ license = {text = "MIT"}
 dependencies = [
     "liquifai>=0.1.0",
     "loggair>=0.1.0",
-    "confluid>=0.1.0",
+    # [pydantic] extra: bridge.py enumerates fields via confluid.to_pydantic.
+    "confluid[pydantic]>=0.1.0",
     "data-flux>=0.1.0",
     "datasets",
     # PEP-593 range marks: the bridge reads Annotated[..., Interval/Ge/Le] into widget
-    # min/max. Already transitive via confluid->pydantic; declared because bridge.py
-    # imports it directly.
+    # min/max. Already transitive via confluid[pydantic]->pydantic; declared because
+    # bridge.py imports it directly.
     "annotated-types",
 ]
 requires-python = ">=3.12"
