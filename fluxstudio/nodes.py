@@ -12,6 +12,7 @@ provides the index-walk stepper.
 
 import ast
 import base64
+import contextvars
 import ctypes
 import io
 import json
@@ -934,7 +935,13 @@ def run_runnable(runnable: Any, unique_id: Optional[str] = None) -> str:
         except BaseException as exc:  # noqa: BLE001 — surfaced to the caller thread below
             holder["exc"] = exc
 
-    worker = threading.Thread(target=_target, name=f"run_runnable-{type(runnable).__name__}", daemon=True)
+    # copy_context().run so the worker inherits contextvars — confluid's engine
+    # state (an active materialization context for late !ref:/Lazy flows) rides
+    # a ContextVar that a raw Thread target would silently drop.
+    worker_ctx = contextvars.copy_context()
+    worker = threading.Thread(
+        target=lambda: worker_ctx.run(_target), name=f"run_runnable-{type(runnable).__name__}", daemon=True
+    )
     # Tee stdout/stderr for the run window: the worker's prints/progress/loggair lines mirror to the
     # live console AND accumulate in `buffer` for the node's log widget. Restored in finally BEFORE any
     # interrupt/error re-raise so a failure never leaves the streams swapped.
