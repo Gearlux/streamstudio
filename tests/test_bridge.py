@@ -2938,6 +2938,33 @@ def test_interval_bounds_extraction() -> None:
     assert _interval_bounds(_Opt[float]) == (None, None)
 
 
+def test_marker_wrapped_annotations_keep_widget_semantics() -> None:
+    """Confluid marker aliases (Mandatory/Lazy = Annotated[Union[T, Fluid], marker],
+    NoBroadcast = Annotated[T, marker]) must not change the rendered widget: scalar
+    types keep their widget, range marks keep their bounds even though the union
+    prevents Annotated flattening, and a wrapped Literal still becomes a combo."""
+    from typing import Annotated as _Ann
+
+    from annotated_types import Interval as _Interval
+    from confluid import Lazy as _Lazy
+    from confluid import Mandatory as _Mand
+    from confluid import NoBroadcast as _NoB
+
+    from fluxstudio.bridge import _interval_bounds, _map_type
+
+    _DbPower = _Ann[float, _Interval(ge=-200.0, le=50.0)]
+    _LitAB = Literal["a", "b"]
+    _LitXY = Literal["x", "y"]
+    assert _map_type("p", _Mand[int]) == "INT"  # type: ignore[misc]
+    assert _map_type("p", _Mand[float]) == "FLOAT"  # type: ignore[misc]
+    assert _map_type("p", _Mand[bool]) == "BOOLEAN"  # type: ignore[misc]
+    assert _map_type("p", _NoB[str]) == "STRING"  # type: ignore[misc]
+    assert _interval_bounds(_Mand[_DbPower]) == (-200.0, 50.0)  # type: ignore[misc]
+    assert _interval_bounds(_Lazy[_DbPower]) == (-200.0, 50.0)  # type: ignore[misc]
+    assert _literal_options(_Mand[_LitAB]) == ["a", "b"]  # type: ignore[misc]
+    assert _literal_options(_NoB[_LitXY]) == ["x", "y"]  # type: ignore[misc]
+
+
 def test_interval_marked_widgets_get_bounds() -> None:
     """A PEP-593 Interval mark narrows the full-range default bounds on FLOAT and INT widgets."""
     from typing import Annotated as _Ann
