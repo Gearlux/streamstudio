@@ -584,12 +584,13 @@ def _literal_options(annotation: Any) -> Optional[List[Any]]:
     fixed, short value set — e.g. waivefront's ``Colormap``) is offered as an enumeration in the GUI,
     enumerated straight from the annotation via ``get_args`` (never a hand-maintained parallel list).
     """
+    annotation = _strip_annotated(annotation)  # Mandatory[Literal[...]] / NoBroadcast[Literal[...]]
     if get_origin(annotation) is Literal:
         return list(get_args(annotation))
-    if get_origin(annotation) is Union:  # Optional[Literal[...]] / Literal[...] | None
+    if get_origin(annotation) is Union:  # Optional[Literal[...]] / Literal[...] | None / marker Fluid arms
         for arg in get_args(annotation):
-            if get_origin(arg) is Literal:
-                return list(get_args(arg))
+            if get_origin(_strip_annotated(arg)) is Literal:
+                return list(get_args(_strip_annotated(arg)))
     return None
 
 
@@ -631,6 +632,11 @@ def _interval_bounds(annotation: Any) -> Tuple[Optional[float], Optional[float]]
             hi = _as_float(meta.le)
         elif isinstance(meta, Lt):
             hi = _as_float(meta.lt)
+    if (lo, hi) == (None, None):
+        # No range mark in THIS layer's metadata — a marker alias (Mandatory[DbPower]
+        # == Annotated[Union[Annotated[float, Interval], Fluid], marker]) prevents
+        # Annotated flattening, so the mark sits one payload level down.
+        return _interval_bounds(get_args(annotation)[0])
     return lo, hi
 
 
