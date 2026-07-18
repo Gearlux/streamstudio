@@ -24,7 +24,13 @@ from fluxstudio.bridge import (
     only_taidal_nodes,
     register_module_nodes,
 )
-from fluxstudio.export import UnsupportedTopologyError, chain_output_paths, collect_export_marks, export_ops_yamls
+from fluxstudio.export import (
+    UnsupportedTopologyError,
+    chain_output_paths,
+    collect_export_marks,
+    export_flow_yamls,
+    export_ops_yamls,
+)
 from fluxstudio.nodes import NODE_CLASS_MAPPINGS as _STATIC_NODE_CLASS_MAPPINGS
 from fluxstudio.nodes import NODE_DISPLAY_NAME_MAPPINGS as _STATIC_NODE_DISPLAY_NAME_MAPPINGS
 
@@ -416,7 +422,12 @@ try:
                     wf_skip, wf_target = collect_export_marks(workflow)
                     skip_ids += wf_skip
                     target_ids += wf_target
-                yaml_docs = export_ops_yamls(
+                # ``flow: true`` emits the readable named-step flow: document instead of the
+                # flat serial ops: list (the same switch as the CLI's ``--flow``; both forms
+                # convert both ways with execution parity — sampleflux.flow).
+                use_flow = bool(body.get("flow")) if isinstance(body, dict) else False
+                exporter = export_flow_yamls if use_flow else export_ops_yamls
+                yaml_docs = exporter(
                     prompt, NODE_CLASS_MAPPINGS, skip_ids=skip_ids or None, target_ids=target_ids or None
                 )
                 # ``yaml`` (first doc) kept alongside ``yamls`` for older clients of the route.

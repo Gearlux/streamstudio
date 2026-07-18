@@ -4,11 +4,15 @@ import { api } from "../../scripts/api.js";
 console.log("ComfyFlux: Loaded Taidal.ExportOps extension");
 
 // Canvas-side companion to the /taidal/export_ops + /taidal/export_ops_graph backend routes + the
-// `fluxstudio export` CLI. TWO commands export the current graph's OPS (the op-kind nodes + the Mix
+// `fluxstudio export` CLI. The commands export the current graph's OPS (the op-kind nodes + the Mix
 // fan-in, dropping the source + Walk/Extract/viewer adapters), differing only in the OUTPUT format:
-//   * → Confluid YAML — COMPILE the op DAG to sequential Confluid op-list YAML(s) (auto Stash/Unstash
-//     + Mix folding + constant hoisting); ONE file per disconnected chain (ops_1.yaml … ops_N.yaml).
+//   * → Confluid YAML — COMPILE the op DAG to sequential Confluid op-list YAML(s) (auto Save/Use/Mix
+//     context ops + constant hoisting); ONE file per disconnected chain (ops_1.yaml … ops_N.yaml).
 //     Reattach to any source via Flux.from_ops_yaml / confluid.materialize(confluid.load(p)["ops"]).
+//   * → Flow YAML     — the READABLE named-step `flow:` document (same compile, lifted via
+//     sampleflux.flow.from_ops; the CLI twin is `fluxstudio export --flow`). Consume with
+//     FlowGraph.from_yaml (native engine) or Flux.from_flow_yaml (lowered to the serial form) —
+//     the two forms convert both ways with execution parity. Downloaded as flow.yaml.
 //   * → Graph         — extract the RAW op DAG *as drawn* into ONE ComfyUI workflow.json (no
 //     compilation — positions/widgets/wiring preserved), for saving or sharing the op subgraph.
 //     Downloaded as ops_graph.json.
@@ -25,7 +29,7 @@ function downloadBlob(text, filename, mime) {
     URL.revokeObjectURL(url);
 }
 
-async function exportOps() {
+async function exportOps(asFlow) {
     // graphToPrompt() returns { workflow, output }: `output` is the API-format prompt the backend
     // compiler consumes (same shape as ComfyUI "Save (API Format)"); `workflow` is the full UI
     // graph — node properties + subgraph definitions included. The export-skip / export-target
@@ -38,7 +42,7 @@ async function exportOps() {
         const res = await api.fetchApi("/taidal/export_ops", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ prompt: output, workflow }),
+            body: JSON.stringify({ prompt: output, workflow, flow: !!asFlow }),
         });
         const data = await res.json();
         if (!res.ok) {
@@ -48,11 +52,12 @@ async function exportOps() {
         }
         // One doc per independent op chain (`yamls`; `yaml` is the older single-doc field).
         const docs = data.yamls || [data.yaml];
+        const stem = asFlow ? "flow" : "ops";
         if (docs.length === 1) {
-            downloadBlob(docs[0], "ops.yaml", "text/yaml");
+            downloadBlob(docs[0], `${stem}.yaml`, "text/yaml");
         } else {
             // The browser may ask once to allow multiple downloads — expected.
-            docs.forEach((doc, i) => downloadBlob(doc, `ops_${i + 1}.yaml`, "text/yaml"));
+            docs.forEach((doc, i) => downloadBlob(doc, `${stem}_${i + 1}.yaml`, "text/yaml"));
         }
     } catch (err) {
         console.error("ExportOps: request failed", err);
@@ -97,7 +102,12 @@ app.registerExtension({
         {
             id: "taidal.exportOps",
             label: "Export Taidal Ops → Confluid YAML",
-            function: exportOps,
+            function: () => exportOps(false),
+        },
+        {
+            id: "taidal.exportFlow",
+            label: "Export Taidal Ops → Flow YAML",
+            function: () => exportOps(true),
         },
         {
             id: "taidal.exportOpsGraphSubgraphs",
@@ -114,7 +124,12 @@ app.registerExtension({
     menuCommands: [
         {
             path: ["Taidal"],
-            commands: ["taidal.exportOps", "taidal.exportOpsGraphSubgraphs", "taidal.exportOpsGraphFlat"],
+            commands: [
+                "taidal.exportOps",
+                "taidal.exportFlow",
+                "taidal.exportOpsGraphSubgraphs",
+                "taidal.exportOpsGraphFlat",
+            ],
         },
     ],
 });
