@@ -7,8 +7,8 @@ console.log("ComfyFlux: Loaded Taidal.ConfusionMatrix extension");
 // `{"ui": {"taidal_confusion_matrix":[payload, ...]}}` — a LIST of payloads, ONE per confusion matrix
 // extracted from the evaluator's `all_metrics` output (there can be several). ComfyUI delivers the list
 // to `onExecuted(message)`. Each payload carries: `counts` (N×N ints), `normalized.{true,pred,all}`
-// (precomputed in dataflux so the normalize toggle never re-runs), `class_names`, `n_classes`, `total`,
-// `name`. ALL computation lives in dataflux (`confusion_matrices_payload`) — this file only DRAWS + hovers.
+// (precomputed in sampleflux so the normalize toggle never re-runs), `class_names`, `n_classes`, `total`,
+// `name`. ALL computation lives in sampleflux (`confusion_matrices_payload`) — this file only DRAWS + hovers.
 //
 // RENDERS ON THE LITEGRAPH NODE CANVAS (onDrawForeground), NOT a DOM widget (the ArrayHistogram pattern):
 // rows = true class, columns = predicted class, cells coloured by value (the diagonal = correct), class

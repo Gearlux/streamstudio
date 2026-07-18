@@ -106,15 +106,15 @@ impairments_rx_config_2: !class:waivefront.torchsig.processing.ImpairmentsRxConf
   digital_agc: true
   digital_agc_probability: null
 ops:
-- !class:dataflux.ops.torch.SqueezeOp()
+- !class:sampleflux.ops.torch.SqueezeOp()
   dim: 0
 - !class:waivefront.processing.CropSignalLengthOp()
   length: 10ms
   mode: front
   seed: null
-- !class:dataflux.ops.stash.StashInputOp()
+- !class:sampleflux.ops.stash.StashInputOp()
   key: __taidal_stash_107_input
-- !class:dataflux.ops.stash.StashTargetOp()
+- !class:sampleflux.ops.stash.StashTargetOp()
   key: __taidal_stash_107_target
 - !class:waivefront.spectrogram.SpectrogramOp()
   fft_size: 1024
@@ -129,31 +129,31 @@ ops:
   eps: 1.0e-12
   to_db: true
   floor_db: null
-- !class:dataflux.ops.configure.ConfigureOp()
+- !class:sampleflux.ops.configure.ConfigureOp()
   ops:
-  - !class:dataflux.ops.numpy.MaxOp()
+  - !class:sampleflux.ops.numpy.MaxOp()
     axis: null
     keepdims: false
-  - !class:dataflux.ops.formula.FormulaOp()
+  - !class:sampleflux.ops.formula.FormulaOp()
     formula: a * 0.2
     var: a
-  target: !class:dataflux.ops.numpy.ThresholdOp()
+  target: !class:sampleflux.ops.numpy.ThresholdOp()
     high_level: NaN
     low_op: '>'
     high_op: <
   param: low_level
-- !class:dataflux.ops.stash.StashInputOp()
+- !class:sampleflux.ops.stash.StashInputOp()
   key: mask
   copy: false
-- !class:dataflux.ops.numpy.ConnectedComponentsOp()
+- !class:sampleflux.ops.numpy.ConnectedComponentsOp()
   min_area_bins: 10
   connectivity: 4
 - !class:waivefront.spectrogram.BboxesToRegionsOp()
   role: predicted
   label: 5GNR
-- !class:dataflux.ops.stash.UnstashInputOp()
+- !class:sampleflux.ops.stash.UnstashInputOp()
   key: __taidal_stash_107_input
-- !class:dataflux.ops.stash.UnstashTargetOp()
+- !class:sampleflux.ops.stash.UnstashTargetOp()
   key: __taidal_stash_107_target
 - !class:waivefront.torchsig.processing.ImpairmentsChain()
   probability: 1

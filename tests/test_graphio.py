@@ -17,10 +17,10 @@ from typing import Any, Dict
 import confluid
 import pytest
 from confluid import Class, Instance, LazyClass, Reference
-from dataflux import Flux
-from dataflux.ops.stash import StashInputOp
-from dataflux.ops.torch import RescaleOp
-from dataflux.sources import HuggingFaceSource
+from sampleflux import Flux
+from sampleflux.ops.stash import StashInputOp
+from sampleflux.ops.torch import RescaleOp
+from sampleflux.sources import HuggingFaceSource
 
 # local @configurable fixtures + the shared op node_mappings helper
 from test_export import AddOp, ChainLikeOp, ConstTxConfig, EmitOp, IfLikeOp, ThresholdLikeOp, _op_mappings
@@ -96,7 +96,7 @@ def test_yaml_to_workflow_engine_pipeline() -> None:
     assert wf["version"] == 0.4
     # one link source→flux.source, one link rescale.op→flux.op_0
     link_types = sorted(link[5] for link in wf["links"])
-    assert link_types == ["DATAFLUX_OP", "DATAFLUX_SOURCE"]
+    assert link_types == ["SAMPLEFLUX_OP", "SAMPLEFLUX_SOURCE"]
     # the op wires from its slot-1 (`op`) output; the source from slot-0
     by_id = {n["id"]: n for n in wf["nodes"]}
     for link in wf["links"]:
@@ -131,8 +131,8 @@ def test_dataset_processor_sink_round_trips_to_yaml() -> None:
     EXISTING whole-graph converter (no graphio change): the sink imports as an object-member node
     wired into the runnable's ``sink`` slot, and re-exports as a ``!class:`` sink the role-less
     ``dataset_processor`` root references. This is what makes a canvas sink pipeline serializable."""
-    from dataflux.storage.hdf5 import HDF5Sink
     from marainer.processing import DatasetProcessor
+    from sampleflux.storage.hdf5 import HDF5Sink
 
     nm = {
         "proc": create_comfy_node(DatasetProcessor, "proc"),
@@ -147,12 +147,12 @@ def test_dataset_processor_sink_round_trips_to_yaml() -> None:
         "sink": Class(HDF5Sink, path="/tmp/out.h5"),
     }
     wf = yaml_to_workflow(doc, nm)
-    # All four node types present; the sink is wired into the processor on a DATAFLUX_OBJECT:sink wire
-    # and the flux on a DATAFLUX_SOURCE wire (the two dock contracts the bridge establishes).
+    # All four node types present; the sink is wired into the processor on a SAMPLEFLUX_OBJECT:sink wire
+    # and the flux on a SAMPLEFLUX_SOURCE wire (the two dock contracts the bridge establishes).
     assert sorted(n["type"] for n in wf["nodes"]) == ["flux", "proc", "sink", "src"]
     link_socket_types = {link[5] for link in wf["links"]}
-    assert "DATAFLUX_OBJECT:sink" in link_socket_types
-    assert "DATAFLUX_SOURCE" in link_socket_types
+    assert "SAMPLEFLUX_OBJECT:sink" in link_socket_types
+    assert "SAMPLEFLUX_SOURCE" in link_socket_types
 
     # Export back: the role-less processor root references a flux + a !class: sink it carries.
     yaml_text = workflow_to_yaml(wf, nm)
@@ -256,7 +256,7 @@ def test_dropped_member_warning_is_interpolated() -> None:
     assert sorted(n["type"] for n in wf["nodes"]) == ["flux", "src"]  # RescaleOp dropped
     dropped = [m for m in messages if "no FluxStudio node" in m]
     assert dropped, "expected a drop warning for the unmapped RescaleOp member"
-    assert "dataflux.ops.torch.RescaleOp" in dropped[0]  # the args were interpolated …
+    assert "sampleflux.ops.torch.RescaleOp" in dropped[0]  # the args were interpolated …
     assert "%s" not in dropped[0]  # … not left as a literal stdlib template
 
 
@@ -284,41 +284,41 @@ def _canvas_workflow() -> Dict[str, Any]:
                 "id": 2,
                 "type": "Taidal_WalkDataset",
                 "widgets_values": [0, "increment", True],
-                "inputs": [{"name": "source", "type": "DATAFLUX_SOURCE", "link": 1}],
+                "inputs": [{"name": "source", "type": "SAMPLEFLUX_SOURCE", "link": 1}],
             },
             {
                 "id": 3,
                 "type": "rescale",
                 "widgets_values": op_widgets,
-                "inputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "link": 2}],
+                "inputs": [{"name": "sample", "type": "SAMPLEFLUX_SAMPLE", "link": 2}],
             },
             {
                 "id": 4,
                 "type": "rescale",
                 "widgets_values": op_widgets,
-                "inputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "link": 3}],
+                "inputs": [{"name": "sample", "type": "SAMPLEFLUX_SAMPLE", "link": 3}],
             },
             {
                 "id": 5,
                 "type": "Taidal_ExtractSample",
                 "widgets_values": ["input", "viridis", 512],
-                "inputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "link": 4}],
+                "inputs": [{"name": "sample", "type": "SAMPLEFLUX_SAMPLE", "link": 4}],
             },
             {"id": 6, "type": "PreviewImage", "widgets_values": [], "inputs": [{"name": "images", "link": 5}]},
             {
                 "id": 7,
                 "type": "rescale",
                 "widgets_values": op_widgets,
-                "inputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "link": 6}],
+                "inputs": [{"name": "sample", "type": "SAMPLEFLUX_SAMPLE", "link": 6}],
             },
         ],
         "links": [
-            [1, 1, 0, 2, 0, "DATAFLUX_SOURCE"],
-            [2, 2, 0, 3, 0, "DATAFLUX_SAMPLE"],
-            [3, 3, 0, 4, 0, "DATAFLUX_SAMPLE"],
-            [4, 4, 0, 5, 0, "DATAFLUX_SAMPLE"],
+            [1, 1, 0, 2, 0, "SAMPLEFLUX_SOURCE"],
+            [2, 2, 0, 3, 0, "SAMPLEFLUX_SAMPLE"],
+            [3, 3, 0, 4, 0, "SAMPLEFLUX_SAMPLE"],
+            [4, 4, 0, 5, 0, "SAMPLEFLUX_SAMPLE"],
             [5, 5, 0, 6, 0, "IMAGE"],
-            [6, 2, 0, 7, 0, "DATAFLUX_SAMPLE"],
+            [6, 2, 0, 7, 0, "SAMPLEFLUX_SAMPLE"],
         ],
     }
 
@@ -350,7 +350,7 @@ def test_extract_ops_workflow_keeps_only_op_nodes() -> None:
 
     graph = extract_ops_workflow(_canvas_workflow(), _canvas_mappings())
     assert {n["id"] for n in graph["nodes"]} == {3, 4, 7}
-    assert graph["links"] == [[3, 3, 0, 4, 0, "DATAFLUX_SAMPLE"]]  # only op(3)→op(4) survives
+    assert graph["links"] == [[3, 3, 0, 4, 0, "SAMPLEFLUX_SAMPLE"]]  # only op(3)→op(4) survives
     by_id = {n["id"]: n for n in graph["nodes"]}
     assert by_id[3]["inputs"][0]["link"] is None  # was fed by the (dropped) Walk adapter
     assert by_id[4]["inputs"][0]["link"] == 3  # fed by op(3), which survives
@@ -377,10 +377,10 @@ def test_extract_ops_workflow_includes_mix_fan_in() -> None:
             },
         ],
         "links": [
-            [1, 1, 0, 2, 0, "DATAFLUX_SOURCE"],  # src → op2  (src dropped → link drops too)
-            [4, 1, 0, 3, 0, "DATAFLUX_SOURCE"],  # src → op3
-            [2, 2, 0, 4, 0, "DATAFLUX_SAMPLE"],  # op2 → Mix.input
-            [3, 3, 0, 4, 1, "DATAFLUX_SAMPLE"],  # op3 → Mix.target
+            [1, 1, 0, 2, 0, "SAMPLEFLUX_SOURCE"],  # src → op2  (src dropped → link drops too)
+            [4, 1, 0, 3, 0, "SAMPLEFLUX_SOURCE"],  # src → op3
+            [2, 2, 0, 4, 0, "SAMPLEFLUX_SAMPLE"],  # op2 → Mix.input
+            [3, 3, 0, 4, 1, "SAMPLEFLUX_SAMPLE"],  # op3 → Mix.target
         ],
     }
     graph = extract_ops_workflow(workflow, _canvas_mappings())
@@ -397,33 +397,33 @@ def _op_through_subgraph_workflow() -> Dict[str, Any]:
                 "id": 1,
                 "type": "src",
                 "inputs": [],
-                "outputs": [{"name": "source", "type": "DATAFLUX_SOURCE", "links": [1]}],
+                "outputs": [{"name": "source", "type": "SAMPLEFLUX_SOURCE", "links": [1]}],
             },
             {
                 "id": 2,
                 "type": "rescale",
                 "widgets_values": [0.0, 255.0, 0.0, 1.0, False],
-                "inputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "link": 1}],
-                "outputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "links": [2]}],
+                "inputs": [{"name": "sample", "type": "SAMPLEFLUX_SAMPLE", "link": 1}],
+                "outputs": [{"name": "sample", "type": "SAMPLEFLUX_SAMPLE", "links": [2]}],
             },
             {
                 "id": 3,
                 "type": "sg-chain",  # a subgraph instance (its type is the definition id)
-                "inputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "link": 2}],
-                "outputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "links": [3]}],
+                "inputs": [{"name": "sample", "type": "SAMPLEFLUX_SAMPLE", "link": 2}],
+                "outputs": [{"name": "sample", "type": "SAMPLEFLUX_SAMPLE", "links": [3]}],
             },
             {
                 "id": 4,
                 "type": "rescale",
                 "widgets_values": [0.0, 255.0, 0.0, 1.0, False],
-                "inputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "link": 3}],
-                "outputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "links": []}],
+                "inputs": [{"name": "sample", "type": "SAMPLEFLUX_SAMPLE", "link": 3}],
+                "outputs": [{"name": "sample", "type": "SAMPLEFLUX_SAMPLE", "links": []}],
             },
         ],
         "links": [
-            [1, 1, 0, 2, 0, "DATAFLUX_SOURCE"],
-            [2, 2, 0, 3, 0, "DATAFLUX_SAMPLE"],
-            [3, 3, 0, 4, 0, "DATAFLUX_SAMPLE"],
+            [1, 1, 0, 2, 0, "SAMPLEFLUX_SOURCE"],
+            [2, 2, 0, 3, 0, "SAMPLEFLUX_SAMPLE"],
+            [3, 3, 0, 4, 0, "SAMPLEFLUX_SAMPLE"],
         ],
         "definitions": {"subgraphs": [_chain_subgraph_def("sg-chain")]},
     }
@@ -468,7 +468,7 @@ def test_extract_ops_workflow_flatten_contracts_through_dropped_node() -> None:
                 "id": 1,
                 "type": "rescale",
                 "inputs": [],
-                "outputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "links": [1]}],
+                "outputs": [{"name": "sample", "type": "SAMPLEFLUX_SAMPLE", "links": [1]}],
             },
             {
                 "id": 2,
@@ -479,11 +479,11 @@ def test_extract_ops_workflow_flatten_contracts_through_dropped_node() -> None:
             {
                 "id": 3,
                 "type": "rescale",
-                "inputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "link": 2}],
-                "outputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "links": []}],
+                "inputs": [{"name": "sample", "type": "SAMPLEFLUX_SAMPLE", "link": 2}],
+                "outputs": [{"name": "sample", "type": "SAMPLEFLUX_SAMPLE", "links": []}],
             },
         ],
-        "links": [[1, 1, 0, 2, 0, "DATAFLUX_SAMPLE"], [2, 2, 0, 3, 0, "DATAFLUX_SAMPLE"]],
+        "links": [[1, 1, 0, 2, 0, "SAMPLEFLUX_SAMPLE"], [2, 2, 0, 3, 0, "SAMPLEFLUX_SAMPLE"]],
     }
     g = extract_ops_workflow(workflow, _canvas_mappings(), flatten=True)
     assert {n["id"] for n in g["nodes"]} == {1, 3}  # the Reroute is dropped
@@ -507,29 +507,29 @@ def test_extract_ops_workflow_honors_target_mark_and_keeps_config() -> None:
                 "id": 1,
                 "type": "rescale",
                 "inputs": [],
-                "outputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "links": [1, 2]}],
+                "outputs": [{"name": "sample", "type": "SAMPLEFLUX_SAMPLE", "links": [1, 2]}],
             },
             {
                 "id": 2,
                 "type": "rescale",
                 "properties": {"taidal_export": "target"},
                 "inputs": [
-                    {"name": "sample", "type": "DATAFLUX_SAMPLE", "link": 1},
+                    {"name": "sample", "type": "SAMPLEFLUX_SAMPLE", "link": 1},
                     {"name": "in_max", "type": "STRING", "link": 3},
                 ],
-                "outputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "links": []}],
+                "outputs": [{"name": "sample", "type": "SAMPLEFLUX_SAMPLE", "links": []}],
             },
             {
                 "id": 3,  # a dead-end tap off op1 — NOT an ancestor of the target → must be dropped
                 "type": "rescale",
-                "inputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "link": 2}],
-                "outputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "links": []}],
+                "inputs": [{"name": "sample", "type": "SAMPLEFLUX_SAMPLE", "link": 2}],
+                "outputs": [{"name": "sample", "type": "SAMPLEFLUX_SAMPLE", "links": []}],
             },
             {"id": 4, "type": "cfg", "inputs": [], "outputs": [{"name": "value", "type": "STRING", "links": [3]}]},
         ],
         "links": [
-            [1, 1, 0, 2, 0, "DATAFLUX_SAMPLE"],  # op1 → target op2
-            [2, 1, 0, 3, 0, "DATAFLUX_SAMPLE"],  # op1 → tap op3 (off-cone)
+            [1, 1, 0, 2, 0, "SAMPLEFLUX_SAMPLE"],  # op1 → target op2
+            [2, 1, 0, 3, 0, "SAMPLEFLUX_SAMPLE"],  # op1 → tap op3 (off-cone)
             [3, 4, 0, 2, 1, "STRING"],  # cfg4 → target op2 (config feeder)
         ],
     }
@@ -571,10 +571,10 @@ def test_export_folds_fan_out_into_tee() -> None:
             "id": 8,
             "type": "rescale",
             "widgets_values": [0.0, 99.0, 0.0, 1.0, False],
-            "inputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "link": 7}],
+            "inputs": [{"name": "sample", "type": "SAMPLEFLUX_SAMPLE", "link": 7}],
         }
     )
-    workflow["links"].append([7, 3, 0, 8, 0, "DATAFLUX_SAMPLE"])  # node 3 now fans out to 4 AND 8
+    workflow["links"].append([7, 3, 0, 8, 0, "SAMPLEFLUX_SAMPLE"])  # node 3 now fans out to 4 AND 8
     yaml_text = workflow_to_yaml(workflow, _canvas_mappings())
     graph = confluid.resolve(yaml_text)
     ops = graph["pipeline"].kwargs["ops"]
@@ -620,7 +620,7 @@ def test_export_failing_taidal_node_is_isolated_with_warning() -> None:
 def test_export_dropped_config_wire_is_commented() -> None:
     # A wire from a skipped node into a REAL config member (DatasetSplit.source here) is
     # dropped — the member falls back to its default — and noted in the comment block.
-    from dataflux.sources import DatasetSplit
+    from sampleflux.sources import DatasetSplit
 
     nm = {"split": create_comfy_node(DatasetSplit, "split")}
     workflow = {
@@ -630,10 +630,10 @@ def test_export_dropped_config_wire_is_commented() -> None:
                 "id": 2,
                 "type": "split",
                 "widgets_values": [],
-                "inputs": [{"name": "source", "type": "DATAFLUX_SOURCE", "link": 1}],
+                "inputs": [{"name": "source", "type": "SAMPLEFLUX_SOURCE", "link": 1}],
             },
         ],
-        "links": [[1, 1, 0, 2, 0, "DATAFLUX_SOURCE"]],
+        "links": [[1, 1, 0, 2, 0, "SAMPLEFLUX_SOURCE"]],
     }
     yaml_text = workflow_to_yaml(workflow, nm)
     assert "node 1 (LoadImage): native ComfyUI node" in yaml_text
@@ -660,25 +660,25 @@ def _chain_subgraph_def(def_id: str) -> Dict[str, Any]:
         "name": "Chain",
         "inputNode": {"id": -10},
         "outputNode": {"id": -20},
-        "inputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE"}, {"name": "k", "type": "FLOAT"}],
-        "outputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE"}],
+        "inputs": [{"name": "sample", "type": "SAMPLEFLUX_SAMPLE"}, {"name": "k", "type": "FLOAT"}],
+        "outputs": [{"name": "sample", "type": "SAMPLEFLUX_SAMPLE"}],
         "nodes": [
             {
                 "id": 21,
                 "type": "rescale",
                 "widgets_values": [0.0, 9.0, 0.0, 1.0, False],
                 "inputs": [
-                    {"name": "sample", "type": "DATAFLUX_SAMPLE", "link": 197},
+                    {"name": "sample", "type": "SAMPLEFLUX_SAMPLE", "link": 197},
                     {"name": "in_max", "type": "FLOAT", "widget": {"name": "in_max"}, "link": 198},
                 ],
-                "outputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "links": [194]}],
+                "outputs": [{"name": "sample", "type": "SAMPLEFLUX_SAMPLE", "links": [194]}],
             },
             {
                 "id": 22,
                 "type": "rescale",
                 "widgets_values": [0.0, 7.0, 0.0, 1.0, False],
-                "inputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "link": 194}],
-                "outputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "links": [199]}],
+                "inputs": [{"name": "sample", "type": "SAMPLEFLUX_SAMPLE", "link": 194}],
+                "outputs": [{"name": "sample", "type": "SAMPLEFLUX_SAMPLE", "links": [199]}],
             },
         ],
         "links": [
@@ -688,7 +688,7 @@ def _chain_subgraph_def(def_id: str) -> Dict[str, Any]:
                 "origin_slot": 0,
                 "target_id": 22,
                 "target_slot": 0,
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
             },
             {
                 "id": 197,
@@ -696,7 +696,7 @@ def _chain_subgraph_def(def_id: str) -> Dict[str, Any]:
                 "origin_slot": 0,
                 "target_id": 21,
                 "target_slot": 0,
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
             },
             {"id": 198, "origin_id": -10, "origin_slot": 1, "target_id": 21, "target_slot": 1, "type": "FLOAT"},
             {
@@ -705,7 +705,7 @@ def _chain_subgraph_def(def_id: str) -> Dict[str, Any]:
                 "origin_slot": 0,
                 "target_id": -20,
                 "target_slot": 0,
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
             },
         ],
     }
@@ -720,24 +720,24 @@ def _two_instance_workflow() -> Dict[str, Any]:
                 "type": "src",
                 "widgets_values": ["mnist", "", "image", "label", "", ""],
                 "inputs": [],
-                "outputs": [{"name": "source", "type": "DATAFLUX_SOURCE", "links": [1, 3]}],
+                "outputs": [{"name": "source", "type": "SAMPLEFLUX_SOURCE", "links": [1, 3]}],
             },
             {
                 "id": 2,
                 "type": "sg-chain",
                 "widgets_values": [],
                 "inputs": [
-                    {"name": "sample", "type": "DATAFLUX_SAMPLE", "link": 1},
+                    {"name": "sample", "type": "SAMPLEFLUX_SAMPLE", "link": 1},
                     {"name": "k", "type": "FLOAT", "widget": {"name": "k"}, "link": 4},
                 ],
-                "outputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "links": [2]}],
+                "outputs": [{"name": "sample", "type": "SAMPLEFLUX_SAMPLE", "links": [2]}],
             },
             {
                 "id": 3,
                 "type": "sg-chain",
                 "widgets_values": [],
-                "inputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "link": 3}],
-                "outputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "links": []}],
+                "inputs": [{"name": "sample", "type": "SAMPLEFLUX_SAMPLE", "link": 3}],
+                "outputs": [{"name": "sample", "type": "SAMPLEFLUX_SAMPLE", "links": []}],
             },
             {
                 "id": 4,
@@ -755,9 +755,9 @@ def _two_instance_workflow() -> Dict[str, Any]:
             },
         ],
         "links": [
-            [1, 1, 0, 2, 0, "DATAFLUX_SAMPLE"],
+            [1, 1, 0, 2, 0, "SAMPLEFLUX_SAMPLE"],
             [2, 2, 0, 5, 0, "IMAGE"],
-            [3, 1, 0, 3, 0, "DATAFLUX_SAMPLE"],
+            [3, 1, 0, 3, 0, "SAMPLEFLUX_SAMPLE"],
             [4, 4, 0, 2, 1, "FLOAT"],
         ],
         "definitions": {"subgraphs": [_chain_subgraph_def("sg-chain")]},
@@ -825,8 +825,8 @@ def test_inline_subgraphs_nested_definitions_flatten() -> None:
                 "id": 31,
                 "type": "rescale",
                 "widgets_values": [0.0, 9.0, 0.0, 1.0, False],
-                "inputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "link": 100}],
-                "outputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "links": [101]}],
+                "inputs": [{"name": "sample", "type": "SAMPLEFLUX_SAMPLE", "link": 100}],
+                "outputs": [{"name": "sample", "type": "SAMPLEFLUX_SAMPLE", "links": [101]}],
             }
         ],
         "links": [
@@ -836,7 +836,7 @@ def test_inline_subgraphs_nested_definitions_flatten() -> None:
                 "origin_slot": 0,
                 "target_id": 31,
                 "target_slot": 0,
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
             },
             {
                 "id": 101,
@@ -844,7 +844,7 @@ def test_inline_subgraphs_nested_definitions_flatten() -> None:
                 "origin_slot": 0,
                 "target_id": -20,
                 "target_slot": 0,
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
             },
         ],
     }
@@ -857,8 +857,8 @@ def test_inline_subgraphs_nested_definitions_flatten() -> None:
                 "id": 41,
                 "type": "sg-inner",
                 "widgets_values": [],
-                "inputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "link": 110}],
-                "outputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "links": [111]}],
+                "inputs": [{"name": "sample", "type": "SAMPLEFLUX_SAMPLE", "link": 110}],
+                "outputs": [{"name": "sample", "type": "SAMPLEFLUX_SAMPLE", "links": [111]}],
             }
         ],
         "links": [
@@ -868,7 +868,7 @@ def test_inline_subgraphs_nested_definitions_flatten() -> None:
                 "origin_slot": 0,
                 "target_id": 41,
                 "target_slot": 0,
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
             },
             {
                 "id": 111,
@@ -876,7 +876,7 @@ def test_inline_subgraphs_nested_definitions_flatten() -> None:
                 "origin_slot": 0,
                 "target_id": -20,
                 "target_slot": 0,
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
             },
         ],
     }
@@ -887,17 +887,17 @@ def test_inline_subgraphs_nested_definitions_flatten() -> None:
                 "type": "src",
                 "widgets_values": ["mnist", "", "image", "label", "", ""],
                 "inputs": [],
-                "outputs": [{"name": "source", "type": "DATAFLUX_SOURCE", "links": [1]}],
+                "outputs": [{"name": "source", "type": "SAMPLEFLUX_SOURCE", "links": [1]}],
             },
             {
                 "id": 2,
                 "type": "sg-outer",
                 "widgets_values": [],
-                "inputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "link": 1}],
-                "outputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "links": []}],
+                "inputs": [{"name": "sample", "type": "SAMPLEFLUX_SAMPLE", "link": 1}],
+                "outputs": [{"name": "sample", "type": "SAMPLEFLUX_SAMPLE", "links": []}],
             },
         ],
-        "links": [[1, 1, 0, 2, 0, "DATAFLUX_SAMPLE"]],
+        "links": [[1, 1, 0, 2, 0, "SAMPLEFLUX_SAMPLE"]],
         "definitions": {"subgraphs": [inner_def, outer_def]},
     }
     flat = _inline_subgraphs(workflow)
@@ -1021,7 +1021,7 @@ def test_subgraph_free_ref_becomes_input_socket() -> None:
     wf = yaml_to_workflow(doc, nm, as_="subgraph", name="component")
     sg = wf["definitions"]["subgraphs"][0]
     assert [i["name"] for i in sg["inputs"]] == ["raw"]
-    assert sg["inputs"][0]["type"] == "DATAFLUX_SOURCE"
+    assert sg["inputs"][0]["type"] == "SAMPLEFLUX_SOURCE"
 
 
 @pytest.mark.skipif(not _MNIST_CFG.exists(), reason="sonair MNIST example not checked out")
@@ -1169,9 +1169,9 @@ def test_linked_converted_widget_placeholder_is_ignored() -> None:
 
 
 def test_single_op_wire_exports_ref() -> None:
-    # ConfigureOp's wired `target` (one DATAFLUX_OP value) references the op's standalone
+    # ConfigureOp's wired `target` (one SAMPLEFLUX_OP value) references the op's standalone
     # entry by name — the op-value producer is not folded into the pipeline.
-    from dataflux.ops.configure import ConfigureOp
+    from sampleflux.ops.configure import ConfigureOp
 
     nm = {
         "src": create_comfy_node(HuggingFaceSource, "src"),
@@ -1210,7 +1210,7 @@ def test_value_chain_compiles_to_configure_op_in_pipeline() -> None:
         },
     }
     yaml_text = workflow_to_yaml(prompt, nm)
-    assert "!class:dataflux.ops.configure.ConfigureOp" in yaml_text
+    assert "!class:sampleflux.ops.configure.ConfigureOp" in yaml_text
     assert "formula: a * 0.2" in yaml_text
     assert ".low_level" not in yaml_text  # no dropped-wire comment — the wire compiled
     assert "(Taidal_Math)" not in yaml_text and "(Taidal_ExtractSample)" not in yaml_text
@@ -1244,9 +1244,9 @@ def test_output_capture_compiles_to_configure_op_in_pipeline() -> None:
         "3": {"class_type": "threshold", "inputs": {"sample": ["2", 0], "low_level": ["2", 2], "gain": 1.5}},
     }
     yaml_text = workflow_to_yaml(prompt, nm)
-    assert "!class:dataflux.ops.capture.CaptureOutputOp" in yaml_text
-    assert "!class:dataflux.ops.configure.ConfigureOp" in yaml_text
-    assert "!class:dataflux.ops.stash.UnstashInputOp" in yaml_text
+    assert "!class:sampleflux.ops.capture.CaptureOutputOp" in yaml_text
+    assert "!class:sampleflux.ops.configure.ConfigureOp" in yaml_text
+    assert "!class:sampleflux.ops.stash.UnstashInputOp" in yaml_text
     assert "__taidal_output_2_emitted" in yaml_text
     assert ".low_level" not in yaml_text  # the wire compiled — no dropped-wire comment
 
@@ -1276,7 +1276,7 @@ def test_value_chain_wraps_standalone_op_entry() -> None:
         "6": {"class_type": "threshold", "inputs": {"low_level": ["5", 3]}},
     }
     yaml_text = workflow_to_yaml(prompt, nm)
-    assert "threshold_like_op: !class:dataflux.ops.configure.ConfigureOp" in yaml_text
+    assert "threshold_like_op: !class:sampleflux.ops.configure.ConfigureOp" in yaml_text
     assert "formula: a + 1" in yaml_text
 
 
@@ -1293,7 +1293,7 @@ def test_export_skip_property_skips_node_and_downstream() -> None:
                 "id": 2,
                 "type": "rescale",
                 "widgets_values": [],
-                "inputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "link": 1}],
+                "inputs": [{"name": "sample", "type": "SAMPLEFLUX_SAMPLE", "link": 1}],
                 "outputs": [],
                 "properties": {"taidal_export": "skip"},
             },
@@ -1301,16 +1301,16 @@ def test_export_skip_property_skips_node_and_downstream() -> None:
                 "id": 3,
                 "type": "rescale",
                 "widgets_values": [],
-                "inputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "link": 2}],
+                "inputs": [{"name": "sample", "type": "SAMPLEFLUX_SAMPLE", "link": 2}],
                 "outputs": [],
             },
         ],
-        "links": [[1, 1, 0, 2, 0, "DATAFLUX_SAMPLE"], [2, 2, 0, 3, 0, "DATAFLUX_SAMPLE"]],
+        "links": [[1, 1, 0, 2, 0, "SAMPLEFLUX_SAMPLE"], [2, 2, 0, 3, 0, "SAMPLEFLUX_SAMPLE"]],
     }
     yaml_text = workflow_to_yaml(wf, nm)
     assert "excluded by export-skip mark" in yaml_text
     assert "node 2" in yaml_text and "node 3" in yaml_text  # the descendant is skipped too
-    assert "!class:dataflux.ops.torch.RescaleOp" not in yaml_text  # neither op exports
+    assert "!class:sampleflux.ops.torch.RescaleOp" not in yaml_text  # neither op exports
     assert "hugging_face_source:" in yaml_text  # the sample path before the mark survives
 
 
@@ -1328,14 +1328,14 @@ def test_export_skip_prunes_only_non_sample_feeders() -> None:
                 "type": "chain",
                 "widgets_values": [],
                 "inputs": [
-                    {"name": "sample", "type": "DATAFLUX_SAMPLE", "link": 1},
+                    {"name": "sample", "type": "SAMPLEFLUX_SAMPLE", "link": 1},
                     {"name": "tx_disabled", "type": "*", "link": 2},
                 ],
                 "outputs": [],
                 "properties": {"taidal_export": "skip"},
             },
         ],
-        "links": [[1, 1, 0, 3, 0, "DATAFLUX_SAMPLE"], [2, 9, 0, 3, 1, "*"]],
+        "links": [[1, 1, 0, 3, 0, "SAMPLEFLUX_SAMPLE"], [2, 9, 0, 3, 1, "*"]],
     }
     yaml_text = workflow_to_yaml(wf, nm)
     assert "const_tx_config:" not in yaml_text  # pruned with its only (marked) consumer
@@ -1348,13 +1348,13 @@ def test_export_skip_prunes_only_non_sample_feeders() -> None:
             "type": "chain",
             "widgets_values": [],
             "inputs": [
-                {"name": "sample", "type": "DATAFLUX_SAMPLE", "link": 3},
+                {"name": "sample", "type": "SAMPLEFLUX_SAMPLE", "link": 3},
                 {"name": "tx_disabled", "type": "*", "link": 4},
             ],
             "outputs": [],
         }
     )
-    wf["links"].extend([[3, 1, 0, 4, 0, "DATAFLUX_SAMPLE"], [4, 9, 0, 4, 1, "*"]])
+    wf["links"].extend([[3, 1, 0, 4, 0, "SAMPLEFLUX_SAMPLE"], [4, 9, 0, 4, 1, "*"]])
     yaml_text = workflow_to_yaml(wf, nm)
     assert "const_tx_config:" in yaml_text
     assert "!ref 'const_tx_config.disabled'" in yaml_text
@@ -1371,14 +1371,14 @@ def test_export_target_property_restricts_to_cone() -> None:
                 "id": 2,
                 "type": "rescale",
                 "widgets_values": [],
-                "inputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "link": 1}],
+                "inputs": [{"name": "sample", "type": "SAMPLEFLUX_SAMPLE", "link": 1}],
                 "outputs": [],
             },
             {
                 "id": 3,  # the target
                 "type": "rescale",
                 "widgets_values": [],
-                "inputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "link": 2}],
+                "inputs": [{"name": "sample", "type": "SAMPLEFLUX_SAMPLE", "link": 2}],
                 "outputs": [],
                 "properties": {"taidal_export": "target"},
             },
@@ -1386,14 +1386,14 @@ def test_export_target_property_restricts_to_cone() -> None:
                 "id": 4,  # viewer branch off the fork — outside the cone
                 "type": "rescale",
                 "widgets_values": [],
-                "inputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "link": 3}],
+                "inputs": [{"name": "sample", "type": "SAMPLEFLUX_SAMPLE", "link": 3}],
                 "outputs": [],
             },
         ],
         "links": [
-            [1, 1, 0, 2, 0, "DATAFLUX_SAMPLE"],
-            [2, 2, 0, 3, 0, "DATAFLUX_SAMPLE"],
-            [3, 2, 0, 4, 0, "DATAFLUX_SAMPLE"],
+            [1, 1, 0, 2, 0, "SAMPLEFLUX_SAMPLE"],
+            [2, 2, 0, 3, 0, "SAMPLEFLUX_SAMPLE"],
+            [3, 2, 0, 4, 0, "SAMPLEFLUX_SAMPLE"],
         ],
     }
     yaml_text = workflow_to_yaml(wf, nm)
@@ -1449,7 +1449,7 @@ def test_subgraph_op_terminator_skipped_gracefully_in_whole_graph_export() -> No
                 "id": 1,
                 "type": "Taidal_SubgraphOp",
                 "widgets_values": [],
-                "inputs": [{"name": "sample", "type": "DATAFLUX_SAMPLE", "link": None}],
+                "inputs": [{"name": "sample", "type": "SAMPLEFLUX_SAMPLE", "link": None}],
             },
         ],
         "links": [],
@@ -1479,7 +1479,7 @@ def _sample_consumers(wf: Dict[str, Any]) -> tuple:
     nodes = {n["id"]: n for n in wf["nodes"]}
     consumers: Dict[int, list] = {}
     for _lid, src, _sslot, dst, didx, ltype in wf["links"]:
-        if ltype == "DATAFLUX_SAMPLE" and nodes[dst]["inputs"][didx].get("name") == "sample":
+        if ltype == "SAMPLEFLUX_SAMPLE" and nodes[dst]["inputs"][didx].get("name") == "sample":
             consumers.setdefault(src, []).append(dst)
     return nodes, consumers
 
@@ -1532,12 +1532,12 @@ def test_ops_import_fanout_reconstructs_branches_and_mix_drops_autostash() -> No
     }
     nm = _ops_import_mappings()
     doc = export_ops_yaml(prompt, nm)
-    assert "StashInputOp" in doc  # the export DID insert auto-stashes to sequentialize the fork
+    assert "context.Save" in doc  # the export DID insert context ops to sequentialize the fork
     wf = ops_yaml_to_workflow(doc, nm)
     types = _types(wf)
     assert types.count("Taidal_AddOp") == 4
     assert types.count("Taidal_MixSamples") == 1  # the Mix fan-in is reconstructed
-    assert not any("Stash" in t for t in types)  # every auto-inserted stash/unstash is gone
+    assert not any("Save" in t or "Stash" in t or t.endswith("_Use") for t in types)  # auto context ops absorbed
     nodes, consumers = _sample_consumers(wf)
     # the fork node (AddOp amount=1) feeds two branches; the Mix feeds the tail op
     fork = next(nid for nid, n in nodes.items() if n["type"] == "Taidal_AddOp" and 1.0 in n["widgets_values"])
@@ -1589,10 +1589,12 @@ def test_ops_import_keeps_user_stash_op_but_drops_auto_stash() -> None:
     assert stash[0]["id"] in consumers  # feeds the next op
 
 
-def test_ops_import_rebuilds_mix_for_a_restored_one_shot_branch() -> None:
-    # "Always rebuild a Mix": a fork's ONE-SHOT side branch re-joins the main flow via a reconstructed
-    # Mix Samples node (input/target from the fork, metadata from the branch tail) instead of being a
-    # dead-end tap — this is the impairments `107` pattern (the detection branch merged back by Mix).
+def test_ops_import_one_shot_branch_is_a_faithful_fan_out() -> None:
+    # Under the context-ops compiler, branches are ISOLATED (each restarts from the fork
+    # cell) — there is no metadata bus for a one-shot side branch to leak onto, so the
+    # import reconstructs a plain fan-out with NO guessed Mix (the old exporter's
+    # bus-accumulation approximation forced the importer to fabricate one; that heuristic
+    # is retired with the bus). The unconsumed branch tail is a colored dead-end tap.
     prompt = {
         "1": _WALK,
         "2": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["1", 0], "amount": 1.0}},  # fork
@@ -1602,17 +1604,12 @@ def test_ops_import_rebuilds_mix_for_a_restored_one_shot_branch() -> None:
     nm = _ops_import_mappings()
     wf = ops_yaml_to_workflow(export_ops_yaml(prompt, nm), nm)
     nodes = {n["id"]: n for n in wf["nodes"]}
-    assert _types(wf).count("Taidal_MixSamples") == 1  # the branch re-joins via a Mix, not a dead end
+    assert _types(wf).count("Taidal_MixSamples") == 0  # no fabricated merge — the graph has none
+    fork = next(nid for nid, n in nodes.items() if n["type"] == "Taidal_AddOp" and 1.0 in n["widgets_values"])
+    _nodes, consumers = _sample_consumers(wf)
+    assert len(consumers[fork]) == 2  # the fork feeds both branches
     emit = next(nid for nid, n in nodes.items() if n["type"] == "Taidal_EmitOp")
-    mix = next(nid for nid, n in nodes.items() if n["type"] == "Taidal_MixSamples")
-    # EmitOp (the branch tail) feeds the Mix's metadata_sample — so it is NOT a colored dead end
-    meta = [
-        ln
-        for ln in wf["links"]
-        if ln[1] == emit and ln[3] == mix and nodes[mix]["inputs"][ln[4]]["name"] == "metadata_sample"
-    ]
-    assert len(meta) == 1
-    assert not nodes[emit].get("color")  # re-joined via the Mix, no longer a dead-end tap
+    assert nodes[emit].get("color")  # the unconsumed branch tail is a colored dead-end tap
 
 
 def test_ops_import_is_json_safe_with_non_finite_widget() -> None:
@@ -1635,7 +1632,7 @@ def test_complete_widget_input_slots_restores_full_list_and_remaps_links() -> No
         def INPUT_TYPES() -> Dict[str, Any]:
             return {
                 "required": {"a": ("FLOAT", {}), "b": ("STRING", {}), "c": ("INT", {})},
-                "optional": {"sample": ("DATAFLUX_SAMPLE",)},
+                "optional": {"sample": ("SAMPLEFLUX_SAMPLE",)},
             }
 
     workflow: Dict[str, Any] = {
@@ -1645,7 +1642,7 @@ def test_complete_widget_input_slots_restores_full_list_and_remaps_links() -> No
                 "id": 2,
                 "type": "fakeop",
                 "inputs": [  # INCOMPLETE: only the socket + the one wired widget `b` (at slot 1)
-                    {"name": "sample", "type": "DATAFLUX_SAMPLE", "link": None},
+                    {"name": "sample", "type": "SAMPLEFLUX_SAMPLE", "link": None},
                     {"name": "b", "type": "STRING", "link": 5, "widget": {"name": "b"}},
                 ],
                 "widgets_values": [1.0, "x", 3],  # a, b, c

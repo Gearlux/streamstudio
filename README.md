@@ -1,8 +1,8 @@
 # FluxStudio
 
-Auto-generating [ComfyUI](https://github.com/comfyanonymous/ComfyUI) nodes from [DataFlux](https://github.com/Gearlux/data-flux) / Waivefront operations.
+Auto-generating [ComfyUI](https://github.com/comfyanonymous/ComfyUI) nodes from [SampleFlux](https://github.com/Gearlux/sampleflux) / Waivefront operations.
 
-FluxStudio is the GUI layer of [Taidal](https://github.com/Gearlux). Rather than ship its own editor, it runs as a ComfyUI **custom node** package: every callable already exposed by DataFlux, Waivefront, or HuggingFace `datasets` is auto-wrapped into a ComfyUI node, so you compose and run pipelines visually on ComfyUI's canvas with no FluxStudio-specific ops to maintain.
+FluxStudio is the GUI layer of [Taidal](https://github.com/Gearlux). Rather than ship its own editor, it runs as a ComfyUI **custom node** package: every callable already exposed by SampleFlux, Waivefront, or HuggingFace `datasets` is auto-wrapped into a ComfyUI node, so you compose and run pipelines visually on ComfyUI's canvas with no FluxStudio-specific ops to maintain.
 
 > **v0.2.0 pivot.** This release replaces the previous bespoke FastAPI server + React/`@xyflow` frontend with the ComfyUI-extension design below. The old `/api/*` server, `SteppingExecutor`, Confluid-YAML graph round-trip, and type→visualizer registry have been removed.
 
@@ -39,9 +39,9 @@ Reuse an existing ComfyUI checkout with `--comfy-dir`:
 fluxstudio --comfy-dir /path/to/ComfyUI
 ```
 
-Taidal nodes then appear in ComfyUI's *Add Node* menu grouped by what they ARE, not by which package ships them. A role-bearing class nests under `Taidal/<Role>[/<Task>]` (role-first) — e.g. `Taidal/Model/Classification`, `Taidal/Trainer/Detection`, `Taidal/Logger` (loggers are task-agnostic, so no task level). An op / source / engine nests under `Taidal/<Category>[/<group>]` — `Taidal/Op/numpy`, `Taidal/Source`. The **producing package rides the node label** as an uppercased tag — `[SONAIR] TimmModel`, `[DATAFLUX] RescaleOp` — so you can tell where a node comes from without burying it in a per-package folder.
+Taidal nodes then appear in ComfyUI's *Add Node* menu grouped by what they ARE, not by which package ships them. A role-bearing class nests under `Taidal/<Role>[/<Task>]` (role-first) — e.g. `Taidal/Model/Classification`, `Taidal/Trainer/Detection`, `Taidal/Logger` (loggers are task-agnostic, so no task level). An op / source / engine nests under `Taidal/<Category>[/<group>]` — `Taidal/Op/numpy`, `Taidal/Source`. The **producing package rides the node label** as an uppercased tag — `[SONAIR] TimmModel`, `[SAMPLEFLUX] RescaleOp` — so you can tell where a node comes from without burying it in a per-package folder.
 
-Object sockets (model / loss / metric) are **role-qualified and task-agnostic**: a classification model and a segmentation model both carry `DATAFLUX_OBJECT:model`, so a model docks into *any* trainer's `model` slot — the role still stops you wiring a loss into a model slot. The **Retag** node re-stamps an object's role to force a connection when you need it.
+Object sockets (model / loss / metric) are **role-qualified and task-agnostic**: a classification model and a segmentation model both carry `SAMPLEFLUX_OBJECT:model`, so a model docks into *any* trainer's `model` slot — the role still stops you wiring a loss into a model slot. The **Retag** node re-stamps an object's role to force a connection when you need it.
 
 A model node can come from a **builder function**, not just a class. Many libraries ship their models as factory functions — torchvision's detectors are `fasterrcnn_resnet50_fpn(...)`, `ssdlite320_mobilenet_v3_large(...)`, etc. These are registered (`raidar.configurables`, with `role="model"`), so each appears under `Taidal/Model/Detection` as an object node whose widgets (`num_classes`, `weights_backbone`, …) are read straight from the function's signature. Wire its **`class`** output into a detection **Trainer**'s `model` slot — because the node is lazy, the trainer injects the dataset-derived `num_classes` at run time, so you can leave that widget blank.
 
@@ -80,7 +80,7 @@ By default the palette shows ComfyUI's built-in nodes (KSampler, Preview Image, 
 fluxstudio --no-default-nodes
 ```
 
-This (a) prunes ComfyUI's built-in / `comfy_extras` / API nodes from the *Add Node* menu, leaving the auto-discovered Taidal nodes (and any other third-party custom nodes), and (b) surfaces the Taidal nodes at the **palette root** — `DataFlux/Op/numpy`, `Waivefront/Op/targets`, `FluxStudio` — instead of nested under a `Taidal/` folder (there's nothing left to disambiguate them from). The default `--default-nodes` keeps everything visible and the `Taidal/` grouping.
+This (a) prunes ComfyUI's built-in / `comfy_extras` / API nodes from the *Add Node* menu, leaving the auto-discovered Taidal nodes (and any other third-party custom nodes), and (b) surfaces the Taidal nodes at the **palette root** — `SampleFlux/Op/numpy`, `Waivefront/Op/targets`, `FluxStudio` — instead of nested under a `Taidal/` folder (there's nothing left to disambiguate them from). The default `--default-nodes` keeps everything visible and the `Taidal/` grouping.
 
 **Keeping specific default nodes (a config file).** A few native nodes are useful even in a Taidal-only palette, so a configurable **keep-list** survives the prune. **Preview Image** and **Preview as text** (`PreviewAny`) are *always* kept; list any others in a **config file** under `keep_nodes:` (use the node's `class_type`/registration key):
 
@@ -115,10 +115,10 @@ FluxStudio starts on an **empty canvas** rather than ComfyUI's built-in Stable-D
 
 ## Building a pipeline
 
-Discovered callables are classified by their DataFlux role so they wire together by **type**, not opaque strings:
+Discovered callables are classified by their SampleFlux role so they wire together by **type**, not opaque strings:
 
-- **Source** nodes (e.g. `HuggingFaceSource`, under `Taidal/DataFlux/Source`) construct a dataset and output a `DATAFLUX_SOURCE`.
-- **Op** nodes (e.g. `RescaleOp`, `StandardizeOp`, `ConvertToImageOp`) take a `DATAFLUX_SAMPLE` input **plus** their constructor config as widgets, apply the op, and output a `DATAFLUX_SAMPLE` — so ops chain.
+- **Source** nodes (e.g. `HuggingFaceSource`, under `Taidal/SampleFlux/Source`) construct a dataset and output a `SAMPLEFLUX_SOURCE`.
+- **Op** nodes (e.g. `RescaleOp`, `StandardizeOp`, `ConvertToImageOp`) take a `SAMPLEFLUX_SAMPLE` input **plus** their constructor config as widgets, apply the op, and output a `SAMPLEFLUX_SAMPLE` — so ops chain.
 - **Generic** nodes (plain functions) keep scalar widgets with a `STRING` fallback.
 
 Node labels are the **verbatim** callable name (underscores become spaces; capitals are preserved — `HuggingFaceSource` stays `HuggingFaceSource`, not `Huggingfacesource`). Internal helpers (names starting with `_`) are not surfaced. Hovering any widget shows a **tooltip** sourced from the wrapped callable's docstring `Args:` block (see *Constructor-parameter tooltips* below).
@@ -141,14 +141,14 @@ The **last row is the exception to the splitting rule:** a `Union` that has both
 
 Three adapter nodes (under `Taidal/FluxStudio`) let you step through a dataset and view samples with **native** ComfyUI viewers (plus one interactive value inspector):
 
-- **Walk Dataset (by index)** — takes a `DATAFLUX_SOURCE` and an `index`, and outputs the `Sample` at that index (`source[index]`). The `index` widget uses ComfyUI's `control_after_generate`, **defaulting to *increment*** so each **Queue Prompt** advances to the next sample in order — set the control to *fixed* (or `index` `0`) to reset, or *randomize* to sample at random. `wrap` cycles modulo the dataset length.
-- **Extract from Sample** — takes a `DATAFLUX_SAMPLE` and a `field` selector (`input` / `target`) and unpacks the selected value onto **typed** sockets — `IMAGE`, `MASK`, `STRING`, `INT`, `FLOAT`, `array` — so you wire the one your viewer expects. ComfyUI types sockets statically, so instead of retyping one socket per run it surfaces every plausible type; *which* one is meaningful is derived from the sample's features (`Sample.describe()`). `IMAGE` is rendered via `waivefront.visualizers.value_to_image` (PIL / tensor / 2-D map → image; a non-visual value renders as a small text image); the `colormap` widget is a **dropdown** of the supported colormaps (the closed `waivefront.visualizers.Colormap` set — `viridis`, `magma`, `gray`, …) applied to 2-D maps, and `max_size` caps the longest side of the rendered image in pixels (default `512`, larger renders are downscaled, aspect ratio preserved). `MASK` carries a 2-D field (segmentation targets); `STRING` is a label/scalar (with `label_name` when the target has it) or a compact type summary; `INT` / `FLOAT` carry a scalar (e.g. a class id). The **`array`** output (`DATAFLUX_ARRAY`) carries the **raw field value on demand** — a tensor stays a tensor, an ndarray stays an ndarray (NOT normalized/colormapped like `IMAGE`) — to feed the **Array / Tensor Histogram** viewer or any array-consuming node. Drop two of these next to each other (one set to `input`, one to `target`) to view both at once.
-- **Array / Tensor Histogram** — wire the `array` output above (or a native `IMAGE`) into this node and **Queue Prompt** to inspect the raw values *on the node itself*: a **histogram** of the value distribution (with a `log scale` toggle), the array **rendered as a colormapped image**, and a **hover readout** — move the cursor over the image to read the value (and source coordinate) under the pointer. The `channel` widget selects which channel to view (`-1` = all → mean view / natural RGB; `0..N` picks one) and `colormap` / `bins` / `max_size` control the render. All computation lives in dataflux (`array_histogram` / `select_channel` / `value_to_image`); the node just ships the result to its in-canvas widget — so unlike *Extract → Preview Image* it works **regardless of `--no-default-nodes`** (no native viewer needed). It passes the array straight through so it can sit inline in a pipeline.
-- **Confusion Matrix** — wire the **`all_metrics`** output of a **classification evaluator** (a JSON `STRING` of every metric) — or a raw `N×N` matrix on the `matrix` input plus optional `class_names` — into this node and **Queue Prompt**. It **extracts every confusion matrix** from the metrics (the square `N×N` ones — there can be several) and shows a **class-labeled grid** *on the node itself*: rows = the true class, columns = the predicted class, cells coloured by value with the diagonal (correct predictions) outlined, and the class names down the left and across the top. A `view:` button cycles between **count → row % → col % → all %** (the normalized views render as **percentages**, **without re-running** — the variants are precomputed); a `cm:` button cycles between matrices when several are present; and a **hover readout** reports `true=<class>, pred=<class>` and the count (and percentage when a % view is active) under the pointer. To get a confusion matrix, wire a `MulticlassConfusionMatrix` metric node's **`class`** output into the evaluator's `metrics` slot (the deferred `class` output sizes itself to the model's `num_classes` at run time). The evaluator output stays generic (all metrics); the extraction + normalization math lives in dataflux (`confusion_matrices_payload`), so the node is glue and works under `--no-default-nodes`.
+- **Walk Dataset (by index)** — takes a `SAMPLEFLUX_SOURCE` and an `index`, and outputs the `Sample` at that index (`source[index]`). The `index` widget uses ComfyUI's `control_after_generate`, **defaulting to *increment*** so each **Queue Prompt** advances to the next sample in order — set the control to *fixed* (or `index` `0`) to reset, or *randomize* to sample at random. `wrap` cycles modulo the dataset length.
+- **Extract from Sample** — takes a `SAMPLEFLUX_SAMPLE` and a `field` selector (`input` / `target`) and unpacks the selected value onto **typed** sockets — `IMAGE`, `MASK`, `STRING`, `INT`, `FLOAT`, `array` — so you wire the one your viewer expects. ComfyUI types sockets statically, so instead of retyping one socket per run it surfaces every plausible type; *which* one is meaningful is derived from the sample's features (`Sample.describe()`). `IMAGE` is rendered via `waivefront.visualizers.value_to_image` (PIL / tensor / 2-D map → image; a non-visual value renders as a small text image); the `colormap` widget is a **dropdown** of the supported colormaps (the closed `waivefront.visualizers.Colormap` set — `viridis`, `magma`, `gray`, …) applied to 2-D maps, and `max_size` caps the longest side of the rendered image in pixels (default `512`, larger renders are downscaled, aspect ratio preserved). `MASK` carries a 2-D field (segmentation targets); `STRING` is a label/scalar (with `label_name` when the target has it) or a compact type summary; `INT` / `FLOAT` carry a scalar (e.g. a class id). The **`array`** output (`SAMPLEFLUX_ARRAY`) carries the **raw field value on demand** — a tensor stays a tensor, an ndarray stays an ndarray (NOT normalized/colormapped like `IMAGE`) — to feed the **Array / Tensor Histogram** viewer or any array-consuming node. Drop two of these next to each other (one set to `input`, one to `target`) to view both at once.
+- **Array / Tensor Histogram** — wire the `array` output above (or a native `IMAGE`) into this node and **Queue Prompt** to inspect the raw values *on the node itself*: a **histogram** of the value distribution (with a `log scale` toggle), the array **rendered as a colormapped image**, and a **hover readout** — move the cursor over the image to read the value (and source coordinate) under the pointer. The `channel` widget selects which channel to view (`-1` = all → mean view / natural RGB; `0..N` picks one) and `colormap` / `bins` / `max_size` control the render. All computation lives in sampleflux (`array_histogram` / `select_channel` / `value_to_image`); the node just ships the result to its in-canvas widget — so unlike *Extract → Preview Image* it works **regardless of `--no-default-nodes`** (no native viewer needed). It passes the array straight through so it can sit inline in a pipeline.
+- **Confusion Matrix** — wire the **`all_metrics`** output of a **classification evaluator** (a JSON `STRING` of every metric) — or a raw `N×N` matrix on the `matrix` input plus optional `class_names` — into this node and **Queue Prompt**. It **extracts every confusion matrix** from the metrics (the square `N×N` ones — there can be several) and shows a **class-labeled grid** *on the node itself*: rows = the true class, columns = the predicted class, cells coloured by value with the diagonal (correct predictions) outlined, and the class names down the left and across the top. A `view:` button cycles between **count → row % → col % → all %** (the normalized views render as **percentages**, **without re-running** — the variants are precomputed); a `cm:` button cycles between matrices when several are present; and a **hover readout** reports `true=<class>, pred=<class>` and the count (and percentage when a % view is active) under the pointer. To get a confusion matrix, wire a `MulticlassConfusionMatrix` metric node's **`class`** output into the evaluator's `metrics` slot (the deferred `class` output sizes itself to the model's `num_classes` at run time). The evaluator output stays generic (all metrics); the extraction + normalization math lives in sampleflux (`confusion_matrices_payload`), so the node is glue and works under `--no-default-nodes`.
 
 - **Display Any** — wire **any** value (a scalar, list, metadata dict, tensor, `Sample`, op/source) into `value` and its text representation appears on the node after **Queue Prompt**. `mode` picks `raw value` (`repr`, truncated for huge values) or `tensor shape` (a recursive summary of shapes/dtypes through lists/dicts/a `Sample` — "what shape is this actually?"). The text is also emitted on a `text` output. A Taidal-native, `--only-taidal-nodes`-friendly stand-in for WAA's *Display Any*.
 - **Apply Text Template** — fill a `template` string with `{a}`…`{e}` placeholders from the matching `a`…`e` inputs (any type; an unwired input is empty; standard format specs like `{a:.2f}` work; an unknown `{x}` renders empty rather than erroring). Emits the filled string on `text` — wire it into *Display Any* or a sink. Inspired by mtb's *Apply Text Template*.
-- **Draw Text to Image** — draw `text` (e.g. from *Apply Text Template*) onto an `image`, or onto a fresh `width`×`height` `background` canvas when none is wired, and output an `IMAGE`. Word-wraps to the image width and anchors by a 9-grid `position` with a `margin` inset; `color`/`background` accept any PIL color name or hex. Feed the `IMAGE` into *Preview Image*, the *Array / Tensor Histogram*, or a save node. The rendering lives in `dataflux.ops.image.draw_text`; the node is glue.
+- **Draw Text to Image** — draw `text` (e.g. from *Apply Text Template*) onto an `image`, or onto a fresh `width`×`height` `background` canvas when none is wired, and output an `IMAGE`. Word-wraps to the image width and anchors by a 9-grid `position` with a `margin` inset; `color`/`background` accept any PIL color name or hex. Feed the `IMAGE` into *Preview Image*, the *Array / Tensor Histogram*, or a save node. The rendering lives in `sampleflux.ops.image.draw_text`; the node is glue.
 
 This replaces the old all-in-one "Show Sample" output node: extraction lives here, **previewing lives in ComfyUI's own nodes** — wire `IMAGE` into *Preview Image*, `STRING` into a text node, the `array` socket into **Array / Tensor Histogram**, any value into **Display Any**, etc.
 
@@ -156,13 +156,13 @@ A minimal "walk an image dataset" graph:
 
 ```
 HuggingFaceSource  (path=ylecun/mnist, split=train, input_feature=image, target_feature=label)
-        │  DATAFLUX_SOURCE          # `path` is a free-text dataset-id field (+ cached-dataset picker), not a folder
+        │  SAMPLEFLUX_SOURCE          # `path` is a free-text dataset-id field (+ cached-dataset picker), not a folder
         ▼
 Walk Dataset (by index)          # Queue Prompt repeatedly to step through samples
-        │  DATAFLUX_SAMPLE
+        │  SAMPLEFLUX_SAMPLE
         ▼
 RescaleOp  (in_min=0, in_max=255)  # optional op chain — stack any Taidal op node here
-        │  DATAFLUX_SAMPLE
+        │  SAMPLEFLUX_SAMPLE
         ▼
 Extract from Sample (field=input)
         │  IMAGE                    # also: MASK / STRING / INT / FLOAT / array
@@ -172,7 +172,7 @@ Extract from Sample (field=input)
 Array / Tensor Histogram         # histogram + colormapped image + hover-to-read-value
 ```
 
-`Extract from Sample` renders the `IMAGE` socket via `value_to_image` (in dataflux, re-exported from waivefront); the `STRING` / `INT` / `FLOAT` / `array` outputs work without the optional `[waivefront]` extra. The **Array / Tensor Histogram** viewer likewise runs on the core install (its math is in dataflux), so it needs no extra and no native viewer.
+`Extract from Sample` renders the `IMAGE` socket via `value_to_image` (in sampleflux, re-exported from waivefront); the `STRING` / `INT` / `FLOAT` / `array` outputs work without the optional `[waivefront]` extra. The **Array / Tensor Histogram** viewer likewise runs on the core install (its math is in sampleflux), so it needs no extra and no native viewer.
 
 ### Running a trainer / evaluator / processor
 
@@ -182,13 +182,13 @@ A trainer / evaluator / processor node **runs itself when you Queue the graph** 
 
 > How it works: the runnable reports progress through marainer's comfy-free `marainer.progress` protocol (a plain `(value, total)` callback), and FluxStudio drives `comfy.utils.ProgressBar` from it — so the bar fills regardless of whether the captured text bar is visible. A runnable that doesn't support the protocol simply shows no native bar (the text widget still streams).
 
-**Outputs are wireable sockets.** Every confluid `@output` a runnable declares is a typed output socket on the node, filled with the run's LIVE value. For a marainer trainer / evaluator (and the sonair / deltaid / raidar specialisations) that's `computed_metrics` (the run's final scalar metrics, e.g. `test/accuracy`, `val/loss`) and `label_names` (the resolved class names) — both `STRING` sockets carrying JSON, so wire them into ComfyUI's native **Show Text** node to see them — plus `trained_model` (a `DATAFLUX_OBJECT:model` you wire straight into an evaluator node's `model` slot to chain train → eval in one graph). Add a new value `@output` upstream and it becomes a socket automatically — no FluxStudio change needed.
+**Outputs are wireable sockets.** Every confluid `@output` a runnable declares is a typed output socket on the node, filled with the run's LIVE value. For a marainer trainer / evaluator (and the sonair / deltaid / raidar specialisations) that's `computed_metrics` (the run's final scalar metrics, e.g. `test/accuracy`, `val/loss`) and `label_names` (the resolved class names) — both `STRING` sockets carrying JSON, so wire them into ComfyUI's native **Show Text** node to see them — plus `trained_model` (a `SAMPLEFLUX_OBJECT:model` you wire straight into an evaluator node's `model` slot to chain train → eval in one graph). Add a new value `@output` upstream and it becomes a socket automatically — no FluxStudio change needed.
 
-**Attaching loggers / callbacks.** An object node's constructor params that accept an *object* (rather than a typed/string value) render as wired `DATAFLUX_OBJECT` input sockets — so to log a run, drop a logger node (e.g. `TensorBoardLogger`, `CSVLogger`) and wire its **`instance`** output into the **Lightning Trainer** node. A param that accepts a *list* of objects (the Trainer's `logger` / `callbacks`) grows **dynamic `logger_0`, `logger_1`, …** sockets as you wire — so you can attach several loggers (or callbacks) at once, just like the `op_N` / `source_N` list inputs. String-settable knobs like `accelerator` (`"gpu"`) and `precision` stay editable widgets; only genuinely object-typed params become sockets.
+**Attaching loggers / callbacks.** An object node's constructor params that accept an *object* (rather than a typed/string value) render as wired `SAMPLEFLUX_OBJECT` input sockets — so to log a run, drop a logger node (e.g. `TensorBoardLogger`, `CSVLogger`) and wire its **`instance`** output into the **Lightning Trainer** node. A param that accepts a *list* of objects (the Trainer's `logger` / `callbacks`) grows **dynamic `logger_0`, `logger_1`, …** sockets as you wire — so you can attach several loggers (or callbacks) at once, just like the `op_N` / `source_N` list inputs. String-settable knobs like `accelerator` (`"gpu"`) and `precision` stay editable widgets; only genuinely object-typed params become sockets.
 
 ### Composing runnables — workflows (run conditionally / in sequence)
 
-To run several runnables together — *train then evaluate*, or *skip training if the checkpoint already exists* — use the **workflow combinator** nodes from `marainer.workflow`: **Sequence** (run a list in order), **Conditional** (run `if_true` / `if_false` by a condition), **Switch** (key a selector into cases). They are themselves runnable nodes, so they expose `DATAFLUX_RUNNABLE` input sockets: wire a trainer/evaluator node's **`runnable`** output into a **Conditional**'s `if_true` / `if_false`, or into a **Sequence**'s `steps_0` (a fresh `steps_1` appears as you wire, like the `op_N` lists).
+To run several runnables together — *train then evaluate*, or *skip training if the checkpoint already exists* — use the **workflow combinator** nodes from `marainer.workflow`: **Sequence** (run a list in order), **Conditional** (run `if_true` / `if_false` by a condition), **Switch** (key a selector into cases). They are themselves runnable nodes, so they expose `SAMPLEFLUX_RUNNABLE` input sockets: wire a trainer/evaluator node's **`runnable`** output into a **Conditional**'s `if_true` / `if_false`, or into a **Sequence**'s `steps_0` (a fresh `steps_1` appears as you wire, like the `op_N` lists).
 
 A runnable wired into a combinator slot is **dual-mode**: instead of running itself when you Queue, it is built as an **instance** and the *combinator* runs the selected branch — so only the chosen runnable trains, and nothing runs twice. (A combinator nested inside another combinator behaves the same.) Autograd is restored for an inner trainer and the native progress bar follows whichever step is running. Queue the combinator node (it's the terminal output) to run the whole workflow — the same document also runs head-less with `marainer process workflow.yaml` and round-trips through the YAML export.
 
@@ -197,10 +197,10 @@ A runnable wired into a combinator slot is **dual-mode**: instead of running its
 A **model node** (a class tagged `@configurable(category="model")`, e.g. the helios
 `ExtendedHeliosModelLoader` / `HeliosExactKnnClassifier` surfaced via `waivefront-helios`) RUNS inference
 — distinct from a deterministic op. Wire a `Sample` into its optional `sample` input and it outputs the
-applied `sample` (with predictions stamped) PLUS the loaded model on a `DATAFLUX_OBJECT:model` output
+applied `sample` (with predictions stamped) PLUS the loaded model on a `SAMPLEFLUX_OBJECT:model` output
 (which you can also dock into an evaluator's `model` slot). The model loads lazily on the first run.
 
-A model node may also TAKE a model on a wired `DATAFLUX_OBJECT:model` **input** — the loader→runner
+A model node may also TAKE a model on a wired `SAMPLEFLUX_OBJECT:model` **input** — the loader→runner
 decoupling. `HeliosModelInference` holds all config in the **Loader** (`ExtendedHeliosModelLoader`, set
 `model_uri` / `window_ms` / …) and just RUNS it: wire the Loader node's `model` output into the
 `HeliosModelInference` node's `model` input, then feed it a `Sample`. (The same shape is the helios eval
@@ -223,9 +223,9 @@ or `MAF_ACCESS_TOKEN`); set `HELIOS_MAF_OFFLINE=1` to use only the local `$DATA_
 
 ## Composing ops (higher-order ops)
 
-Every op node is **dual-mode**. Besides the `sample` input (`DATAFLUX_SAMPLE`, now *optional*) and the applied `sample` output, it has a second **`op`** output (`DATAFLUX_OP`) carrying the *constructed op itself*. So you can either chain ops by `sample` (the linear pipeline above) **or** take the `op` output and feed a **higher-order op** — one whose constructor takes a list of ops (`Parallel`, `Tee`, …).
+Every op node is **dual-mode**. Besides the `sample` input (`SAMPLEFLUX_SAMPLE`, now *optional*) and the applied `sample` output, it has a second **`op`** output (`SAMPLEFLUX_OP`) carrying the *constructed op itself*. So you can either chain ops by `sample` (the linear pipeline above) **or** take the `op` output and feed a **higher-order op** — one whose constructor takes a list of ops (`Parallel`, `Tee`, …).
 
-Those higher-order nodes don't show a text widget for their op-list; they grow dynamic `op_0`, `op_1`, … `DATAFLUX_OP` inputs (a fresh empty slot appears whenever the last fills, via `web/op_list.js`). Wire each op node's `op` output into one:
+Those higher-order nodes don't show a text widget for their op-list; they grow dynamic `op_0`, `op_1`, … `SAMPLEFLUX_OP` inputs (a fresh empty slot appears whenever the last fills, via `web/op_list.js`). Wire each op node's `op` output into one:
 
 ```
 RescaleOp      ──op──┐
@@ -237,7 +237,7 @@ Walk ──────────sample┘
 
 `Parallel(ops=[RescaleOp, StandardizeOp])` applies both to the incoming sample. Leave a higher-order op's `sample` unconnected and take *its* `op` output to nest it inside another higher-order op.
 
-**Single-op params** work the same way with ONE socket instead of a list: a constructor param named `op` or `target` (`RandomApply.op`, `ConfigureOp.target`) renders as one optional `DATAFLUX_OP` input. A node may have **several** — a bridged-helios composite's op slots (named the helios way and surfaced via the bridge's `__taidal_op_params__` stamp) all become sockets, so `HeliosConfigureOp` exposes BOTH `compute` and `target`, and `HeliosConfigOp.delegate` / `HeliosApplyToTargetOp.transform` are wireable too. The canonical use is **`ConfigureOp`** (dataflux, the helios *Configure* pattern) — a per-sample parameter injector: wire the value-computing ops into its `op_N` inputs, the op to configure into `target`, and name the attribute in `param`:
+**Single-op params** work the same way with ONE socket instead of a list: a constructor param named `op` or `target` (`RandomApply.op`, `ConfigureOp.target`) renders as one optional `SAMPLEFLUX_OP` input. A node may have **several** — a bridged-helios composite's op slots (named the helios way and surfaced via the bridge's `__taidal_op_params__` stamp) all become sockets, so `HeliosConfigureOp` exposes BOTH `compute` and `target`, and `HeliosConfigOp.delegate` / `HeliosApplyToTargetOp.transform` are wireable too. The canonical use is **`ConfigureOp`** (sampleflux, the helios *Configure* pattern) — a per-sample parameter injector: wire the value-computing ops into its `op_N` inputs, the op to configure into `target`, and name the attribute in `param`:
 
 ```
 MaxOp        ──op──→ (op_0)   ConfigureOp(param="low_level")  ─sample→ …
@@ -257,10 +257,10 @@ What you can wire in, and how each compiles, is the [DAG → sequential](#dag--s
 
 ## Subgraph as an Op
 
-The higher-order ops above are *sequential* (a flat op-list wired into `op_N`). To package a **more complex transformation — an arbitrary `Sample → Sample` DAG with fan-out and `Mix` fan-in — as one reusable Op**, draw it the normal way (sample wires) and cap it with the **Extract as Op** node (`Taidal/FluxStudio`). It compiles the whole upstream sub-pipeline into a single `dataflux.ops.transform_chain.TransformChain` and emits it on an **`op`** output (`DATAFLUX_OP`):
+The higher-order ops above are *sequential* (a flat op-list wired into `op_N`). To package a **more complex transformation — an arbitrary `Sample → Sample` DAG with fan-out and `Mix` fan-in — as one reusable Op**, draw it the normal way (sample wires) and cap it with the **Extract as Op** node (`Taidal/FluxStudio`). It compiles the whole upstream sub-pipeline into a single `sampleflux.ops.transform_chain.TransformChain` and emits it on an **`op`** output (`SAMPLEFLUX_OP`):
 
 ```
-(subgraph input: DATAFLUX_SAMPLE)
+(subgraph input: SAMPLEFLUX_SAMPLE)
    │
    ▼
  RescaleOp ─┬─→ StandardizeOp ─┐
@@ -271,7 +271,7 @@ The higher-order ops above are *sequential* (a flat op-list wired into `op_N`). 
                         Extract as Op ──op──► (promote to subgraph boundary)
 ```
 
-Inside a **ComfyUI native subgraph**, build the inner pipeline starting from the subgraph's `DATAFLUX_SAMPLE` input boundary, drop **Extract as Op** at the end, and *promote its `op` output to the subgraph boundary*. The subgraph instance then exposes a **`DATAFLUX_OP` output** and behaves as:
+Inside a **ComfyUI native subgraph**, build the inner pipeline starting from the subgraph's `SAMPLEFLUX_SAMPLE` input boundary, drop **Extract as Op** at the end, and *promote its `op` output to the subgraph boundary*. The subgraph instance then exposes a **`SAMPLEFLUX_OP` output** and behaves as:
 
 - **an Op** — wire that output into any op slot (`Parallel`/`Tee`/`Enable` `op_N`, `ConfigureOp.target`/`RandomApply.op`, or another op-list); the subgraph *is* the transformation, reusable across the canvas;
 - **a graph** — run a sample through the subgraph's sample boundary inline (the normal native-subgraph use).
@@ -303,10 +303,10 @@ The result is a `{ops: [...]}` document of `!class:…()` markers, e.g.:
 
 ```yaml
 ops:
-- !class:dataflux.ops.torch.RescaleOp()
+- !class:sampleflux.ops.torch.RescaleOp()
   in_min: 0.0
   in_max: 255.0
-- !class:dataflux.ops.torch.RescaleOp()
+- !class:sampleflux.ops.torch.RescaleOp()
   in_min: 0.0
   in_max: 1.0
   out_max: 10.0
@@ -315,8 +315,8 @@ ops:
 Reattach it to your own source:
 
 ```python
-from dataflux import Flux
-from dataflux.sources import HuggingFaceSource
+from sampleflux import Flux
+from sampleflux.sources import HuggingFaceSource
 
 flux = Flux.from_ops_yaml("ops.yaml", source=HuggingFaceSource(path="ylecun/mnist"))
 # or, equivalently, the manual form:
@@ -331,7 +331,7 @@ flux = Flux.from_ops_yaml("ops.yaml", source=HuggingFaceSource(path="ylecun/mnis
 
 The compiler converts the whole **op DAG** of every Taidal/FluxStudio node into one flat op sequence (a `Flux` runs a list, not a graph), stopping only at non-trivial native ComfyUI nodes (viewers, third-party nodes):
 
-- **Fan-out** (one op output wired to ≥2 op nodes): branches are scheduled one after another; the fork-point sample is snapshotted with auto-inserted `dataflux.ops.stash` ops (`StashInputOp`/`StashTargetOp`) and restored (`Unstash*Op`) before each later branch. `metadata` deliberately accumulates across branches (the metadata-bus convention); the `__taidal_stash_*` snapshot keys remain in metadata after the run.
+- **Fan-out** (one op output wired to ≥2 op nodes): branches are scheduled one after another; the fork-point sample is snapshotted with auto-inserted `sampleflux.ops.stash` ops (`StashInputOp`/`StashTargetOp`) and restored (`Unstash*Op`) before each later branch. `metadata` deliberately accumulates across branches (the metadata-bus convention); the `__taidal_stash_*` snapshot keys remain in metadata after the run.
 - **Fan-in via *Mix Samples*** (`input` from A, `target` from B, `metadata` = union of all three): the branches run in Mix-argument order (so the metadata-sample branch writes last, matching Mix's priority) and the merge compiles to the equivalent unstashes — the Mix node itself disappears from the YAML. The same construction you would hand-write with `Stash`/`Unstash` ops, generated for you.
 - The **deepest sink is scheduled last**, so the document's final sample is the longest path's output; viewer-only side branches run earlier in the sequence (delete them from the YAML if you don't want their compute).
 - A graph holding **several disconnected components** exports each individually — one complete, individually-loadable document per component, in deterministic smallest-node-id order.
@@ -361,7 +361,7 @@ ops:
   tx_probability_overrides: !ref 'impairments_tx_config.probability_overrides'
 ```
 
-`op_N` links (an op consumed as a `DATAFLUX_OP` value by a higher-order op like `Tee`/`Enable`/`Parallel`) compile too: each wired producer embeds as a nested `!class:` instance in the consumer's op-list kwarg.
+`op_N` links (an op consumed as a `SAMPLEFLUX_OP` value by a higher-order op like `Tee`/`Enable`/`Parallel`) compile too: each wired producer embeds as a nested `!class:` instance in the consumer's op-list kwarg.
 
 ### Excluding nodes from an export
 
@@ -447,7 +447,7 @@ trainer: !class:marainer.trainer.LightningTrainer
 
 ### v1 scope & limitations
 
-- **Export skips what YAML can't express — it never fails on it.** A canvas usually contains nodes with no Confluid form: native ComfyUI nodes (*Preview Image*, *Show Text*), the canvas-only Taidal adapters (*Walk Dataset*, *Extract from Sample*, *Retag*, …), and occasionally a node whose config can't be serialized. **Export Graph → Taidal YAML** leaves those out and lists each one (with the reason) in a leading `#` comment block of the downloaded YAML — the document below stays a normal, loadable config of the remaining Taidal nodes. A wire from a skipped node into an exported config member is dropped (the member falls back to its default) and noted in the same block — **except** a wire from a native **primitive** node (`PrimitiveInt`/`PrimitiveFloat`/…), which inlines as its literal `value` widget. The canvas **wiring is preserved**: each run of sample-chained ops folds into a `pipeline: !class:dataflux.core.Flux` entry — `source: !ref:<source>` (traced through the *Walk Dataset* adapter back to the source node) plus the ordered `ops:` list, with fan-out compiled to a nested `Tee` — so the exported YAML reconstructs the same data flow (`confluid.materialize(confluid.load("config.yaml"))["pipeline"]` is an iterable `Flux`). A chain broken by a skipped node continues as its own `pipeline_N` entry.
+- **Export skips what YAML can't express — it never fails on it.** A canvas usually contains nodes with no Confluid form: native ComfyUI nodes (*Preview Image*, *Show Text*), the canvas-only Taidal adapters (*Walk Dataset*, *Extract from Sample*, *Retag*, …), and occasionally a node whose config can't be serialized. **Export Graph → Taidal YAML** leaves those out and lists each one (with the reason) in a leading `#` comment block of the downloaded YAML — the document below stays a normal, loadable config of the remaining Taidal nodes. A wire from a skipped node into an exported config member is dropped (the member falls back to its default) and noted in the same block — **except** a wire from a native **primitive** node (`PrimitiveInt`/`PrimitiveFloat`/…), which inlines as its literal `value` widget. The canvas **wiring is preserved**: each run of sample-chained ops folds into a `pipeline: !class:sampleflux.core.Flux` entry — `source: !ref:<source>` (traced through the *Walk Dataset* adapter back to the source node) plus the ordered `ops:` list, with fan-out compiled to a nested `Tee` — so the exported YAML reconstructs the same data flow (`confluid.materialize(confluid.load("config.yaml"))["pipeline"]` is an iterable `Flux`). A chain broken by a skipped node continues as its own `pipeline_N` entry.
 - **Value chains compile here too.** The ``op-chain → Extract(input) → Math → widget`` pattern wraps the consumer in a `ConfigureOp` (chain ops + `FormulaOp`) exactly like the ops-export — inside pipeline folds and on standalone op-value entries; the consumed Extract/Math adapters are no longer listed as "left out".
 - **Value nodes export by their class name with DOTTED output refs.** A wire from a value-producer node's output slot (e.g. `ImpairmentsTxConfig.disabled` feeding `ImpairmentsChain.tx_disabled`) emits `!ref:<entry>.<output>` — the `@output` *property value*, not the config instance a plain `!ref:` would inject. On **import**, confluid's resolver instantiates such dotted refs (a documented `resolve()` caveat), so the consumer widget receives the *evaluated* value and the config lands as a standalone value node carrying its settings — re-wire the two on the canvas to re-establish the live link.
 - A config member with **no FluxStudio node** (a class not tagged op/source/engine/member — e.g. a torchmetrics `MetricCollection`) is **dropped from the canvas with a warning** on import; the runnable falls back to its default. To surface such a class, tag/register it (loggers and the base `LightningTrainer`/`LightningEvaluator` are registered in `marainer.configurables`).
@@ -460,10 +460,10 @@ trainer: !class:marainer.trainer.LightningTrainer
 FluxStudio never hand-defines a node. At ComfyUI startup, `_discover_and_register_nodes()` (`fluxstudio/__init__.py`):
 
 1. Enumerates the `confluid.configurables` entry-point group via `importlib.metadata`.
-2. For each module, `dataflux.discovery.scan_module` finds the compatible callables.
+2. For each module, `sampleflux.discovery.scan_module` finds the compatible callables.
 3. `register_module_nodes` / `create_comfy_node` (`fluxstudio/bridge.py`) classify each callable (Source / Op / Generic — see *Building a pipeline*) and wrap it in a ComfyUI node class, keyed by `_node_key` as `Taidal_<package>_<category>[_<group>]_<callable>` (globally unique, so a same-named class in two modules — e.g. numpy's vs torch's `RescaleOp` — doesn't clobber its twin) and filed under a `Taidal/<Package>/<Category>[/<group>]` palette path (built by `_node_category`: top-level package via `_PACKAGE_DISPLAY_NAMES` for canonical casing, then the `@configurable` category, then the optional `group` tag). The displayed name stays the verbatim class name.
 
-Registration is a **positive allowlist**: a class becomes a node only if its `@configurable` category is one of `{op, source, engine, sink}`. So the palette is exactly the deliberately-tagged ops, sources, engines, and sinks. The generic dataflux **engines** (`Flux` / `JointFlux`, `category="engine"`) and the source-view `DatasetSplit` (`category="source"`) **are** buildable on the canvas: their source-typed constructor params render as wired sockets — a single `source` → a `DATAFLUX_SOURCE` input, a source-list (`fluxes`) → dynamic `source_N` inputs, an op-list (`ops`) → dynamic `op_N` `DATAFLUX_OP` inputs — so a Source/Op node (which already outputs *itself* as `DATAFLUX_SOURCE` / `DATAFLUX_OP`) wires straight into them. The DataFlux storage **sinks** (`category="sink"` — `HDF5Sink` / `ZarrGroupSink` / `ZarrBatchSink` / `DirectorySink` / `JsonSink` / `JsonPerWindowSink` / `LabelStudioImportSink` / `YoloSink`) become **object-member producer** nodes (two outputs, `instance` + `class`, on a role-qualified `DATAFLUX_OBJECT:sink` wire) that dock into a `DatasetProcessor` runnable node's `sink` slot — wire `Source → Flux → DatasetProcessor(flux, sink)` and queue it to write the dataset, or export the graph to a `marainer convert` YAML. Excluded *by construction*: the **raw-callable op wrappers** (`FilterOp` / `WrappedOp`) — UNcategorised (bare `@configurable`), since they take a raw Python callable nothing a widget or socket supplies (so they stay out even with `engine` allowed); **task datasets** (`*_dataset`, e.g. `classification_dataset`) — a trainer-config concept navigaitor cares about, but a canvas only needs a `source` to yield Samples; uncategorised module-level helper functions; and an **UNtagged sink** (a raw `Storage` subclass without `category="sink"`, including the `write(prediction, metadata)` **prediction** sinks `DetectionPredictionsSink` / `ClassificationPredictionsSink`, which aren't Sample sinks). You can build a dataset by wiring `Source → Op → …` *or* by feeding a `Source`/`Op` into a `Flux` / `DatasetSplit` engine node. (To surface another role, add its category to `_NODE_CATEGORIES` in `bridge.py` and tag the classes. Note: ops-export compiles the op DAG — fan-out, *Mix Samples* fan-in, `op_N` op-values — but engine-node graphs (`Flux`/`JointFlux` built on the canvas) and sink/`DatasetProcessor` nodes aren't exportable through it; use the whole-graph export for those.)
+Registration is a **positive allowlist**: a class becomes a node only if its `@configurable` category is one of `{op, source, engine, sink}`. So the palette is exactly the deliberately-tagged ops, sources, engines, and sinks. The generic sampleflux **engines** (`Flux` / `JointFlux`, `category="engine"`) and the source-view `DatasetSplit` (`category="source"`) **are** buildable on the canvas: their source-typed constructor params render as wired sockets — a single `source` → a `SAMPLEFLUX_SOURCE` input, a source-list (`fluxes`) → dynamic `source_N` inputs, an op-list (`ops`) → dynamic `op_N` `SAMPLEFLUX_OP` inputs — so a Source/Op node (which already outputs *itself* as `SAMPLEFLUX_SOURCE` / `SAMPLEFLUX_OP`) wires straight into them. The SampleFlux storage **sinks** (`category="sink"` — `HDF5Sink` / `ZarrGroupSink` / `ZarrBatchSink` / `DirectorySink` / `JsonSink` / `JsonPerWindowSink` / `LabelStudioImportSink` / `YoloSink`) become **object-member producer** nodes (two outputs, `instance` + `class`, on a role-qualified `SAMPLEFLUX_OBJECT:sink` wire) that dock into a `DatasetProcessor` runnable node's `sink` slot — wire `Source → Flux → DatasetProcessor(flux, sink)` and queue it to write the dataset, or export the graph to a `marainer convert` YAML. Excluded *by construction*: the **raw-callable op wrappers** (`FilterOp` / `WrappedOp`) — UNcategorised (bare `@configurable`), since they take a raw Python callable nothing a widget or socket supplies (so they stay out even with `engine` allowed); **task datasets** (`*_dataset`, e.g. `classification_dataset`) — a trainer-config concept navigaitor cares about, but a canvas only needs a `source` to yield Samples; uncategorised module-level helper functions; and an **UNtagged sink** (a raw `Storage` subclass without `category="sink"`, including the `write(prediction, metadata)` **prediction** sinks `DetectionPredictionsSink` / `ClassificationPredictionsSink`, which aren't Sample sinks). You can build a dataset by wiring `Source → Op → …` *or* by feeding a `Source`/`Op` into a `Flux` / `DatasetSplit` engine node. (To surface another role, add its category to `_NODE_CATEGORIES` in `bridge.py` and tag the classes. Note: ops-export compiles the op DAG — fan-out, *Mix Samples* fan-in, `op_N` op-values — but engine-node graphs (`Flux`/`JointFlux` built on the canvas) and sink/`DatasetProcessor` nodes aren't exportable through it; use the whole-graph export for those.)
 
 A module that fails to import or scan is skipped at `debug` level, so one package's missing optional dependency never empties the palette.
 
@@ -476,8 +476,8 @@ Node sockets and widgets are derived from each callable's signature by `_map_typ
 | Python type | ComfyUI mapping |
 |-------------|-----------------|
 | `int` / `float` / `str` / `bool` (incl. `Optional[...]` / `Union[...]` of these) | scalar widgets (`INT` / `FLOAT` / `STRING` / `BOOLEAN`) |
-| `dataflux.sample.Sample` (incl. `Iterator[Sample]`) | `DATAFLUX_SAMPLE` socket |
-| a `Sample`-yielding source class | `DATAFLUX_SOURCE` output socket |
+| `sampleflux.sample.Sample` (incl. `Iterator[Sample]`) | `SAMPLEFLUX_SAMPLE` socket |
+| a `Sample`-yielding source class | `SAMPLEFLUX_SOURCE` output socket |
 | `datasets.Dataset` | `HF_DATASET` socket |
 | the dataset-id param of a `HuggingFace*` source (`repo_id` / `path`) | free-text `STRING` + optional cached-dataset picker (`web/hf_dataset_chooser.js` → `/taidal/hf_datasets`), tagged `taidal_widget="HF_DATASET_ID"` |
 | a feature-selector param of a `HuggingFace*` source (`input_feature` / `target_feature`) | free-text `STRING` + optional column picker (`web/hf_feature_chooser.js` → `/taidal/hf_dataset_features`), tagged `taidal_widget="HF_FEATURE"` |
@@ -486,13 +486,13 @@ Node sockets and widgets are derived from each callable's signature by `_map_typ
 | `pathlib.Path`, or a param named `*path*` / `*dir*` / `*root*` / `*folder*` | directory-picker `STRING` (`web/directory_chooser.js` → `/taidal/choose_directory`) |
 | anything else | `STRING` fallback |
 
-`DATAFLUX_SOURCE` and `DATAFLUX_SAMPLE` are FluxStudio socket types that carry the live `Flux` / `Sample` objects between nodes (ComfyUI connects two sockets only when their type strings match), which is what lets ops chain into a pipeline.
+`SAMPLEFLUX_SOURCE` and `SAMPLEFLUX_SAMPLE` are FluxStudio socket types that carry the live `Flux` / `Sample` objects between nodes (ComfyUI connects two sockets only when their type strings match), which is what lets ops chain into a pipeline.
 
 The directory picker calls the `/taidal/choose_directory` route registered in `fluxstudio/__init__.py`, currently a native **macOS** folder dialog (`osascript`). Extend `TYPE_MAP` / `_map_type` to support new types — never special-case an individual node.
 
 ### HuggingFace dataset-id field
 
-A HuggingFace dataset source's identifier is a **name**, not a folder — `dataflux.sources.HuggingFaceSource` happens to call it `path` (mirroring `datasets.load_dataset`), and sonair's `HuggingFaceClassificationDataset` calls it `repo_id`. Either way FluxStudio renders it as a free-text `STRING` (so you can type any Hub repo id like `kitofrank/RFUAV`, or a local imagefolder path), **not** the directory picker. `web/hf_dataset_chooser.js` adds an optional “📚 cached dataset” combo populated from the `/taidal/hf_datasets` route (`huggingface_hub.scan_cache_dir()`, dataset repos only) — selecting one fills the text field, which stays editable. The field is detected by the `HuggingFace*` class-name convention, so any future `HuggingFace*` source inherits it automatically.
+A HuggingFace dataset source's identifier is a **name**, not a folder — `sampleflux.sources.HuggingFaceSource` happens to call it `path` (mirroring `datasets.load_dataset`), and sonair's `HuggingFaceClassificationDataset` calls it `repo_id`. Either way FluxStudio renders it as a free-text `STRING` (so you can type any Hub repo id like `kitofrank/RFUAV`, or a local imagefolder path), **not** the directory picker. `web/hf_dataset_chooser.js` adds an optional “📚 cached dataset” combo populated from the `/taidal/hf_datasets` route (`huggingface_hub.scan_cache_dir()`, dataset repos only) — selecting one fills the text field, which stays editable. The field is detected by the `HuggingFace*` class-name convention, so any future `HuggingFace*` source inherits it automatically.
 
 ### HuggingFace feature-selector fields
 
@@ -504,26 +504,26 @@ A HuggingFace dataset source's identifier is a **name**, not a folder — `dataf
 
 ### HuggingFace metadata-columns field (multi-select)
 
-`HuggingFaceSource.metadata_features` is a **list** — which columns ride along on `Sample.metadata`. It renders as a comma-separated `STRING` (which `_coerce_kwargs` splits back into a list), and `web/hf_metadata_chooser.js` adds a “🗂️ add column” combo. ComfyUI has no native multi-select, so the combo **appends** the picked column each time (pick repeatedly to build the list); the field stays editable. The options are the **selected** dataset's columns (reusing the `/taidal/hf_dataset_features` route) **minus** whatever is currently mapped as `input_feature` / `target_feature`, plus a special **`*`** entry meaning *every column except input/target* (the `dataflux.sources.METADATA_ALL_FEATURES` sentinel — resolved against the real dataset at load; left empty ⇒ no extra metadata). Picking `*` is exclusive (it already means "the rest"). The list refreshes when the dataset id / `name` / `split` **or** the input/target feature changes.
+`HuggingFaceSource.metadata_features` is a **list** — which columns ride along on `Sample.metadata`. It renders as a comma-separated `STRING` (which `_coerce_kwargs` splits back into a list), and `web/hf_metadata_chooser.js` adds a “🗂️ add column” combo. ComfyUI has no native multi-select, so the combo **appends** the picked column each time (pick repeatedly to build the list); the field stays editable. The options are the **selected** dataset's columns (reusing the `/taidal/hf_dataset_features` route) **minus** whatever is currently mapped as `input_feature` / `target_feature`, plus a special **`*`** entry meaning *every column except input/target* (the `sampleflux.sources.METADATA_ALL_FEATURES` sentinel — resolved against the real dataset at load; left empty ⇒ no extra metadata). Picking `*` is exclusive (it already means "the rest"). The list refreshes when the dataset id / `name` / `split` **or** the input/target feature changes.
 
 ### Constructor-parameter tooltips
 
-Each widget's hover tooltip is sourced from the wrapped callable's docstring `Args:` block (parsed by `confluid.parse_param_docs`) — the **same** per-parameter help [navigaitor](https://github.com/Gearlux/navigaitor) surfaces as JSON-Schema `description`s in its visual editor. Document a constructor parameter once in the upstream class's `Args:` and it shows up in both GUIs. A parameter with no `Args:` entry simply has no tooltip; the fix is to document it in dataflux / waivefront, never to hand-write a tooltip in FluxStudio.
+Each widget's hover tooltip is sourced from the wrapped callable's docstring `Args:` block (parsed by `confluid.parse_param_docs`) — the **same** per-parameter help [navigaitor](https://github.com/Gearlux/navigaitor) surfaces as JSON-Schema `description`s in its visual editor. Document a constructor parameter once in the upstream class's `Args:` and it shows up in both GUIs. A parameter with no `Args:` entry simply has no tooltip; the fix is to document it in sampleflux / waivefront, never to hand-write a tooltip in FluxStudio.
 
 ## Connection filtering
 
-Every `Sample` wire keeps the single `DATAFLUX_SAMPLE` socket string (so any op *can* be wired and the pipeline still chains). The richer DataFlux type contract — declared as `ACCEPTS` / `PRODUCES` on each op/source in dataflux/waivefront (see *DataFlux → Type Specs*) — is layered on top to filter incompatible connections, two ways:
+Every `Sample` wire keeps the single `SAMPLEFLUX_SAMPLE` socket string (so any op *can* be wired and the pipeline still chains). The richer SampleFlux type contract — declared as `ACCEPTS` / `PRODUCES` on each op/source in sampleflux/waivefront (see *SampleFlux → Type Specs*) — is layered on top to filter incompatible connections, two ways:
 
 - **Runtime (authoritative):** a generated op node's `execute()` checks the actual incoming sample against the op's `ACCEPTS` and raises a clear `expects … but got …` error on a mismatch.
-- **Canvas (advisory):** `web/connection_validator.js` fetches each node's spec from the `/taidal/node_specs` route and rejects an incompatible Sample wire live in the editor (via litegraph's `onConnectInput`). It is a faithful port of `dataflux.typespec.compatible()` — permissive, so un-annotated ops (spec `None`) connect freely. Drag-drop only; graph-load wiring falls back to the runtime check.
+- **Canvas (advisory):** `web/connection_validator.js` fetches each node's spec from the `/taidal/node_specs` route and rejects an incompatible Sample wire live in the editor (via litegraph's `onConnectInput`). It is a faithful port of `sampleflux.typespec.compatible()` — permissive, so un-annotated ops (spec `None`) connect freely. Drag-drop only; graph-load wiring falls back to the runtime check.
 
-Specs come exclusively from dataflux/waivefront — to fix or add a contract, edit the op's `ACCEPTS`/`PRODUCES` there, not here.
+Specs come exclusively from sampleflux/waivefront — to fix or add a contract, edit the op's `ACCEPTS`/`PRODUCES` there, not here.
 
 ## Dependencies
 
 | Package | Purpose |
 |---------|---------|
-| `dataflux` | Op discovery (`scan_module`) + pipeline engine. |
+| `sampleflux` | Op discovery (`scan_module`) + pipeline engine. |
 | `confluid` | `confluid.configurables` entry-point group that drives discovery. |
 | `datasets` | HuggingFace `Dataset` ↔ `HF_DATASET` socket. |
 | `liquifai` | App / CLI framework. |

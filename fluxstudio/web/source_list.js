@@ -3,14 +3,14 @@ import { app } from "../../scripts/app.js";
 console.log("ComfyFlux: Loaded Taidal.SourceListInputs extension");
 
 // Dynamic source-list inputs for engine nodes whose constructor takes a list of sources
-// (JointFlux.fluxes — tagged by a seed `source_0` input of type DATAFLUX_SOURCE in
+// (JointFlux.fluxes — tagged by a seed `source_0` input of type SAMPLEFLUX_SOURCE in
 // bridge._build_source_node). Wire a Source/engine node's `source` output into `source_0`; a fresh
 // `source_1` slot appears, and so on — so you build the source-list visually. The Python side
 // (`bridge._collect_sources`) gathers every connected `source_N` (in index order, dropping empties),
 // so the slot bookkeeping here is purely UX — the backend is robust to gaps or a missing extension
 // (you can still wire the single `source_0`). Source analogue of web/op_list.js.
 
-const SOURCE_TYPE = "DATAFLUX_SOURCE";
+const SOURCE_TYPE = "SAMPLEFLUX_SOURCE";
 const SOURCE_RE = /^source_\d+$/;
 
 function sourceSlots(node) {

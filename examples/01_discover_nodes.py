@@ -6,7 +6,7 @@ entry-point group and wraps every compatible callable into a ComfyUI node via
 ``fluxstudio.bridge``. This dumps the resulting node palette as JSON.
 
 Runs headlessly — no ComfyUI process required. CI verifies this exits 0 and finds
-at least one node (``dataflux`` is a hard dependency, so the palette is never
+at least one node (``sampleflux`` is a hard dependency, so the palette is never
 empty).
 """
 

@@ -4,15 +4,15 @@ console.log("ComfyFlux: Loaded Taidal.RunnableListInputs extension");
 
 // Dynamic runnable-list inputs for a workflow COMBINATOR node whose constructor takes a LIST of
 // runnables (marainer.workflow.Sequence's `steps` — tagged by a seed `<name>_0` input of type
-// DATAFLUX_RUNNABLE in bridge._build_runnable_node, via _RUNNABLE_LIST_PARAMS). Wire a trainer /
+// SAMPLEFLUX_RUNNABLE in bridge._build_runnable_node, via _RUNNABLE_LIST_PARAMS). Wire a trainer /
 // evaluator / nested-combinator node's `runnable` output into `steps_0`; a fresh `steps_1` slot
 // appears, and so on — so you build the workflow step list visually. The Python side
 // (`bridge._collect_indexed`) gathers every connected `<name>_N` (in index order, dropping empties)
 // into the list, so the slot bookkeeping here is purely UX — the backend is robust to gaps or a
 // missing extension (you can still wire the single `<name>_0`). Runnable analogue of
-// web/object_list.js / web/op_list.js / web/source_list.js, by DATAFLUX_RUNNABLE socket type.
+// web/object_list.js / web/op_list.js / web/source_list.js, by SAMPLEFLUX_RUNNABLE socket type.
 
-const RUNNABLE_TYPE = "DATAFLUX_RUNNABLE";
+const RUNNABLE_TYPE = "SAMPLEFLUX_RUNNABLE";
 const INDEXED_RE = /^(.+)_(\d+)$/;
 
 function baseType(t) {
@@ -66,7 +66,7 @@ app.registerExtension({
     name: "Taidal.RunnableListInputs",
     async beforeRegisterNodeDef(nodeType, nodeData) {
         const optional = nodeData.input?.optional || {};
-        // Any runnable-list seed (<prefix>_0 of DATAFLUX_RUNNABLE)?
+        // Any runnable-list seed (<prefix>_0 of SAMPLEFLUX_RUNNABLE)?
         const hasSeed = Object.keys(optional).some((k) => {
             const m = INDEXED_RE.exec(k);
             return m && m[2] === "0" && baseType(optional[k]?.[0]) === RUNNABLE_TYPE;

@@ -1,7 +1,7 @@
-"""Dual-mode runnable nodes + DATAFLUX_RUNNABLE input sockets (workflow combinators, Phase B).
+"""Dual-mode runnable nodes + SAMPLEFLUX_RUNNABLE input sockets (workflow combinators, Phase B).
 
 A workflow COMBINATOR (marainer.workflow Sequence / Conditional / Switch) is a runnable that HOLDS
-other runnables. FluxStudio renders its runnable-typed members as DATAFLUX_RUNNABLE input sockets
+other runnables. FluxStudio renders its runnable-typed members as SAMPLEFLUX_RUNNABLE input sockets
 (single, or a dynamic ``<name>_N`` family), and a runnable node feeding such a socket switches to
 INSTANCE mode (built, not run) so the combinator runs the selected branch — no double-run.
 """
@@ -140,7 +140,7 @@ def test_consumed_true_for_runnable_input() -> None:
 
 def test_consumed_false_for_non_runnable_input() -> None:
     prompt = {"9": {"class_type": "Obj", "inputs": {"model": ["5", 0]}}}
-    assert _runnable_consumed_as_instance(prompt, "5", {"Obj": _consumer("model", "DATAFLUX_OBJECT")}) is False
+    assert _runnable_consumed_as_instance(prompt, "5", {"Obj": _consumer("model", "SAMPLEFLUX_OBJECT")}) is False
 
 
 def test_consumed_false_without_prompt() -> None:

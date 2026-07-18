@@ -1,31 +1,31 @@
-"""Dynamic runtime generation of ComfyUI nodes from DataFlux / Waivefront / HF callables.
+"""Dynamic runtime generation of ComfyUI nodes from SampleFlux / Waivefront / HF callables.
 
 Discovered callables are classified into three node shapes so a real pipeline can be
 wired on the ComfyUI canvas — instead of every socket collapsing to ``STRING``:
 
 * **Source** — a class whose ``__getitem__`` / ``__iter__`` yields a
-  :class:`dataflux.sample.Sample` (e.g. ``HuggingFaceSource``). The node exposes the
-  constructor config as widgets and outputs a ``DATAFLUX_SOURCE`` (a
-  :class:`dataflux.core.Flux` wrapping the constructed source). The engines / view-sources
+  :class:`sampleflux.sample.Sample` (e.g. ``HuggingFaceSource``). The node exposes the
+  constructor config as widgets and outputs a ``SAMPLEFLUX_SOURCE`` (a
+  :class:`sampleflux.core.Flux` wrapping the constructed source). The engines / view-sources
   (``DatasetSplit`` / ``Flux`` / ``JointFlux``) are the same shape, but their source-typed
   constructor params ride WIRED sockets instead of widgets — a single ``source`` →
-  ``DATAFLUX_SOURCE`` input, a source-list (``fluxes``) → dynamic ``source_N`` inputs, an op-list
-  (``ops``) → dynamic ``op_N`` ``DATAFLUX_OP`` inputs — so they compose on the canvas from other
-  Source/Op nodes (which already output themselves as ``DATAFLUX_SOURCE`` / ``DATAFLUX_OP``).
+  ``SAMPLEFLUX_SOURCE`` input, a source-list (``fluxes``) → dynamic ``source_N`` inputs, an op-list
+  (``ops``) → dynamic ``op_N`` ``SAMPLEFLUX_OP`` inputs — so they compose on the canvas from other
+  Source/Op nodes (which already output themselves as ``SAMPLEFLUX_SOURCE`` / ``SAMPLEFLUX_OP``).
 * **Op** — a ``@configurable`` class with ``__call__(self, sample: Sample) ->
   Optional[Sample]`` (e.g. ``RescaleOp``, ``ConvertToImageOp``). The node is **dual-mode**:
-  constructor config as widgets, an OPTIONAL ``DATAFLUX_SAMPLE`` input, and TWO outputs —
+  constructor config as widgets, an OPTIONAL ``SAMPLEFLUX_SAMPLE`` input, and TWO outputs —
   ``sample`` (the op applied to the input sample, for linear chaining) and ``op`` (the constructed
-  op as a ``DATAFLUX_OP`` value, so it can feed a higher-order op). A higher-order op whose
-  constructor takes an op-list (``Enable`` / ``Parallel`` / ``Tee``) gets dynamic ``DATAFLUX_OP``
+  op as a ``SAMPLEFLUX_OP`` value, so it can feed a higher-order op). A higher-order op whose
+  constructor takes an op-list (``Enable`` / ``Parallel`` / ``Tee``) gets dynamic ``SAMPLEFLUX_OP``
   inputs (``op_0`` …) instead of a STRING widget.
 * **Generic** — any other callable (plain value functions): scalar widgets with a ``STRING``
   fallback (the original behaviour, preserved).
 
-The custom socket type strings ``DATAFLUX_SOURCE`` / ``DATAFLUX_SAMPLE`` / ``DATAFLUX_OP`` carry the
+The custom socket type strings ``SAMPLEFLUX_SOURCE`` / ``SAMPLEFLUX_SAMPLE`` / ``SAMPLEFLUX_OP`` carry the
 live Python objects (``Flux`` / ``Sample`` / a constructed op) between nodes — ComfyUI connects two
-sockets iff their type strings are equal — which is what lets ops chain (via ``DATAFLUX_SAMPLE``) and
-compose into higher-order ops (via ``DATAFLUX_OP``).
+sockets iff their type strings are equal — which is what lets ops chain (via ``SAMPLEFLUX_SAMPLE``) and
+compose into higher-order ops (via ``SAMPLEFLUX_OP``).
 """
 
 import ast
@@ -60,10 +60,10 @@ from typing import (
 import datasets
 from annotated_types import Ge, Gt, Interval, Le, Lt
 from confluid import mandatory_param_names, output_specs, parse_param_docs
-from dataflux.discovery import get_callable_path, resolve_callable, scan_module
-from dataflux.sample import Sample as _Sample
-from dataflux.typespec import infer_sample_type
 from loggair import get_logger
+from sampleflux.discovery import get_callable_path, resolve_callable, scan_module
+from sampleflux.sample import Sample as _Sample
+from sampleflux.typespec import infer_sample_type
 
 logger = get_logger(__name__)
 
@@ -77,30 +77,30 @@ def _spec_to_dict(cls: Any, attr: str) -> Optional[Dict[str, Any]]:
     return to_dict() if callable(to_dict) else None
 
 
-# Custom ComfyUI socket types for live DataFlux objects passed between nodes.
-SAMPLE_TYPE = "DATAFLUX_SAMPLE"
-SOURCE_TYPE = "DATAFLUX_SOURCE"
+# Custom ComfyUI socket types for live SampleFlux objects passed between nodes.
+SAMPLE_TYPE = "SAMPLEFLUX_SAMPLE"
+SOURCE_TYPE = "SAMPLEFLUX_SOURCE"
 # A constructed op instance (a callable ``Sample -> Optional[Sample]``) ridden as a wire, so an op
 # node's ``op`` output can feed a higher-order op (``Enable`` / ``Parallel`` / ``Tee``) that takes
-# ops as constructor input. Distinct from ``DATAFLUX_SAMPLE`` (data) — this carries the op itself.
-OP_TYPE = "DATAFLUX_OP"
+# ops as constructor input. Distinct from ``SAMPLEFLUX_SAMPLE`` (data) — this carries the op itself.
+OP_TYPE = "SAMPLEFLUX_OP"
 # A built "runnable" (a trainer / evaluator / processor — any class implementing ``run(self)``),
 # output by a runnable node and consumed by the ``Run`` node which calls ``.run()``.
-RUNNABLE_TYPE = "DATAFLUX_RUNNABLE"
+RUNNABLE_TYPE = "SAMPLEFLUX_RUNNABLE"
 # A built configurable MEMBER object (model / loss / optimizer / loader / lightning / metrics) — or a
 # deferred ``LazyClass`` of one (when the member class is tagged ``lazy``) — ridden as a wire so an
-# object node feeds a runnable's member slot. Distinct from SOURCE (datasets ride DATAFLUX_SOURCE).
-OBJECT_TYPE = "DATAFLUX_OBJECT"
+# object node feeds a runnable's member slot. Distinct from SOURCE (datasets ride SAMPLEFLUX_SOURCE).
+OBJECT_TYPE = "SAMPLEFLUX_OBJECT"
 # A raw numpy array / torch tensor ridden as a wire — the field value behind a Sample, carried OUT of
 # the Sample extractor and INTO the Array/Tensor Histogram viewer for value inspection. A hand-wired
 # ADAPTER socket only (``nodes.py``); deliberately NOT in ``TYPE_MAP`` — no op-param annotation maps
 # to it, so auto-generated op nodes are unaffected (an ``np.ndarray`` param stays a STRING widget).
-ARRAY_TYPE = "DATAFLUX_ARRAY"
+ARRAY_TYPE = "SAMPLEFLUX_ARRAY"
 # An arbitrary structured Python VALUE (a list of boxes, a list of lists, a dict of containers) ridden
 # as a wire. A constructor param whose type is a NESTED container can't be sensibly typed into a single
-# widget, so it renders as an OPTIONAL ``DATAFLUX_VALUE`` input socket (``_needs_value_socket``) fed by
+# widget, so it renders as an OPTIONAL ``SAMPLEFLUX_VALUE`` input socket (``_needs_value_socket``) fed by
 # the hand-written **Value** node (``nodes.py``), which parses a Python/JSON literal into the value.
-VALUE_TYPE = "DATAFLUX_VALUE"
+VALUE_TYPE = "SAMPLEFLUX_VALUE"
 
 # Mapping Python types to ComfyUI widget types.
 TYPE_MAP = {
@@ -140,11 +140,11 @@ def _object_socket(category: Optional[str]) -> str:
     """The object-member socket type for a class's ``@configurable`` category.
 
     Object members (model / loss / metric) ride a CATEGORY-QUALIFIED socket —
-    ``DATAFLUX_OBJECT:classification_model`` — so ComfyUI's string-equality
+    ``SAMPLEFLUX_OBJECT:classification_model`` — so ComfyUI's string-equality
     connection rule enforces compatibility (a ``classification_model`` node docks
     only into a ``classification_model`` slot, never a loss/segmentation slot).
     Category-less members (the role-less ``lazy`` infra members optimizer/loader/
-    lightning, and task-agnostic loggers) keep the bare ``DATAFLUX_OBJECT`` type.
+    lightning, and task-agnostic loggers) keep the bare ``SAMPLEFLUX_OBJECT`` type.
     The ``Retag`` adapter node (``nodes.py``) is the deliberate escape hatch that
     re-types an object to a chosen category.
     """
@@ -152,7 +152,7 @@ def _object_socket(category: Optional[str]) -> str:
 
 
 def _base_socket_type(socket_type: Any) -> Any:
-    """Strip a ``:category`` suffix to the base socket type (``DATAFLUX_OBJECT``).
+    """Strip a ``:category`` suffix to the base socket type (``SAMPLEFLUX_OBJECT``).
 
     Object sockets are category-qualified (see :func:`_object_socket`); consumers
     that only need to know "is this a wired socket vs a widget" (graphio's
@@ -169,15 +169,15 @@ def _is_socket_type(socket_type: Any) -> bool:
 
 
 # A runnable's constructor params / body slots that hold a DATASET / SOURCE / FLUX — rendered as a
-# wired ``DATAFLUX_SOURCE`` socket (fed by a Source / ``Flux`` engine node) instead of a STRING
+# wired ``SAMPLEFLUX_SOURCE`` socket (fed by a Source / ``Flux`` engine node) instead of a STRING
 # widget. ``flux`` covers ``marainer.processing.DatasetProcessor`` (its sole non-sink input is the
 # ``Flux`` to write); ``source`` is also handled by ``_SOURCE_PARAM``. Detected by name (same
-# convention as the op/source-list params); a runnable's other object members ride ``DATAFLUX_OBJECT``
+# convention as the op/source-list params); a runnable's other object members ride ``SAMPLEFLUX_OBJECT``
 # sockets.
 _DATASET_MEMBER_PARAMS = {"train_set", "val_set", "test_set", "dataset", "flux"}
 
 # Discovery ROLES whose classes become OBJECT nodes (a trainer/runnable slot-filler producing a
-# ``DATAFLUX_OBJECT`` wire): a task-scoped model / loss / metric, plus ``logger`` (a Lightning logger
+# ``SAMPLEFLUX_OBJECT`` wire): a task-scoped model / loss / metric, plus ``logger`` (a Lightning logger
 # fed into the ``pytorch_lightning.Trainer`` ``logger`` slot). Datasets are SOURCE nodes (role
 # ``"dataset"`` is routed to ``_build_source_node``), not object nodes. The role-less runtime members
 # (``torch.optim.*`` / ``DataLoader`` / ``pytorch_lightning.Trainer``, registered in
@@ -186,21 +186,21 @@ _DATASET_MEMBER_PARAMS = {"train_set", "val_set", "test_set", "dataset", "flux"}
 # form-spec slot pickers (which resolve a picker FROM the slot's default-target category and would
 # then offer the raw ``params``-taking optimizer). Loggers carry ``role="logger"`` (NOT ``lazy``) so
 # they build EAGERLY — a logger's required ``save_dir`` must stay a configurable widget, not be
-# skipped as a runtime-injected slot. See ``_is_object_member_class``. (DataFlux sinks are NOT here:
+# skipped as a runtime-injected slot. See ``_is_object_member_class``. (SampleFlux sinks are NOT here:
 # they're admitted by ``category="sink"`` in ``_NODE_CATEGORIES`` and dispatched by ``_is_sink_class``,
 # not by role — but ``_role_for_class`` maps them to a synthetic ``"sink"`` role for socket-typing.)
 _MEMBER_ROLES = {"model", "loss", "metric", "logger"}
 
 # A runnable's object-member PARAM NAME → the ROLE its slot accepts. The slot socket is then
-# ROLE-qualified (``_object_socket(role)`` → ``DATAFLUX_OBJECT:model``) — TASK-AGNOSTIC: a
-# classification model and a segmentation model BOTH produce ``DATAFLUX_OBJECT:model`` and dock
+# ROLE-qualified (``_object_socket(role)`` → ``SAMPLEFLUX_OBJECT:model``) — TASK-AGNOSTIC: a
+# classification model and a segmentation model BOTH produce ``SAMPLEFLUX_OBJECT:model`` and dock
 # into ANY trainer's ``model`` slot. The role still guards kind (a loss can't dock into a model
 # slot). Task survives only as GUIDANCE (navigaitor slot ranking + the FluxStudio palette
 # label/grouping), never on the socket. Mirrors navigaitor's ``configs.generate.PARAM_NAME_TO_ROLE``
 # (fluxstudio must NOT import navigaitor — the convention is small and stable). ``logger`` is
 # deliberately ABSENT, as are the infra members (optimizer/loader/lightning): those stay generic
-# ``DATAFLUX_OBJECT`` (no meaningful role-kind distinction to enforce). ``sink`` IS qualified so a
-# DataFlux storage sink (output ``DATAFLUX_OBJECT:sink`` via ``_role_for_class``) docks ONLY into a
+# ``SAMPLEFLUX_OBJECT`` (no meaningful role-kind distinction to enforce). ``sink`` IS qualified so a
+# SampleFlux storage sink (output ``SAMPLEFLUX_OBJECT:sink`` via ``_role_for_class``) docks ONLY into a
 # ``DatasetProcessor.sink`` slot — never a model/loss slot, and vice versa.
 _STRICT_SLOT_ROLES = {
     "model": "model",
@@ -212,8 +212,8 @@ _STRICT_SLOT_ROLES = {
     "sink": "sink",
 }
 
-# The roles whose object sockets are ROLE-qualified (``DATAFLUX_OBJECT:<role>``). Everything else
-# (logger / optimizer / loader / lightning, and untagged objects) rides the bare ``DATAFLUX_OBJECT``.
+# The roles whose object sockets are ROLE-qualified (``SAMPLEFLUX_OBJECT:<role>``). Everything else
+# (logger / optimizer / loader / lightning, and untagged objects) rides the bare ``SAMPLEFLUX_OBJECT``.
 # This is the value-set of :data:`_STRICT_SLOT_ROLES`, kept as a name so the object-NODE output side
 # and the runnable-SLOT input side agree on which roles qualify (else a socket mismatch silently
 # refuses an otherwise-valid wire — the original "can't connect" footgun).
@@ -239,11 +239,11 @@ def _role_for_class(cls: Any) -> Optional[str]:
     model from a loss — both are ``nn.Module``). When a class is untagged, infer the role from its
     Python type (a base-class qualname substring scan via :data:`_TYPE_ROLE_BY_BASE`), so e.g. an
     untagged ``torchmetrics`` metric still sockets as a ``metric``. Returns ``None`` when neither a
-    tag nor a recognised base applies → the object rides the generic ``DATAFLUX_OBJECT``.
+    tag nor a recognised base applies → the object rides the generic ``SAMPLEFLUX_OBJECT``.
 
-    A ``category="sink"`` class maps to a synthetic ``"sink"`` role (DataFlux storage sinks carry no
+    A ``category="sink"`` class maps to a synthetic ``"sink"`` role (SampleFlux storage sinks carry no
     ``role=`` tag and their ``Storage`` base isn't in :data:`_TYPE_ROLE_BY_BASE`) so the sink node's
-    object output sockets as ``DATAFLUX_OBJECT:sink`` — matching the ``DatasetProcessor.sink`` slot.
+    object output sockets as ``SAMPLEFLUX_OBJECT:sink`` — matching the ``DatasetProcessor.sink`` slot.
     Checked first: it is the deliberate sink marker (see :data:`_NODE_CATEGORIES` / :func:`_is_sink_class`).
     """
     if getattr(cls, "__confluid_category__", None) == "sink":
@@ -264,8 +264,8 @@ def _role_for_class(cls: Any) -> Optional[str]:
 def _object_socket_for_class(cls: Any) -> str:
     """The object-output socket type for a class: ROLE-qualified for a strict role, else generic.
 
-    ``DATAFLUX_OBJECT:model`` for a model / loss / metric (task-agnostic — see
-    :data:`_QUALIFIED_OBJECT_ROLES`), bare ``DATAFLUX_OBJECT`` for everything else (logger / infra /
+    ``SAMPLEFLUX_OBJECT:model`` for a model / loss / metric (task-agnostic — see
+    :data:`_QUALIFIED_OBJECT_ROLES`), bare ``SAMPLEFLUX_OBJECT`` for everything else (logger / infra /
     untagged). Mirrors the runnable-SLOT side so an object node docks into the matching slot.
     """
     role = _role_for_class(cls)
@@ -277,9 +277,9 @@ def _infer_member_role(name: str) -> Optional[str]:
 
     Exact INPUT param names resolve via :data:`_STRICT_SLOT_ROLES`; a runnable ``@output`` name
     (e.g. ``trained_model``) is freer, so fall back to a keyword scan — this keeps a trainer's
-    ``trained_model`` output ROLE-qualified (``DATAFLUX_OBJECT:model``, task-agnostic) so it docks
+    ``trained_model`` output ROLE-qualified (``SAMPLEFLUX_OBJECT:model``, task-agnostic) so it docks
     into a downstream evaluator's likewise-qualified ``model`` slot. Returns ``None`` for role-less
-    members (optimizer / loader / lightning / logger) → generic ``DATAFLUX_OBJECT``.
+    members (optimizer / loader / lightning / logger) → generic ``SAMPLEFLUX_OBJECT``.
     """
     if name in _STRICT_SLOT_ROLES:
         return _STRICT_SLOT_ROLES[name]
@@ -290,7 +290,7 @@ def _infer_member_role(name: str) -> Optional[str]:
 
 
 # Constructor params (on higher-order ops) that hold a LIST OF OPS — rendered as dynamic
-# ``DATAFLUX_OP`` multi-inputs (``op_0``, ``op_1``, … via ``web/op_list.js``) instead of a STRING
+# ``SAMPLEFLUX_OP`` multi-inputs (``op_0``, ``op_1``, … via ``web/op_list.js``) instead of a STRING
 # widget, so concrete op nodes wire into them. ``Enable``/``Parallel`` take ``ops``; ``Tee`` takes
 # ``branches`` (a list of op-lists — v1 wraps each connected op as its own single-op branch);
 # ``transforms`` is the helios convention surfaced by waivefront-helios's auto-bridged composites
@@ -298,24 +298,24 @@ def _infer_member_role(name: str) -> Optional[str]:
 _OP_LIST_PARAMS = {"ops", "branches", "transforms"}
 
 # Single-op constructor params (one op VALUE, not a chain): ``RandomApply.op``,
-# ``ConfigureOp.target``. Rendered as ONE optional ``DATAFLUX_OP`` input socket.
+# ``ConfigureOp.target``. Rendered as ONE optional ``SAMPLEFLUX_OP`` input socket.
 _SINGLE_OP_PARAMS = {"op", "target"}
 
 # Constructor params (on source/engine classes) that hold ANOTHER source — rendered as a single
-# wired ``DATAFLUX_SOURCE`` input socket instead of a STRING widget, so a Source/engine node's output
+# wired ``SAMPLEFLUX_SOURCE`` input socket instead of a STRING widget, so a Source/engine node's output
 # feeds them. ``DatasetSplit(source=…)`` and ``Flux(source=…)`` use ``source``. Detected by exact
 # name (the same name-convention as ``_OP_LIST_PARAMS``); safe because no concrete leaf source
 # (``HuggingFaceSource``/``RFUAVSource``/``RegionsJsonSource``) has a param literally named ``source``.
 _SOURCE_PARAM = "source"
 
-# Constructor params that hold a LIST OF SOURCES — rendered as dynamic ``DATAFLUX_SOURCE`` multi-inputs
+# Constructor params that hold a LIST OF SOURCES — rendered as dynamic ``SAMPLEFLUX_SOURCE`` multi-inputs
 # (``source_0``, ``source_1``, … via ``web/source_list.js``), the source analogue of ``_OP_LIST_PARAMS``.
 # ``JointFlux(fluxes: List[Flux])`` uses ``fluxes``.
 _SOURCE_LIST_PARAMS = {"fluxes", "sources"}
 
 # A runnable COMBINATOR's constructor params that hold ANOTHER runnable (a trainer / evaluator /
-# DatasetProcessor / nested combinator), rendered as ``DATAFLUX_RUNNABLE`` INPUT sockets instead of a
-# generic ``DATAFLUX_OBJECT`` socket — the consuming half of the dual-mode runnable node. SINGLE-runnable
+# DatasetProcessor / nested combinator), rendered as ``SAMPLEFLUX_RUNNABLE`` INPUT sockets instead of a
+# generic ``SAMPLEFLUX_OBJECT`` socket — the consuming half of the dual-mode runnable node. SINGLE-runnable
 # params get one socket each; LIST params get a dynamic ``<name>_N`` family grown by ``web/runnable_list.js``
 # (collected by :func:`_collect_indexed`). marainer.workflow's ``Conditional.if_true``/``if_false`` +
 # ``Switch.default`` (single) and ``Sequence.steps`` (list). Detected by NAME (like ``_OP_LIST_PARAMS`` /
@@ -326,7 +326,7 @@ _RUNNABLE_LIST_PARAMS = {"steps"}
 # Constructor params that name a HuggingFace dataset *identifier* (a hub repo id
 # like ``mnist`` / ``kitofrank/RFUAV``, or optionally a local imagefolder path) —
 # NOT a filesystem directory. Recognised only on HuggingFace dataset sources (see
-# ``_is_hf_dataset_id_param``); ``dataflux.sources.HuggingFaceSource`` calls it
+# ``_is_hf_dataset_id_param``); ``sampleflux.sources.HuggingFaceSource`` calls it
 # ``path`` (the upstream ``datasets.load_dataset`` arg name) while sonair's
 # ``HuggingFaceClassificationDataset`` calls it ``repo_id``.
 _HF_DATASET_ID_PARAMS = {"path", "repo_id"}
@@ -358,25 +358,25 @@ _HF_SPLIT_PARAM = "split"
 # ``HuggingFaceSource.metadata_features``. Kept a free-text (comma-separated) STRING tagged
 # ``taidal_widget="HF_METADATA"``; ``web/hf_metadata_chooser.js`` augments it with a MULTI-select
 # "add column" combo offering ``*`` (= every column except input/target — the ``METADATA_ALL_FEATURES``
-# sentinel resolved by ``dataflux.sources``) plus the SELECTED dataset's columns. Recognised only on
+# sentinel resolved by ``sampleflux.sources``) plus the SELECTED dataset's columns. Recognised only on
 # ``HuggingFace*`` sources (see ``_is_hf_metadata_param``).
 _HF_METADATA_PARAM = "metadata_features"
 
 # FluxStudio surfaces a node ONLY when its ``@configurable`` discovery category is one of these
-# (a POSITIVE allowlist — see dataflux/confluid taxonomy). This is what a canvas can build:
+# (a POSITIVE allowlist — see sampleflux/confluid taxonomy). This is what a canvas can build:
 #   * ``op``      — concrete Sample→Sample ops (``RescaleOp``, ``SpectrogramOp`` …).
 #   * ``source``  — concrete data sources (``HuggingFaceSource``, ``RFUAVSource`` …) AND
 #                   ``DatasetSplit`` (a source-view: it yields Samples and wraps another source).
 #   * ``engine``  — the generic composition primitives ``Flux`` / ``JointFlux``. They ARE buildable
 #                   on a canvas: their source-typed constructor params render as WIRED sockets
-#                   (``_build_source_node``) — ``Flux.source`` (single ``DATAFLUX_SOURCE`` input) +
-#                   ``Flux.ops`` (dynamic ``op_N`` ``DATAFLUX_OP`` inputs); ``JointFlux.fluxes``
-#                   (dynamic ``source_N`` ``DATAFLUX_SOURCE`` inputs). So a Source/Op node's output
-#                   (it already exposes itself as ``DATAFLUX_SOURCE`` / ``DATAFLUX_OP``) feeds them.
-#   * ``sink``    — the DataFlux storage sinks (``HDF5Sink`` / ``YoloSink`` / ``JsonSink`` …) that
+#                   (``_build_source_node``) — ``Flux.source`` (single ``SAMPLEFLUX_SOURCE`` input) +
+#                   ``Flux.ops`` (dynamic ``op_N`` ``SAMPLEFLUX_OP`` inputs); ``JointFlux.fluxes``
+#                   (dynamic ``source_N`` ``SAMPLEFLUX_SOURCE`` inputs). So a Source/Op node's output
+#                   (it already exposes itself as ``SAMPLEFLUX_SOURCE`` / ``SAMPLEFLUX_OP``) feeds them.
+#   * ``sink``    — the SampleFlux storage sinks (``HDF5Sink`` / ``YoloSink`` / ``JsonSink`` …) that
 #                   write a whole Flux (``write(sample)`` / ``open`` / ``flush`` / ``close``). A sink
 #                   is an object-member PRODUCER (``_build_object_node`` → an ``instance`` + ``class``
-#                   output on a ROLE-qualified ``DATAFLUX_OBJECT:sink`` wire, see ``_is_sink_class`` /
+#                   output on a ROLE-qualified ``SAMPLEFLUX_OBJECT:sink`` wire, see ``_is_sink_class`` /
 #                   ``_role_for_class``) that docks into a ``DatasetProcessor`` runnable node's
 #                   ``sink`` slot — the same model/loss/logger → trainer relationship. The prediction
 #                   sinks (``DetectionPredictionsSink`` / ``ClassificationPredictionsSink``,
@@ -388,7 +388,7 @@ _HF_METADATA_PARAM = "metadata_features"
 #     stay out (correct — they're not buildable).
 #   * task ``dataset``s (``classification_dataset`` …) — a trainer/model-config concept (a
 #     task-scoped, model-ready dataset slot), meaningful for navigaitor's config composition but
-#     NOT for a per-sample DataFlux canvas, which only needs a ``source`` to yield Samples.
+#     NOT for a per-sample SampleFlux canvas, which only needs a ``source`` to yield Samples.
 #   * uncategorised module-level helper functions (no ``__confluid_category__``); an UNtagged sink
 #     (a raw ``Storage`` subclass without ``category="sink"``) is likewise excluded.
 # To surface another role add it here AND tag the classes.
@@ -491,7 +491,7 @@ def node_root() -> str:
     """The Taidal palette root prefix: ``""`` (root-level) when default nodes are hidden, else ``"Taidal"``.
 
     When ComfyUI's own nodes are hidden there is nothing to disambiguate the Taidal nodes from, so
-    they read more naturally at the palette root (``DataFlux/Op`` rather than ``Taidal/DataFlux/Op``).
+    they read more naturally at the palette root (``SampleFlux/Op`` rather than ``Taidal/SampleFlux/Op``).
     When the defaults are shown the ``Taidal/`` folder keeps the workspace nodes grouped together.
     """
     return "" if hide_default_comfy_nodes() else "Taidal"
@@ -802,7 +802,7 @@ def _is_nested_container(t: Any) -> bool:
 
 
 def _needs_value_socket(annotation: Any) -> bool:
-    """True if a param's type can't be a sensible widget and should ride a wired ``DATAFLUX_VALUE``
+    """True if a param's type can't be a sensible widget and should ride a wired ``SAMPLEFLUX_VALUE``
     input socket (fed by the **Value** node) — i.e. ANY Union arm is a NESTED container
     (:func:`_is_nested_container`). A scalar / flat container / numeric tuple stays a widget."""
     annotation = _resolve_annotation(annotation)
@@ -825,7 +825,7 @@ def _map_type(param_name: str, annotation: Any) -> str:
     if get_origin(annotation) is Annotated:
         return _map_type(param_name, get_args(annotation)[0])
 
-    # DataFlux Sample (bare / Optional[Sample] / Iterator[Sample]) → the sample wire.
+    # SampleFlux Sample (bare / Optional[Sample] / Iterator[Sample]) → the sample wire.
     if _type_mentions(annotation, _Sample):
         return SAMPLE_TYPE
     # HuggingFace dataset → the HF_DATASET wire.
@@ -1037,7 +1037,7 @@ def _build_config_inputs(
     simply gets no tooltip (fix it upstream, never hand-write one here).
 
     ``skip`` names parameters to omit from both sets — used by op nodes to
-    exclude the op-list param (it becomes a ``DATAFLUX_OP`` socket, not a widget).
+    exclude the op-list param (it becomes a ``SAMPLEFLUX_OP`` socket, not a widget).
     """
     try:
         sig = inspect.signature(func)
@@ -1065,7 +1065,7 @@ def _build_config_inputs(
         if isinstance(param.annotation, str) and name in hints:
             param = param.replace(annotation=hints[name])
         # A NESTED-container type (a list of boxes, a dict of lists) can't be typed into a single widget
-        # → an OPTIONAL ``DATAFLUX_VALUE`` input socket fed by the Value node. Optional so an unwired
+        # → an OPTIONAL ``SAMPLEFLUX_VALUE`` input socket fed by the Value node. Optional so an unwired
         # socket keeps the constructor default (``boxes=[]``); the wired Python value passes through
         # ``_coerce_kwargs`` unchanged (it is not a string).
         if _needs_value_socket(param.annotation):
@@ -1364,7 +1364,7 @@ def _coerce_kwargs(func: Callable, kwargs: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _is_sample_annotation(annotation: Any) -> bool:
-    """True if an annotation refers to a DataFlux ``Sample`` (handles ``Iterator[Sample]`` etc.)."""
+    """True if an annotation refers to a SampleFlux ``Sample`` (handles ``Iterator[Sample]`` etc.)."""
     return "Sample" in str(annotation)
 
 
@@ -1459,7 +1459,7 @@ def _is_dataset_member_class(obj: Any) -> bool:
 
 
 def _is_object_member_class(obj: Any) -> bool:
-    """True if ``obj`` is a runnable MEMBER that should become a ``DATAFLUX_OBJECT`` node.
+    """True if ``obj`` is a runnable MEMBER that should become a ``SAMPLEFLUX_OBJECT`` node.
 
     A task-scoped model / loss / metric (``__confluid_role__`` in :data:`_MEMBER_ROLES`), OR a target
     tagged confluid ``lazy`` (``__confluid_lazy__`` — the role-less registered runtime members:
@@ -1478,14 +1478,14 @@ def _is_object_member_class(obj: Any) -> bool:
 
 
 def _is_sink_class(obj: Any) -> bool:
-    """True if ``obj`` is a DataFlux storage sink tagged ``@configurable(category="sink")``.
+    """True if ``obj`` is a SampleFlux storage sink tagged ``@configurable(category="sink")``.
 
     A sink (``HDF5Sink`` / ``YoloSink`` / ``JsonSink`` …) writes a whole Flux via
     ``write(sample)`` / ``open`` / ``flush`` / ``close`` — it has NO ``run()`` (not a runnable), NO
     ``__call__(sample)`` (not an op), and carries no ``role``/``lazy`` mark (not an object member by
     the role gate), so it matches none of the signature/role dispatch predicates. It is admitted via
     ``category="sink"`` in :data:`_NODE_CATEGORIES` and routed here: a sink builds as an OBJECT
-    producer node (``_build_object_node``) whose output sockets as ``DATAFLUX_OBJECT:sink`` (see
+    producer node (``_build_object_node``) whose output sockets as ``SAMPLEFLUX_OBJECT:sink`` (see
     :func:`_role_for_class`), docking into a ``DatasetProcessor`` runnable node's ``sink`` slot. The
     prediction sinks (``write(prediction, metadata)``) are deliberately UNtagged and excluded.
     """
@@ -1517,7 +1517,7 @@ def _op_list_params(cls: Any) -> Dict[str, str]:
     A param accepts a LIST of ops when its NAME is in ``_OP_LIST_PARAMS`` with a ``list`` annotation
     (``Enable.ops`` / ``Tee.branches`` / a helios ``*transforms`` variadic mirror) OR it is stamped
     ``__taidal_op_list_params__`` by the waivefront-helios bridge (a ``List[Transform]`` slot whose
-    helios name — ``true_transforms`` / ``default_transforms`` — the dataflux-tuned allowlist can't
+    helios name — ``true_transforms`` / ``default_transforms`` — the sampleflux-tuned allowlist can't
     know). The family prefix is ``"op"`` for the original name-set params (so existing ``op_N``
     graphs/exports keep working unchanged) and the PARAM NAME otherwise — letting ONE node carry
     SEVERAL independent op-list families (``HeliosIfOp``'s ``true_transforms_N`` + ``false_transforms_N``),
@@ -1552,7 +1552,7 @@ def _single_op_params(cls: Any) -> List[str]:
     (``RandomApply.op`` / ``ConfigureOp.target``) OR it is stamped ``__taidal_op_params__`` by the
     waivefront-helios bridge (a single ``Transform`` slot — ``Configure.compute``/``.target``,
     ``Config.delegate`` — whose helios name the allowlist can't know). Each rides ONE optional
-    ``DATAFLUX_OP`` input socket instead of a STRING widget. Op-LIST params (``_op_list_params``) are
+    ``SAMPLEFLUX_OP`` input socket instead of a STRING widget. Op-LIST params (``_op_list_params``) are
     excluded (a list wins). Returning SEVERAL is what surfaces BOTH ``HeliosConfigureOp.compute`` and
     ``.target`` — the old single-name helper exposed only the first.
     """
@@ -1578,7 +1578,7 @@ def _model_params(cls: Any) -> List[str]:
     Read from the ``__taidal_model_params__`` stamp the waivefront-helios ``bridge_model`` sets on a
     ``ModelInference``-style class (a ``model``-named, non-scalar ctor param — the wrapped type is
     deliberately open, so it can't be inferred from the annotation). Each rides ONE optional
-    ``DATAFLUX_OBJECT:model`` INPUT socket (a Loader model node's model output wires straight in)
+    ``SAMPLEFLUX_OBJECT:model`` INPUT socket (a Loader model node's model output wires straight in)
     instead of a STRING widget — the model-node analogue of :func:`_single_op_params`. A self-contained
     model (no ``model`` slot) returns ``[]``, so it keeps the existing widget-only surface.
     """
@@ -1628,7 +1628,7 @@ def _has_param(cls: Any, name: str) -> bool:
 def _source_param(cls: Any) -> Optional[str]:
     """Name of a single-source constructor param (``source``), or ``None``.
 
-    Such a param holds ANOTHER source/engine, so it rides a single ``DATAFLUX_SOURCE`` input socket
+    Such a param holds ANOTHER source/engine, so it rides a single ``SAMPLEFLUX_SOURCE`` input socket
     instead of becoming a STRING widget — e.g. ``DatasetSplit(source=…)`` / ``Flux(source=…)``.
     """
     return _SOURCE_PARAM if _has_param(cls, _SOURCE_PARAM) else None
@@ -1639,7 +1639,7 @@ def _source_list_param(cls: Any) -> Optional[str]:
 
     Detected by name (``_SOURCE_LIST_PARAMS``) + a ``List``/``list`` annotation — e.g.
     ``JointFlux(fluxes: List[Flux])``. Such a param holds OTHER sources, so it rides dynamic
-    ``DATAFLUX_SOURCE`` sockets (``source_0`` / ``source_1`` / …) instead of a STRING widget.
+    ``SAMPLEFLUX_SOURCE`` sockets (``source_0`` / ``source_1`` / …) instead of a STRING widget.
     """
     try:
         sig = inspect.signature(cls)
@@ -1734,7 +1734,7 @@ def _node_class(
     ``accepts`` / ``produces`` are the source callable's declared ``SampleType.to_dict()`` (or
     ``None``); they ride on the node class as ``TAIDAL_ACCEPTS`` / ``TAIDAL_PRODUCES`` so the
     ``/taidal/node_specs`` route and the canvas connection-validator can read them. They do NOT change
-    the ComfyUI socket strings (every Sample wire stays ``DATAFLUX_SAMPLE`` so the pipeline still chains).
+    the ComfyUI socket strings (every Sample wire stays ``SAMPLEFLUX_SAMPLE`` so the pipeline still chains).
 
     ``kind`` (``"op"`` / ``"source"`` / ``"generic"``) and ``callable_path`` (importable
     ``module:qualname``) ride on the class as ``TAIDAL_NODE_KIND`` / ``TAIDAL_CALLABLE_PATH`` so the
@@ -1819,16 +1819,16 @@ def _node_class(
 
 
 def _build_source_node(cls: Callable, name: str, category: str) -> Type:
-    """Build a source/engine node: constructor config -> a ``DATAFLUX_SOURCE`` output (a ``Flux``).
+    """Build a source/engine node: constructor config -> a ``SAMPLEFLUX_SOURCE`` output (a ``Flux``).
 
     Source-typed constructor params ride WIRED sockets instead of STRING widgets, so the engine /
     view sources (``DatasetSplit`` / ``Flux`` / ``JointFlux``) compose on the canvas from other
-    Source/Op nodes (which already expose themselves as ``DATAFLUX_SOURCE`` / ``DATAFLUX_OP``):
-      * a single ``source`` param   -> one ``DATAFLUX_SOURCE`` input (``DatasetSplit.source`` /
+    Source/Op nodes (which already expose themselves as ``SAMPLEFLUX_SOURCE`` / ``SAMPLEFLUX_OP``):
+      * a single ``source`` param   -> one ``SAMPLEFLUX_SOURCE`` input (``DatasetSplit.source`` /
         ``Flux.source``); a required socket when the ctor param has no default, else optional;
-      * a source-list param (``fluxes``) -> dynamic ``source_N`` ``DATAFLUX_SOURCE`` inputs grown by
+      * a source-list param (``fluxes``) -> dynamic ``source_N`` ``SAMPLEFLUX_SOURCE`` inputs grown by
         ``web/source_list.js`` (``JointFlux.fluxes``);
-      * an op-list param (``ops``)        -> dynamic ``op_N`` ``DATAFLUX_OP`` inputs grown by
+      * an op-list param (``ops``)        -> dynamic ``op_N`` ``SAMPLEFLUX_OP`` inputs grown by
         ``web/op_list.js`` (``Flux.ops``).
     Everything else stays a constructor-config widget. A plain leaf source (``HuggingFaceSource`` …)
     has none of these params, so it is unchanged (all-widget).
@@ -1858,7 +1858,7 @@ def _build_source_node(cls: Callable, name: str, category: str) -> Type:
         optional["op_0"] = (OP_TYPE,)  # seed; web/op_list.js grows op_1, op_2, …
 
     def execute(self: Any, **kwargs: Any) -> Tuple[Any, ...]:
-        from dataflux.core import Flux
+        from sampleflux.core import Flux
 
         if src_list_param is not None:
             sources = _collect_sources(kwargs)
@@ -1893,9 +1893,9 @@ def _build_op_node(cls: Callable, name: str, category: str) -> Type:
     """Build a dual-mode op node: ``(SAMPLE?, op_*) -> (SAMPLE, OP[, @output…])``.
 
     The op node both APPLIES the op (the ``sample`` input chained to the ``sample`` output, today's
-    linear-pipeline UX) AND exposes the constructed op on the ``op`` output (``DATAFLUX_OP``), so it
+    linear-pipeline UX) AND exposes the constructed op on the ``op`` output (``SAMPLEFLUX_OP``), so it
     can feed a higher-order op. ``sample`` is OPTIONAL: leave it unconnected to use the node purely
-    as an op-value. Op-VALUED constructor params ride ``DATAFLUX_OP`` sockets instead of STRING
+    as an op-value. Op-VALUED constructor params ride ``SAMPLEFLUX_OP`` sockets instead of STRING
     widgets: each single-op param (``_single_op_params``) is one static socket, and each op-LIST param
     (``_op_list_params``) a dynamic ``<prefix>_N`` family. A node may carry SEVERAL of each — e.g.
     ``HeliosConfigureOp`` sockets BOTH ``compute`` and ``target``; ``HeliosIfOp`` carries the
@@ -1909,7 +1909,7 @@ def _build_op_node(cls: Callable, name: str, category: str) -> Type:
     op_list_params = _op_list_params(cls)  # {param: socket-family prefix}
     single_op_params = _single_op_params(cls)  # [param, …] — each ONE op VALUE
     list_prefixes = sorted(set(op_list_params.values()))
-    # Config widgets EXCLUDING the op-typed params (they ride DATAFLUX_OP sockets, not widgets).
+    # Config widgets EXCLUDING the op-typed params (they ride SAMPLEFLUX_OP sockets, not widgets).
     _strict = getattr(cls, "__confluid_strict_typing__", False)
     _socketed = set(op_list_params) | set(single_op_params)
     required, nullable_opts, _split_map = _build_config_inputs(cls, skip=_socketed or None, strict_typing=_strict)
@@ -1933,7 +1933,7 @@ def _build_op_node(cls: Callable, name: str, category: str) -> Type:
                 list_values[pname] = [[o] for o in ops] if pname == "branches" else ops
             kwargs = {k: v for k, v in kwargs.items() if not _is_indexed_key(k, set(list_prefixes))}
             kwargs.update(list_values)
-        # Post-construction injection (the confluid paradigm) of each wired single-op DATAFLUX_OP value.
+        # Post-construction injection (the confluid paradigm) of each wired single-op SAMPLEFLUX_OP value.
         wired_singles = {p: kwargs.pop(p, None) for p in single_op_params}
         op = cls(**_coerce_kwargs(cls, kwargs))
         for pname, wired in wired_singles.items():
@@ -1990,20 +1990,20 @@ def _build_model_node(cls: Callable, name: str, category: str) -> Type:
     A model node is "like an op, but a bit different": it RUNS inference rather than applying a
     deterministic transform. Like :func:`_build_op_node` it takes an optional ``sample`` and config
     widgets and outputs the applied ``sample``, but its SECOND output is the constructed model on a
-    role-qualified ``DATAFLUX_OBJECT:model`` socket (it outputs ITSELF as the model object — so it can
-    also dock into a downstream evaluator's ``model`` slot) rather than a ``DATAFLUX_OP``. The wrapped
+    role-qualified ``SAMPLEFLUX_OBJECT:model`` socket (it outputs ITSELF as the model object — so it can
+    also dock into a downstream evaluator's ``model`` slot) rather than a ``SAMPLEFLUX_OP``. The wrapped
     class must be callable as ``model(sample) -> sample`` (the waivefront-helios bridge generates such a
     wrapper around a helios ``infer``). ``@output`` properties, if any, are appended as extra sockets.
 
     A ``model``-typed ctor param (``_model_params`` — the ``ModelInference.model`` loader→runner
     decoupling, stamped ``__taidal_model_params__`` by the waivefront-helios bridge) rides a wired
-    ``DATAFLUX_OBJECT:model`` INPUT socket instead of a STRING widget, so a Loader model node's model
+    ``SAMPLEFLUX_OBJECT:model`` INPUT socket instead of a STRING widget, so a Loader model node's model
     output wires straight in. ``execute`` ``setattr``s each wired model post-construction (the confluid
-    paradigm) — mirroring how :func:`_build_op_node` injects single-op ``DATAFLUX_OP`` values.
+    paradigm) — mirroring how :func:`_build_op_node` injects single-op ``SAMPLEFLUX_OP`` values.
     """
     model_socket = _object_socket("model")
-    model_in_params = _model_params(cls)  # ctor params that take a WIRED model (DATAFLUX_OBJECT:model)
-    # Config widgets EXCLUDING the wired model params (they ride DATAFLUX_OBJECT:model input sockets).
+    model_in_params = _model_params(cls)  # ctor params that take a WIRED model (SAMPLEFLUX_OBJECT:model)
+    # Config widgets EXCLUDING the wired model params (they ride SAMPLEFLUX_OBJECT:model input sockets).
     required, nullable_opts, _split_map = _build_config_inputs(
         cls, skip=set(model_in_params) or None, strict_typing=getattr(cls, "__confluid_strict_typing__", False)
     )
@@ -2014,7 +2014,7 @@ def _build_model_node(cls: Callable, name: str, category: str) -> Type:
     out_sockets = [_output_socket_type(s["name"], _output_return_anno(cls, s["name"])) for s in out_specs]
 
     def execute(self: Any, sample: Any = None, **kwargs: Any) -> Tuple[Any, ...]:
-        # Post-construction injection (the confluid paradigm) of each wired DATAFLUX_OBJECT:model value.
+        # Post-construction injection (the confluid paradigm) of each wired SAMPLEFLUX_OBJECT:model value.
         wired_models = {p: kwargs.pop(p, None) for p in model_in_params}
         model = cls(**_coerce_kwargs(cls, kwargs))
         for pname, wired in wired_models.items():
@@ -2173,7 +2173,7 @@ def _container_element(anno: Any) -> Any:
 
 
 def _is_wireable_object_param(anno: Any) -> bool:
-    """True when a constructor param should be a wired ``DATAFLUX_OBJECT`` socket (not a widget).
+    """True when a constructor param should be a wired ``SAMPLEFLUX_OBJECT`` socket (not a widget).
 
     A param is wireable iff its annotation has a concrete OBJECT-class arm (a ``Logger`` / ``Callback`` /
     ``nn.Module`` — something a producer node builds) and NO real scalar-config arm. The rule, over the
@@ -2251,16 +2251,16 @@ def _output_socket_type(prop_name: str, anno: Any) -> str:
     Since a runnable node RUNS on execute (:func:`_build_runnable_node`), its ``@output`` sockets carry
     LIVE post-run values. The mapping:
 
-    * a dataset-named output rides ``DATAFLUX_SOURCE``;
+    * a dataset-named output rides ``SAMPLEFLUX_SOURCE``;
     * a scalar output a typed widget string (via :func:`_map_type` — ``INT`` / ``FLOAT`` / ``STRING`` / ``BOOLEAN``);
     * a **container** output (``Dict`` / ``List`` / ``Set`` / ``Tuple`` — e.g. ``computed_metrics`` a
       ``Dict[str, float]``, ``label_names`` a ``List[str]``) rides a plain ``STRING`` socket (the runnable
       node JSON-encodes the value), so it wires straight into ComfyUI's native *Show Text* node. This branch
       is BEFORE the role inference on purpose: it stops ``computed_metrics`` from mis-mapping to a bogus
-      ``DATAFLUX_OBJECT:metric`` via the ``"metric"`` substring in :func:`_infer_member_role`;
-    * a role-bearing object output (``trained_model`` → ``DATAFLUX_OBJECT:model``, task-agnostic) docks
+      ``SAMPLEFLUX_OBJECT:metric`` via the ``"metric"`` substring in :func:`_infer_member_role`;
+    * a role-bearing object output (``trained_model`` → ``SAMPLEFLUX_OBJECT:model``, task-agnostic) docks
       straight into a downstream runnable's likewise-qualified object slot (an evaluator's ``model``);
-    * any other object rides the bare ``DATAFLUX_OBJECT``.
+    * any other object rides the bare ``SAMPLEFLUX_OBJECT``.
     """
     if prop_name in _DATASET_MEMBER_PARAMS:
         return SOURCE_TYPE
@@ -2297,7 +2297,7 @@ def _coerce_output_value(value: Any, socket_type: str) -> Any:
 
 
 def _build_object_node(cls: Callable, name: str, category: str) -> Type:
-    """Build an OBJECT node: constructor config widgets -> TWO ``DATAFLUX_OBJECT`` outputs.
+    """Build an OBJECT node: constructor config widgets -> TWO ``SAMPLEFLUX_OBJECT`` outputs.
 
     Both outputs carry the configured member (model / loss / metric / lazy runtime member); a runnable
     accepts either on its member slot (``confluid.flow`` is idempotent on a live instance):
@@ -2335,7 +2335,7 @@ def _build_object_node(cls: Callable, name: str, category: str) -> Type:
         except (ValueError, TypeError):  # pragma: no cover - defensive
             skip = None
     # An OBJECT-typed ctor param (``logger`` / ``callbacks`` — a non-scalar class arm with no
-    # str/int/float config arm; see :func:`_is_wireable_object_param`) rides a WIRED ``DATAFLUX_OBJECT``
+    # str/int/float config arm; see :func:`_is_wireable_object_param`) rides a WIRED ``SAMPLEFLUX_OBJECT``
     # socket so a producer node docks in — instead of the bool-poisoned BOOLEAN widget ``_map_type``
     # would emit. A param that also admits a LIST/Iterable of objects (``_admits_object_list`` —
     # ``logger`` / ``callbacks`` / ``plugins``) gets a DYNAMIC ``<name>_N`` socket family (seed
@@ -2419,9 +2419,9 @@ def _build_object_node(cls: Callable, name: str, category: str) -> Type:
 
     # ROLE-qualify BOTH outputs (instance + class) so they dock only into a matching-ROLE slot
     # (a ``model`` node → a ``model`` slot), TASK-AGNOSTIC: a classification model and a segmentation
-    # model both ride ``DATAFLUX_OBJECT:model``. The role is the explicit ``role=`` tag or inferred
+    # model both ride ``SAMPLEFLUX_OBJECT:model``. The role is the explicit ``role=`` tag or inferred
     # from the type (``_role_for_class``); a role-less member (logger / lazy infra) keeps the bare
-    # ``DATAFLUX_OBJECT``. Mirrors the runnable-SLOT side. See :func:`_object_socket_for_class`.
+    # ``SAMPLEFLUX_OBJECT``. Mirrors the runnable-SLOT side. See :func:`_object_socket_for_class`.
     obj_socket = _object_socket_for_class(cls)
 
     return _node_class(
@@ -2442,8 +2442,8 @@ def _runnable_consumed_as_instance(
     unique_id: Optional[Any],
     node_mappings: Optional[Dict[str, Any]] = None,
 ) -> bool:
-    """True if this runnable node's slot-0 ``DATAFLUX_RUNNABLE`` output is wired into ANOTHER node's
-    ``DATAFLUX_RUNNABLE`` input — i.e. it is a BRANCH of a workflow combinator (``Conditional`` /
+    """True if this runnable node's slot-0 ``SAMPLEFLUX_RUNNABLE`` output is wired into ANOTHER node's
+    ``SAMPLEFLUX_RUNNABLE`` input — i.e. it is a BRANCH of a workflow combinator (``Conditional`` /
     ``Sequence`` / ``Switch``) that will run it, so it must NOT run standalone (no double-run).
 
     This is the dual-mode switch read inside a runnable node's ``execute``: consumed-as-instance ⇒
@@ -2491,9 +2491,9 @@ def _build_runnable_node(cls: Callable, name: str, category: str) -> Type:
     Every configurable member is enumerated from ``to_pydantic(cls)`` (which surfaces both ctor params
     AND ``__init__``-body slots, and skips ``@ignore_config`` members). Each member is rendered as:
 
-    * a ``DATAFLUX_SOURCE`` socket — dataset/source members (:data:`_DATASET_MEMBER_PARAMS` + the
+    * a ``SAMPLEFLUX_SOURCE`` socket — dataset/source members (:data:`_DATASET_MEMBER_PARAMS` + the
       ``source`` param), fed by Source/dataset nodes;
-    * a ``DATAFLUX_OBJECT`` socket — any other non-scalar member (model / loss / optimizer / loaders /
+    * a ``SAMPLEFLUX_OBJECT`` socket — any other non-scalar member (model / loss / optimizer / loaders /
       lightning / metrics), fed by object nodes;
     * a WIDGET — scalar members (``num_classes`` / ``max_epochs`` / ``experiment_name`` …) via the
       shared :func:`_build_config_inputs` (ComfyUI lets the user "convert to input" when they want a
@@ -2510,9 +2510,9 @@ def _build_runnable_node(cls: Callable, name: str, category: str) -> Type:
     ``__torch_runner__`` trainers, ComfyUI-interrupt handling, live stdout streaming to the node's log
     widget), then reads each declared ``@output`` (now LIVE, post-run) and emits it on a typed socket.
 
-    OUTPUTS: slot 0 is the (post-run) runnable on a ``DATAFLUX_RUNNABLE`` wire; then EVERY declared
+    OUTPUTS: slot 0 is the (post-run) runnable on a ``SAMPLEFLUX_RUNNABLE`` wire; then EVERY declared
     ``@output`` property (:func:`confluid.output_specs`) becomes a wireable socket via
-    :func:`_output_socket_type` — ``trained_model`` rides ``DATAFLUX_OBJECT:model`` into a downstream
+    :func:`_output_socket_type` — ``trained_model`` rides ``SAMPLEFLUX_OBJECT:model`` into a downstream
     evaluator's ``model`` slot, and container outputs (``computed_metrics`` / ``label_names``) ride a
     ``STRING`` (JSON) socket you wire into ComfyUI's native *Show Text*. Because the node runs first,
     these carry real values (not ``None``).
@@ -2539,13 +2539,13 @@ def _build_runnable_node(cls: Callable, name: str, category: str) -> Type:
     required_params = ctor_required | mandatory_param_names(runnable_cls)
 
     # An object slot for a role (model / loss / metric) is ROLE-qualified — e.g. ANY trainer's
-    # ``model`` slot accepts ``DATAFLUX_OBJECT:model`` — so ComfyUI rejects a loss wire but a
+    # ``model`` slot accepts ``SAMPLEFLUX_OBJECT:model`` — so ComfyUI rejects a loss wire but a
     # classification model docks into a segmentation trainer's model slot just the same (TASK-
     # AGNOSTIC; task survives only as palette/navigaitor guidance). Role-less slots (optimizer /
-    # loader / lightning / logger) stay generic ``DATAFLUX_OBJECT``. See :data:`_STRICT_SLOT_ROLES`
+    # loader / lightning / logger) stay generic ``SAMPLEFLUX_OBJECT``. See :data:`_STRICT_SLOT_ROLES`
     # / :func:`_object_socket`. Mirrors the object-NODE output side (:func:`_object_socket_for_class`).
     socket_members: Dict[str, str] = {}  # member name -> SOURCE_TYPE | OBJECT_TYPE[:role] | RUNNABLE_TYPE
-    runnable_list_members: List[str] = []  # member name -> a dynamic <name>_N DATAFLUX_RUNNABLE family
+    runnable_list_members: List[str] = []  # member name -> a dynamic <name>_N SAMPLEFLUX_RUNNABLE family
     for fname, finfo in fields.items():
         anno = getattr(finfo, "annotation", Any)
         if fname in _RUNNABLE_LIST_PARAMS:
@@ -2572,7 +2572,7 @@ def _build_runnable_node(cls: Callable, name: str, category: str) -> Type:
             required[member] = (socket,)
         else:
             optional[member] = (socket,)
-    # A runnable-LIST member (Sequence.steps) seeds ONE optional DATAFLUX_RUNNABLE socket
+    # A runnable-LIST member (Sequence.steps) seeds ONE optional SAMPLEFLUX_RUNNABLE socket
     # (``<name>_0``); web/runnable_list.js grows ``<name>_1`` … as branches are wired, and
     # execute collects the whole family via _collect_indexed.
     for member in runnable_list_members:
@@ -2610,7 +2610,7 @@ def _build_runnable_node(cls: Callable, name: str, category: str) -> Type:
         for k, v in post.items():
             setattr(obj, k, v)
 
-        # DUAL-MODE: if this runnable's slot-0 output feeds a workflow combinator's DATAFLUX_RUNNABLE
+        # DUAL-MODE: if this runnable's slot-0 output feeds a workflow combinator's SAMPLEFLUX_RUNNABLE
         # input, it is a BRANCH — hand over the constructed-but-UN-RUN instance and let the combinator
         # run it (no double-run; only the SELECTED branch ever runs). Otherwise it is the terminal
         # OUTPUT_NODE and runs on execute (the default, unchanged when not consumed).
@@ -2659,12 +2659,12 @@ def create_comfy_node(
 ) -> Type:
     """Dynamically construct a ComfyUI node class from a Python callable.
 
-    Dispatches on the callable's DataFlux role: a ``run()``-implementing class (trainer / evaluator /
+    Dispatches on the callable's SampleFlux role: a ``run()``-implementing class (trainer / evaluator /
     processor) becomes a buildable RUNNABLE node (members as wired sockets); ``Sample``-taking op
     classes become ``SAMPLE -> SAMPLE`` nodes; ``Sample``-yielding sources (and task ``role="dataset"``
     classes) become ``-> SOURCE`` nodes; runnable MEMBER classes (model / loss / metric / optimizer /
     loader / lightning) AND ``category="sink"`` storage sinks become ``-> OBJECT`` nodes (a sink
-    outputs ``DATAFLUX_OBJECT:sink``, docking into a ``DatasetProcessor`` node's ``sink`` slot); a
+    outputs ``SAMPLEFLUX_OBJECT:sink``, docking into a ``DatasetProcessor`` node's ``sink`` slot); a
     no-arg ``__call__(self)`` class becomes a VALUE node (config widgets -> ``@output`` sockets, no
     Sample I/O); everything else falls back to generic.
     """
@@ -2681,7 +2681,7 @@ def create_comfy_node(
         return _build_source_node(func, name, category)
     if _is_object_member_class(func) or _is_sink_class(func):
         # A sink is an object-member PRODUCER (like a model / loss / logger): config widgets ->
-        # ``instance`` + ``class`` outputs on a ``DATAFLUX_OBJECT:sink`` wire, docking into a
+        # ``instance`` + ``class`` outputs on a ``SAMPLEFLUX_OBJECT:sink`` wire, docking into a
         # ``DatasetProcessor`` node's ``sink`` slot. Reuses ``_build_object_node`` verbatim.
         return _build_object_node(func, name, category)
     if _value_call_signature(func) is not None:
@@ -2754,10 +2754,10 @@ def _node_key(module_path: str, confluid_category: str, group: Optional[str], na
 
     ComfyUI identifies a node TYPE by its key in ``NODE_CLASS_MAPPINGS`` — NOT by its display
     ``CATEGORY`` — so the key must be unique. A plain ``Taidal_<ClassName>`` collides whenever two
-    modules expose a same-named class (e.g. ``dataflux.ops.numpy:RescaleOp`` vs
-    ``dataflux.ops.torch:RescaleOp``): the second registration silently overwrites the first and
+    modules expose a same-named class (e.g. ``sampleflux.ops.numpy:RescaleOp`` vs
+    ``sampleflux.ops.torch:RescaleOp``): the second registration silently overwrites the first and
     one node vanishes from the palette. We qualify the key with the top-level package + confluid
-    category + group, e.g. ``Taidal_dataflux_op_numpy_RescaleOp`` vs ``Taidal_dataflux_op_torch_RescaleOp``.
+    category + group, e.g. ``Taidal_sampleflux_op_numpy_RescaleOp`` vs ``Taidal_sampleflux_op_torch_RescaleOp``.
 
     Built from RAW identifiers (the module's top-level package, the lowercase category, the literal
     group segments) — NOT the display-cased palette path — so the key stays stable even if a
@@ -2785,7 +2785,7 @@ def register_module_nodes(
     ``@configurable`` discovery category is in :data:`_NODE_CATEGORIES` (``op`` / ``source`` /
     ``engine``). The engines ``Flux`` / ``JointFlux`` (``category="engine"``) and the source-view
     ``DatasetSplit`` (``category="source"``) ARE buildable: their source-typed constructor params
-    render as wired ``DATAFLUX_SOURCE`` / ``DATAFLUX_OP`` sockets (see :func:`_build_source_node`).
+    render as wired ``SAMPLEFLUX_SOURCE`` / ``SAMPLEFLUX_OP`` sockets (see :func:`_build_source_node`).
     Excluded by construction — the raw-callable op wrappers ``FilterOp`` / ``WrappedOp``
     (UNcategorised — they take a raw callable, nothing to wire, so even with ``engine`` allowed they
     stay out); task ``*_dataset`` classes (a trainer-config concept, not a canvas one); uncategorised

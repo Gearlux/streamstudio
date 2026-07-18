@@ -4,16 +4,16 @@ console.log("ComfyFlux: Loaded Taidal.RetagOutputType extension");
 
 // Dynamic output socket typing for the Retag node (fluxstudio/nodes.py:RetagObjectNode).
 //
-// Object-member sockets are ROLE-qualified and TASK-AGNOSTIC (DATAFLUX_OBJECT:<role> — see
+// Object-member sockets are ROLE-qualified and TASK-AGNOSTIC (SAMPLEFLUX_OBJECT:<role> — see
 // bridge._object_socket_for_class), so a node docks where its ROLE matches (any task). The Retag
 // node is the escape hatch: it takes any object (wildcard "*" input) and re-emits it under a chosen
 // ROLE. ComfyUI types a socket statically at registration, so this extension retypes the OUTPUT
 // socket from the `target_role` combo at edit time:
 //   (keep) -> "*"                        (pure wildcard passthrough — docks anywhere)
-//   (none) -> "DATAFLUX_OBJECT"          (generic object slot)
-//   <role> -> "DATAFLUX_OBJECT:<role>"   (docks only into that role's slots)
+//   (none) -> "SAMPLEFLUX_OBJECT"          (generic object slot)
+//   <role> -> "SAMPLEFLUX_OBJECT:<role>"   (docks only into that role's slots)
 
-const OBJECT_BASE = "DATAFLUX_OBJECT";
+const OBJECT_BASE = "SAMPLEFLUX_OBJECT";
 const WILDCARD = "*";
 const KEEP = "(keep)";
 const NONE = "(none)";

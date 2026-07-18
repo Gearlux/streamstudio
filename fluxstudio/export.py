@@ -1,31 +1,32 @@
 """Compile a FluxStudio canvas graph's **ops** into a Confluid YAML op-list.
 
-A FluxStudio canvas is a :class:`dataflux.core.Flux` turned inside-out — the source
-is a ``-> DATAFLUX_SOURCE`` node, each transform a ``DATAFLUX_SAMPLE -> DATAFLUX_SAMPLE``
+A FluxStudio canvas is a :class:`sampleflux.core.Flux` turned inside-out — the source
+is a ``-> SAMPLEFLUX_SOURCE`` node, each transform a ``SAMPLEFLUX_SAMPLE -> SAMPLEFLUX_SAMPLE``
 op node, and the lazy ``__iter__`` is replaced by the Walk/Extract adapters. This module
 reverses the *ops half*: given a ComfyUI **prompt / API-format** graph it compiles the op
 DAG into ONE SEQUENTIAL Confluid ``!class:...()`` op-list per weakly-connected component
 (dropping the source + adapter nodes), so a user can reattach it to their own source::
 
     import confluid
-    from dataflux import Flux
+    from sampleflux import Flux
     ops = confluid.load("ops.yaml")["ops"]
     flux = Flux(source=my_own_source, ops=ops)
 
 **DAG → sequential conversion** (the compiler is no longer limited to linear chains):
 
 * **fan-out** (one op output → several op nodes) schedules the branches one after the
-  other; the fork-point sample is snapshotted with :class:`dataflux.ops.stash.StashInputOp`
-  / ``StashTargetOp`` and restored (``Unstash*Op``) before each later branch, so the
-  branchy canvas wiring becomes one flat op sequence. ``metadata`` deliberately accumulates
-  across branches (the Tee / metadata-bus convention) — per-branch metadata isolation is
-  NOT reproduced. The inserted ``__taidal_stash_*`` snapshot is CLEANED UP by its final
-  unstash (``Unstash*Op`` defaults to ``remove=True``; a fan-out's non-final unstashes carry
-  ``remove=False`` so the key survives until the last branch), so it does not linger into a sink.
+  other; the fork-point sample is snapshotted into a per-sample **Context cell**
+  (:class:`sampleflux.ops.context.Save`) and each later branch restarts from it
+  (:class:`~sampleflux.ops.context.Use`), so the branchy canvas wiring becomes one flat
+  op sequence. Branches are ISOLATED (``Use`` deep-copies the fork; each branch carries
+  its own metadata) — sample.metadata is never used for graph wiring, so nothing
+  compiler-inserted lingers into a sink. The auto-cells are ``__taidal_cell_<id>``,
+  freed by their last reader (``drop`` flags compiled by a liveness pass).
 * **fan-in** via the canvas ``Mix Samples`` adapter (``Taidal_MixSamples``: input from A,
-  target from B, metadata = union of all three) compiles to the equivalent unstashes —
-  branches run in Mix-argument order so the metadata-sample branch writes last (matching
-  Mix's ``{**m1, **m2, **m3}`` priority) and the merge node itself disappears.
+  target from B, metadata = union of all three) compiles to ONE
+  :class:`sampleflux.ops.context.Mix` reading the three branch cells
+  (``input_from``/``target_from``/``metadata_from`` — the slot merge order reproduces the
+  ``{**m1, **m2, **m3}`` arg-3-wins priority) and the adapter node itself disappears.
 * the **deepest sink is scheduled last**, so the document's final sample is the longest
   path's output; viewer-only side branches run earlier (delete them from the YAML if
   unwanted).
@@ -44,7 +45,7 @@ DAG into ONE SEQUENTIAL Confluid ``!class:...()`` op-list per weakly-connected c
   like ``ThresholdOp.low_level`` accept ``"{meta_key}"`` resolved from ``sample.meta``
   at call time).
 
-``op_N`` links (an op consumed as a ``DATAFLUX_OP`` value by a higher-order op such as
+``op_N`` links (an op consumed as a ``SAMPLEFLUX_OP`` value by a higher-order op such as
 ``Tee`` / ``Enable`` / ``Parallel``) compile too: each wired producer embeds as a nested
 ``!class:`` instance in the consumer's op-list kwarg (``branches`` entries are wrapped as
 1-op branches, mirroring the live node).
@@ -52,7 +53,7 @@ DAG into ONE SEQUENTIAL Confluid ``!class:...()`` op-list per weakly-connected c
 Input format — the ComfyUI prompt / API graph (what ``app.graphToPrompt()`` emits and
 ``/prompt`` consumes), NOT the richer UI ``workflow.json``::
 
-    {"<node_id>": {"class_type": "Taidal_dataflux_op_numpy_RescaleOp",
+    {"<node_id>": {"class_type": "Taidal_sampleflux_op_numpy_RescaleOp",
                    "inputs": {"sample": ["3", 0], "factor": 2.0}}, ...}
 
 ``inputs`` values are either literals (widget values) or ``["<upstream_id>", <slot>]`` links.
@@ -70,19 +71,18 @@ from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple, Union, cas
 
 from confluid import dump
 from confluid.fluid import Class, Instance, Reference
-from dataflux.discovery import resolve_callable
-from dataflux.ops.capture import CaptureOutputOp
-from dataflux.ops.configure import ConfigureOp
-from dataflux.ops.formula import FormulaOp
-from dataflux.ops.stash import StashInputOp, StashTargetOp, UnstashInputOp, UnstashTargetOp
-from dataflux.ops.transform_chain import TransformChain
 from loggair import get_logger
+from sampleflux.discovery import resolve_callable
+from sampleflux.ops.configure import ConfigureOp
+from sampleflux.ops.context import Apply, Capture, Mix, Save, Use
+from sampleflux.ops.formula import FormulaOp
+from sampleflux.ops.transform_chain import TransformChain
 
 from fluxstudio.bridge import _SINGLE_OP_PARAMS, _coerce_kwargs, _op_list_params, _single_op_params
 
 logger = get_logger(__name__)
 
-# The single ``DATAFLUX_SAMPLE`` input socket every generated op node declares
+# The single ``SAMPLEFLUX_SAMPLE`` input socket every generated op node declares
 # (see ``bridge._build_op_node``) — the one edge that defines op-to-op data flow.
 _SAMPLE_INPUT = "sample"
 
@@ -97,7 +97,7 @@ _MIX_ARGS = ("input_sample", "target_sample", "metadata_sample")
 # (DAG→sequential, the same compiler) and the cone's inner ops drop from the standalone schedule.
 _SUBGRAPH_OP_CLASS_TYPE = "Taidal_SubgraphOp"
 # The hand-written ``Value`` node (``nodes.ValueNode``): a STRING ``value`` widget echoed to a
-# ``DATAFLUX_VALUE`` output as a parsed Python literal — the producer for a NESTED-container param
+# ``SAMPLEFLUX_VALUE`` output as a parsed Python literal — the producer for a NESTED-container param
 # (``OverlayBoxes.boxes``) that rides a value socket. Folds INLINE as its parsed literal.
 _VALUE_NODE_CLASS_TYPE = "Taidal_Value"
 
@@ -115,15 +115,21 @@ _PRIMITIVE_VALUE_NODES = {
     "PrimitiveNode",
 }
 
-# Metadata keys used by the inserted stash/unstash ops. They stay in metadata after the
-# run — namespaced so they never collide with real pipeline keys.
+# Legacy metadata-key prefix of the RETIRED stash/unstash lowering — kept ONLY so graphio's
+# importer still recognises documents exported before the context-ops compiler (2026-07).
 _STASH_KEY_PREFIX = "__taidal_stash_"
+
+# Per-sample Context cells used by the inserted Save/Use/Mix context ops (the graph data
+# plane — sample.metadata is never used for wiring). Namespaced so they can't collide with
+# user-named cells; each auto-cell is freed by its LAST reader (compiled drop flags).
+_CELL_PREFIX = "__taidal_cell_"
 
 # Op nodes expose their declared @output properties as output sockets at slot >= 2 (slot 0 =
 # ``sample``, slot 1 = ``op`` — see bridge._build_op_node). A wire from such a slot into a LATER
-# op's PARAM is an op-@output capture: the producer is wrapped in CaptureOutputOp (records the
-# ACTUAL @output value into metadata) and the consumer in ConfigureOp(ops=[UnstashInputOp(key)]).
-# The captured value rides the metadata bus under a namespaced key (it persists after the run).
+# op's PARAM is an op-@output capture: the producer is wrapped in the context op ``Capture``
+# (records the ACTUAL @output value into a Context cell) and the consumer in ``Apply`` (reads
+# the cell into the param per sample). The cell may be read by several consumers, so it is
+# never dropped — it dies with the per-sample Context.
 _OP_OUTPUT_FIRST_SLOT = 2
 _OUTPUT_CAPTURE_PREFIX = "__taidal_output_"
 
@@ -144,7 +150,7 @@ _EXPORT_TARGET_VALUE = "target"
 # Virtual node id for "the component's incoming sample" (whatever the Flux source feeds).
 _ROOT = "__taidal_root__"
 
-# Dynamic ``DATAFLUX_OP`` value sockets a higher-order op node grows (``web/op_list.js``). The dataflux
+# Dynamic ``SAMPLEFLUX_OP`` value sockets a higher-order op node grows (``web/op_list.js``). The sampleflux
 # higher-order ops use the ``op_N`` family; a waivefront-helios composite can carry SEVERAL families
 # under its own helios param names (``true_transforms_N`` …) — recognised class-aware via
 # :func:`_op_list_socket_param` rather than this fixed pattern (kept as the unstamped fallback).
@@ -157,7 +163,7 @@ def _op_class_of(node_cls: Any) -> Any:
     The op class is the authority on which constructor params accept op VALUES — ``bridge._single_op_params``
     / ``_op_list_params`` introspect IT (single-op params + the dynamic op-list families, incl. the
     stamped helios slots ``compute`` / ``true_transforms``). ``None`` when the path is missing/unresolvable
-    (a non-op / native node), so the callers fall back to the dataflux ``op_N`` / ``op`` / ``target`` names.
+    (a non-op / native node), so the callers fall back to the sampleflux ``op_N`` / ``op`` / ``target`` names.
     """
     path = getattr(node_cls, "TAIDAL_CALLABLE_PATH", None)
     if not path:
@@ -172,7 +178,7 @@ def _op_list_socket_param(op_cls: Any, key: str) -> Optional[str]:
     """The op-LIST constructor param whose dynamic ``<prefix>_N`` socket family ``key`` belongs to, else None.
 
     Routes each wired op-list socket to the right kwarg even when a node has SEVERAL families
-    (``HeliosIfOp`` → ``true_transforms_N`` + ``false_transforms_N``); the dataflux ``op_N`` family maps
+    (``HeliosIfOp`` → ``true_transforms_N`` + ``false_transforms_N``); the sampleflux ``op_N`` family maps
     to its single op-list param. ``None`` ``op_cls`` (unstamped/native) recognises nothing here.
     """
     if op_cls is not None:
@@ -187,7 +193,7 @@ def _is_op_value_key(op_cls: Any, key: str) -> bool:
     / a stamped helios ``compute``) or an indexed op-list socket (``op_0`` / ``true_transforms_0``).
 
     These wires embed through the op-value path (nested ``!class:`` / list kwarg), NOT the widget/value-chain
-    pre-passes — so the pre-passes SKIP them. Falls back to the dataflux name conventions when ``op_cls`` is
+    pre-passes — so the pre-passes SKIP them. Falls back to the sampleflux name conventions when ``op_cls`` is
     unavailable.
     """
     if op_cls is None:
@@ -222,8 +228,8 @@ class _OutputCapture(NamedTuple):
 
     ``producer_id`` is the op node whose ``@output`` is captured (a sample-ancestor of the consumer),
     ``output_name`` the ``@output`` property (``RETURN_NAMES[slot]``), and ``stash_key`` the namespaced
-    metadata key the captured value lands in. The producer is wrapped in ``CaptureOutputOp`` and the
-    consumer in ``ConfigureOp(ops=[UnstashInputOp(stash_key)], target=…, param=…)``.
+    Context cell the captured value lands in (historically a metadata stash key — the field name
+    survives). The producer is wrapped in the context op ``Capture`` and the consumer in ``Apply``.
     """
 
     producer_id: str
@@ -343,8 +349,8 @@ class _FoldContext:
         self.notes = notes
         self.configure_specs = configure_specs or {}
         # op-@output → param captures (consumer id -> [(param, capture)]). The consumer is wrapped in
-        # ConfigureOp(UnstashInputOp); the producer is wrapped in CaptureOutputOp — `captures_by_producer`
-        # is the reverse map (producer id -> {output_name: stash_key}) so a producer feeding several
+        # Apply (reads the cell); the producer is wrapped in the context op Capture — `captures_by_producer`
+        # is the reverse map (producer id -> {output_name: cell}) so a producer feeding several
         # consumers captures each @output exactly once.
         self.output_captures = output_captures or {}
         self.captures_by_producer: Dict[str, Dict[str, str]] = {}
@@ -504,8 +510,8 @@ def _collect_output_captures(
 ) -> Dict[str, List[Tuple[str, _OutputCapture]]]:
     """Pre-trace every op-param wire that captures another op's ``@output`` (output slot >= 2).
 
-    Maps a consumer node id to its ``(param, capture)`` list — each compiles to a ``CaptureOutputOp``
-    on the producer + a ``ConfigureOp(ops=[UnstashInputOp(key)])`` on the consumer. Disjoint from
+    Maps a consumer node id to its ``(param, capture)`` list — each compiles to a context ``Capture``
+    on the producer + an ``Apply`` (cell read) on the consumer. Disjoint from
     value chains by construction (a value chain's immediate upstream is a Math/Extract adapter, not an
     op-kind node), so this runs alongside :func:`_collect_value_chains`. Both the producer and the
     consumer stay in the schedule (the producer also transforms the sample; nothing is excluded).
@@ -661,11 +667,11 @@ def _ancestor_cone(target_id: str, prompt: Dict[str, Any]) -> Set[str]:
 def _runtime_value_hint(target: Any, key: str) -> Optional[str]:
     """The per-sample-value note suffix: the sanctioned runtime mechanisms.
 
-    Always points at ``dataflux.ops.configure.ConfigureOp`` (compute the value from the
+    Always points at ``sampleflux.ops.configure.ConfigureOp`` (compute the value from the
     sample and inject it as the param — works for ANY op attribute); additionally mentions
     the metadata-expression form when the param's annotation admits ``str``.
     """
-    hint = f"; for a per-sample value wrap the op in dataflux ConfigureOp " f"(compute ops + target + param={key!r})"
+    hint = f"; for a per-sample value wrap the op in sampleflux ConfigureOp " f"(compute ops + target + param={key!r})"
     if _param_admits_str(target, key):
         hint += " or set the widget to a '{meta_key}' expression resolved from sample.meta at call time"
     return hint
@@ -726,7 +732,7 @@ def _resolve_widget_link(target: Any, key: str, link: Any, fold: _FoldContext) -
         return ("ref", Reference(f"{name}.{return_names[slot]}"))
 
     if kind == "op":
-        # A wire from an op node's ``op`` VALUE output (a DATAFLUX_OP wire into a single-op
+        # A wire from an op node's ``op`` VALUE output (a SAMPLEFLUX_OP wire into a single-op
         # param like ``RandomApply.op`` / ``ConfigureOp.target``) embeds as a nested instance.
         return_names = tuple(getattr(node_cls, "RETURN_NAMES", ()) or ())
         op_slot = return_names.index("op") if "op" in return_names else 1
@@ -940,30 +946,20 @@ def _op_to_instance(
             instance = cast(
                 Instance, _marker(Instance, ConfigureOp, {"ops": compute, "target": instance, "param": param})
             )
-    # op-@output → param (consumer side): inject the producer's CAPTURED value (read back from the
-    # metadata bus via UnstashInputOp) into this op's param per sample.
+    # op-@output → param (consumer side): inject the producer's CAPTURED value (read from its
+    # per-sample Context cell) into this op's param — the cell is NOT dropped (it may feed
+    # several consumers; it dies with the per-sample Context).
     for param, cap in capture_specs:
         instance = cast(
             Instance,
-            _marker(
-                Instance,
-                ConfigureOp,
-                {
-                    # remove=False: the captured ``__taidal_output_*`` value may be read by SEVERAL
-                    # consumers of the same producer output, so this unstash must NOT delete the key
-                    # (distinct from the fan-out ``__taidal_stash_*`` keys cleaned up in _compile_component).
-                    "ops": [_marker(Instance, UnstashInputOp, {"key": cap.stash_key, "remove": False})],
-                    "target": instance,
-                    "param": param,
-                },
-            ),
+            _marker(Instance, Apply, {"op": instance, "param": param, "source": cap.stash_key}),
         )
     # op-@output → param (producer side): if THIS op's @output is captured downstream, wrap it so its
-    # ACTUAL value lands in metadata after it runs (outermost — it applies the configured op above and
-    # reads the @output off the innermost wrapped op via CaptureOutputOp's .target walk).
+    # ACTUAL value lands in a Context cell after it runs (outermost — it applies the configured op
+    # above and reads the @output off the innermost wrapped op via Capture's .target/.op walk).
     produced = fold.captures_by_producer.get(str(node_id)) if fold is not None else None
     if produced:
-        instance = cast(Instance, _marker(Instance, CaptureOutputOp, {"op": instance, "captures": dict(produced)}))
+        instance = cast(Instance, _marker(Instance, Capture, {"op": instance, "captures": dict(produced)}))
     return instance
 
 
@@ -978,7 +974,7 @@ def _subgraph_op_instance(
     The cone (the ops computing the sample wired into the terminator) is flattened with the
     SAME DAG→sequential machinery the top level uses — fan-out and ``Mix`` fan-in become
     ``Stash``/``Unstash`` sequences — so the whole drawn sub-pipeline lands as one
-    ``!class:dataflux.ops.transform_chain.TransformChain(ops=[…])``. The shared ``fold`` means a
+    ``!class:sampleflux.ops.transform_chain.TransformChain(ops=[…])``. The shared ``fold`` means a
     ``constant=True`` value node inside the subgraph still hoists ONCE to the document top
     level and the nested ops dotted-``!ref:`` it. ``fold.excluded`` (value-chain members) is
     honoured; the standalone-schedule exclusion (:func:`_subgraph_cone_excluded`) is NOT applied
@@ -1067,7 +1063,7 @@ def _build_graph(
     ``boundary_feeds`` maps node id → the out-of-universe feed markers it touches
     (boundary node ids, or ``"<unconnected>"``) for the one-stream check.
 
-    An op consumed ONLY as a ``DATAFLUX_OP`` value (an ``op_N`` link) with no sample
+    An op consumed ONLY as a ``SAMPLEFLUX_OP`` value (an ``op_N`` link) with no sample
     wiring is config, not sample flow — it is excluded here and embeds as a nested
     instance in its consumer instead.
     """
@@ -1195,12 +1191,15 @@ def _compile_component(
     node_mappings: Dict[str, Any],
     fold: _FoldContext,
 ) -> List[Any]:
-    """Flatten one component of the op DAG into a sequential op-list.
+    """Flatten one component of the op DAG into a sequential context-ops list.
 
     Deterministic DFS from the sinks (deepest sink LAST, so the final sample is the
     longest path's output); a Mix node visits its predecessors in argument order. The
-    flowing sample's input/target lineage is tracked, with ``Stash*Op``/``Unstash*Op``
-    instances inserted at forks and Mix merges (see the module docstring).
+    flowing sample is tracked as ONE whole-sample lineage: a fork's post-op sample is
+    snapshotted into a per-sample Context cell (``Save``), a later branch restarts from
+    it (``Use``), and a ``Mix Samples`` merge reads its three argument cells with ONE
+    :class:`sampleflux.ops.context.Mix` (see the module docstring). A liveness post-pass
+    frees each auto-cell at its last reader (``drop`` flags).
     """
     member_set = set(members)
     consumer_count: Dict[str, int] = {}
@@ -1208,13 +1207,15 @@ def _compile_component(
         for _arg, pred in preds[nid]:
             consumer_count[pred] = consumer_count.get(pred, 0) + 1
 
-    # Nodes whose post-op sample state must be restorable later: every fork (≥2 consumers,
-    # the virtual ROOT included) and every Mix input/target argument (restored at the merge).
-    needs_stash: Set[str] = {nid for nid, count in consumer_count.items() if count >= 2}
+    # Nodes whose post-op sample must live in a Context cell: every fork (≥2 consumers,
+    # the virtual ROOT included) and every Mix argument (all three slots read cells —
+    # input_from/target_from/metadata_from; reading arg-3 as metadata_from reproduces
+    # the canvas Mix's ``{**m1, **m2, **m3}`` arg-3-wins merge priority).
+    needs_save: Set[str] = {nid for nid, count in consumer_count.items() if count >= 2}
     for nid in members:
         if universe[nid] == "mix":
-            (_, x), (_, y), (_, _z) = preds[nid]
-            needs_stash.update((x, y))
+            (_, x), (_, y), (_, z) = preds[nid]
+            needs_save.update((x, y, z))
 
     # Longest-path depth orders the sinks: side branches first, the deepest tail last.
     depth: Dict[str, int] = {}
@@ -1230,54 +1231,39 @@ def _compile_component(
     sinks.sort(key=lambda nid: (_depth(nid), _id_sort_key(nid)))
 
     ops_out: List[Any] = []
-    inserted = 0
-    live = {"input": _ROOT, "target": _ROOT}
+    live = _ROOT  # the node whose full sample is currently on the linear stream
     emitted: Set[str] = set()
 
-    def _stash_key(nid: str, field: str) -> str:
-        # Input and target snapshots need DISTINCT metadata keys (both ops write
-        # ``metadata[key]`` — one shared key would silently overwrite the other).
-        return f"{_STASH_KEY_PREFIX}{'root' if nid == _ROOT else nid}_{field}"
+    def _cell(nid: str) -> str:
+        return f"{_CELL_PREFIX}{'root' if nid == _ROOT else nid}"
 
-    def _append_stash(nid: str) -> None:
-        nonlocal inserted
-        ops_out.append(Instance(StashInputOp, key=_stash_key(nid, "input")))
-        ops_out.append(Instance(StashTargetOp, key=_stash_key(nid, "target")))
-        inserted += 2
-
-    def _restore(field: str, nid: str) -> None:
-        nonlocal inserted
-        if live[field] == nid:
-            return
-        op_cls = UnstashInputOp if field == "input" else UnstashTargetOp
-        ops_out.append(Instance(op_cls, key=_stash_key(nid, field)))
-        live[field] = nid
-        inserted += 1
-
-    if _ROOT in needs_stash:
-        _append_stash(_ROOT)
+    if _ROOT in needs_save:
+        ops_out.append(_marker(Instance, Save, {"name": _cell(_ROOT)}))
 
     def _emit(nid: str) -> None:
+        nonlocal live
         if nid == _ROOT or nid in emitted:
             return
         emitted.add(nid)  # acyclicity established by _check_component
         for _arg, pred in preds[nid]:
             _emit(pred)
         if universe[nid] == "mix":
-            (_, x), (_, y), (_, _z) = preds[nid]
-            # Mix(input← x, target← y, metadata = union): the branches already ran in
-            # argument order, so metadata is merged with arg-3 priority; restore the
-            # input/target lineages the merge selects, then the merge node is the state.
-            _restore("input", x)
-            _restore("target", y)
+            (_, x), (_, y), (_, z) = preds[nid]
+            ops_out.append(
+                _marker(
+                    Instance,
+                    Mix,
+                    {"input_from": _cell(x), "target_from": _cell(y), "metadata_from": _cell(z)},
+                )
+            )
         else:
             pred = preds[nid][0][1]
-            _restore("input", pred)
-            _restore("target", pred)
+            if live != pred:
+                ops_out.append(_marker(Instance, Use, {"name": _cell(pred)}))
             ops_out.append(_op_to_instance(nid, prompt[nid], node_mappings, dropped_notes=fold.notes, fold=fold))
-        live["input"] = live["target"] = nid
-        if nid in needs_stash:
-            _append_stash(nid)
+        live = nid
+        if nid in needs_save:
+            ops_out.append(_marker(Instance, Save, {"name": _cell(nid)}))
 
     for sink in sinks:
         _emit(sink)
@@ -1286,24 +1272,52 @@ def _compile_component(
     if leftover:  # pragma: no cover - defensive: every DAG node reaches some sink
         raise UnsupportedTopologyError(f"Op nodes {sorted(leftover, key=_id_sort_key)} are unreachable from any sink.")
 
-    # The Unstash*Op default is remove=True, so each ``__taidal_stash_*`` snapshot is DELETED from the
-    # metadata bus once restored — it never lingers into a downstream sink. But a fan-out restores the
-    # SAME key before each later branch, so EVERY unstash of a key EXCEPT the LAST must keep it
-    # (remove=False) or the next branch can't restore the fork. (copy stays at its default — earlier
-    # unstashes still deepcopy for branch independence.)
-    unstash_indices: Dict[str, List[int]] = {}
+    # Liveness post-pass: the LAST reader of each auto-cell frees it (Use -> drop=True,
+    # Mix -> the cell joins its ``drop`` list), so a well-formed graph leaves the
+    # per-sample Context empty. User-named cells (no ``__taidal_cell_`` prefix) and the
+    # multi-consumer capture cells are never managed here.
+    reads: Dict[str, List[int]] = {}
     for i, op in enumerate(ops_out):
-        if isinstance(op, Instance) and op.target in (UnstashInputOp, UnstashTargetOp):
-            unstash_indices.setdefault(str(op.kwargs.get("key")), []).append(i)
-    for indices in unstash_indices.values():
-        for i in indices[:-1]:  # all but the LAST occurrence of each key keep it
-            keep = ops_out[i]
-            ops_out[i] = Instance(keep.target, **{**keep.kwargs, "remove": False})
+        if not isinstance(op, Instance):
+            continue
+        if op.target is Use:
+            reads.setdefault(str(op.kwargs.get("name")), []).append(i)
+        elif op.target is Mix:
+            for slot in ("input_from", "target_from", "metadata_from"):
+                cell = op.kwargs.get(slot)
+                if cell:
+                    reads.setdefault(str(cell), []).append(i)
+    for cell, sites in reads.items():
+        if not cell.startswith(_CELL_PREFIX):
+            continue
+        i = sites[-1]
+        last = ops_out[i]
+        if last.target is Use:
+            ops_out[i] = _marker(Instance, Use, {**last.kwargs, "drop": True})
+        else:
+            drops = [c for c in (last.kwargs.get("drop") or [])]
+            if cell not in drops:
+                drops.append(cell)
+            ops_out[i] = _marker(Instance, Mix, {**last.kwargs, "drop": drops})
 
+    # A Save whose cell is never read (defensive — a conservatively-forked node whose
+    # extra consumers all rode the stream) would leak; drop such Saves outright.
+    ops_out = [
+        op
+        for op in ops_out
+        if not (
+            isinstance(op, Instance)
+            and op.target is Save
+            and str(op.kwargs.get("name", "")).startswith(_CELL_PREFIX)
+            and str(op.kwargs.get("name")) not in reads
+        )
+    ]
+
+    inserted = sum(1 for op in ops_out if isinstance(op, Instance) and op.target in (Save, Use, Mix))
     if inserted:
         fold.notes.append(
-            f"branching canvas wiring compiled to a sequential op-list — {inserted} stash/unstash "
-            f"ops inserted (each '{_STASH_KEY_PREFIX}*' snapshot is removed by its final unstash)"
+            f"branching canvas wiring compiled to a sequential op-list — {inserted} context ops "
+            "(Save/Use/Mix over per-sample Context cells, freed by their last reader) inserted"
         )
     return ops_out
 
@@ -1407,9 +1421,9 @@ def compile_op_chains(
         prompt = {nid: node for nid, node in prompt.items() if nid not in skipped_marks}
 
     configure_specs, vc_excluded = _collect_value_chains(prompt, node_mappings)
-    # op-@output → param captures: a CaptureOutputOp on the producer + a ConfigureOp(UnstashInputOp)
-    # on the consumer. Both stay scheduled (the producer also transforms the sample), so captures add
-    # NOTHING to schedule_excluded.
+    # op-@output → param captures: a context Capture on the producer + an Apply on the consumer.
+    # Both stay scheduled (the producer also transforms the sample), so captures add NOTHING to
+    # schedule_excluded.
     output_captures = _collect_output_captures(prompt, node_mappings)
     # A consumed Subgraph-Op terminator's inner ops embed as a nested TransformChain in the
     # consumer (see _subgraph_op_instance), so they drop from the STANDALONE schedule — but NOT
@@ -1566,6 +1580,78 @@ def export_ops_yamls(
     return docs
 
 
+def export_flow_yamls(
+    prompt: Dict[str, Any],
+    node_mappings: Dict[str, Any],
+    skip_ids: Optional[Any] = None,
+    target_ids: Optional[Any] = None,
+) -> List[str]:
+    """Compile a prompt graph and serialize EACH op component as a readable ``flow:`` document.
+
+    The named-step twin of :func:`export_ops_yamls`: the compiled flat context-ops list is
+    LIFTED via :func:`sampleflux.flow.from_ops` (marker-aware — hoisted-constant dotted
+    ``!ref:``\\ s stay intact) into ``{…constants…, flow: {step: …}, outputs: …}``. The
+    consumer side is ``FlowGraph.from_yaml(path)`` (native engine) or
+    ``Flux.from_flow_yaml(path)`` (lowered back to the serial form) — execution parity is
+    the sampleflux flow⇄ops contract. A purely linear component emits a linear flow.
+    """
+    from sampleflux.flow import from_ops as _flow_from_ops
+
+    notes_per_chain: List[List[str]] = []
+    constants_per_chain: List[Dict[str, Any]] = []
+    chains = compile_op_chains(
+        prompt,
+        node_mappings,
+        chain_notes=notes_per_chain,
+        chain_constants=constants_per_chain,
+        skip_ids=skip_ids,
+        target_ids=target_ids,
+    )
+    if not chains:
+        return [dump({"flow": {}})]
+    docs: List[str] = []
+    for chain, notes, constants in zip(chains, notes_per_chain, constants_per_chain):
+        flow_map, outputs = _flow_from_ops(chain)
+        flow_map, outputs = _prettify_flow_names(flow_map, outputs)
+        document: Dict[str, Any] = dict(constants)
+        document["flow"] = flow_map
+        document["outputs"] = outputs
+        docs.append(_comment_block(notes) + dump(document))
+    return docs
+
+
+def _prettify_flow_names(flow_map: Dict[str, Any], outputs: str) -> Tuple[Dict[str, Any], str]:
+    """Rename compiler-internal ``__taidal_cell_<id>`` step names to readable ``node_<id>`` forms.
+
+    The lift carries the exporter's namespaced cell names as step names; a flow document is
+    the READABLE form, so strip the namespace (subgraph ``:`` path separators become ``_``).
+    Every reference (``from``/``target_from``/``metadata_from``/``bind``) is rewritten too.
+    """
+    rename = {
+        name: "node_" + name[len(_CELL_PREFIX) :].replace(":", "_")
+        for name in flow_map
+        if name.startswith(_CELL_PREFIX)
+    }
+    if not rename:
+        return flow_map, outputs
+
+    def _ref(value: str) -> str:
+        head, dot, attr = str(value).partition(".")
+        return rename.get(head, head) + (dot + attr if dot else "")
+
+    renamed: Dict[str, Any] = {}
+    for name, entry in flow_map.items():
+        if isinstance(entry, dict):
+            entry = dict(entry)
+            for key in ("from", "target_from", "metadata_from"):
+                if key in entry:
+                    entry[key] = _ref(entry[key])
+            if isinstance(entry.get("bind"), dict):
+                entry["bind"] = {param: _ref(ref) for param, ref in entry["bind"].items()}
+        renamed[rename.get(name, name)] = entry
+    return renamed, rename.get(outputs, outputs)
+
+
 def chain_output_paths(base: Union[str, Path], count: int) -> List[Path]:
     """Output file paths for ``count`` component documents derived from one user-given ``base``.
 
@@ -1585,6 +1671,7 @@ __all__ = [
     "collect_export_marks",
     "compile_op_chains",
     "compile_ops",
+    "export_flow_yamls",
     "export_ops_yaml",
     "export_ops_yamls",
 ]

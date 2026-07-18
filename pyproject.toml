@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "fluxstudio"
 version = "0.2.0"
-description = "Auto-generating ComfyUI nodes from DataFlux/HuggingFace operations."
+description = "Auto-generating ComfyUI nodes from SampleFlux/HuggingFace operations."
 authors = [{name = "Taidal"}]
 license = {text = "MIT"}
 dependencies = [
@@ -13,7 +13,7 @@ dependencies = [
     "loggair>=0.1.0",
     # [pydantic] extra: bridge.py enumerates fields via confluid.to_pydantic.
     "confluid[pydantic]>=0.1.0",
-    "data-flux>=0.1.0",
+    "sampleflux>=0.1.0",
     "datasets",
     # PEP-593 range marks: the bridge reads Annotated[..., Interval/Ge/Le] into widget
     # min/max. Already transitive via confluid[pydantic]->pydantic; declared because

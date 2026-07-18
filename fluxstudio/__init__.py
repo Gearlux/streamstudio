@@ -239,7 +239,7 @@ _discover_and_register_nodes()
 loggair.force_no_color()
 
 # Merge the statically-defined FluxStudio adapter nodes (dataset walker + sample viewer) on top of
-# the auto-discovered DataFlux/Waivefront nodes.
+# the auto-discovered SampleFlux/Waivefront nodes.
 NODE_CLASS_MAPPINGS.update(_STATIC_NODE_CLASS_MAPPINGS)
 NODE_DISPLAY_NAME_MAPPINGS.update(_STATIC_NODE_DISPLAY_NAME_MAPPINGS)
 

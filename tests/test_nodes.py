@@ -18,9 +18,9 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 import torch
-from dataflux.ops.torch import RescaleOp
-from dataflux.ops.transform_chain import TransformChain
-from dataflux.sample import Sample
+from sampleflux.ops.torch import RescaleOp
+from sampleflux.ops.transform_chain import TransformChain
+from sampleflux.sample import Sample
 
 from fluxstudio.bridge import ARRAY_TYPE, OP_TYPE, SAMPLE_TYPE, create_comfy_node
 from fluxstudio.nodes import (
@@ -111,7 +111,7 @@ def test_walk_empty_source_raises() -> None:
 
 
 def test_walk_accepts_existing_flux() -> None:
-    from dataflux.core import Flux
+    from sampleflux.core import Flux
 
     flux = Flux.from_source(_ImgSource(2))
     (sample,) = WalkDatasetNode().walk(source=flux, index=1, wrap=True)
@@ -154,7 +154,7 @@ def test_walk_step_param_accepted_but_index_governs_out_of_range() -> None:
 
 def test_extractor_input_types_and_outputs() -> None:
     required = SampleExtractorNode.INPUT_TYPES()["required"]
-    assert required["sample"] == ("DATAFLUX_SAMPLE",)
+    assert required["sample"] == ("SAMPLEFLUX_SAMPLE",)
     assert required["field"][0] == ["input", "target"]
     # colormap is a combo (enumeration), not free text — its options are the closed waivefront
     # ``Colormap`` set, and the default ("viridis") is one of them.
@@ -169,8 +169,8 @@ def test_extractor_input_types_and_outputs() -> None:
         "STRING",
         "INT",
         "FLOAT",
-        "DATAFLUX_ARRAY",
-        "DATAFLUX_VALUE",
+        "SAMPLEFLUX_ARRAY",
+        "SAMPLEFLUX_VALUE",
     )
     assert SampleExtractorNode.RETURN_NAMES == ("image", "mask", "text", "int", "float", "array", "value")
     # NOT an output node — it feeds native ComfyUI viewers.
@@ -203,10 +203,10 @@ def test_extract_input_image_yields_comfy_image() -> None:
     assert tuple(mask.shape) == (1, 1, 1)
     assert ival == 0 and fval == 0.0
     assert isinstance(text, str)
-    # DATAFLUX_ARRAY output passes the raw ndarray field through UNCHANGED (not normalized/colormapped).
+    # SAMPLEFLUX_ARRAY output passes the raw ndarray field through UNCHANGED (not normalized/colormapped).
     assert isinstance(arr, np.ndarray) and arr.shape == (8, 8, 3)
     assert arr is sample.input
-    # DATAFLUX_VALUE output is the raw field VERBATIM (same object).
+    # SAMPLEFLUX_VALUE output is the raw field VERBATIM (same object).
     assert value is sample.input
 
 
@@ -305,7 +305,7 @@ def test_extract_none_sample_raises_legible_error() -> None:
 
 
 def test_extract_sample_value_output_is_the_raw_list_field() -> None:
-    # A list-valued field (a list of boxes) comes out VERBATIM on the DATAFLUX_VALUE ``value`` output,
+    # A list-valued field (a list of boxes) comes out VERBATIM on the SAMPLEFLUX_VALUE ``value`` output,
     # so it wires straight into a nested-container param socket (OverlayBoxes.boxes).
     boxes = [(20, 10, 80, 50), (200, 100, 300, 150)]
     sample = Sample(input=boxes, target=None, metadata={})
@@ -320,20 +320,20 @@ def test_extract_sample_value_output_is_the_raw_list_field() -> None:
 
 def test_extract_metadata_input_types_and_outputs() -> None:
     req = ExtractMetadataNode.INPUT_TYPES()["required"]
-    assert req["sample"] == ("DATAFLUX_SAMPLE",)
+    assert req["sample"] == ("SAMPLEFLUX_SAMPLE",)
     assert req["key"][0] == "STRING" and req["key"][1]["default"] == "detection_boxes"
-    assert ExtractMetadataNode.RETURN_TYPES == ("DATAFLUX_VALUE", "DATAFLUX_ARRAY", "STRING")
+    assert ExtractMetadataNode.RETURN_TYPES == ("SAMPLEFLUX_VALUE", "SAMPLEFLUX_ARRAY", "STRING")
     assert ExtractMetadataNode.RETURN_NAMES == ("value", "array", "text")
     assert NODE_CLASS_MAPPINGS["Taidal_ExtractMetadata"] is ExtractMetadataNode
 
 
 def test_extract_metadata_pulls_value_by_key() -> None:
     # The canonical flow: a model stamps metadata['detection_boxes']; this extracts it as a
-    # DATAFLUX_VALUE to wire into OverlayBoxes.boxes.
+    # SAMPLEFLUX_VALUE to wire into OverlayBoxes.boxes.
     boxes = [[20, 10, 80, 50], [200, 100, 300, 150]]
     sample = Sample(input=0, target=None, metadata={"detection_boxes": boxes, "detection_labels": ["WLAN"]})
     value, array, text = ExtractMetadataNode().extract(sample, key="detection_boxes")
-    assert value == boxes  # verbatim list of boxes on the DATAFLUX_VALUE output
+    assert value == boxes  # verbatim list of boxes on the SAMPLEFLUX_VALUE output
     assert array == boxes  # a non-array value passes through verbatim too
     assert "20" in text and "300" in text  # repr view
     # a different key
@@ -626,7 +626,7 @@ def test_compose_input_types_has_three_sample_sockets() -> None:
     required = ComposeSampleNode.INPUT_TYPES()["required"]
     assert set(required) == {"input_sample", "target_sample", "metadata_sample"}
     for key in ("input_sample", "target_sample", "metadata_sample"):
-        assert required[key][0] == "DATAFLUX_SAMPLE"
+        assert required[key][0] == "SAMPLEFLUX_SAMPLE"
 
 
 def test_compose_takes_input_from_first_sample() -> None:
@@ -679,7 +679,7 @@ def test_mix_input_types_has_three_sample_sockets() -> None:
     required = MixSamplesNode.INPUT_TYPES()["required"]
     assert set(required) == {"input_sample", "target_sample", "metadata_sample"}
     for key in ("input_sample", "target_sample", "metadata_sample"):
-        assert required[key][0] == "DATAFLUX_SAMPLE"
+        assert required[key][0] == "SAMPLEFLUX_SAMPLE"
 
 
 def test_mix_takes_input_from_first_sample() -> None:
@@ -756,7 +756,7 @@ def test_static_node_mappings_present() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# SubgraphOpExtractNode — compile an upstream op DAG into one DATAFLUX_OP
+# SubgraphOpExtractNode — compile an upstream op DAG into one SAMPLEFLUX_OP
 # --------------------------------------------------------------------------- #
 
 
@@ -1154,8 +1154,8 @@ def test_retag_node_io_is_wildcard() -> None:
     spec = RetagObjectNode.INPUT_TYPES()
     assert spec["required"]["object"] == (ANY,)
     # The wildcard compares equal to every concrete socket type (the AnyType contract).
-    assert ANY == "DATAFLUX_OBJECT:model"
-    assert not (ANY != "DATAFLUX_SOURCE")
+    assert ANY == "SAMPLEFLUX_OBJECT:model"
+    assert not (ANY != "SAMPLEFLUX_SOURCE")
     # Combos carry the keep / none sentinels.
     for field in ("target_role", "target_task"):
         options = spec["required"][field][0]
@@ -1269,11 +1269,11 @@ def test_yaml_dump_node_configurable() -> None:
 
 def test_yaml_dump_node_sample_does_not_produce_class_tag() -> None:
     """A Sample NamedTuple must NOT be serialized via confluid.dump (which produces
-    the useless 'class:dataflux.sample.Sample ''' output) — it should fall through
+    the useless 'class:sampleflux.sample.Sample ''' output) — it should fall through
     to yaml.safe_dump or repr() and show the actual field values."""
     sample = Sample(input=np.zeros((4, 4), dtype="float32"), target=1, metadata={"label": "wifi"})
     (yaml_str,) = YamlDumpNode().dump(sample)
-    assert "class:dataflux.sample.Sample" not in yaml_str
+    assert "class:sampleflux.sample.Sample" not in yaml_str
 
 
 def test_yaml_dump_node_input_types() -> None:

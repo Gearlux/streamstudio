@@ -40,15 +40,18 @@ from confluid import get_configurable_attrs
 from confluid import load as _confluid_load
 from confluid import resolve as _confluid_resolve
 from confluid.registry import resolve_class
-from dataflux import Flux
-from dataflux.discovery import resolve_callable
-from dataflux.ops.capture import CaptureOutputOp
-from dataflux.ops.configure import ConfigureOp
-from dataflux.ops.formula import FormulaOp
-from dataflux.ops.stash import StashInputOp, StashTargetOp, UnstashInputOp, UnstashTargetOp
-from dataflux.ops.tee import Tee
-from dataflux.ops.transform_chain import TransformChain
 from loggair import get_logger
+from sampleflux import Flux
+from sampleflux.discovery import resolve_callable
+from sampleflux.ops.capture import CaptureOutputOp
+from sampleflux.ops.configure import ConfigureOp
+from sampleflux.ops.context import Mix as CtxMix
+from sampleflux.ops.context import Save as CtxSave
+from sampleflux.ops.context import Use as CtxUse
+from sampleflux.ops.formula import FormulaOp
+from sampleflux.ops.stash import StashInputOp, StashTargetOp, UnstashInputOp, UnstashTargetOp
+from sampleflux.ops.tee import Tee
+from sampleflux.ops.transform_chain import TransformChain
 
 from fluxstudio.bridge import (
     _OP_LIST_PARAMS,
@@ -61,6 +64,7 @@ from fluxstudio.bridge import (
     _op_list_params,
 )
 from fluxstudio.export import (
+    _CELL_PREFIX,
     _EXPORT_SKIP_PROPERTY,
     _EXPORT_SKIP_VALUE,
     _EXPORT_TARGET_VALUE,
@@ -216,7 +220,7 @@ def _widget_and_socket_params(node_cls: Any) -> Tuple[List[str], Dict[str, str]]
 
     Widget order is the declaration order (required then optional) — the same order the
     positional ``widgets_values`` array uses. Socket entries are those whose ComfyUI type is a
-    wire type (``DATAFLUX_*`` / ``HF_DATASET``); everything else (scalars, ``Literal`` combos) is
+    wire type (``SAMPLEFLUX_*`` / ``HF_DATASET``); everything else (scalars, ``Literal`` combos) is
     a widget.
     """
     from fluxstudio.bridge import _is_socket_type
@@ -230,7 +234,7 @@ def _widget_and_socket_params(node_cls: Any) -> Tuple[List[str], Dict[str, str]]
             if isinstance(socket_type, list):  # a Literal combo (options list as the "type") → widget
                 widgets.append(name)
             # ``_is_socket_type`` is BASE-type aware so a category-qualified object socket
-            # (``DATAFLUX_OBJECT:classification_model``) is still recognised as a wired socket,
+            # (``SAMPLEFLUX_OBJECT:classification_model``) is still recognised as a wired socket,
             # not mistaken for a widget. The full qualified string is preserved in ``sockets``.
             elif isinstance(socket_type, str) and _is_socket_type(socket_type):
                 sockets[name] = socket_type
@@ -670,7 +674,7 @@ def yaml_to_workflow(
             raw = _confluid_load(doc, flow=False)
         except Exception:  # pragma: no cover - defensive: the whole-graph path re-parses and reports
             raw = None
-        if _is_ops_document(raw):
+        if _is_ops_document(raw) or _is_flow_document(raw):
             return ops_yaml_to_workflow(raw, node_mappings, as_=as_, name=name)
 
     # instantiate=True → live-but-inert objects (load parses the file/string THEN materialises with
@@ -705,6 +709,27 @@ def _is_ops_document(doc: Any) -> bool:
         return False
     ops = doc["ops"]
     return all(isinstance(item, Fluid) for item in ops) if ops else True
+
+
+def _is_flow_document(doc: Any) -> bool:
+    """True if ``doc`` is a parsed flow-export document: a dict with a ``flow`` step MAPPING."""
+    return isinstance(doc, dict) and isinstance(doc.get("flow"), dict)
+
+
+def _lower_flow_document(doc: Dict[str, Any]) -> Dict[str, Any]:
+    """Lower a ``{…constants…, flow: {...}, outputs: …}`` document into the ops-doc form.
+
+    Uses ``sampleflux.flow`` with UNBUILT step markers (``parse_flow(build=False)`` — a
+    hoisted constant's dotted ``!ref:`` must not resolve during a structural import), so
+    the replay sees live context ops around marker real-ops, exactly like a fresh export.
+    """
+    from sampleflux.flow import parse_flow as _parse_flow
+    from sampleflux.flow import to_ops as _to_ops
+
+    steps, outputs = _parse_flow(doc["flow"], str(doc.get("outputs", "") or ""), build=False)
+    lowered: Dict[str, Any] = {k: v for k, v in doc.items() if k not in ("flow", "outputs")}
+    lowered["ops"] = _to_ops(steps, outputs)
+    return lowered
 
 
 def ops_yaml_to_workflow(
@@ -753,9 +778,16 @@ def ops_yaml_to_workflow(
     Returns:
         A ComfyUI UI-format workflow dict, JSON-safe (non-finite widget values nulled).
     """
-    raw = doc if _is_ops_document(doc) else _confluid_load(doc, flow=False)
-    if not isinstance(raw, dict) or not _is_ops_document(raw):  # pragma: no cover - caller detected an ops-doc
-        raise UnsupportedTopologyError("ops_yaml_to_workflow expects an ops-export document (a top-level 'ops:' list).")
+    raw = doc if (_is_ops_document(doc) or _is_flow_document(doc)) else _confluid_load(doc, flow=False)
+    if _is_flow_document(raw):
+        # The lowered list holds LIVE context ops around marker real-ops (to_ops builds the
+        # Save/Use/Mix), so it deliberately bypasses the all-markers ops-doc check below.
+        raw = _lower_flow_document(cast(Dict[str, Any], raw))
+    elif not isinstance(raw, dict) or not _is_ops_document(raw):  # pragma: no cover - caller detected the shape
+        raise UnsupportedTopologyError(
+            "ops_yaml_to_workflow expects an ops-export document (a top-level 'ops:' list) "
+            "or a flow-export document (a 'flow:' step mapping)."
+        )
     builder = _WorkflowBuilder(node_mappings)
 
     # 1. Hoisted constants → value nodes (document key -> node id), for dotted-!ref wiring below.
@@ -778,6 +810,7 @@ def ops_yaml_to_workflow(
     #    never emits one), so `stash` stays input/target only.
     live: Dict[str, Optional[int]] = {"input": None, "target": None, "metadata": None}  # node id per lineage
     stash: Dict[str, Dict[str, Optional[int]]] = {"input": {}, "target": {}}  # key -> snapshotted node id
+    cells: Dict[str, Optional[int]] = {}  # context-ops export: __taidal_cell_* -> the node it snapshots
     stashed_nodes: set = set()  # every node ever auto-stashed (a saved FORK, reused later — see below)
     op_node_ids: List[int] = []  # real op nodes, in schedule order (last = deepest sink = final output)
 
@@ -788,8 +821,9 @@ def ops_yaml_to_workflow(
         cls, _is_lazy, kwargs = spec
         key_value = kwargs.get("key")
         if cls in _STASH_CLASSES and isinstance(key_value, str) and key_value.startswith(_STASH_KEY_PREFIX):
-            # An auto-inserted snapshot op: update the input/target lineage, place NO node. The
-            # metadata lineage is deliberately untouched (the export never restores it).
+            # A LEGACY auto-inserted snapshot op (pre-context-ops export): update the
+            # input/target lineage, place NO node. The metadata lineage is deliberately
+            # untouched (that exporter never restored it).
             field = "input" if cls in _STASH_INPUT_CLASSES else "target"
             if cls in _STASH_WRITE_CLASSES:
                 stash[field][key_value] = live[field]
@@ -797,6 +831,34 @@ def ops_yaml_to_workflow(
                     stashed_nodes.add(live[field])
             elif key_value in stash[field]:
                 live[field] = stash[field][key_value]
+            continue
+
+        # The context-ops export (2026-07): whole-sample Save/Use/Mix over namespaced
+        # ``__taidal_cell_*`` cells. Save records the live node into a cell (no node
+        # placed); Use restarts the stream from a cell; a Mix marker rebuilds the erased
+        # ``Mix Samples`` canvas node wired from its three argument cells. A USER-named
+        # cell (no namespace prefix) falls through and stays a real node.
+        cell_name = kwargs.get("name")
+        if cls is CtxSave and isinstance(cell_name, str) and cell_name.startswith(_CELL_PREFIX):
+            cells[cell_name] = live["input"]
+            if live["input"] is not None:
+                stashed_nodes.add(live["input"])
+            continue
+        if cls is CtxUse and isinstance(cell_name, str) and cell_name.startswith(_CELL_PREFIX):
+            restored = cells.get(cell_name)
+            live["input"] = live["target"] = live["metadata"] = restored
+            continue
+        if cls is CtxMix and any(
+            str(kwargs.get(slot, "")).startswith(_CELL_PREFIX)
+            for slot in ("input_from", "target_from", "metadata_from")
+        ):
+            mix_id = builder.spawn(_MIX_CLASS_TYPE)
+            for arg, slot in zip(_MIX_ARGS, ("input_from", "target_from", "metadata_from")):
+                slot_cell = kwargs.get(slot)
+                src = cells.get(str(slot_cell)) if slot_cell else live["input"]
+                if src is not None:
+                    builder.connect(src, 0, mix_id, arg, SAMPLE_TYPE)
+            live["input"] = live["target"] = live["metadata"] = mix_id
             continue
 
         # A real op node (incl. a user Stash*Op with a non-namespaced key).
@@ -870,7 +932,7 @@ def _color_dead_end_taps(builder: "_WorkflowBuilder", op_node_ids: List[int]) ->
 
     "Sample-chain op" = has an incoming ``sample`` wire (so a config-only node like a ``MaxOp`` feeding
     a ``ConfigureOp`` via its ``op`` output, with no sample input, is NOT a tap). "Feeds nothing" = no
-    outgoing ``DATAFLUX_SAMPLE`` wire from any output (so an op feeding a Mix or a later op is live).
+    outgoing ``SAMPLEFLUX_SAMPLE`` wire from any output (so an op feeding a Mix or a later op is live).
     The single last-scheduled op (the deepest sink = the pipeline's final output) is exempt.
     """
     if not op_node_ids:
@@ -2059,7 +2121,7 @@ def _collect_op_chains(
     op.sample ← Walk ← source) or taken directly when the head's feed is a source node.
 
     NOT folded (stay standalone entries): an op with no sample wiring at all (a configured
-    op-value), and any chain containing an op consumed as a ``DATAFLUX_OP`` value by an
+    op-value), and any chain containing an op consumed as a ``SAMPLEFLUX_OP`` value by an
     exported node (an ``op_N`` list input — those wires reference top-level entries).
     """
 
@@ -2076,7 +2138,7 @@ def _collect_op_chains(
         else:
             heads.append(nid)
 
-    # An op pulled by its DATAFLUX_OP value output into an exported node (op_N lists of a
+    # An op pulled by its SAMPLEFLUX_OP value output into an exported node (op_N lists of a
     # higher-order op / engine) is referenced BY NAME — its chain cannot fold away.
     captures = output_captures or {}
     consumed_as_value: set = set()
@@ -2090,7 +2152,7 @@ def _collect_op_chains(
                 continue
             # A capture wire (op-@output → param) is NOT an op-value reference: the producer stays
             # folded in the pipeline (CaptureOutputOp + the metadata bus carry the value to the
-            # consumer's ConfigureOp). Only true DATAFLUX_OP value wires force a standalone entry.
+            # consumer's ConfigureOp). Only true SAMPLEFLUX_OP value wires force a standalone entry.
             if base in captured_params:
                 continue
             consumed_as_value.add(src_id)

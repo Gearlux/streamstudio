@@ -28,8 +28,8 @@ import numpy as np
 import pytest
 from confluid import configurable
 from confluid.decorators import output
-from dataflux.sample import Sample
-from dataflux.typespec import ArrayType, SampleType
+from sampleflux.sample import Sample
+from sampleflux.typespec import ArrayType, SampleType
 
 from fluxstudio.bridge import (
     ARRAY_TYPE,
@@ -111,10 +111,10 @@ def test_only_taidal_nodes_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_array_type_is_a_wire_socket_not_a_widget() -> None:
-    # DATAFLUX_ARRAY (the Extract→Histogram array wire) is a live-object socket type, so graphio's
+    # SAMPLEFLUX_ARRAY (the Extract→Histogram array wire) is a live-object socket type, so graphio's
     # socket-vs-widget split treats it as a wire. It must NOT be a TYPE_MAP entry (that would retype
     # auto-generated op params), only a hand-wired adapter socket.
-    assert ARRAY_TYPE == "DATAFLUX_ARRAY"
+    assert ARRAY_TYPE == "SAMPLEFLUX_ARRAY"
     assert _is_socket_type(ARRAY_TYPE) is True
     from fluxstudio.bridge import TYPE_MAP
 
@@ -217,7 +217,7 @@ def test_map_type_union_int_float_still_float() -> None:
 
 def test_needs_value_socket_only_for_nested_containers() -> None:
     # A NESTED container (a container whose element is itself a container) can't be a sensible widget →
-    # a wired DATAFLUX_VALUE socket. A flat container / fixed tuple stays a typeable widget.
+    # a wired SAMPLEFLUX_VALUE socket. A flat container / fixed tuple stays a typeable widget.
     Box = Tuple[int, int, int, int]
     Color = Tuple[int, int, int]
     assert _needs_value_socket(List[Box]) is True  # list of tuples (boxes)
@@ -242,7 +242,7 @@ def test_is_nested_container_shape_rule() -> None:
 
 
 def test_nested_container_param_is_value_socket_not_widget() -> None:
-    # A generated op node renders a nested-container param as an OPTIONAL DATAFLUX_VALUE input socket;
+    # A generated op node renders a nested-container param as an OPTIONAL SAMPLEFLUX_VALUE input socket;
     # a flat fixed-tuple param stays a widget. Wiring a real value into it passes through to the op.
     from confluid import configurable as _cfg
 
@@ -515,7 +515,7 @@ def test_register_module_nodes_registers_callable() -> None:
 
 def test_register_module_nodes_palette_path_with_group_and_tag() -> None:
     """A grouped op nests as <root>/<Category>/<group> (NOT under the package), and its label carries
-    the canonical-cased package tag (dataflux -> [DATAFLUX]). The registration KEY still uses RAW
+    the canonical-cased package tag (sampleflux -> [SAMPLEFLUX]). The registration KEY still uses RAW
     package+category+group identifiers (globally unique)."""
 
     def _grouped_op(x: int) -> str:
@@ -526,15 +526,15 @@ def test_register_module_nodes_palette_path_with_group_and_tag() -> None:
 
     mappings: dict = {}
     display: dict = {}
-    discovered = [{"path": "dataflux.ops.numpy:grouped_op", "name": "grouped_op"}]
+    discovered = [{"path": "sampleflux.ops.numpy:grouped_op", "name": "grouped_op"}]
 
     with patch("fluxstudio.bridge.scan_module", return_value=discovered):
         with patch("fluxstudio.bridge.resolve_callable", return_value=_grouped_op):
-            register_module_nodes("dataflux.ops.numpy", mappings, display)
+            register_module_nodes("sampleflux.ops.numpy", mappings, display)
 
-    assert "Taidal_dataflux_op_numpy_grouped_op" in mappings
-    assert mappings["Taidal_dataflux_op_numpy_grouped_op"].CATEGORY == "Taidal/Op/numpy"
-    assert display["Taidal_dataflux_op_numpy_grouped_op"] == "[DATAFLUX] grouped op"
+    assert "Taidal_sampleflux_op_numpy_grouped_op" in mappings
+    assert mappings["Taidal_sampleflux_op_numpy_grouped_op"].CATEGORY == "Taidal/Op/numpy"
+    assert display["Taidal_sampleflux_op_numpy_grouped_op"] == "[SAMPLEFLUX] grouped op"
 
 
 def test_package_tag_uses_dist_name_when_provided() -> None:
@@ -549,7 +549,7 @@ def test_package_tag_uses_dist_name_when_provided() -> None:
 def test_package_tag_falls_back_to_top_level_package_without_dist_name() -> None:
     """When dist_name is absent the fallback is the first dotted segment uppercased."""
     assert _package_tag("waivefront.processing") == "WAIVEFRONT"
-    assert _package_tag("dataflux.ops.numpy") == "DATAFLUX"
+    assert _package_tag("sampleflux.ops.numpy") == "SAMPLEFLUX"
     assert _package_tag("sonair") == "SONAIR"
 
 
@@ -591,18 +591,18 @@ def test_register_module_nodes_same_name_different_module_no_collision() -> None
     mappings: dict = {}
     display: dict = {}
 
-    for mod, fn in (("dataflux.ops.numpy", _numpy_rescale), ("dataflux.ops.torch", _torch_rescale)):
+    for mod, fn in (("sampleflux.ops.numpy", _numpy_rescale), ("sampleflux.ops.torch", _torch_rescale)):
         with patch("fluxstudio.bridge.scan_module", return_value=[{"path": f"{mod}:RescaleOp", "name": "RescaleOp"}]):
             with patch("fluxstudio.bridge.resolve_callable", return_value=fn):
                 register_module_nodes(mod, mappings, display)
 
     # Both survive under distinct keys, in distinct palette folders, with the SAME [PKG]-tagged label.
-    assert "Taidal_dataflux_op_numpy_RescaleOp" in mappings
-    assert "Taidal_dataflux_op_torch_RescaleOp" in mappings
-    assert mappings["Taidal_dataflux_op_numpy_RescaleOp"].CATEGORY == "Taidal/Op/numpy"
-    assert mappings["Taidal_dataflux_op_torch_RescaleOp"].CATEGORY == "Taidal/Op/torch"
-    assert display["Taidal_dataflux_op_numpy_RescaleOp"] == "[DATAFLUX] RescaleOp"
-    assert display["Taidal_dataflux_op_torch_RescaleOp"] == "[DATAFLUX] RescaleOp"
+    assert "Taidal_sampleflux_op_numpy_RescaleOp" in mappings
+    assert "Taidal_sampleflux_op_torch_RescaleOp" in mappings
+    assert mappings["Taidal_sampleflux_op_numpy_RescaleOp"].CATEGORY == "Taidal/Op/numpy"
+    assert mappings["Taidal_sampleflux_op_torch_RescaleOp"].CATEGORY == "Taidal/Op/torch"
+    assert display["Taidal_sampleflux_op_numpy_RescaleOp"] == "[SAMPLEFLUX] RescaleOp"
+    assert display["Taidal_sampleflux_op_torch_RescaleOp"] == "[SAMPLEFLUX] RescaleOp"
 
 
 def test_hide_default_comfy_nodes_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -643,7 +643,7 @@ def test_node_category_empty_root_drops_taidal_folder() -> None:
 
 def test_register_module_nodes_root_level_when_defaults_hidden(monkeypatch: pytest.MonkeyPatch) -> None:
     # When --no-default-nodes is active (env set), register_module_nodes defaults root to "" so the
-    # node sits at the palette root (DataFlux/Op) rather than under a Taidal/ folder.
+    # node sits at the palette root (SampleFlux/Op) rather than under a Taidal/ folder.
     monkeypatch.setenv("FLUXSTUDIO_HIDE_DEFAULT_NODES", "1")
     mappings: dict = {}
     display: dict = {}
@@ -677,7 +677,7 @@ def test_register_module_nodes_honors_display_name_override() -> None:
 
     The waivefront-helios bridge sets it to the class name minus the leading ``Helios`` so the label reads
     cleanly (``ThresholdOp``) while the callable name — the confluid registry key AND the node key segment —
-    keeps the prefix (``HeliosThresholdOp``), avoiding a flat-registry collision with the native dataflux op.
+    keeps the prefix (``HeliosThresholdOp``), avoiding a flat-registry collision with the native sampleflux op.
     """
     mappings: dict = {}
     display: dict = {}
@@ -733,7 +733,7 @@ def test_register_module_nodes_is_a_positive_category_allowlist() -> None:
     are excluded.
 
     The generic engines (``Flux``/``JointFlux``) are ``category="engine"`` and now DO register
-    (they compose on the canvas via wired source/op sockets). DataFlux storage sinks tagged
+    (they compose on the canvas via wired source/op sockets). SampleFlux storage sinks tagged
     ``category="sink"`` register too (object-member producers wired into a ``DatasetProcessor`` node).
     The raw-callable wrappers ``FilterOp``/``WrappedOp`` are UNcategorised (neither op nor engine), so
     they stay out even with ``engine`` allowed; task datasets are ``*_dataset`` (a trainer-config
@@ -764,7 +764,7 @@ def test_register_module_nodes_is_a_positive_category_allowlist() -> None:
         def __getitem__(self, i: int) -> Sample:
             return Sample(input=i, target=None, metadata={})
 
-    class _FakeSink:  # category="sink" -> kept (a DataFlux storage sink -> DatasetProcessor.sink)
+    class _FakeSink:  # category="sink" -> kept (a SampleFlux storage sink -> DatasetProcessor.sink)
         __confluid_category__ = "sink"
 
         def write(self, sample: Sample) -> None: ...
@@ -817,7 +817,7 @@ def test_register_module_nodes_skips_non_callable() -> None:
 
 
 class _FakeSource:
-    """Indexable source whose items are Samples -> classified as a DATAFLUX_SOURCE node."""
+    """Indexable source whose items are Samples -> classified as a SAMPLEFLUX_SOURCE node."""
 
     def __init__(self, path: str, count: int = 3) -> None:
         self.path = path
@@ -837,7 +837,7 @@ class _FakeSource:
 
 
 class _FakeOp:
-    """Sample -> Sample op -> classified as a DATAFLUX_SAMPLE in/out node."""
+    """Sample -> Sample op -> classified as a SAMPLEFLUX_SAMPLE in/out node."""
 
     def __init__(self, bump: int = 1) -> None:
         self.bump = bump
@@ -862,7 +862,7 @@ def test_source_class_becomes_source_node() -> None:
 
 
 def test_source_node_execute_wraps_in_flux() -> None:
-    from dataflux.core import Flux
+    from sampleflux.core import Flux
 
     node = create_comfy_node(_FakeSource, "Taidal__FakeSource")()
     (out,) = node.execute(path="x", count=2)["result"]
@@ -1085,7 +1085,7 @@ class _FakeHigherOrderOp:
 def test_higher_order_op_gets_op_list_inputs_and_composes() -> None:
     node_cls = create_comfy_node(_FakeHigherOrderOp, "Taidal__HOO")
     spec = node_cls.INPUT_TYPES()
-    # The ``ops`` list param is NOT a STRING widget — it's a dynamic DATAFLUX_OP input (seed op_0).
+    # The ``ops`` list param is NOT a STRING widget — it's a dynamic SAMPLEFLUX_OP input (seed op_0).
     assert "ops" not in spec["required"]
     assert spec["optional"]["op_0"] == (OP_TYPE,)
     # Build two op-values (bump +1, +2) and compose them via the op-list inputs.
@@ -1176,13 +1176,13 @@ class _FakeView:
 
 def test_required_source_param_is_a_wired_socket_not_widget() -> None:
     spec = create_comfy_node(_FakeView, "Taidal__FakeView").INPUT_TYPES()
-    # ``source`` has no default -> REQUIRED DATAFLUX_SOURCE input (NOT a STRING widget).
+    # ``source`` has no default -> REQUIRED SAMPLEFLUX_SOURCE input (NOT a STRING widget).
     assert spec["required"]["source"] == (SOURCE_TYPE,)
     assert spec["required"]["start"][0] == "INT"  # plain scalar stays a widget
 
 
 def test_source_node_consumes_a_wired_source() -> None:
-    from dataflux.core import Flux
+    from sampleflux.core import Flux
 
     upstream = create_comfy_node(_FakeSource, "Taidal__Up")()
     (src,) = upstream.execute(path="x", count=4)["result"]  # a Flux of 4 samples (inputs 0..3)
@@ -1192,7 +1192,7 @@ def test_source_node_consumes_a_wired_source() -> None:
 
 
 def test_flux_engine_node_wires_source_and_op_collection() -> None:
-    from dataflux.core import Flux
+    from sampleflux.core import Flux
 
     node_cls = create_comfy_node(Flux, "Taidal__Flux")
     spec = node_cls.INPUT_TYPES()
@@ -1209,11 +1209,11 @@ def test_flux_engine_node_wires_source_and_op_collection() -> None:
 
 
 def test_jointflux_engine_node_wires_source_list() -> None:
-    from dataflux.core import Flux, JointFlux
+    from sampleflux.core import Flux, JointFlux
 
     node_cls = create_comfy_node(JointFlux, "Taidal__JointFlux")
     spec = node_cls.INPUT_TYPES()
-    # fluxes (List[Flux]) -> dynamic source_0 seed (DATAFLUX_SOURCE), NOT a STRING widget.
+    # fluxes (List[Flux]) -> dynamic source_0 seed (SAMPLEFLUX_SOURCE), NOT a STRING widget.
     assert spec["optional"]["source_0"] == (SOURCE_TYPE,)
     assert "fluxes" not in spec.get("required", {})
 
@@ -1225,8 +1225,8 @@ def test_jointflux_engine_node_wires_source_list() -> None:
 
 
 def test_real_dataset_split_node_wires_source_and_splits() -> None:
-    from dataflux.core import Flux
-    from dataflux.sources import DatasetSplit
+    from sampleflux.core import Flux
+    from sampleflux.sources import DatasetSplit
 
     node_cls = create_comfy_node(DatasetSplit, "Taidal__DatasetSplit")
     spec = node_cls.INPUT_TYPES()
@@ -1242,12 +1242,12 @@ def test_real_dataset_split_node_wires_source_and_splits() -> None:
 
 
 def test_real_range_source_node_wires_source() -> None:
-    from dataflux.core import Flux
-    from dataflux.sources import RangeSource
+    from sampleflux.core import Flux
+    from sampleflux.sources import RangeSource
 
     node_cls = create_comfy_node(RangeSource, "Taidal__RangeSource")
     spec = node_cls.INPUT_TYPES()
-    # ``source`` is now defaulted (lazy / zero-arg convention) -> wired DATAFLUX_SOURCE input in the
+    # ``source`` is now defaulted (lazy / zero-arg convention) -> wired SAMPLEFLUX_SOURCE input in the
     # OPTIONAL bucket (required-when-no-default, else optional); start/end stay widgets.
     assert spec["optional"]["source"] == (SOURCE_TYPE,)
     (src,) = create_comfy_node(_FakeSource, "Taidal__RangeUp")().execute(path="x", count=10)["result"]
@@ -1257,12 +1257,12 @@ def test_real_range_source_node_wires_source() -> None:
 
 
 def test_real_concat_source_node_wires_source_list() -> None:
-    from dataflux.core import Flux
-    from dataflux.sources import ConcatSource
+    from sampleflux.core import Flux
+    from sampleflux.sources import ConcatSource
 
     node_cls = create_comfy_node(ConcatSource, "Taidal__ConcatSource")
     spec = node_cls.INPUT_TYPES()
-    # ``sources`` (List) -> dynamic source_0 seed (DATAFLUX_SOURCE), not a STRING widget.
+    # ``sources`` (List) -> dynamic source_0 seed (SAMPLEFLUX_SOURCE), not a STRING widget.
     assert spec["optional"]["source_0"] == (SOURCE_TYPE,)
     assert "sources" not in spec.get("required", {})
     (a,) = create_comfy_node(_FakeSource, "Taidal__CA")().execute(path="a", count=2)["result"]
@@ -1273,7 +1273,7 @@ def test_real_concat_source_node_wires_source_list() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# _map_type — DataFlux Sample + Optional/Union scalar unwrapping
+# _map_type — SampleFlux Sample + Optional/Union scalar unwrapping
 # --------------------------------------------------------------------------- #
 
 
@@ -1638,7 +1638,7 @@ def test_nullable_numeric_validate_inputs_accepts_numeric_wire() -> None:
     assert node.VALIDATE_INPUTS(input_types={"noise_power_db": "FLOAT"}) is True
     assert node.VALIDATE_INPUTS(input_types={"noise_power_db": "INT"}) is True
     # Other sockets still type-check: an exact match passes, a genuine mismatch is rejected.
-    assert node.VALIDATE_INPUTS(input_types={"sample": "DATAFLUX_SAMPLE"}) is True
+    assert node.VALIDATE_INPUTS(input_types={"sample": "SAMPLEFLUX_SAMPLE"}) is True
     bad = node.VALIDATE_INPUTS(input_types={"sample": "FLOAT"})
     assert bad is not True and "sample" in bad
 
@@ -1669,10 +1669,10 @@ def test_coerce_kwargs_casts_filled_nullable_numeric() -> None:
 
 
 def test_single_op_param_renders_op_socket() -> None:
-    # ConfigureOp.target / RandomApply.op are SINGLE-op params: one optional DATAFLUX_OP
+    # ConfigureOp.target / RandomApply.op are SINGLE-op params: one optional SAMPLEFLUX_OP
     # input socket each (the single-op counterpart of the op_N list family), not a widget.
-    from dataflux.ops.configure import ConfigureOp
-    from dataflux.ops.random_apply import RandomApply
+    from sampleflux.ops.configure import ConfigureOp
+    from sampleflux.ops.random_apply import RandomApply
 
     cfg_node = create_comfy_node(ConfigureOp, "Taidal_ConfigureOp")
     spec = cfg_node.INPUT_TYPES()
@@ -1685,8 +1685,8 @@ def test_single_op_param_renders_op_socket() -> None:
 
 
 def test_configure_op_node_executes_with_wired_target_and_compute() -> None:
-    from dataflux.ops.configure import ConfigureOp
-    from dataflux.ops.numpy import MaxOp, ThresholdOp
+    from sampleflux.ops.configure import ConfigureOp
+    from sampleflux.ops.numpy import MaxOp, ThresholdOp
 
     node = create_comfy_node(ConfigureOp, "Taidal_ConfigureOp")()
     sample = Sample(input=np.array([1.0, 6.0, 2.0]), target=None, metadata={})
@@ -1699,7 +1699,7 @@ def test_configure_op_node_executes_with_wired_target_and_compute() -> None:
 
 # ---- stamped op-value params (the waivefront-helios __taidal_op_*__ contract) ----
 # These mirror what waivefront.helios.bridge stamps on a bridged helios composite — op slots named
-# the helios way (compute/target/delegate/true_transforms/…) that the dataflux name allowlists can't
+# the helios way (compute/target/delegate/true_transforms/…) that the sampleflux name allowlists can't
 # know. Tested with synthetic stamped classes so fluxstudio stays hermetic (no helios dependency).
 
 
@@ -1766,7 +1766,7 @@ def test_stamped_op_list_params_seed_distinct_families_and_collect() -> None:
 
 
 def test_coerce_kwargs_leaves_expression_string_on_float_str_union() -> None:
-    # A ``Union[float, int, str]`` param (e.g. dataflux ThresholdOp.low_level) accepts
+    # A ``Union[float, int, str]`` param (e.g. sampleflux ThresholdOp.low_level) accepts
     # call-time metadata expressions like "{snr}" — the coercion must NOT float()-cast
     # the widget string (that crashed the node); the constructor resolves it at call time.
     def fn(low_level: Optional[Union[float, int, str]] = None) -> None: ...
@@ -1969,7 +1969,7 @@ def test_hf_source_metadata_param_renders_as_hf_metadata_widget() -> None:
 
 def test_hf_metadata_string_coerces_to_list_and_star() -> None:
     # The comma-separated STRING widget round-trips to the List[str] the constructor wants;
-    # "*" passes through as a single-element list (the dataflux sentinel for "the rest").
+    # "*" passes through as a single-element list (the sampleflux sentinel for "the rest").
     assert _coerce_kwargs(HuggingFaceFakeDataset, {"metadata_features": "id, src"})["metadata_features"] == [
         "id",
         "src",
@@ -2094,7 +2094,7 @@ def test_build_runnable_node_member_sockets_and_widgets() -> None:
 
     assert node.RETURN_TYPES == (RUNNABLE_TYPE,)
     assert node.TAIDAL_NODE_KIND == "runnable"
-    # The ``model`` slot is ROLE-qualified and TASK-AGNOSTIC — it accepts ``DATAFLUX_OBJECT:model``
+    # The ``model`` slot is ROLE-qualified and TASK-AGNOSTIC — it accepts ``SAMPLEFLUX_OBJECT:model``
     # from ANY model (any task), so a loss can't dock but a cross-task model can.
     assert req["model"] == (_object_socket("model"),)
     assert req["train_set"] == (SOURCE_TYPE,)
@@ -2159,7 +2159,7 @@ class _FakeTrainerWithOutput:
 def test_runnable_node_appends_declared_outputs() -> None:
     node = _build_runnable_node(_FakeTrainerWithOutput, "Taidal_FakeOut", "Taidal/Fake")
     # The declared @output rides alongside the runnable wire, ROLE-qualified (``model`` keyword ->
-    # ``DATAFLUX_OBJECT:model``, task-agnostic) so it docks into a downstream evaluator's model slot.
+    # ``SAMPLEFLUX_OBJECT:model``, task-agnostic) so it docks into a downstream evaluator's model slot.
     assert node.RETURN_NAMES == ("runnable", "trained_model")
     assert node.RETURN_TYPES == (RUNNABLE_TYPE, _object_socket("model"))
 
@@ -2184,9 +2184,9 @@ def test_output_socket_type_maps_containers_to_string() -> None:
     # Containers ride a STRING (JSON) socket — and computed_metrics must NOT mis-map to OBJECT:metric.
     assert _output_socket_type("computed_metrics", Dict[str, float]) == "STRING"
     assert _output_socket_type("label_names", List[str]) == "STRING"
-    # A role-bearing object output stays a role-qualified DATAFLUX_OBJECT socket.
+    # A role-bearing object output stays a role-qualified SAMPLEFLUX_OBJECT socket.
     assert _output_socket_type("trained_model", nn.Module) == _object_socket("model")
-    # A dataset-named output rides DATAFLUX_SOURCE.
+    # A dataset-named output rides SAMPLEFLUX_SOURCE.
     assert _output_socket_type("dataset", object) == SOURCE_TYPE
 
 
@@ -2219,7 +2219,7 @@ class _FakeTrainerWithDisplayOutputs:
 
 def test_runnable_node_is_output_node_with_all_outputs() -> None:
     # EVERY declared @output becomes a static wireable socket (no dynamic outputs): the object output
-    # rides DATAFLUX_OBJECT:model, the container outputs ride STRING (JSON). The node is an OUTPUT_NODE
+    # rides SAMPLEFLUX_OBJECT:model, the container outputs ride STRING (JSON). The node is an OUTPUT_NODE
     # with a hidden unique_id (for the live-output widget).
     node = _build_runnable_node(_FakeTrainerWithDisplayOutputs, "Taidal_FakeDisp", "Taidal/Fake")
     assert getattr(node, "OUTPUT_NODE", False) is True
@@ -2350,7 +2350,7 @@ def test_register_module_nodes_admits_reexported_function(monkeypatch: pytest.Mo
 
 
 # --------------------------------------------------------------------------- #
-# Object-typed ctor params (logger / callbacks) -> wired DATAFLUX_OBJECT sockets
+# Object-typed ctor params (logger / callbacks) -> wired SAMPLEFLUX_OBJECT sockets
 # --------------------------------------------------------------------------- #
 class _FakeLogger:
     def __init__(self, save_dir: str = "logs") -> None:
@@ -2400,7 +2400,7 @@ def test_object_node_object_param_is_a_socket_not_a_widget() -> None:
     node = _build_object_node(_ObjConfig, "Taidal_ObjCfg", "Taidal/Obj")
     spec = node.INPUT_TYPES()
     required, optional = spec["required"], spec.get("optional", {})
-    # logger (object arm, only a bool scalar arm) -> a wired DATAFLUX_OBJECT OPTIONAL socket, NOT BOOLEAN.
+    # logger (object arm, only a bool scalar arm) -> a wired SAMPLEFLUX_OBJECT OPTIONAL socket, NOT BOOLEAN.
     assert optional.get("logger") == (OBJECT_TYPE,)
     assert "logger" not in required
     # accel (has a str arm) stays a STRING widget; max_epochs stays a scalar widget.
@@ -2510,7 +2510,7 @@ def test_object_node_output_socket_is_role_qualified() -> None:
 
 def test_object_node_output_socket_generic_when_uncategorised() -> None:
     """A role-less member (no ``@configurable`` role — the lazy infra members / loggers)
-    keeps the bare ``DATAFLUX_OBJECT`` so it stays interchangeable on generic slots."""
+    keeps the bare ``SAMPLEFLUX_OBJECT`` so it stays interchangeable on generic slots."""
     node = _build_object_node(_EagerMember, "Taidal_Eager", "Taidal/Obj")
     assert node.RETURN_TYPES == (OBJECT_TYPE, OBJECT_TYPE)
 
@@ -2547,7 +2547,7 @@ def test_role_for_class_infers_from_type_when_untagged() -> None:
 
 
 def test_object_node_socket_role_inferred_from_type() -> None:
-    """An untagged metric-typed object node sockets as ``DATAFLUX_OBJECT:metric`` via type inference,
+    """An untagged metric-typed object node sockets as ``SAMPLEFLUX_OBJECT:metric`` via type inference,
     so it docks into a trainer's metric slot without an explicit tag."""
 
     class _Metric:
@@ -2580,7 +2580,7 @@ def test_strict_sockets_reject_cross_role() -> None:
 
 @configurable(category="sink", validate=False)
 class _FakeStorageSink:
-    """A DataFlux storage sink (``category="sink"``) — built as a ``DATAFLUX_OBJECT:sink`` producer."""
+    """A SampleFlux storage sink (``category="sink"``) — built as a ``SAMPLEFLUX_OBJECT:sink`` producer."""
 
     def __init__(self, path: str = "./out", overwrite: bool = False) -> None:
         self.path = path
@@ -2610,7 +2610,7 @@ def test_is_sink_class() -> None:
 
 def test_role_for_class_maps_sink_category_to_sink_role() -> None:
     """A ``category="sink"`` class carries no ``role=`` tag, but ``_role_for_class`` maps it to a
-    synthetic ``"sink"`` role so its object output sockets as ``DATAFLUX_OBJECT:sink`` — matching the
+    synthetic ``"sink"`` role so its object output sockets as ``SAMPLEFLUX_OBJECT:sink`` — matching the
     ``DatasetProcessor.sink`` slot."""
     from fluxstudio.bridge import _role_for_class
 
@@ -2619,7 +2619,7 @@ def test_role_for_class_maps_sink_category_to_sink_role() -> None:
 
 def test_create_comfy_node_dispatches_sink_to_object_node() -> None:
     """A ``category="sink"`` storage sink (no run / no __call__(sample) / no role tag) is dispatched to
-    an OBJECT producer node: instance+class outputs on a role-qualified ``DATAFLUX_OBJECT:sink`` wire,
+    an OBJECT producer node: instance+class outputs on a role-qualified ``SAMPLEFLUX_OBJECT:sink`` wire,
     its ctor config rendered as widgets."""
     node = create_comfy_node(_FakeStorageSink, "Taidal_fake_sink_FakeStorageSink", "Taidal/Sink")
     assert node.TAIDAL_NODE_KIND == "object"
@@ -2630,8 +2630,8 @@ def test_create_comfy_node_dispatches_sink_to_object_node() -> None:
 
 
 def test_runnable_sink_slot_matches_sink_node_and_flux_is_source() -> None:
-    """A ``DatasetProcessor``-shaped runnable renders ``flux`` as a ``DATAFLUX_SOURCE`` socket and
-    ``sink`` as a ``DATAFLUX_OBJECT:sink`` slot — and the sink node's output type EQUALS that slot, so
+    """A ``DatasetProcessor``-shaped runnable renders ``flux`` as a ``SAMPLEFLUX_SOURCE`` socket and
+    ``sink`` as a ``SAMPLEFLUX_OBJECT:sink`` slot — and the sink node's output type EQUALS that slot, so
     ComfyUI's string-equality rule lets a sink node dock into the processor (the whole feature)."""
     proc = _build_runnable_node(_FakeProcessor, "Taidal_fake_FakeProcessor", "Taidal/Proc")
     spec = proc.INPUT_TYPES()
@@ -2702,7 +2702,7 @@ def test_register_module_nodes_admits_runnable_and_member() -> None:
 def test_strict_typing_union_int_str_gets_dual_optional_sockets() -> None:
     """An op with __confluid_strict_typing__ gets {name}_samples + {name}_duration sockets."""
     from confluid import configurable as cfg
-    from dataflux.sample import Sample
+    from sampleflux.sample import Sample
 
     from fluxstudio.bridge import _build_config_inputs
 
@@ -2744,7 +2744,7 @@ def test_strict_typing_false_union_int_str_gets_single_string_widget() -> None:
 def test_strict_typing_node_execute_merges_duration_string() -> None:
     """The generated node merges {name}_duration back into the canonical param name."""
     from confluid import configurable as cfg
-    from dataflux.sample import Sample
+    from sampleflux.sample import Sample
 
     from fluxstudio.bridge import create_comfy_node
 
@@ -2778,7 +2778,7 @@ def test_strict_typing_node_execute_merges_duration_string() -> None:
 def test_strict_typing_node_execute_str_wins_over_samples() -> None:
     """Duration string takes priority over samples INT when both are supplied."""
     from confluid import configurable as cfg
-    from dataflux.sample import Sample
+    from sampleflux.sample import Sample
 
     from fluxstudio.bridge import create_comfy_node
 
@@ -2898,7 +2898,7 @@ def test_range_widget_node_execute_passes_tuple_to_constructor() -> None:
     from typing import Tuple
 
     from confluid import configurable as cfg
-    from dataflux.sample import Sample
+    from sampleflux.sample import Sample
 
     received: dict = {}
 
