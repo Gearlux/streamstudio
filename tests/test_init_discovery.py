@@ -431,6 +431,25 @@ def test_export_ops_route_returns_yaml() -> None:
     assert data["yamls"] == [data["yaml"]]
 
 
+def test_export_ops_route_flow_flag_returns_flow_document() -> None:
+    # ``flow: true`` in the POST body switches the route to the readable named-step
+    # flow: document (the canvas twin of the CLI's ``--flow``).
+    from sampleflux.ops.torch import RescaleOp
+
+    from fluxstudio.bridge import create_comfy_node
+
+    with _fake_comfy() as (routes, web):
+        handler = routes.post_handlers.get("/taidal/export_ops")
+        assert handler is not None
+        fluxstudio.NODE_CLASS_MAPPINGS["Taidal_RescaleOp"] = create_comfy_node(RescaleOp, "Taidal_RescaleOp")
+        prompt = {"1": {"class_type": "Taidal_RescaleOp", "inputs": {"in_min": 0.0, "in_max": 255.0}}}
+        asyncio.run(handler(_json_request({"prompt": prompt, "flow": True})))
+    data, _kwargs = web.calls[-1]
+    assert "flow:" in data["yaml"] and "outputs:" in data["yaml"]
+    assert "ops:" not in data["yaml"]  # the flow form, not the serial list
+    assert "RescaleOp" in data["yaml"]
+
+
 def test_export_ops_graph_route_returns_op_workflow() -> None:
     # The /taidal/export_ops_graph POST handler extracts JUST the op-DAG nodes from the posted UI
     # workflow into a standalone workflow.json (the raw graph as drawn, no compilation).
