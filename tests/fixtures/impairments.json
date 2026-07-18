@@ -33,7 +33,7 @@
         {
           "localized_name": "source",
           "name": "source",
-          "type": "DATAFLUX_SOURCE",
+          "type": "SAMPLEFLUX_SOURCE",
           "links": [
             1
           ]
@@ -65,7 +65,7 @@
         {
           "localized_name": "source",
           "name": "source",
-          "type": "DATAFLUX_SOURCE",
+          "type": "SAMPLEFLUX_SOURCE",
           "link": 1
         },
         {
@@ -91,7 +91,7 @@
         {
           "localized_name": "sample",
           "name": "sample",
-          "type": "DATAFLUX_SAMPLE",
+          "type": "SAMPLEFLUX_SAMPLE",
           "links": [
             42
           ]
@@ -108,7 +108,7 @@
     },
     {
       "id": 9,
-      "type": "Taidal_dataflux_op_torch_SqueezeOp",
+      "type": "Taidal_sampleflux_op_torch_SqueezeOp",
       "pos": [
         -1124.220872162449,
         -772.1421306689118
@@ -127,7 +127,7 @@
           "localized_name": "sample",
           "name": "sample",
           "shape": 7,
-          "type": "DATAFLUX_SAMPLE",
+          "type": "SAMPLEFLUX_SAMPLE",
           "link": 42
         },
         {
@@ -146,7 +146,7 @@
         {
           "localized_name": "sample",
           "name": "sample",
-          "type": "DATAFLUX_SAMPLE",
+          "type": "SAMPLEFLUX_SAMPLE",
           "links": [
             162
           ]
@@ -154,12 +154,12 @@
         {
           "localized_name": "op",
           "name": "op",
-          "type": "DATAFLUX_OP",
+          "type": "SAMPLEFLUX_OP",
           "links": null
         }
       ],
       "properties": {
-        "Node name for S&R": "Taidal_dataflux_op_torch_SqueezeOp"
+        "Node name for S&R": "Taidal_sampleflux_op_torch_SqueezeOp"
       },
       "widgets_values": [
         0
@@ -186,7 +186,7 @@
           "localized_name": "sample",
           "name": "sample",
           "shape": 7,
-          "type": "DATAFLUX_SAMPLE",
+          "type": "SAMPLEFLUX_SAMPLE",
           "link": 162
         },
         {
@@ -221,7 +221,7 @@
         {
           "localized_name": "sample",
           "name": "sample",
-          "type": "DATAFLUX_SAMPLE",
+          "type": "SAMPLEFLUX_SAMPLE",
           "links": [
             540
           ]
@@ -229,7 +229,7 @@
         {
           "localized_name": "op",
           "name": "op",
-          "type": "DATAFLUX_OP",
+          "type": "SAMPLEFLUX_OP",
           "links": null
         }
       ],
@@ -262,7 +262,7 @@
           "label": "sample (IQ)",
           "localized_name": "sample",
           "name": "sample",
-          "type": "DATAFLUX_SAMPLE",
+          "type": "SAMPLEFLUX_SAMPLE",
           "link": 540
         }
       ],
@@ -276,7 +276,7 @@
         {
           "label": "sample (spectrogram)",
           "name": "sample",
-          "type": "DATAFLUX_SAMPLE",
+          "type": "SAMPLEFLUX_SAMPLE",
           "links": [
             541
           ]
@@ -284,7 +284,7 @@
         {
           "label": "image_sample",
           "name": "sample_1",
-          "type": "DATAFLUX_SAMPLE",
+          "type": "SAMPLEFLUX_SAMPLE",
           "links": null
         },
         {
@@ -322,19 +322,19 @@
         {
           "localized_name": "input_sample",
           "name": "input_sample",
-          "type": "DATAFLUX_SAMPLE",
+          "type": "SAMPLEFLUX_SAMPLE",
           "link": 543
         },
         {
           "localized_name": "target_sample",
           "name": "target_sample",
-          "type": "DATAFLUX_SAMPLE",
+          "type": "SAMPLEFLUX_SAMPLE",
           "link": 544
         },
         {
           "localized_name": "metadata_sample",
           "name": "metadata_sample",
-          "type": "DATAFLUX_SAMPLE",
+          "type": "SAMPLEFLUX_SAMPLE",
           "link": 545
         }
       ],
@@ -342,7 +342,7 @@
         {
           "localized_name": "sample",
           "name": "sample",
-          "type": "DATAFLUX_SAMPLE",
+          "type": "SAMPLEFLUX_SAMPLE",
           "links": [
             555,
             653
@@ -673,7 +673,7 @@
           "localized_name": "sample",
           "name": "sample",
           "shape": 7,
-          "type": "DATAFLUX_SAMPLE",
+          "type": "SAMPLEFLUX_SAMPLE",
           "link": 541
         }
       ],
@@ -690,7 +690,7 @@
           "label": "boxes",
           "localized_name": "sample",
           "name": "sample",
-          "type": "DATAFLUX_SAMPLE",
+          "type": "SAMPLEFLUX_SAMPLE",
           "links": [
             545
           ]
@@ -1310,7 +1310,7 @@
           "localized_name": "sample",
           "name": "sample",
           "shape": 7,
-          "type": "DATAFLUX_SAMPLE",
+          "type": "SAMPLEFLUX_SAMPLE",
           "link": 617
         },
         {
@@ -1381,7 +1381,7 @@
         {
           "localized_name": "sample",
           "name": "sample",
-          "type": "DATAFLUX_SAMPLE",
+          "type": "SAMPLEFLUX_SAMPLE",
           "links": [
             620
           ]
@@ -1389,7 +1389,7 @@
         {
           "localized_name": "op",
           "name": "op",
-          "type": "DATAFLUX_OP",
+          "type": "SAMPLEFLUX_OP",
           "links": null
         },
         {
@@ -1435,7 +1435,7 @@
           "localized_name": "sample",
           "name": "sample",
           "shape": 7,
-          "type": "DATAFLUX_SAMPLE",
+          "type": "SAMPLEFLUX_SAMPLE",
           "link": 605
         },
         {
@@ -1596,7 +1596,7 @@
         {
           "localized_name": "sample",
           "name": "sample",
-          "type": "DATAFLUX_SAMPLE",
+          "type": "SAMPLEFLUX_SAMPLE",
           "links": [
             606,
             617
@@ -1605,7 +1605,7 @@
         {
           "localized_name": "op",
           "name": "op",
-          "type": "DATAFLUX_OP",
+          "type": "SAMPLEFLUX_OP",
           "links": null
         },
         {
@@ -1670,7 +1670,7 @@
           "label": "sample (IQ)",
           "localized_name": "sample",
           "name": "sample",
-          "type": "DATAFLUX_SAMPLE",
+          "type": "SAMPLEFLUX_SAMPLE",
           "link": 606
         }
       ],
@@ -1678,7 +1678,7 @@
         {
           "label": "sample (IQ)",
           "name": "sample",
-          "type": "DATAFLUX_SAMPLE",
+          "type": "SAMPLEFLUX_SAMPLE",
           "links": null
         },
         {
@@ -1698,7 +1698,7 @@
         {
           "label": "sample (image)",
           "name": "sample_1",
-          "type": "DATAFLUX_SAMPLE",
+          "type": "SAMPLEFLUX_SAMPLE",
           "links": null
         },
         {
@@ -1747,7 +1747,7 @@
           "label": "sample (IQ)",
           "localized_name": "sample",
           "name": "sample",
-          "type": "DATAFLUX_SAMPLE",
+          "type": "SAMPLEFLUX_SAMPLE",
           "link": 585
         }
       ],
@@ -1755,7 +1755,7 @@
         {
           "label": "sample (IQ)",
           "name": "sample",
-          "type": "DATAFLUX_SAMPLE",
+          "type": "SAMPLEFLUX_SAMPLE",
           "links": null
         },
         {
@@ -1775,7 +1775,7 @@
         {
           "label": "sample (image)",
           "name": "sample_1",
-          "type": "DATAFLUX_SAMPLE",
+          "type": "SAMPLEFLUX_SAMPLE",
           "links": null
         },
         {
@@ -1824,7 +1824,7 @@
           "label": "sample (IQ)",
           "localized_name": "sample",
           "name": "sample",
-          "type": "DATAFLUX_SAMPLE",
+          "type": "SAMPLEFLUX_SAMPLE",
           "link": 555
         }
       ],
@@ -1832,7 +1832,7 @@
         {
           "label": "sample (IQ)",
           "name": "sample",
-          "type": "DATAFLUX_SAMPLE",
+          "type": "SAMPLEFLUX_SAMPLE",
           "links": []
         },
         {
@@ -1852,7 +1852,7 @@
         {
           "label": "sample (image)",
           "name": "sample_1",
-          "type": "DATAFLUX_SAMPLE",
+          "type": "SAMPLEFLUX_SAMPLE",
           "links": null
         },
         {
@@ -2423,7 +2423,7 @@
           "localized_name": "sample",
           "name": "sample",
           "shape": 7,
-          "type": "DATAFLUX_SAMPLE",
+          "type": "SAMPLEFLUX_SAMPLE",
           "link": 652
         },
         {
@@ -2503,7 +2503,7 @@
         {
           "localized_name": "sample",
           "name": "sample",
-          "type": "DATAFLUX_SAMPLE",
+          "type": "SAMPLEFLUX_SAMPLE",
           "links": [
             94
           ]
@@ -2511,7 +2511,7 @@
         {
           "localized_name": "op",
           "name": "op",
-          "type": "DATAFLUX_OP",
+          "type": "SAMPLEFLUX_OP",
           "links": null
         }
       ],
@@ -2549,7 +2549,7 @@
         {
           "localized_name": "sample",
           "name": "sample",
-          "type": "DATAFLUX_SAMPLE",
+          "type": "SAMPLEFLUX_SAMPLE",
           "link": 94
         },
         {
@@ -2616,7 +2616,7 @@
         {
           "localized_name": "array",
           "name": "array",
-          "type": "DATAFLUX_ARRAY",
+          "type": "SAMPLEFLUX_ARRAY",
           "links": null
         }
       ],
@@ -2967,7 +2967,7 @@
           "label": "sample (IQ)",
           "localized_name": "sample",
           "name": "sample",
-          "type": "DATAFLUX_SAMPLE",
+          "type": "SAMPLEFLUX_SAMPLE",
           "link": 620
         }
       ],
@@ -2975,7 +2975,7 @@
         {
           "label": "sample (IQ)",
           "name": "sample",
-          "type": "DATAFLUX_SAMPLE",
+          "type": "SAMPLEFLUX_SAMPLE",
           "links": null
         },
         {
@@ -2995,7 +2995,7 @@
         {
           "label": "sample (image)",
           "name": "sample_1",
-          "type": "DATAFLUX_SAMPLE",
+          "type": "SAMPLEFLUX_SAMPLE",
           "links": [
             652
           ]
@@ -3047,7 +3047,7 @@
           "localized_name": "sample",
           "name": "sample",
           "shape": 7,
-          "type": "DATAFLUX_SAMPLE",
+          "type": "SAMPLEFLUX_SAMPLE",
           "link": 653
         },
         {
@@ -3118,7 +3118,7 @@
         {
           "localized_name": "sample",
           "name": "sample",
-          "type": "DATAFLUX_SAMPLE",
+          "type": "SAMPLEFLUX_SAMPLE",
           "links": [
             585,
             605
@@ -3127,7 +3127,7 @@
         {
           "localized_name": "op",
           "name": "op",
-          "type": "DATAFLUX_OP",
+          "type": "SAMPLEFLUX_OP",
           "links": null
         },
         {
@@ -3160,7 +3160,7 @@
       0,
       2,
       0,
-      "DATAFLUX_SOURCE"
+      "SAMPLEFLUX_SOURCE"
     ],
     [
       42,
@@ -3168,7 +3168,7 @@
       0,
       9,
       0,
-      "DATAFLUX_SAMPLE"
+      "SAMPLEFLUX_SAMPLE"
     ],
     [
       94,
@@ -3176,7 +3176,7 @@
       0,
       62,
       0,
-      "DATAFLUX_SAMPLE"
+      "SAMPLEFLUX_SAMPLE"
     ],
     [
       162,
@@ -3184,7 +3184,7 @@
       0,
       107,
       0,
-      "DATAFLUX_SAMPLE"
+      "SAMPLEFLUX_SAMPLE"
     ],
     [
       316,
@@ -3200,7 +3200,7 @@
       0,
       288,
       0,
-      "DATAFLUX_SAMPLE"
+      "SAMPLEFLUX_SAMPLE"
     ],
     [
       541,
@@ -3208,7 +3208,7 @@
       1,
       179,
       0,
-      "DATAFLUX_SAMPLE"
+      "SAMPLEFLUX_SAMPLE"
     ],
     [
       543,
@@ -3216,7 +3216,7 @@
       3,
       292,
       0,
-      "DATAFLUX_SAMPLE"
+      "SAMPLEFLUX_SAMPLE"
     ],
     [
       544,
@@ -3224,7 +3224,7 @@
       3,
       292,
       1,
-      "DATAFLUX_SAMPLE"
+      "SAMPLEFLUX_SAMPLE"
     ],
     [
       545,
@@ -3232,7 +3232,7 @@
       1,
       292,
       2,
-      "DATAFLUX_SAMPLE"
+      "SAMPLEFLUX_SAMPLE"
     ],
     [
       555,
@@ -3240,7 +3240,7 @@
       0,
       317,
       0,
-      "DATAFLUX_SAMPLE"
+      "SAMPLEFLUX_SAMPLE"
     ],
     [
       579,
@@ -3272,7 +3272,7 @@
       0,
       342,
       0,
-      "DATAFLUX_SAMPLE"
+      "SAMPLEFLUX_SAMPLE"
     ],
     [
       586,
@@ -3320,7 +3320,7 @@
       0,
       281,
       0,
-      "DATAFLUX_SAMPLE"
+      "SAMPLEFLUX_SAMPLE"
     ],
     [
       606,
@@ -3328,7 +3328,7 @@
       0,
       360,
       0,
-      "DATAFLUX_SAMPLE"
+      "SAMPLEFLUX_SAMPLE"
     ],
     [
       607,
@@ -3368,7 +3368,7 @@
       0,
       365,
       0,
-      "DATAFLUX_SAMPLE"
+      "SAMPLEFLUX_SAMPLE"
     ],
     [
       618,
@@ -3392,7 +3392,7 @@
       0,
       378,
       0,
-      "DATAFLUX_SAMPLE"
+      "SAMPLEFLUX_SAMPLE"
     ],
     [
       624,
@@ -3496,7 +3496,7 @@
       3,
       61,
       0,
-      "DATAFLUX_SAMPLE"
+      "SAMPLEFLUX_SAMPLE"
     ],
     [
       653,
@@ -3504,7 +3504,7 @@
       0,
       331,
       0,
-      "DATAFLUX_SAMPLE"
+      "SAMPLEFLUX_SAMPLE"
     ]
   ],
   "groups": [
@@ -3593,7 +3593,7 @@
           {
             "id": "e224a7be-75e8-4d52-bb2f-852fa5af3148",
             "name": "sample",
-            "type": "DATAFLUX_SAMPLE",
+            "type": "SAMPLEFLUX_SAMPLE",
             "linkIds": [
               223,
               224
@@ -3612,7 +3612,7 @@
           {
             "id": "4914e7b7-be45-438c-8c0f-0d57e0cb7f33",
             "name": "sample",
-            "type": "DATAFLUX_SAMPLE",
+            "type": "SAMPLEFLUX_SAMPLE",
             "linkIds": [
               225
             ],
@@ -3640,7 +3640,7 @@
         "nodes": [
           {
             "id": 138,
-            "type": "Taidal_dataflux_op_numpy_MaxOp",
+            "type": "Taidal_sampleflux_op_numpy_MaxOp",
             "pos": [
               463.6699340103247,
               -4.978586098441838
@@ -3659,7 +3659,7 @@
                 "localized_name": "sample",
                 "name": "sample",
                 "shape": 7,
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "link": 223
               },
               {
@@ -3687,7 +3687,7 @@
               {
                 "localized_name": "sample",
                 "name": "sample",
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "links": [
                   220
                 ]
@@ -3695,12 +3695,12 @@
               {
                 "localized_name": "op",
                 "name": "op",
-                "type": "DATAFLUX_OP",
+                "type": "SAMPLEFLUX_OP",
                 "links": []
               }
             ],
             "properties": {
-              "Node name for S&R": "Taidal_dataflux_op_numpy_MaxOp"
+              "Node name for S&R": "Taidal_sampleflux_op_numpy_MaxOp"
             },
             "widgets_values": [
               "",
@@ -3725,7 +3725,7 @@
               {
                 "localized_name": "sample",
                 "name": "sample",
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "link": 220
               },
               {
@@ -3792,7 +3792,7 @@
               {
                 "localized_name": "array",
                 "name": "array",
-                "type": "DATAFLUX_ARRAY",
+                "type": "SAMPLEFLUX_ARRAY",
                 "links": null
               }
             ],
@@ -3928,7 +3928,7 @@
               {
                 "localized_name": "sample",
                 "name": "sample",
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "link": 228
               },
               {
@@ -3996,7 +3996,7 @@
               {
                 "localized_name": "array",
                 "name": "array",
-                "type": "DATAFLUX_ARRAY",
+                "type": "SAMPLEFLUX_ARRAY",
                 "links": null
               }
             ],
@@ -4050,7 +4050,7 @@
           },
           {
             "id": 141,
-            "type": "Taidal_dataflux_op_numpy_ThresholdOp",
+            "type": "Taidal_sampleflux_op_numpy_ThresholdOp",
             "pos": [
               444.88056302924673,
               245.7493049754902
@@ -4069,7 +4069,7 @@
                 "localized_name": "sample",
                 "name": "sample",
                 "shape": 7,
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "link": 224
               },
               {
@@ -4117,7 +4117,7 @@
               {
                 "localized_name": "sample",
                 "name": "sample",
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "links": [
                   225,
                   228
@@ -4126,12 +4126,12 @@
               {
                 "localized_name": "op",
                 "name": "op",
-                "type": "DATAFLUX_OP",
+                "type": "SAMPLEFLUX_OP",
                 "links": []
               }
             ],
             "properties": {
-              "Node name for S&R": "Taidal_dataflux_op_numpy_ThresholdOp"
+              "Node name for S&R": "Taidal_sampleflux_op_numpy_ThresholdOp"
             },
             "widgets_values": [
               ">",
@@ -4149,7 +4149,7 @@
             "origin_slot": 0,
             "target_id": 139,
             "target_slot": 0,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           },
           {
             "id": 221,
@@ -4173,7 +4173,7 @@
             "origin_slot": 0,
             "target_id": 138,
             "target_slot": 0,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           },
           {
             "id": 224,
@@ -4181,7 +4181,7 @@
             "origin_slot": 0,
             "target_id": 141,
             "target_slot": 0,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           },
           {
             "id": 225,
@@ -4189,7 +4189,7 @@
             "origin_slot": 0,
             "target_id": -20,
             "target_slot": 0,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           },
           {
             "id": 228,
@@ -4197,7 +4197,7 @@
             "origin_slot": 0,
             "target_id": 143,
             "target_slot": 0,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           },
           {
             "id": 230,
@@ -4252,7 +4252,7 @@
           {
             "id": "d106e583-f8de-4424-848e-0740de71e98f",
             "name": "sample",
-            "type": "DATAFLUX_SAMPLE",
+            "type": "SAMPLEFLUX_SAMPLE",
             "linkIds": [
               226
             ],
@@ -4283,7 +4283,7 @@
           {
             "id": "4f461b3f-8839-4710-9ea1-0218f266472f",
             "name": "sample",
-            "type": "DATAFLUX_SAMPLE",
+            "type": "SAMPLEFLUX_SAMPLE",
             "linkIds": [
               90
             ],
@@ -4299,7 +4299,7 @@
         "nodes": [
           {
             "id": 56,
-            "type": "Taidal_dataflux_op_numpy_ConnectedComponentsOp",
+            "type": "Taidal_sampleflux_op_numpy_ConnectedComponentsOp",
             "pos": [
               811.9362609608253,
               326.8409089647822
@@ -4318,7 +4318,7 @@
                 "localized_name": "sample",
                 "name": "sample",
                 "shape": 7,
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "link": 616
               },
               {
@@ -4344,7 +4344,7 @@
               {
                 "localized_name": "sample",
                 "name": "sample",
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "links": [
                   88
                 ]
@@ -4352,12 +4352,12 @@
               {
                 "localized_name": "op",
                 "name": "op",
-                "type": "DATAFLUX_OP",
+                "type": "SAMPLEFLUX_OP",
                 "links": null
               }
             ],
             "properties": {
-              "Node name for S&R": "Taidal_dataflux_op_numpy_ConnectedComponentsOp"
+              "Node name for S&R": "Taidal_sampleflux_op_numpy_ConnectedComponentsOp"
             },
             "widgets_values": [
               10,
@@ -4385,7 +4385,7 @@
                 "localized_name": "sample",
                 "name": "sample",
                 "shape": 7,
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "link": 88
               },
               {
@@ -4411,7 +4411,7 @@
               {
                 "localized_name": "sample",
                 "name": "sample",
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "links": [
                   90
                 ]
@@ -4419,7 +4419,7 @@
               {
                 "localized_name": "op",
                 "name": "op",
-                "type": "DATAFLUX_OP",
+                "type": "SAMPLEFLUX_OP",
                 "links": null
               }
             ],
@@ -4452,7 +4452,7 @@
                 "localized_name": "sample",
                 "name": "sample",
                 "shape": 7,
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "link": 226
               }
             ],
@@ -4460,7 +4460,7 @@
               {
                 "localized_name": "sample",
                 "name": "sample",
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "links": [
                   615
                 ]
@@ -4483,7 +4483,7 @@
           },
           {
             "id": 364,
-            "type": "Taidal_dataflux_op_structure_StashInputOp",
+            "type": "Taidal_sampleflux_op_structure_StashInputOp",
             "pos": [
               1016.7291446327479,
               85.34302537588631
@@ -4502,7 +4502,7 @@
                 "localized_name": "sample",
                 "name": "sample",
                 "shape": 7,
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "link": 615
               },
               {
@@ -4528,7 +4528,7 @@
               {
                 "localized_name": "sample",
                 "name": "sample",
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "links": [
                   616
                 ]
@@ -4536,12 +4536,12 @@
               {
                 "localized_name": "op",
                 "name": "op",
-                "type": "DATAFLUX_OP",
+                "type": "SAMPLEFLUX_OP",
                 "links": null
               }
             ],
             "properties": {
-              "Node name for S&R": "Taidal_dataflux_op_structure_StashInputOp"
+              "Node name for S&R": "Taidal_sampleflux_op_structure_StashInputOp"
             },
             "widgets_values": [
               "mask",
@@ -4557,7 +4557,7 @@
             "origin_slot": 0,
             "target_id": 59,
             "target_slot": 0,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           },
           {
             "id": 226,
@@ -4565,7 +4565,7 @@
             "origin_slot": 0,
             "target_id": 142,
             "target_slot": 0,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           },
           {
             "id": 297,
@@ -4581,7 +4581,7 @@
             "origin_slot": 0,
             "target_id": -20,
             "target_slot": 1,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           },
           {
             "id": 615,
@@ -4589,7 +4589,7 @@
             "origin_slot": 0,
             "target_id": 364,
             "target_slot": 0,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           },
           {
             "id": 616,
@@ -4597,7 +4597,7 @@
             "origin_slot": 0,
             "target_id": 56,
             "target_slot": 0,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           }
         ],
         "extra": {}
@@ -4636,7 +4636,7 @@
           {
             "id": "4e800e82-45bf-4a43-b8bb-5b51a2551b66",
             "name": "sample",
-            "type": "DATAFLUX_SAMPLE",
+            "type": "SAMPLEFLUX_SAMPLE",
             "linkIds": [
               536,
               539
@@ -4668,7 +4668,7 @@
           {
             "id": "24cc0538-746d-4617-b33a-e40d1a07dae4",
             "name": "sample",
-            "type": "DATAFLUX_SAMPLE",
+            "type": "SAMPLEFLUX_SAMPLE",
             "linkIds": [
               203
             ],
@@ -4681,7 +4681,7 @@
           {
             "id": "52e128d3-2783-48cc-b5ff-643dd4c6354e",
             "name": "sample_1",
-            "type": "DATAFLUX_SAMPLE",
+            "type": "SAMPLEFLUX_SAMPLE",
             "linkIds": [
               204
             ],
@@ -4728,7 +4728,7 @@
                 "localized_name": "sample",
                 "name": "sample",
                 "shape": 7,
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "link": 194
               },
               {
@@ -4763,7 +4763,7 @@
               {
                 "localized_name": "sample",
                 "name": "sample",
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "links": [
                   195,
                   196,
@@ -4773,7 +4773,7 @@
               {
                 "localized_name": "op",
                 "name": "op",
-                "type": "DATAFLUX_OP",
+                "type": "SAMPLEFLUX_OP",
                 "links": []
               }
             ],
@@ -4804,7 +4804,7 @@
               {
                 "localized_name": "sample",
                 "name": "sample",
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "link": 195
               },
               {
@@ -4871,7 +4871,7 @@
               {
                 "localized_name": "array",
                 "name": "array",
-                "type": "DATAFLUX_ARRAY",
+                "type": "SAMPLEFLUX_ARRAY",
                 "links": null
               }
             ],
@@ -4929,7 +4929,7 @@
           },
           {
             "id": 286,
-            "type": "Taidal_dataflux_op_image_ConvertToImageOp",
+            "type": "Taidal_sampleflux_op_image_ConvertToImageOp",
             "pos": [
               1197.002670186914,
               -873.8600565711636
@@ -4948,7 +4948,7 @@
                 "localized_name": "sample",
                 "name": "sample",
                 "shape": 7,
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "link": 196
               },
               {
@@ -5001,7 +5001,7 @@
               {
                 "localized_name": "sample",
                 "name": "sample",
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "links": [
                   204
                 ]
@@ -5009,12 +5009,12 @@
               {
                 "localized_name": "op",
                 "name": "op",
-                "type": "DATAFLUX_OP",
+                "type": "SAMPLEFLUX_OP",
                 "links": []
               }
             ],
             "properties": {
-              "Node name for S&R": "Taidal_dataflux_op_image_ConvertToImageOp"
+              "Node name for S&R": "Taidal_sampleflux_op_image_ConvertToImageOp"
             },
             "widgets_values": [
               "viridis",
@@ -5045,7 +5045,7 @@
                 "localized_name": "sample",
                 "name": "sample",
                 "shape": 7,
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "link": 539
               },
               {
@@ -5125,7 +5125,7 @@
               {
                 "localized_name": "sample",
                 "name": "sample",
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "links": [
                   194
                 ]
@@ -5133,7 +5133,7 @@
               {
                 "localized_name": "op",
                 "name": "op",
-                "type": "DATAFLUX_OP",
+                "type": "SAMPLEFLUX_OP",
                 "links": []
               }
             ],
@@ -5160,7 +5160,7 @@
             "origin_slot": 0,
             "target_id": 285,
             "target_slot": 0,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           },
           {
             "id": 195,
@@ -5168,7 +5168,7 @@
             "origin_slot": 0,
             "target_id": 287,
             "target_slot": 0,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           },
           {
             "id": 196,
@@ -5176,7 +5176,7 @@
             "origin_slot": 0,
             "target_id": 286,
             "target_slot": 0,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           },
           {
             "id": 199,
@@ -5192,7 +5192,7 @@
             "origin_slot": 0,
             "target_id": -20,
             "target_slot": 1,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           },
           {
             "id": 204,
@@ -5200,7 +5200,7 @@
             "origin_slot": 0,
             "target_id": -20,
             "target_slot": 2,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           },
           {
             "id": 536,
@@ -5224,7 +5224,7 @@
             "origin_slot": 0,
             "target_id": 284,
             "target_slot": 0,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           }
         ],
         "extra": {}
@@ -5263,7 +5263,7 @@
           {
             "id": "4e800e82-45bf-4a43-b8bb-5b51a2551b66",
             "name": "sample",
-            "type": "DATAFLUX_SAMPLE",
+            "type": "SAMPLEFLUX_SAMPLE",
             "linkIds": [
               536,
               539
@@ -5295,7 +5295,7 @@
           {
             "id": "24cc0538-746d-4617-b33a-e40d1a07dae4",
             "name": "sample",
-            "type": "DATAFLUX_SAMPLE",
+            "type": "SAMPLEFLUX_SAMPLE",
             "linkIds": [
               203
             ],
@@ -5308,7 +5308,7 @@
           {
             "id": "52e128d3-2783-48cc-b5ff-643dd4c6354e",
             "name": "sample_1",
-            "type": "DATAFLUX_SAMPLE",
+            "type": "SAMPLEFLUX_SAMPLE",
             "linkIds": [
               204
             ],
@@ -5355,7 +5355,7 @@
                 "localized_name": "sample",
                 "name": "sample",
                 "shape": 7,
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "link": 194
               },
               {
@@ -5390,7 +5390,7 @@
               {
                 "localized_name": "sample",
                 "name": "sample",
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "links": [
                   195,
                   196,
@@ -5400,7 +5400,7 @@
               {
                 "localized_name": "op",
                 "name": "op",
-                "type": "DATAFLUX_OP",
+                "type": "SAMPLEFLUX_OP",
                 "links": []
               }
             ],
@@ -5431,7 +5431,7 @@
               {
                 "localized_name": "sample",
                 "name": "sample",
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "link": 195
               },
               {
@@ -5498,7 +5498,7 @@
               {
                 "localized_name": "array",
                 "name": "array",
-                "type": "DATAFLUX_ARRAY",
+                "type": "SAMPLEFLUX_ARRAY",
                 "links": null
               }
             ],
@@ -5532,7 +5532,7 @@
                 "localized_name": "sample",
                 "name": "sample",
                 "shape": 7,
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "link": 539
               },
               {
@@ -5612,7 +5612,7 @@
               {
                 "localized_name": "sample",
                 "name": "sample",
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "links": [
                   194
                 ]
@@ -5620,7 +5620,7 @@
               {
                 "localized_name": "op",
                 "name": "op",
-                "type": "DATAFLUX_OP",
+                "type": "SAMPLEFLUX_OP",
                 "links": []
               }
             ],
@@ -5683,7 +5683,7 @@
           },
           {
             "id": 312,
-            "type": "Taidal_dataflux_op_image_ConvertToImageOp",
+            "type": "Taidal_sampleflux_op_image_ConvertToImageOp",
             "pos": [
               1197.002670186914,
               -873.8600565711636
@@ -5702,7 +5702,7 @@
                 "localized_name": "sample",
                 "name": "sample",
                 "shape": 7,
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "link": 196
               },
               {
@@ -5755,7 +5755,7 @@
               {
                 "localized_name": "sample",
                 "name": "sample",
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "links": [
                   204
                 ]
@@ -5763,12 +5763,12 @@
               {
                 "localized_name": "op",
                 "name": "op",
-                "type": "DATAFLUX_OP",
+                "type": "SAMPLEFLUX_OP",
                 "links": []
               }
             ],
             "properties": {
-              "Node name for S&R": "Taidal_dataflux_op_image_ConvertToImageOp"
+              "Node name for S&R": "Taidal_sampleflux_op_image_ConvertToImageOp"
             },
             "widgets_values": [
               "viridis",
@@ -5787,7 +5787,7 @@
             "origin_slot": 0,
             "target_id": 308,
             "target_slot": 0,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           },
           {
             "id": 195,
@@ -5795,7 +5795,7 @@
             "origin_slot": 0,
             "target_id": 309,
             "target_slot": 0,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           },
           {
             "id": 196,
@@ -5803,7 +5803,7 @@
             "origin_slot": 0,
             "target_id": 312,
             "target_slot": 0,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           },
           {
             "id": 199,
@@ -5819,7 +5819,7 @@
             "origin_slot": 0,
             "target_id": -20,
             "target_slot": 1,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           },
           {
             "id": 204,
@@ -5827,7 +5827,7 @@
             "origin_slot": 0,
             "target_id": -20,
             "target_slot": 2,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           },
           {
             "id": 536,
@@ -5851,7 +5851,7 @@
             "origin_slot": 0,
             "target_id": 310,
             "target_slot": 0,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           }
         ],
         "extra": {}
@@ -5890,7 +5890,7 @@
           {
             "id": "ea47f0e6-dcfa-404c-9ba7-d756a923c199",
             "name": "sample",
-            "type": "DATAFLUX_SAMPLE",
+            "type": "SAMPLEFLUX_SAMPLE",
             "linkIds": [
               554
             ],
@@ -5907,7 +5907,7 @@
           {
             "id": "034e5523-0583-426e-b69a-935cfeb3b84e",
             "name": "sample",
-            "type": "DATAFLUX_SAMPLE",
+            "type": "SAMPLEFLUX_SAMPLE",
             "linkIds": [
               560
             ],
@@ -5946,7 +5946,7 @@
           {
             "id": "788a8c96-9996-4f24-98ee-4a04376c01f8",
             "name": "sample_1",
-            "type": "DATAFLUX_SAMPLE",
+            "type": "SAMPLEFLUX_SAMPLE",
             "linkIds": [
               563
             ],
@@ -6005,7 +6005,7 @@
                 "label": "sample (IQ)",
                 "localized_name": "sample",
                 "name": "sample",
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "link": 554
               }
             ],
@@ -6021,7 +6021,7 @@
               {
                 "label": "sample (spectrogram)",
                 "name": "sample",
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "links": [
                   552,
                   557,
@@ -6031,7 +6031,7 @@
               {
                 "label": "image_sample",
                 "name": "sample_1",
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "links": [
                   563
                 ]
@@ -6072,7 +6072,7 @@
               {
                 "localized_name": "sample",
                 "name": "sample",
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "link": 551
               },
               {
@@ -6139,7 +6139,7 @@
               {
                 "localized_name": "array",
                 "name": "array",
-                "type": "DATAFLUX_ARRAY",
+                "type": "SAMPLEFLUX_ARRAY",
                 "links": []
               }
             ],
@@ -6260,7 +6260,7 @@
                 "localized_name": "sample",
                 "name": "sample",
                 "shape": 7,
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "link": 552
               },
               {
@@ -6295,13 +6295,13 @@
               {
                 "localized_name": "sample",
                 "name": "sample",
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "links": []
               },
               {
                 "localized_name": "op",
                 "name": "op",
-                "type": "DATAFLUX_OP",
+                "type": "SAMPLEFLUX_OP",
                 "links": []
               },
               {
@@ -6385,7 +6385,7 @@
                 "localized_name": "sample",
                 "name": "sample",
                 "shape": 7,
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "link": 553
               },
               {
@@ -6420,7 +6420,7 @@
               {
                 "localized_name": "sample",
                 "name": "sample",
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "links": [
                   551
                 ]
@@ -6428,7 +6428,7 @@
               {
                 "localized_name": "op",
                 "name": "op",
-                "type": "DATAFLUX_OP",
+                "type": "SAMPLEFLUX_OP",
                 "links": []
               }
             ],
@@ -6450,7 +6450,7 @@
             "origin_slot": 1,
             "target_id": 300,
             "target_slot": 0,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           },
           {
             "id": 553,
@@ -6458,7 +6458,7 @@
             "origin_slot": 3,
             "target_id": 306,
             "target_slot": 0,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           },
           {
             "id": 551,
@@ -6466,7 +6466,7 @@
             "origin_slot": 0,
             "target_id": 307,
             "target_slot": 0,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           },
           {
             "id": 554,
@@ -6474,7 +6474,7 @@
             "origin_slot": 0,
             "target_id": 313,
             "target_slot": 0,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           },
           {
             "id": 560,
@@ -6490,7 +6490,7 @@
             "origin_slot": 1,
             "target_id": -20,
             "target_slot": 1,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           },
           {
             "id": 562,
@@ -6506,7 +6506,7 @@
             "origin_slot": 2,
             "target_id": -20,
             "target_slot": 3,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           },
           {
             "id": 564,
@@ -6593,7 +6593,7 @@
           {
             "id": "ea47f0e6-dcfa-404c-9ba7-d756a923c199",
             "name": "sample",
-            "type": "DATAFLUX_SAMPLE",
+            "type": "SAMPLEFLUX_SAMPLE",
             "linkIds": [
               554
             ],
@@ -6610,7 +6610,7 @@
           {
             "id": "034e5523-0583-426e-b69a-935cfeb3b84e",
             "name": "sample",
-            "type": "DATAFLUX_SAMPLE",
+            "type": "SAMPLEFLUX_SAMPLE",
             "linkIds": [
               560
             ],
@@ -6649,7 +6649,7 @@
           {
             "id": "788a8c96-9996-4f24-98ee-4a04376c01f8",
             "name": "sample_1",
-            "type": "DATAFLUX_SAMPLE",
+            "type": "SAMPLEFLUX_SAMPLE",
             "linkIds": [
               563
             ],
@@ -6708,7 +6708,7 @@
                 "label": "sample (IQ)",
                 "localized_name": "sample",
                 "name": "sample",
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "link": 554
               }
             ],
@@ -6724,7 +6724,7 @@
               {
                 "label": "sample (spectrogram)",
                 "name": "sample",
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "links": [
                   552,
                   557,
@@ -6734,7 +6734,7 @@
               {
                 "label": "image_sample",
                 "name": "sample_1",
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "links": [
                   563
                 ]
@@ -6775,7 +6775,7 @@
               {
                 "localized_name": "sample",
                 "name": "sample",
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "link": 551
               },
               {
@@ -6842,7 +6842,7 @@
               {
                 "localized_name": "array",
                 "name": "array",
-                "type": "DATAFLUX_ARRAY",
+                "type": "SAMPLEFLUX_ARRAY",
                 "links": []
               }
             ],
@@ -6963,7 +6963,7 @@
                 "localized_name": "sample",
                 "name": "sample",
                 "shape": 7,
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "link": 552
               },
               {
@@ -6998,13 +6998,13 @@
               {
                 "localized_name": "sample",
                 "name": "sample",
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "links": []
               },
               {
                 "localized_name": "op",
                 "name": "op",
-                "type": "DATAFLUX_OP",
+                "type": "SAMPLEFLUX_OP",
                 "links": []
               },
               {
@@ -7088,7 +7088,7 @@
                 "localized_name": "sample",
                 "name": "sample",
                 "shape": 7,
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "link": 553
               },
               {
@@ -7123,7 +7123,7 @@
               {
                 "localized_name": "sample",
                 "name": "sample",
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "links": [
                   551
                 ]
@@ -7131,7 +7131,7 @@
               {
                 "localized_name": "op",
                 "name": "op",
-                "type": "DATAFLUX_OP",
+                "type": "SAMPLEFLUX_OP",
                 "links": []
               }
             ],
@@ -7153,7 +7153,7 @@
             "origin_slot": 1,
             "target_id": 335,
             "target_slot": 0,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           },
           {
             "id": 553,
@@ -7161,7 +7161,7 @@
             "origin_slot": 3,
             "target_id": 336,
             "target_slot": 0,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           },
           {
             "id": 551,
@@ -7169,7 +7169,7 @@
             "origin_slot": 0,
             "target_id": 333,
             "target_slot": 0,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           },
           {
             "id": 554,
@@ -7177,7 +7177,7 @@
             "origin_slot": 0,
             "target_id": 332,
             "target_slot": 0,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           },
           {
             "id": 560,
@@ -7193,7 +7193,7 @@
             "origin_slot": 1,
             "target_id": -20,
             "target_slot": 1,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           },
           {
             "id": 562,
@@ -7209,7 +7209,7 @@
             "origin_slot": 2,
             "target_id": -20,
             "target_slot": 3,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           },
           {
             "id": 564,
@@ -7296,7 +7296,7 @@
           {
             "id": "4e800e82-45bf-4a43-b8bb-5b51a2551b66",
             "name": "sample",
-            "type": "DATAFLUX_SAMPLE",
+            "type": "SAMPLEFLUX_SAMPLE",
             "linkIds": [
               536,
               539
@@ -7328,7 +7328,7 @@
           {
             "id": "24cc0538-746d-4617-b33a-e40d1a07dae4",
             "name": "sample",
-            "type": "DATAFLUX_SAMPLE",
+            "type": "SAMPLEFLUX_SAMPLE",
             "linkIds": [
               203
             ],
@@ -7341,7 +7341,7 @@
           {
             "id": "52e128d3-2783-48cc-b5ff-643dd4c6354e",
             "name": "sample_1",
-            "type": "DATAFLUX_SAMPLE",
+            "type": "SAMPLEFLUX_SAMPLE",
             "linkIds": [
               204
             ],
@@ -7388,7 +7388,7 @@
                 "localized_name": "sample",
                 "name": "sample",
                 "shape": 7,
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "link": 194
               },
               {
@@ -7423,7 +7423,7 @@
               {
                 "localized_name": "sample",
                 "name": "sample",
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "links": [
                   195,
                   196,
@@ -7433,7 +7433,7 @@
               {
                 "localized_name": "op",
                 "name": "op",
-                "type": "DATAFLUX_OP",
+                "type": "SAMPLEFLUX_OP",
                 "links": []
               }
             ],
@@ -7464,7 +7464,7 @@
               {
                 "localized_name": "sample",
                 "name": "sample",
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "link": 195
               },
               {
@@ -7531,7 +7531,7 @@
               {
                 "localized_name": "array",
                 "name": "array",
-                "type": "DATAFLUX_ARRAY",
+                "type": "SAMPLEFLUX_ARRAY",
                 "links": null
               }
             ],
@@ -7565,7 +7565,7 @@
                 "localized_name": "sample",
                 "name": "sample",
                 "shape": 7,
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "link": 539
               },
               {
@@ -7645,7 +7645,7 @@
               {
                 "localized_name": "sample",
                 "name": "sample",
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "links": [
                   194
                 ]
@@ -7653,7 +7653,7 @@
               {
                 "localized_name": "op",
                 "name": "op",
-                "type": "DATAFLUX_OP",
+                "type": "SAMPLEFLUX_OP",
                 "links": []
               }
             ],
@@ -7716,7 +7716,7 @@
           },
           {
             "id": 341,
-            "type": "Taidal_dataflux_op_image_ConvertToImageOp",
+            "type": "Taidal_sampleflux_op_image_ConvertToImageOp",
             "pos": [
               1197.002670186914,
               -873.8600565711636
@@ -7735,7 +7735,7 @@
                 "localized_name": "sample",
                 "name": "sample",
                 "shape": 7,
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "link": 196
               },
               {
@@ -7788,7 +7788,7 @@
               {
                 "localized_name": "sample",
                 "name": "sample",
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "links": [
                   204
                 ]
@@ -7796,12 +7796,12 @@
               {
                 "localized_name": "op",
                 "name": "op",
-                "type": "DATAFLUX_OP",
+                "type": "SAMPLEFLUX_OP",
                 "links": []
               }
             ],
             "properties": {
-              "Node name for S&R": "Taidal_dataflux_op_image_ConvertToImageOp"
+              "Node name for S&R": "Taidal_sampleflux_op_image_ConvertToImageOp"
             },
             "widgets_values": [
               "viridis",
@@ -7820,7 +7820,7 @@
             "origin_slot": 0,
             "target_id": 337,
             "target_slot": 0,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           },
           {
             "id": 195,
@@ -7828,7 +7828,7 @@
             "origin_slot": 0,
             "target_id": 338,
             "target_slot": 0,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           },
           {
             "id": 196,
@@ -7836,7 +7836,7 @@
             "origin_slot": 0,
             "target_id": 341,
             "target_slot": 0,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           },
           {
             "id": 199,
@@ -7852,7 +7852,7 @@
             "origin_slot": 0,
             "target_id": -20,
             "target_slot": 1,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           },
           {
             "id": 204,
@@ -7860,7 +7860,7 @@
             "origin_slot": 0,
             "target_id": -20,
             "target_slot": 2,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           },
           {
             "id": 536,
@@ -7884,7 +7884,7 @@
             "origin_slot": 0,
             "target_id": 339,
             "target_slot": 0,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           }
         ],
         "extra": {}
@@ -7923,7 +7923,7 @@
           {
             "id": "ea47f0e6-dcfa-404c-9ba7-d756a923c199",
             "name": "sample",
-            "type": "DATAFLUX_SAMPLE",
+            "type": "SAMPLEFLUX_SAMPLE",
             "linkIds": [
               554
             ],
@@ -7940,7 +7940,7 @@
           {
             "id": "034e5523-0583-426e-b69a-935cfeb3b84e",
             "name": "sample",
-            "type": "DATAFLUX_SAMPLE",
+            "type": "SAMPLEFLUX_SAMPLE",
             "linkIds": [
               560
             ],
@@ -7979,7 +7979,7 @@
           {
             "id": "788a8c96-9996-4f24-98ee-4a04376c01f8",
             "name": "sample_1",
-            "type": "DATAFLUX_SAMPLE",
+            "type": "SAMPLEFLUX_SAMPLE",
             "linkIds": [
               563
             ],
@@ -8036,7 +8036,7 @@
               {
                 "localized_name": "sample",
                 "name": "sample",
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "link": 551
               },
               {
@@ -8103,7 +8103,7 @@
               {
                 "localized_name": "array",
                 "name": "array",
-                "type": "DATAFLUX_ARRAY",
+                "type": "SAMPLEFLUX_ARRAY",
                 "links": []
               }
             ],
@@ -8224,7 +8224,7 @@
                 "localized_name": "sample",
                 "name": "sample",
                 "shape": 7,
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "link": 552
               },
               {
@@ -8259,13 +8259,13 @@
               {
                 "localized_name": "sample",
                 "name": "sample",
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "links": []
               },
               {
                 "localized_name": "op",
                 "name": "op",
-                "type": "DATAFLUX_OP",
+                "type": "SAMPLEFLUX_OP",
                 "links": []
               },
               {
@@ -8349,7 +8349,7 @@
                 "localized_name": "sample",
                 "name": "sample",
                 "shape": 7,
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "link": 553
               },
               {
@@ -8384,7 +8384,7 @@
               {
                 "localized_name": "sample",
                 "name": "sample",
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "links": [
                   551
                 ]
@@ -8392,7 +8392,7 @@
               {
                 "localized_name": "op",
                 "name": "op",
-                "type": "DATAFLUX_OP",
+                "type": "SAMPLEFLUX_OP",
                 "links": []
               }
             ],
@@ -8425,7 +8425,7 @@
                 "label": "sample (IQ)",
                 "localized_name": "sample",
                 "name": "sample",
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "link": 554
               }
             ],
@@ -8441,7 +8441,7 @@
               {
                 "label": "sample (spectrogram)",
                 "name": "sample",
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "links": [
                   552,
                   557,
@@ -8451,7 +8451,7 @@
               {
                 "label": "image_sample",
                 "name": "sample_1",
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "links": [
                   563
                 ]
@@ -8483,7 +8483,7 @@
             "origin_slot": 1,
             "target_id": 353,
             "target_slot": 0,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           },
           {
             "id": 553,
@@ -8491,7 +8491,7 @@
             "origin_slot": 3,
             "target_id": 354,
             "target_slot": 0,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           },
           {
             "id": 551,
@@ -8499,7 +8499,7 @@
             "origin_slot": 0,
             "target_id": 351,
             "target_slot": 0,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           },
           {
             "id": 554,
@@ -8507,7 +8507,7 @@
             "origin_slot": 0,
             "target_id": 350,
             "target_slot": 0,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           },
           {
             "id": 560,
@@ -8523,7 +8523,7 @@
             "origin_slot": 1,
             "target_id": -20,
             "target_slot": 1,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           },
           {
             "id": 562,
@@ -8539,7 +8539,7 @@
             "origin_slot": 2,
             "target_id": -20,
             "target_slot": 3,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           },
           {
             "id": 564,
@@ -8626,7 +8626,7 @@
           {
             "id": "4e800e82-45bf-4a43-b8bb-5b51a2551b66",
             "name": "sample",
-            "type": "DATAFLUX_SAMPLE",
+            "type": "SAMPLEFLUX_SAMPLE",
             "linkIds": [
               536,
               539
@@ -8658,7 +8658,7 @@
           {
             "id": "24cc0538-746d-4617-b33a-e40d1a07dae4",
             "name": "sample",
-            "type": "DATAFLUX_SAMPLE",
+            "type": "SAMPLEFLUX_SAMPLE",
             "linkIds": [
               203
             ],
@@ -8671,7 +8671,7 @@
           {
             "id": "52e128d3-2783-48cc-b5ff-643dd4c6354e",
             "name": "sample_1",
-            "type": "DATAFLUX_SAMPLE",
+            "type": "SAMPLEFLUX_SAMPLE",
             "linkIds": [
               204
             ],
@@ -8718,7 +8718,7 @@
                 "localized_name": "sample",
                 "name": "sample",
                 "shape": 7,
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "link": 194
               },
               {
@@ -8753,7 +8753,7 @@
               {
                 "localized_name": "sample",
                 "name": "sample",
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "links": [
                   195,
                   196,
@@ -8763,7 +8763,7 @@
               {
                 "localized_name": "op",
                 "name": "op",
-                "type": "DATAFLUX_OP",
+                "type": "SAMPLEFLUX_OP",
                 "links": []
               }
             ],
@@ -8794,7 +8794,7 @@
               {
                 "localized_name": "sample",
                 "name": "sample",
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "link": 195
               },
               {
@@ -8861,7 +8861,7 @@
               {
                 "localized_name": "array",
                 "name": "array",
-                "type": "DATAFLUX_ARRAY",
+                "type": "SAMPLEFLUX_ARRAY",
                 "links": null
               }
             ],
@@ -8895,7 +8895,7 @@
                 "localized_name": "sample",
                 "name": "sample",
                 "shape": 7,
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "link": 539
               },
               {
@@ -8975,7 +8975,7 @@
               {
                 "localized_name": "sample",
                 "name": "sample",
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "links": [
                   194
                 ]
@@ -8983,7 +8983,7 @@
               {
                 "localized_name": "op",
                 "name": "op",
-                "type": "DATAFLUX_OP",
+                "type": "SAMPLEFLUX_OP",
                 "links": []
               }
             ],
@@ -9046,7 +9046,7 @@
           },
           {
             "id": 359,
-            "type": "Taidal_dataflux_op_image_ConvertToImageOp",
+            "type": "Taidal_sampleflux_op_image_ConvertToImageOp",
             "pos": [
               1197.002670186914,
               -873.8600565711636
@@ -9065,7 +9065,7 @@
                 "localized_name": "sample",
                 "name": "sample",
                 "shape": 7,
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "link": 196
               },
               {
@@ -9118,7 +9118,7 @@
               {
                 "localized_name": "sample",
                 "name": "sample",
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "links": [
                   204
                 ]
@@ -9126,12 +9126,12 @@
               {
                 "localized_name": "op",
                 "name": "op",
-                "type": "DATAFLUX_OP",
+                "type": "SAMPLEFLUX_OP",
                 "links": []
               }
             ],
             "properties": {
-              "Node name for S&R": "Taidal_dataflux_op_image_ConvertToImageOp"
+              "Node name for S&R": "Taidal_sampleflux_op_image_ConvertToImageOp"
             },
             "widgets_values": [
               "viridis",
@@ -9150,7 +9150,7 @@
             "origin_slot": 0,
             "target_id": 355,
             "target_slot": 0,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           },
           {
             "id": 195,
@@ -9158,7 +9158,7 @@
             "origin_slot": 0,
             "target_id": 356,
             "target_slot": 0,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           },
           {
             "id": 196,
@@ -9166,7 +9166,7 @@
             "origin_slot": 0,
             "target_id": 359,
             "target_slot": 0,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           },
           {
             "id": 199,
@@ -9182,7 +9182,7 @@
             "origin_slot": 0,
             "target_id": -20,
             "target_slot": 1,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           },
           {
             "id": 204,
@@ -9190,7 +9190,7 @@
             "origin_slot": 0,
             "target_id": -20,
             "target_slot": 2,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           },
           {
             "id": 536,
@@ -9214,7 +9214,7 @@
             "origin_slot": 0,
             "target_id": 357,
             "target_slot": 0,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           }
         ],
         "extra": {}
@@ -9253,7 +9253,7 @@
           {
             "id": "ea47f0e6-dcfa-404c-9ba7-d756a923c199",
             "name": "sample",
-            "type": "DATAFLUX_SAMPLE",
+            "type": "SAMPLEFLUX_SAMPLE",
             "linkIds": [
               554
             ],
@@ -9270,7 +9270,7 @@
           {
             "id": "034e5523-0583-426e-b69a-935cfeb3b84e",
             "name": "sample",
-            "type": "DATAFLUX_SAMPLE",
+            "type": "SAMPLEFLUX_SAMPLE",
             "linkIds": [
               560
             ],
@@ -9309,7 +9309,7 @@
           {
             "id": "788a8c96-9996-4f24-98ee-4a04376c01f8",
             "name": "sample_1",
-            "type": "DATAFLUX_SAMPLE",
+            "type": "SAMPLEFLUX_SAMPLE",
             "linkIds": [
               563
             ],
@@ -9366,7 +9366,7 @@
               {
                 "localized_name": "sample",
                 "name": "sample",
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "link": 551
               },
               {
@@ -9433,7 +9433,7 @@
               {
                 "localized_name": "array",
                 "name": "array",
-                "type": "DATAFLUX_ARRAY",
+                "type": "SAMPLEFLUX_ARRAY",
                 "links": []
               }
             ],
@@ -9554,7 +9554,7 @@
                 "localized_name": "sample",
                 "name": "sample",
                 "shape": 7,
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "link": 553
               },
               {
@@ -9589,7 +9589,7 @@
               {
                 "localized_name": "sample",
                 "name": "sample",
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "links": [
                   551
                 ]
@@ -9597,7 +9597,7 @@
               {
                 "localized_name": "op",
                 "name": "op",
-                "type": "DATAFLUX_OP",
+                "type": "SAMPLEFLUX_OP",
                 "links": []
               }
             ],
@@ -9630,7 +9630,7 @@
                 "label": "sample (IQ)",
                 "localized_name": "sample",
                 "name": "sample",
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "link": 554
               }
             ],
@@ -9646,7 +9646,7 @@
               {
                 "label": "sample (spectrogram)",
                 "name": "sample",
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "links": [
                   552,
                   557,
@@ -9656,7 +9656,7 @@
               {
                 "label": "image_sample",
                 "name": "sample_1",
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "links": [
                   563
                 ]
@@ -9700,7 +9700,7 @@
                 "localized_name": "sample",
                 "name": "sample",
                 "shape": 7,
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "link": 552
               },
               {
@@ -9735,13 +9735,13 @@
               {
                 "localized_name": "sample",
                 "name": "sample",
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "links": []
               },
               {
                 "localized_name": "op",
                 "name": "op",
-                "type": "DATAFLUX_OP",
+                "type": "SAMPLEFLUX_OP",
                 "links": []
               },
               {
@@ -9814,7 +9814,7 @@
             "origin_slot": 1,
             "target_id": 371,
             "target_slot": 0,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           },
           {
             "id": 553,
@@ -9822,7 +9822,7 @@
             "origin_slot": 3,
             "target_id": 372,
             "target_slot": 0,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           },
           {
             "id": 551,
@@ -9830,7 +9830,7 @@
             "origin_slot": 0,
             "target_id": 369,
             "target_slot": 0,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           },
           {
             "id": 554,
@@ -9838,7 +9838,7 @@
             "origin_slot": 0,
             "target_id": 368,
             "target_slot": 0,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           },
           {
             "id": 560,
@@ -9854,7 +9854,7 @@
             "origin_slot": 1,
             "target_id": -20,
             "target_slot": 1,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           },
           {
             "id": 562,
@@ -9870,7 +9870,7 @@
             "origin_slot": 2,
             "target_id": -20,
             "target_slot": 3,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           },
           {
             "id": 564,
@@ -9957,7 +9957,7 @@
           {
             "id": "4e800e82-45bf-4a43-b8bb-5b51a2551b66",
             "name": "sample",
-            "type": "DATAFLUX_SAMPLE",
+            "type": "SAMPLEFLUX_SAMPLE",
             "linkIds": [
               536,
               539
@@ -9989,7 +9989,7 @@
           {
             "id": "24cc0538-746d-4617-b33a-e40d1a07dae4",
             "name": "sample",
-            "type": "DATAFLUX_SAMPLE",
+            "type": "SAMPLEFLUX_SAMPLE",
             "linkIds": [
               203
             ],
@@ -10002,7 +10002,7 @@
           {
             "id": "52e128d3-2783-48cc-b5ff-643dd4c6354e",
             "name": "sample_1",
-            "type": "DATAFLUX_SAMPLE",
+            "type": "SAMPLEFLUX_SAMPLE",
             "linkIds": [
               204
             ],
@@ -10049,7 +10049,7 @@
                 "localized_name": "sample",
                 "name": "sample",
                 "shape": 7,
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "link": 194
               },
               {
@@ -10084,7 +10084,7 @@
               {
                 "localized_name": "sample",
                 "name": "sample",
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "links": [
                   195,
                   196,
@@ -10094,7 +10094,7 @@
               {
                 "localized_name": "op",
                 "name": "op",
-                "type": "DATAFLUX_OP",
+                "type": "SAMPLEFLUX_OP",
                 "links": []
               }
             ],
@@ -10125,7 +10125,7 @@
               {
                 "localized_name": "sample",
                 "name": "sample",
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "link": 195
               },
               {
@@ -10192,7 +10192,7 @@
               {
                 "localized_name": "array",
                 "name": "array",
-                "type": "DATAFLUX_ARRAY",
+                "type": "SAMPLEFLUX_ARRAY",
                 "links": null
               }
             ],
@@ -10226,7 +10226,7 @@
                 "localized_name": "sample",
                 "name": "sample",
                 "shape": 7,
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "link": 539
               },
               {
@@ -10306,7 +10306,7 @@
               {
                 "localized_name": "sample",
                 "name": "sample",
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "links": [
                   194
                 ]
@@ -10314,7 +10314,7 @@
               {
                 "localized_name": "op",
                 "name": "op",
-                "type": "DATAFLUX_OP",
+                "type": "SAMPLEFLUX_OP",
                 "links": []
               }
             ],
@@ -10377,7 +10377,7 @@
           },
           {
             "id": 377,
-            "type": "Taidal_dataflux_op_image_ConvertToImageOp",
+            "type": "Taidal_sampleflux_op_image_ConvertToImageOp",
             "pos": [
               1197.002670186914,
               -873.8600565711636
@@ -10396,7 +10396,7 @@
                 "localized_name": "sample",
                 "name": "sample",
                 "shape": 7,
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "link": 196
               },
               {
@@ -10449,7 +10449,7 @@
               {
                 "localized_name": "sample",
                 "name": "sample",
-                "type": "DATAFLUX_SAMPLE",
+                "type": "SAMPLEFLUX_SAMPLE",
                 "links": [
                   204
                 ]
@@ -10457,12 +10457,12 @@
               {
                 "localized_name": "op",
                 "name": "op",
-                "type": "DATAFLUX_OP",
+                "type": "SAMPLEFLUX_OP",
                 "links": []
               }
             ],
             "properties": {
-              "Node name for S&R": "Taidal_dataflux_op_image_ConvertToImageOp"
+              "Node name for S&R": "Taidal_sampleflux_op_image_ConvertToImageOp"
             },
             "widgets_values": [
               "viridis",
@@ -10481,7 +10481,7 @@
             "origin_slot": 0,
             "target_id": 373,
             "target_slot": 0,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           },
           {
             "id": 195,
@@ -10489,7 +10489,7 @@
             "origin_slot": 0,
             "target_id": 374,
             "target_slot": 0,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           },
           {
             "id": 196,
@@ -10497,7 +10497,7 @@
             "origin_slot": 0,
             "target_id": 377,
             "target_slot": 0,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           },
           {
             "id": 199,
@@ -10513,7 +10513,7 @@
             "origin_slot": 0,
             "target_id": -20,
             "target_slot": 1,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           },
           {
             "id": 204,
@@ -10521,7 +10521,7 @@
             "origin_slot": 0,
             "target_id": -20,
             "target_slot": 2,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           },
           {
             "id": 536,
@@ -10545,7 +10545,7 @@
             "origin_slot": 0,
             "target_id": 375,
             "target_slot": 0,
-            "type": "DATAFLUX_SAMPLE"
+            "type": "SAMPLEFLUX_SAMPLE"
           }
         ],
         "extra": {}

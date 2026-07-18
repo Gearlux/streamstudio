@@ -565,7 +565,7 @@ def test_no_manager_filters_declared_tier_only(
 
 def _register_rescale_node() -> None:
     """Put the generated RescaleOp op node into the live NODE_CLASS_MAPPINGS the CLI reads."""
-    from dataflux.ops.torch import RescaleOp
+    from sampleflux.ops.torch import RescaleOp
 
     import fluxstudio
     from fluxstudio.bridge import create_comfy_node

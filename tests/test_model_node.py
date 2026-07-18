@@ -2,7 +2,7 @@
 
 A MODEL node (``@configurable(category="model")``) RUNS inference: like an op it takes an optional
 ``sample`` and outputs the applied ``sample``, but its second output is the constructed model on a
-``DATAFLUX_OBJECT:model`` socket (dockable into a downstream evaluator).
+``SAMPLEFLUX_OBJECT:model`` socket (dockable into a downstream evaluator).
 """
 
 from typing import Optional, cast
@@ -10,7 +10,7 @@ from typing import Optional, cast
 import pytest
 from confluid import configurable
 from confluid.decorators import output
-from dataflux.sample import Sample
+from sampleflux.sample import Sample
 
 from fluxstudio.bridge import (
     _NODE_CATEGORIES,
@@ -51,7 +51,7 @@ class _FakeInference:
     """A ``ModelInference``-style node: a WIRED ``model`` (stamped) + config widget, delegating infer.
 
     Mirrors the waivefront-helios ``HeliosModelInference`` shape — ``__taidal_model_params__`` marks
-    ``model`` as a wired ``DATAFLUX_OBJECT:model`` input; ``__call__`` delegates to it.
+    ``model`` as a wired ``SAMPLEFLUX_OBJECT:model`` input; ``__call__`` delegates to it.
     """
 
     __taidal_model_params__ = ("model",)
@@ -75,7 +75,7 @@ def test_model_in_node_categories() -> None:
 
 def test_model_class_becomes_model_node_not_op() -> None:
     node = create_comfy_node(_FakeModel, "Taidal__FakeModel")
-    # Sample (applied) + the model object on a role-qualified DATAFLUX_OBJECT:model socket.
+    # Sample (applied) + the model object on a role-qualified SAMPLEFLUX_OBJECT:model socket.
     assert node.RETURN_TYPES == (SAMPLE_TYPE, _object_socket("model"))
     assert node.RETURN_NAMES == ("sample", "model")
     assert node.TAIDAL_NODE_KIND == "model"  # NOT "op"
@@ -122,7 +122,7 @@ def test_model_params_reads_stamp() -> None:
 def test_model_input_param_is_wired_socket_not_widget() -> None:
     node = create_comfy_node(_FakeInference, "Taidal__FakeInference")
     spec = node.INPUT_TYPES()
-    # `model` rides a DATAFLUX_OBJECT:model input socket; it is NOT a widget.
+    # `model` rides a SAMPLEFLUX_OBJECT:model input socket; it is NOT a widget.
     assert spec["optional"]["model"] == (_object_socket("model"),)
     assert "model" not in spec["required"]
     # Other config params stay widgets.

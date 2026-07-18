@@ -8,7 +8,7 @@ console.log("ComfyFlux: Loaded Taidal.ArrayHistogram extension");
 // ComfyUI delivers that payload to `onExecuted(message)`. The payload carries: a base64 PNG of the
 // colormapped image, the histogram counts/bin_edges + stats, and a small nearest-downsampled value
 // grid (+ original dims) so we can map a hovered display pixel back to its source value/coordinate.
-// ALL computation lives in dataflux — this file only DRAWS + hovers.
+// ALL computation lives in sampleflux — this file only DRAWS + hovers.
 //
 // RENDERING — we DRAW ON THE LITEGRAPH NODE CANVAS (onDrawForeground), NOT a DOM widget (the
 // ComfyUI-Olm-Histogram pattern). A DOM widget under ComfyUI's shrink-to-fit parent broke width

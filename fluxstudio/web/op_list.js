@@ -3,21 +3,21 @@ import { app } from "../../scripts/app.js";
 console.log("ComfyFlux: Loaded Taidal.OpListInputs extension");
 
 // Dynamic op-list inputs for higher-order op nodes (Parallel/Tee/Enable/Flux — any op whose
-// constructor takes a list of ops; tagged by a seed `<prefix>_0` input of type DATAFLUX_OP in
+// constructor takes a list of ops; tagged by a seed `<prefix>_0` input of type SAMPLEFLUX_OP in
 // bridge._build_op_node / _build_source_node). Wire an op node's `op` output into `<prefix>_0`; a
 // fresh `<prefix>_1` slot appears, and so on — so you build the op-list visually. The Python side
 // (`bridge._collect_indexed`) gathers every connected `<prefix>_N` (in index order, dropping empties),
 // so the slot bookkeeping here is purely UX — the backend is robust to gaps or a missing extension.
 //
-// GENERALISED to ANY `<prefix>_N` OP family on the node (mirroring web/object_list.js): the dataflux
+// GENERALISED to ANY `<prefix>_N` OP family on the node (mirroring web/object_list.js): the sampleflux
 // higher-order ops use the `op_N` family (prefix "op"), while a waivefront-helios composite that takes
 // SEVERAL op lists (HeliosIfOp → `true_transforms_N` + `false_transforms_N`) gets one family per
 // op-list param, each grown independently.
 
-const OP_TYPE = "DATAFLUX_OP";
+const OP_TYPE = "SAMPLEFLUX_OP";
 const INDEXED_RE = /^(.+)_(\d+)$/;
 
-// Every <prefix> for which this node currently has a DATAFLUX_OP `<prefix>_<digit>` input.
+// Every <prefix> for which this node currently has a SAMPLEFLUX_OP `<prefix>_<digit>` input.
 function familyPrefixes(node) {
     const prefixes = new Set();
     for (const inp of node.inputs || []) {
@@ -64,7 +64,7 @@ app.registerExtension({
     name: "Taidal.OpListInputs",
     async beforeRegisterNodeDef(nodeType, nodeData) {
         const optional = nodeData.input?.optional || {};
-        // Any op-list seed (<prefix>_0 of DATAFLUX_OP)? (object_0/source_0 are OBJECT/SOURCE-typed,
+        // Any op-list seed (<prefix>_0 of SAMPLEFLUX_OP)? (object_0/source_0 are OBJECT/SOURCE-typed,
         // handled by their own extensions, so the type filter excludes them.)
         const hasSeed = Object.keys(optional).some((k) => {
             const m = INDEXED_RE.exec(k);

@@ -1,10 +1,10 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-// Live, advisory connection filtering for DATAFLUX_SAMPLE wires.
+// Live, advisory connection filtering for SAMPLEFLUX_SAMPLE wires.
 //
-// Every Sample wire carries the ComfyUI socket type "DATAFLUX_SAMPLE", so litegraph's built-in
-// string-equality check lets ANY op connect to ANY other. This extension layers the richer DataFlux
+// Every Sample wire carries the ComfyUI socket type "SAMPLEFLUX_SAMPLE", so litegraph's built-in
+// string-equality check lets ANY op connect to ANY other. This extension layers the richer SampleFlux
 // type contract on top: it fetches each node's declared ACCEPTS/PRODUCES (from /taidal/node_specs) and,
 // when the user drags a Sample wire, rejects it if the producer's PRODUCES is not compatible with the
 // consumer's ACCEPTS. It hooks `onConnectInput`, which litegraph calls BEFORE the socket-type check and
@@ -12,17 +12,17 @@ import { api } from "../../scripts/api.js";
 //
 // This is ADVISORY (drag-drop only; graph-load / programmatic wiring bypass onConnectInput). The
 // authoritative check is the runtime accept-check in fluxstudio/bridge.py. The matcher here is the
-// PERMISSIVE port of dataflux.typespec.compatible(): anything unknown / Any passes, so un-annotated
+// PERMISSIVE port of sampleflux.typespec.compatible(): anything unknown / Any passes, so un-annotated
 // ops are never blocked.
 
 console.log("ComfyFlux: Loaded Taidal.ConnectionValidator extension");
 
-const SAMPLE_TYPE = "DATAFLUX_SAMPLE";
+const SAMPLE_TYPE = "SAMPLEFLUX_SAMPLE";
 
 // node-name -> { accepts: SampleType|null, produces: SampleType|null } (SampleType is .to_dict() form)
 let nodeSpecs = {};
 
-// dtype family table — mirrors dataflux.typespec._DTYPE_FAMILIES so dtype matching agrees with Python.
+// dtype family table — mirrors sampleflux.typespec._DTYPE_FAMILIES so dtype matching agrees with Python.
 const FLOATING = ["float16", "bfloat16", "float32", "float64"];
 const INTEGER = ["int8", "int16", "int32", "int64"];
 const UNSIGNED = ["uint8", "uint16", "uint32", "uint64"];
@@ -71,7 +71,7 @@ function arrayCompatible(c, p) {
     return true;
 }
 
-// Permissive single-slot compatibility — the JS port of dataflux.typespec.compatible().
+// Permissive single-slot compatibility — the JS port of sampleflux.typespec.compatible().
 function slotCompatible(c, p) {
     if (!c || !p) return true; // unknown -> permissive
     if (c.kind === "any" || p.kind === "any") return true;

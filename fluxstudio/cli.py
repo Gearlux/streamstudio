@@ -227,7 +227,7 @@ def _export(args: argparse.Namespace) -> None:
     # Import here (not at module top): pulling in fluxstudio runs entry-point node discovery,
     # which is unnecessary weight for the common ``run`` path.
     import fluxstudio
-    from fluxstudio.export import chain_output_paths, export_ops_yamls
+    from fluxstudio.export import chain_output_paths, export_flow_yamls, export_ops_yamls
 
     graph_path: Path = args.graph
     if not graph_path.exists():
@@ -245,7 +245,8 @@ def _export(args: argparse.Namespace) -> None:
     # ``--skip`` mirrors the canvas export-skip mark; an API-format file carries no node
     # properties, so the marked ids must be named explicitly here (getattr: tolerate
     # programmatic Namespace callers that predate the flag).
-    yaml_docs = export_ops_yamls(
+    exporter = export_flow_yamls if getattr(args, "flow", False) else export_ops_yamls
+    yaml_docs = exporter(
         prompt,
         fluxstudio.NODE_CLASS_MAPPINGS,
         skip_ids=getattr(args, "skip", None),
@@ -392,6 +393,15 @@ def main() -> None:
         help=(
             "Write the YAML here (default: stdout). With several disconnected op chains, one "
             "file per chain is written (ops.yaml -> ops_1.yaml ... ops_N.yaml)."
+        ),
+    )
+    export_parser.add_argument(
+        "--flow",
+        action="store_true",
+        help=(
+            "Emit the readable named-step `flow:` document instead of the flat serial `ops:` list "
+            "(consume with FlowGraph.from_yaml / Flux.from_flow_yaml; the two forms convert both "
+            "ways with execution parity — sampleflux.flow)."
         ),
     )
     export_parser.add_argument(

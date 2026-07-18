@@ -4,7 +4,7 @@ console.log("ComfyFlux: Loaded Taidal.ObjectListInputs extension");
 
 // Dynamic object-list inputs for object nodes whose constructor takes a LIST of objects (a
 // pytorch_lightning.Trainer's `logger` / `callbacks` / `plugins` — tagged by a seed `<name>_0` input
-// of type DATAFLUX_OBJECT in bridge._build_object_node, via _admits_object_list). Wire a producer
+// of type SAMPLEFLUX_OBJECT in bridge._build_object_node, via _admits_object_list). Wire a producer
 // node's `instance` output into `logger_0`; a fresh `logger_1` slot appears, and so on — so you build
 // the list visually. The Python side (`bridge._collect_indexed`) gathers every connected `<name>_N`
 // (in index order, dropping empties) into a list, so the slot bookkeeping here is purely UX — the
@@ -12,10 +12,10 @@ console.log("ComfyFlux: Loaded Taidal.ObjectListInputs extension");
 // analogue of web/op_list.js / web/source_list.js, generalised to ANY `<name>_N` OBJECT family on the
 // node (one object node can have several: logger_N AND callbacks_N).
 
-const OBJECT_TYPE = "DATAFLUX_OBJECT";
+const OBJECT_TYPE = "SAMPLEFLUX_OBJECT";
 const INDEXED_RE = /^(.+)_(\d+)$/;
 
-// Object sockets may be role-qualified ("DATAFLUX_OBJECT:model"); list seeds are role-less but compare
+// Object sockets may be role-qualified ("SAMPLEFLUX_OBJECT:model"); list seeds are role-less but compare
 // base-aware to be safe.
 function baseType(t) {
     return typeof t === "string" && t.includes(":") ? t.split(":")[0] : t;
@@ -68,7 +68,7 @@ app.registerExtension({
     name: "Taidal.ObjectListInputs",
     async beforeRegisterNodeDef(nodeType, nodeData) {
         const optional = nodeData.input?.optional || {};
-        // Any object-list seed (<prefix>_0 of DATAFLUX_OBJECT)? (op_0/source_0 are OP/SOURCE-typed,
+        // Any object-list seed (<prefix>_0 of SAMPLEFLUX_OBJECT)? (op_0/source_0 are OP/SOURCE-typed,
         // handled by their own extensions, so the type filter excludes them.)
         const hasSeed = Object.keys(optional).some((k) => {
             const m = INDEXED_RE.exec(k);

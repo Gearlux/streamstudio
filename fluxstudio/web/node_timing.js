@@ -10,7 +10,7 @@ import { app } from "../../scripts/app.js";
 console.log("ComfyFlux: Loaded Taidal.NodeTiming extension");
 
 function isTaidalNode(nodeData) {
-    return !!(nodeData?.category?.startsWith?.("Taidal") || nodeData?.category?.startsWith?.("DataFlux"));
+    return !!(nodeData?.category?.startsWith?.("Taidal") || nodeData?.category?.startsWith?.("SampleFlux"));
 }
 
 function isRunnableNode(nodeData) {

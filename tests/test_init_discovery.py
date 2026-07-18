@@ -414,7 +414,7 @@ def _json_request(body: Any) -> SimpleNamespace:
 def test_export_ops_route_returns_yaml() -> None:
     # The /taidal/export_ops POST handler compiles the posted graph's ops into a Confluid
     # YAML op-list using the live NODE_CLASS_MAPPINGS.
-    from dataflux.ops.torch import RescaleOp
+    from sampleflux.ops.torch import RescaleOp
 
     from fluxstudio.bridge import create_comfy_node
 
@@ -434,7 +434,7 @@ def test_export_ops_route_returns_yaml() -> None:
 def test_export_ops_graph_route_returns_op_workflow() -> None:
     # The /taidal/export_ops_graph POST handler extracts JUST the op-DAG nodes from the posted UI
     # workflow into a standalone workflow.json (the raw graph as drawn, no compilation).
-    from dataflux.ops.torch import RescaleOp
+    from sampleflux.ops.torch import RescaleOp
 
     from fluxstudio.bridge import create_comfy_node
 
@@ -447,7 +447,7 @@ def test_export_ops_graph_route_returns_op_workflow() -> None:
                 {"id": 1, "type": "src", "inputs": []},  # a non-op node (unmapped) → dropped
                 {"id": 2, "type": "rescale", "inputs": [{"name": "sample", "link": 1}]},
             ],
-            "links": [[1, 1, 0, 2, 0, "DATAFLUX_SOURCE"]],
+            "links": [[1, 1, 0, 2, 0, "SAMPLEFLUX_SOURCE"]],
         }
         asyncio.run(handler(_json_request({"workflow": workflow})))
     data, _kwargs = web.calls[-1]
@@ -459,8 +459,8 @@ def test_export_ops_graph_route_returns_op_workflow() -> None:
 
 def test_import_yaml_route_returns_workflow() -> None:
     # The /taidal/import_yaml POST handler converts a posted YAML config into a workflow.json.
-    from dataflux.ops.torch import RescaleOp
-    from dataflux.sources import HuggingFaceSource
+    from sampleflux.ops.torch import RescaleOp
+    from sampleflux.sources import HuggingFaceSource
 
     from fluxstudio.bridge import create_comfy_node
 
@@ -469,7 +469,7 @@ def test_import_yaml_route_returns_workflow() -> None:
         assert handler is not None
         fluxstudio.NODE_CLASS_MAPPINGS["src"] = create_comfy_node(HuggingFaceSource, "src")
         fluxstudio.NODE_CLASS_MAPPINGS["rescale"] = create_comfy_node(RescaleOp, "rescale")
-        yaml = "raw: !class:dataflux.sources.HuggingFaceSource()\n  path: mnist\n"
+        yaml = "raw: !class:sampleflux.sources.HuggingFaceSource()\n  path: mnist\n"
         asyncio.run(handler(_json_request({"yaml": yaml, "as": "graph"})))
     data, _kwargs = web.calls[-1]
     assert "workflow" in data
@@ -478,7 +478,7 @@ def test_import_yaml_route_returns_workflow() -> None:
 
 def test_export_workflow_route_returns_yaml() -> None:
     # The /taidal/export_workflow POST handler converts a whole workflow.json into hoisted YAML.
-    from dataflux.sources import HuggingFaceSource
+    from sampleflux.sources import HuggingFaceSource
 
     from fluxstudio.bridge import create_comfy_node
     from fluxstudio.graphio import yaml_to_workflow
@@ -497,7 +497,7 @@ def test_export_workflow_route_returns_yaml() -> None:
 def test_export_ops_route_multi_chain_returns_one_doc_per_chain(tmp_path: Path) -> None:
     # Two disconnected chains no longer 400: the route compiles EACH chain into its own YAML
     # doc and (with `path`) writes one stem-suffixed file per chain.
-    from dataflux.ops.torch import RescaleOp
+    from sampleflux.ops.torch import RescaleOp
 
     from fluxstudio.bridge import create_comfy_node
 
@@ -521,7 +521,7 @@ def test_export_ops_route_multi_chain_returns_one_doc_per_chain(tmp_path: Path) 
 def test_export_ops_route_400_on_bad_topology() -> None:
     # A structurally-unexportable graph (a sample-wire CYCLE) -> UnsupportedTopologyError -> 400.
     # (A widget driven by a link is no longer an error — it's omitted with a note.)
-    from dataflux.ops.torch import RescaleOp
+    from sampleflux.ops.torch import RescaleOp
 
     from fluxstudio.bridge import create_comfy_node
 

@@ -6,7 +6,7 @@ DAG→sequential compilation shapes (flat fan-out with stash/unstash isolation, 
 ``Mix Samples`` fan-in translation), the widget-wire folding pass (native primitive
 inlining, ``constant=True`` value-node hoisting + dotted ``!ref:``, ``op_N`` embedding,
 omission notes), every ``UnsupportedTopologyError`` branch, and the end-to-end
-**Pipeline Parity** round-trip mandated by DataFlux: a dumped op-list, reloaded through
+**Pipeline Parity** round-trip mandated by SampleFlux: a dumped op-list, reloaded through
 ``confluid.load`` + ``confluid.materialize``, must reproduce the exact transform a
 hand-built ``Flux`` of the same ops produces.
 
@@ -25,16 +25,15 @@ import pytest
 import torch
 from confluid import configurable, output
 from confluid.fluid import Instance, Reference
-from dataflux import Flux, Sample
-from dataflux.ops.capture import CaptureOutputOp
-from dataflux.ops.configure import ConfigureOp
-from dataflux.ops.formula import FormulaOp
-from dataflux.ops.parallel import Parallel
-from dataflux.ops.stash import StashInputOp, StashTargetOp, UnstashInputOp, UnstashTargetOp
-from dataflux.ops.tee import Tee
-from dataflux.ops.torch import RescaleOp
-from dataflux.ops.transform_chain import TransformChain
-from dataflux.sources import HuggingFaceSource
+from sampleflux import Flux, Sample
+from sampleflux.ops.configure import ConfigureOp
+from sampleflux.ops.context import Apply, Capture, Mix, Save, Use
+from sampleflux.ops.formula import FormulaOp
+from sampleflux.ops.parallel import Parallel
+from sampleflux.ops.tee import Tee
+from sampleflux.ops.torch import RescaleOp
+from sampleflux.ops.transform_chain import TransformChain
+from sampleflux.sources import HuggingFaceSource
 
 from fluxstudio.bridge import create_comfy_node
 from fluxstudio.export import (
@@ -211,7 +210,7 @@ class AddOp:
 
 @configurable(category="op", group="test_export")
 class BoxesLikeOp:
-    """An op with a NESTED-container param (a list of boxes) → a wired DATAFLUX_VALUE socket.
+    """An op with a NESTED-container param (a list of boxes) → a wired SAMPLEFLUX_VALUE socket.
 
     Args:
         boxes: A list of (x_min, y_min, x_max, y_max) tuples.
@@ -284,7 +283,7 @@ class EmitOp:
 @configurable(category="op", group="test_export")
 class ConfigureLikeOp:
     """Two single-op slots named the HELIOS way (compute/target) — surfaced via the __taidal_op_params__
-    stamp, NOT the dataflux name allowlist. Applies compute then target so a round-trip run is meaningful.
+    stamp, NOT the sampleflux name allowlist. Applies compute then target so a round-trip run is meaningful.
     """
 
     def __init__(self, compute: Optional[object] = None, target: Optional[object] = None, key: str = "k") -> None:
@@ -374,13 +373,13 @@ def _load_ops(yaml_doc: str) -> Any:
 def test_op_node_stamps_kind_and_callable_path() -> None:
     node = create_comfy_node(RescaleOp, "Taidal_RescaleOp")
     assert node.TAIDAL_NODE_KIND == "op"
-    assert node.TAIDAL_CALLABLE_PATH == "dataflux.ops.torch:RescaleOp"
+    assert node.TAIDAL_CALLABLE_PATH == "sampleflux.ops.torch:RescaleOp"
 
 
 def test_source_node_stamps_source_kind() -> None:
     node = create_comfy_node(HuggingFaceSource, "Taidal_HuggingFaceSource")
     assert node.TAIDAL_NODE_KIND == "source"
-    assert node.TAIDAL_CALLABLE_PATH == "dataflux.sources:HuggingFaceSource"
+    assert node.TAIDAL_CALLABLE_PATH == "sampleflux.sources:HuggingFaceSource"
 
 
 def test_generic_node_stamps_generic_kind() -> None:
@@ -420,7 +419,7 @@ def test_export_yaml_contains_class_tags() -> None:
     }
     doc = export_ops_yaml(prompt, _op_mappings())
     assert "ops:" in doc
-    assert "!class:dataflux.ops.torch.RescaleOp()" in doc
+    assert "!class:sampleflux.ops.torch.RescaleOp()" in doc
 
 
 def test_sink_node_is_ignored_by_ops_export() -> None:
@@ -428,7 +427,7 @@ def test_sink_node_is_ignored_by_ops_export() -> None:
     into ``{ops:[...]}`` for ``Flux.from_ops_yaml``) ignores it. Sinks serialize via the whole-graph
     ``DatasetProcessor`` path (graphio), never the op-list; this pins that boundary so a sink can
     never leak into an op-list (which ``Flux`` would reject)."""
-    from dataflux.storage.hdf5 import HDF5Sink
+    from sampleflux.storage.hdf5 import HDF5Sink
 
     nm = {**_op_mappings(), "Taidal_HDF5Sink": create_comfy_node(HDF5Sink, "Taidal_HDF5Sink")}
     prompt = {
@@ -442,9 +441,10 @@ def test_sink_node_is_ignored_by_ops_export() -> None:
     assert "HDF5Sink" not in docs[0]  # the sink never appears in the op-list
 
 
-def test_fan_out_compiles_to_flat_stash_sequence() -> None:
-    # DAG→sequential: the fork sample is stashed after node 2 and restored before the
-    # second branch, so the branchy wiring becomes ONE flat op-list (no Tee emitted).
+def test_fan_out_compiles_to_flat_context_sequence() -> None:
+    # DAG→sequential: the fork sample is Saved into a Context cell after node 2 and the
+    # second branch restarts from it with Use, so the branchy wiring becomes ONE flat
+    # op-list (no Tee emitted, nothing on sample.metadata).
     prompt = {
         "1": {"class_type": "WalkDatasetNode", "inputs": {}},
         "2": _rescale_node(["1", 0], in_min=0.0, in_max=255.0),
@@ -455,31 +455,20 @@ def test_fan_out_compiles_to_flat_stash_sequence() -> None:
     chains = compile_op_chains(prompt, _op_mappings(), chain_notes=notes)
     assert len(chains) == 1
     ops = chains[0]
-    assert [op.target for op in ops] == [
-        RescaleOp,
-        StashInputOp,
-        StashTargetOp,
-        RescaleOp,
-        UnstashInputOp,
-        UnstashTargetOp,
-        RescaleOp,
-    ]
+    assert [op.target for op in ops] == [RescaleOp, Save, RescaleOp, Use, RescaleOp]
     # Deterministic numeric-aware branch order: node 3 before node 4.
-    assert ops[3].kwargs["out_max"] == 10.0
-    assert ops[6].kwargs["out_max"] == 99.0
-    # One fork → per-field stash keys, each restore matching its snapshot.
-    assert ops[1].kwargs["key"] == "__taidal_stash_2_input" == ops[4].kwargs["key"]
-    assert ops[2].kwargs["key"] == "__taidal_stash_2_target" == ops[5].kwargs["key"]
-    # The single (final) unstash of each key removes it (default remove=True → no explicit kwarg).
-    assert ops[4].kwargs.get("remove", True) is True
-    assert ops[5].kwargs.get("remove", True) is True
-    assert any("stash/unstash" in note for note in notes[0])
+    assert ops[2].kwargs["out_max"] == 10.0
+    assert ops[4].kwargs["out_max"] == 99.0
+    # One fork → one whole-sample cell; the single (final) Use frees it (move semantics).
+    assert ops[1].kwargs["name"] == "__taidal_cell_2" == ops[3].kwargs["name"]
+    assert ops[3].kwargs.get("drop") is True
+    assert any("context ops" in note for note in notes[0])
 
 
-def test_fan_out_non_final_unstash_keeps_key_final_removes() -> None:
-    # 3-way fork: the fork is restored before branches 4 AND 5 → TWO unstashes per field. The
-    # non-final unstash must KEEP the key (remove=False) or branch 5 can't restore the fork; the
-    # final unstash removes it (default remove=True), so the __taidal_stash_* snapshot is cleaned up.
+def test_fan_out_non_final_use_keeps_cell_final_drops() -> None:
+    # 3-way fork: the fork cell is read before branches 4 AND 5 → TWO Uses of the cell. The
+    # non-final Use must KEEP the cell (copy-on-read) or branch 5 can't restart from the fork;
+    # the final Use drops it (move semantics), so the __taidal_cell_* snapshot is freed.
     prompt = {
         "1": {"class_type": "WalkDatasetNode", "inputs": {}},
         "2": _rescale_node(["1", 0], in_min=0.0, in_max=255.0),
@@ -488,10 +477,10 @@ def test_fan_out_non_final_unstash_keeps_key_final_removes() -> None:
         "5": _rescale_node(["2", 0], in_min=0.0, in_max=1.0, out_max=30.0),
     }
     ops = compile_op_chains(prompt, _op_mappings())[0]
-    in_unstash = [op for op in ops if op.target is UnstashInputOp and op.kwargs["key"] == "__taidal_stash_2_input"]
-    assert len(in_unstash) == 2
-    assert in_unstash[0].kwargs.get("remove") is False  # non-final keeps the key
-    assert in_unstash[1].kwargs.get("remove", True) is True  # final removes it (default)
+    uses = [op for op in ops if op.target is Use and op.kwargs["name"] == "__taidal_cell_2"]
+    assert len(uses) == 2
+    assert uses[0].kwargs.get("drop", False) is False  # non-final keeps the cell (copy)
+    assert uses[1].kwargs.get("drop") is True  # final frees it (move)
 
 
 def test_compiled_fan_out_removes_stash_keys_from_metadata() -> None:
@@ -553,7 +542,7 @@ def test_export_ops_yamls_one_doc_per_chain() -> None:
     assert len(docs) == 3
     # Each document is individually a complete, loadable {ops: [...]} config.
     for doc, expected_len in zip(docs, (2, 1, 1)):
-        assert "ops:" in doc and "!class:dataflux.ops.torch.RescaleOp()" in doc
+        assert "ops:" in doc and "!class:sampleflux.ops.torch.RescaleOp()" in doc
         ops = _load_ops(doc)
         assert [type(o).__name__ for o in ops] == ["RescaleOp"] * expected_len
 
@@ -876,7 +865,7 @@ def test_primitive_value_nodes_fold_inline() -> None:
 
 
 def test_value_node_folds_literal_into_consumer_kwarg() -> None:
-    # A nested-container param (boxes: List[Tuple]) rides a DATAFLUX_VALUE socket fed by the Value
+    # A nested-container param (boxes: List[Tuple]) rides a SAMPLEFLUX_VALUE socket fed by the Value
     # node; on export the Value node's literal folds INLINE as the consumer's kwarg.
     prompt = {
         "1": {"class_type": "WalkDatasetNode", "inputs": {}},
@@ -917,7 +906,7 @@ def test_primitive_fed_by_primitive_follows_the_wire() -> None:
 
 def test_configure_op_single_op_wire_embeds_nested_target() -> None:
     """The helios 'Configure' trick exports statically: a ConfigureOp's wired `target`
-    (a single DATAFLUX_OP wire) and `op_N` compute chain embed as nested instances, so the
+    (a single SAMPLEFLUX_OP wire) and `op_N` compute chain embed as nested instances, so the
     per-sample runtime value (e.g. ThresholdOp.low_level) becomes expressible in YAML."""
     prompt = {
         "1": {"class_type": "WalkDatasetNode", "inputs": {}},
@@ -1106,29 +1095,29 @@ def _output_capture_prompt() -> Dict[str, Any]:
     }
 
 
-def test_output_capture_compiles_to_configure_with_unstash() -> None:
-    """An op-@output → param wire compiles to CaptureOutputOp (producer) + ConfigureOp(UnstashInputOp)
-    (consumer); the captured value reaches the param per sample, and the param is not baked."""
+def test_output_capture_compiles_to_capture_with_apply() -> None:
+    """An op-@output → param wire compiles to the context ops Capture (producer) + Apply
+    (consumer); the captured value reaches the param per sample via a Context cell — never
+    the metadata bus — and the param is not baked."""
     notes: List[List[str]] = []
     chains = compile_op_chains(_output_capture_prompt(), _op_mappings(), chain_notes=notes)
     assert len(chains) == 1 and notes[0] == []  # the wire compiled — no omission note
     ops = chains[0]
-    assert [op.target for op in ops] == [CaptureOutputOp, ConfigureOp]
+    assert [op.target for op in ops] == [Capture, Apply]
     cap = ops[0]
     assert cap.kwargs["op"].target is EmitOp
     assert cap.kwargs["captures"] == {"emitted": "__taidal_output_2_emitted"}
-    cfg = ops[1]
-    assert cfg.kwargs["param"] == "low_level"
-    assert cfg.kwargs["target"].target is ThresholdLikeOp
-    assert cfg.kwargs["target"].kwargs == {"gain": 1.5}  # low_level NOT baked — injected per sample
-    unstash = cfg.kwargs["ops"][0]
-    assert unstash.target is UnstashInputOp and unstash.kwargs["key"] == "__taidal_output_2_emitted"
+    apply_op = ops[1]
+    assert apply_op.kwargs["param"] == "low_level"
+    assert apply_op.kwargs["source"] == "__taidal_output_2_emitted"
+    assert apply_op.kwargs["op"].target is ThresholdLikeOp
+    assert apply_op.kwargs["op"].kwargs == {"gain": 1.5}  # low_level NOT baked — injected per sample
 
     # Round-trip + parity: EmitOp(base=100) on input 1.0 records 101 -> ThresholdLikeOp.low_level := 101.
     loaded = _load_ops(export_ops_yamls(_output_capture_prompt(), _op_mappings())[0])
     out = list(Flux(source=[Sample(input=1.0, target=None, metadata={})], ops=loaded))[0]
-    assert out.meta["low_level"] == pytest.approx(101.0)
-    assert loaded[1].target.low_level == pytest.approx(101.0)
+    assert loaded[1].op.low_level == pytest.approx(101.0)
+    assert "low_level" not in out.meta  # the wiring never touches sample.metadata
 
 
 def test_output_capture_cross_branch_keeps_note() -> None:
@@ -1148,8 +1137,8 @@ def test_output_capture_cross_branch_keeps_note() -> None:
 
 def test_output_capture_producer_and_consumer_chain() -> None:
     """A node may be BOTH a capture consumer (its param configured from an upstream @output) AND a
-    capture producer (its own @output captured downstream): the producer CaptureOutputOp reads the
-    inner op's @output through the consumer ConfigureOp's .target wrapper. End-to-end parity."""
+    capture producer (its own @output captured downstream): the producer Capture reads the
+    inner op's @output through the consumer Apply's .op wrapper. End-to-end parity."""
     prompt = {
         "1": {"class_type": "WalkDatasetNode", "inputs": {}},
         "2": {"class_type": "Taidal_EmitOp", "inputs": {"sample": ["1", 0], "base": 100.0}},
@@ -1159,11 +1148,13 @@ def test_output_capture_producer_and_consumer_chain() -> None:
     loaded = _load_ops(export_ops_yamls(prompt, _op_mappings())[0])
     out = list(Flux(source=[Sample(input=1.0, target=None, metadata={})], ops=loaded))[0]
     # node2 records 100+1=101; node3.base := 101 -> records 101+1=102; node4.low_level := 102.
-    assert out.meta["low_level"] == pytest.approx(102.0)
+    threshold_apply = loaded[-1]
+    assert threshold_apply.op.low_level == pytest.approx(102.0)
+    assert "low_level" not in out.meta  # capture cells never ride sample.metadata
 
 
 def test_op_value_links_embed_into_higher_order_op() -> None:
-    # Node 8 is consumed as a DATAFLUX_OP value (op_0) and has no sample wiring — it embeds
+    # Node 8 is consumed as a SAMPLEFLUX_OP value (op_0) and has no sample wiring — it embeds
     # as a nested instance inside Tee.branches instead of joining the sample sequence.
     prompt = {
         "1": {"class_type": "WalkDatasetNode", "inputs": {}},
@@ -1204,31 +1195,31 @@ def _mix_prompt() -> Dict[str, Any]:
     }
 
 
-def test_mix_samples_compiles_to_stash_merge() -> None:
+def test_mix_samples_compiles_to_context_merge() -> None:
     notes: List[List[str]] = []
     chains = compile_op_chains(_mix_prompt(), _op_mappings(), chain_notes=notes)
     assert len(chains) == 1
     targets = [op.target for op in chains[0]]
     assert targets == [
         AddOp,  # fork (node 2)
-        StashInputOp,
-        StashTargetOp,
+        Save,  # __taidal_cell_2
         AddOp,  # branch X (node 3)
         SetTargetOp,  # node 31 (Mix input/target source)
-        StashInputOp,
-        StashTargetOp,
-        UnstashInputOp,  # back to the fork for branch Z
-        UnstashTargetOp,
+        Save,  # __taidal_cell_31
+        Use,  # back to the fork for branch Z (drop=True — last read)
         AddOp,  # node 4
         WriteMetaOp,  # node 5
         SetTargetOp,  # node 51
-        UnstashInputOp,  # the Mix merge: input ← node 31, target ← node 31
-        UnstashTargetOp,
+        Save,  # __taidal_cell_51
+        Mix,  # the merge: input/target ← 31's cell, metadata ← 51's cell (arg-3 wins)
         AddOp,  # tail (node 7)
     ]
-    assert chains[0][12].kwargs["key"] == "__taidal_stash_31_input"
-    assert chains[0][13].kwargs["key"] == "__taidal_stash_31_target"
-    assert any("stash/unstash" in note for note in notes[0])
+    mix = chains[0][10]
+    assert mix.kwargs["input_from"] == "__taidal_cell_31" == mix.kwargs["target_from"]
+    assert mix.kwargs["metadata_from"] == "__taidal_cell_51"
+    assert sorted(mix.kwargs["drop"]) == ["__taidal_cell_31", "__taidal_cell_51"]
+    assert chains[0][5].kwargs.get("drop") is True  # the fork cell freed at its last read
+    assert any("context ops" in note for note in notes[0])
 
 
 def test_mix_samples_execution_parity() -> None:
@@ -1305,7 +1296,7 @@ def test_integration_impairments_shape() -> None:
     assert list(constants[0]) == ["const_tx_config"]
     # the runtime wire dropped with the metadata-expression hint; the stash summary noted
     assert any("'low_level'" in note and "{meta_key}" in note for note in notes[0])
-    assert any("stash/unstash" in note for note in notes[0])
+    assert any("context ops" in note for note in notes[0])
 
     doc = export_ops_yamls(prompt, _op_mappings())[0]
     ops = _load_ops(doc)
@@ -1647,9 +1638,9 @@ def test_subgraph_op_into_configure_target_embeds_a_transformchain() -> None:
     assert [op.kwargs["amount"] for op in chain.kwargs["ops"]] == [5.0]
 
 
-def test_subgraph_op_fan_out_inner_dag_flattens_with_stash() -> None:
+def test_subgraph_op_fan_out_inner_dag_flattens_with_context_ops() -> None:
     # An inner fork (node 2 → 3 and 4) reconverged by Mix → the embedded TransformChain carries
-    # the auto-inserted stash/unstash sequence (DAG→sequential inside the subgraph too).
+    # the auto-inserted Save/Use/Mix context ops (DAG→sequential inside the subgraph too).
     prompt = {
         "1": {"class_type": "WalkDatasetNode", "inputs": {}},
         "2": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["1", 0], "amount": 1.0}},
@@ -1666,7 +1657,7 @@ def test_subgraph_op_fan_out_inner_dag_flattens_with_stash() -> None:
     assert len(chains) == 1
     inner = chains[0][0].kwargs["ops"][0].kwargs["ops"]
     targets = [op.target for op in inner]
-    assert AddOp in targets and StashInputOp in targets and UnstashInputOp in targets
+    assert AddOp in targets and Save in targets and Mix in targets
 
 
 def test_subgraph_op_unconsumed_terminator_schedules_inner_as_a_graph() -> None:
@@ -1728,3 +1719,80 @@ def test_subgraph_cone_exclusion_applies_only_when_terminator_is_not_the_target(
     prompt = _subgraph_op_target_mode_prompt()
     assert "3" in _subgraph_cone_excluded(prompt, _op_mappings())  # no exempt → connective op excluded
     assert "3" not in _subgraph_cone_excluded(prompt, _op_mappings(), exempt={"5"})  # exempt target → kept
+
+
+# --------------------------------------------------------------------------- flow: export
+
+
+def test_export_flow_yamls_emits_named_step_document() -> None:
+    from fluxstudio.export import export_flow_yamls
+
+    prompt = {
+        "1": {"class_type": "WalkDatasetNode", "inputs": {}},
+        "2": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["1", 0], "amount": 1.0}},
+        "3": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["2", 0], "amount": 2.0}},
+        "4": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["2", 0], "amount": 3.0}},
+        "5": {
+            "class_type": "Taidal_MixSamples",
+            "inputs": {"input_sample": ["3", 0], "target_sample": ["4", 0], "metadata_sample": ["4", 0]},
+        },
+        "6": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["5", 0], "amount": 4.0}},
+    }
+    doc = export_flow_yamls(prompt, _op_mappings())[0]
+    assert "flow:" in doc and "outputs:" in doc
+    assert "__taidal_cell_" not in doc  # internal cell names prettified to node_<id>
+    assert "node_2:" in doc  # the fork step carries a readable name
+
+    # Both engines execute the exported document with identical results.
+    from sampleflux.flow import FlowGraph
+
+    src = [Sample(input=0.0, target=None, metadata={})]
+    native = [(s.input, s.target) for s in FlowGraph.from_yaml(doc, source=list(src))]
+    serial = [(s.input, s.target) for s in Flux.from_flow_yaml(doc, source=list(src))]
+    assert native == serial == [(7.0, None)]  # 0+1 (fork) +2 (input branch) +4 (tail)
+
+
+def test_export_flow_yamls_linear_graph_is_a_linear_flow() -> None:
+    from fluxstudio.export import export_flow_yamls
+
+    prompt = {
+        "1": {"class_type": "WalkDatasetNode", "inputs": {}},
+        "2": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["1", 0], "amount": 1.0}},
+        "3": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["2", 0], "amount": 2.0}},
+    }
+    doc = export_flow_yamls(prompt, _op_mappings())[0]
+    assert "from:" not in doc and "target_from:" not in doc  # pure linear steps, zero grammar
+    out = list(Flux.from_flow_yaml(doc, source=[Sample(input=0.0, target=None, metadata={})]))[0]
+    assert out.input == 3.0
+
+
+def test_export_flow_yamls_hoisted_constant_ref_survives_the_lift() -> None:
+    from fluxstudio.export import export_flow_yamls
+
+    prompt = {
+        "1": {"class_type": "WalkDatasetNode", "inputs": {}},
+        "163": {"class_type": "Taidal_ConstTxConfig", "inputs": {"quantize": False}},
+        "2": {"class_type": "Taidal_ChainLikeOp", "inputs": {"sample": ["1", 0], "tx_disabled": ["163", 0]}},
+    }
+    doc = export_flow_yamls(prompt, _op_mappings())[0]
+    assert "const_tx_config:" in doc and "!ref 'const_tx_config.disabled'" in doc
+    # The whole document loads and runs: the dotted ref resolves against the same document.
+    out = list(Flux.from_flow_yaml(doc, source=[Sample(input=1.0, target=None, metadata={})]))[0]
+    assert out.input == 1.0
+
+
+def test_flow_document_imports_back_to_a_workflow() -> None:
+    from fluxstudio.export import export_flow_yamls
+    from fluxstudio.graphio import ops_yaml_to_workflow
+
+    prompt = {
+        "1": {"class_type": "WalkDatasetNode", "inputs": {}},
+        "2": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["1", 0], "amount": 1.0}},
+        "3": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["2", 0], "amount": 2.0}},
+        "4": {"class_type": "Taidal_AddOp", "inputs": {"sample": ["2", 0], "amount": 3.0}},
+    }
+    doc = export_flow_yamls(prompt, _op_mappings())[0]
+    wf = ops_yaml_to_workflow(doc, _op_mappings())
+    types = [n["type"] for n in wf["nodes"]]
+    assert types.count("Taidal_AddOp") == 3
+    assert not any("Save" in t or t.endswith("_Use") for t in types)  # context ops absorbed

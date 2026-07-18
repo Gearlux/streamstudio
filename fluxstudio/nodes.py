@@ -1,7 +1,7 @@
-"""Static ComfyUI adapter nodes for FluxStudio: walk a DataFlux source by index, and extract a Sample.
+"""Static ComfyUI adapter nodes for FluxStudio: walk a SampleFlux source by index, and extract a Sample.
 
-These are ComfyUI orchestration/adapter glue — NOT DataFlux data ops — so they live here rather
-than in dataflux / waivefront. ``SampleExtractorNode`` unpacks a ``Sample``'s ``input`` / ``target``
+These are ComfyUI orchestration/adapter glue — NOT SampleFlux data ops — so they live here rather
+than in sampleflux / waivefront. ``SampleExtractorNode`` unpacks a ``Sample``'s ``input`` / ``target``
 onto statically-typed ComfyUI sockets (IMAGE / MASK / STRING / INT / FLOAT) so it wires into NATIVE
 ComfyUI viewers (Preview Image, a text node, …) instead of a bespoke in-canvas viewer — the relevant
 type is derived from the sample's declared/inferred features (``Sample.describe()``). The actual
@@ -30,7 +30,7 @@ from loggair import get_logger
 from fluxstudio.bridge import ARRAY_TYPE, OP_TYPE, SAMPLE_TYPE, SOURCE_TYPE, VALUE_TYPE, node_root
 
 if TYPE_CHECKING:
-    from dataflux.ops.image import TextPosition
+    from sampleflux.ops.image import TextPosition
     from waivefront.visualizers import Colormap
 
 logger = get_logger(__name__)
@@ -69,7 +69,7 @@ _INDEX_CONTROL_DEFAULT = "increment"
 
 
 class WalkDatasetNode:
-    """Emit the ``Sample`` at ``index`` from a ``DATAFLUX_SOURCE``; ``index`` auto-increments each run.
+    """Emit the ``Sample`` at ``index`` from a ``SAMPLEFLUX_SOURCE``; ``index`` auto-increments each run.
 
     The ``index`` widget uses ComfyUI's ``control_after_generate``, defaulting to **increment** so every
     Queue Prompt advances to the next sample in order (set the control to "fixed" / index 0 to reset, or
@@ -106,7 +106,7 @@ class WalkDatasetNode:
         # `step` is managed by web/walk_dataset_step.js — it sets index.options.step2 so
         # ComfyUI's native control_after_generate increments by `step` instead of 1.
         # Python receives the already-advanced `index` and uses it directly.
-        from dataflux.core import Flux
+        from sampleflux.core import Flux
 
         flux = source if isinstance(source, Flux) else Flux.from_source(source)
         length = len(flux)
@@ -128,9 +128,9 @@ class WalkDatasetNode:
 class SampleExtractorNode:
     """Unpack a ``Sample``'s ``input`` or ``target`` onto typed ComfyUI sockets.
 
-    Takes a ``DATAFLUX_SAMPLE`` and a ``field`` selector (``input`` / ``target``) and
+    Takes a ``SAMPLEFLUX_SAMPLE`` and a ``field`` selector (``input`` / ``target``) and
     exposes the selected value on several statically-typed outputs — ``IMAGE``,
-    ``MASK``, ``STRING``, ``INT``, ``FLOAT``, ``DATAFLUX_ARRAY`` — so you wire the one
+    ``MASK``, ``STRING``, ``INT``, ``FLOAT``, ``SAMPLEFLUX_ARRAY`` — so you wire the one
     your viewer / consumer expects (Preview Image, a text node, a math node, the
     **Array / Tensor Histogram** viewer, …). ComfyUI types sockets statically, so
     rather than retype one socket per run we surface every plausible type; which one
@@ -147,12 +147,12 @@ class SampleExtractorNode:
       when the target carries it), else a compact type summary.
     * ``INT`` / ``FLOAT`` — the value as a number when it is a 0-D scalar (e.g. a
       class id), else ``0`` / ``0.0``.
-    * ``array`` (``DATAFLUX_ARRAY``) — the RAW field value on demand (a tensor stays
+    * ``array`` (``SAMPLEFLUX_ARRAY``) — the RAW field value on demand (a tensor stays
       a tensor, an ndarray stays an ndarray, a PIL image becomes an ndarray), for the
       **Array / Tensor Histogram** viewer or any array-consuming node. Unlike
       ``IMAGE``/``MASK`` this is NOT normalized/colormapped — it carries the original
       numbers so a downstream node can inspect or process them.
-    * ``value`` (``DATAFLUX_VALUE``) — the RAW field value VERBATIM (a list, dict, or
+    * ``value`` (``SAMPLEFLUX_VALUE``) — the RAW field value VERBATIM (a list, dict, or
       any structured object — NOT coerced to an ndarray like ``array``), so a
       list-valued ``input``/``target`` (a list of boxes) wires straight into a
       nested-container param socket (``OverlayBoxes.boxes``; see
@@ -211,17 +211,17 @@ class SampleExtractorNode:
         float_val = float(scalar) if scalar is not None else 0.0
         array_val = self._to_array(value)
         logger.debug(f"SampleExtractorNode: field={field} type={spec} scalar={scalar}")
-        # ``value`` is the RAW field value, verbatim (a list of boxes stays a list) → DATAFLUX_VALUE.
+        # ``value`` is the RAW field value, verbatim (a list of boxes stays a list) → SAMPLEFLUX_VALUE.
         return (image, mask, text, int_val, float_val, array_val, value)
 
     # ------------------------------------------------------------------ #
     @staticmethod
     def _to_array(value: Any) -> Any:
-        """The raw field value for the ``DATAFLUX_ARRAY`` output (the histogram viewer's input).
+        """The raw field value for the ``SAMPLEFLUX_ARRAY`` output (the histogram viewer's input).
 
         Tensors and ndarrays pass through UNCHANGED (preserving dtype / device); a PIL image becomes
         an ndarray; anything else (a scalar, a bbox list) is passed through verbatim — the consuming
-        node coerces it (``dataflux.ops.image.select_channel`` / ``array_histogram`` handle the rest).
+        node coerces it (``sampleflux.ops.image.select_channel`` / ``array_histogram`` handle the rest).
         """
         if hasattr(value, "convert"):  # PIL.Image.Image -> ndarray (keep native mode: L=2-D, RGB=3-D)
             return np.array(value)
@@ -230,7 +230,7 @@ class SampleExtractorNode:
     @staticmethod
     def _field_spec(sample: Any, field: str, value: Any) -> Any:
         """The selected field's TypeSpec — from declared features, else inferred from the value."""
-        from dataflux.typespec import infer_type
+        from sampleflux.typespec import infer_type
 
         try:
             described = sample.describe()
@@ -396,14 +396,14 @@ def _build_histogram_payload(
 ) -> Dict[str, Any]:
     """Build the JSON-safe payload the Array/Tensor Histogram node ships to ``web/array_histogram.js``.
 
-    All computation lives in dataflux (``array_histogram`` / ``select_channel`` / ``value_to_image``);
+    All computation lives in sampleflux (``array_histogram`` / ``select_channel`` / ``value_to_image``);
     this only assembles their output into a browser payload — a base64 PNG of the colormapped image,
     the histogram counts/edges + stats, and a small nearest-downsampled value grid for the hover
     readout (with original dims so the frontend can map a hovered display pixel back to the source
     coordinate). Every float that could be non-finite is sanitized to ``None`` (see
     :func:`_sanitize_float`) so the payload survives ComfyUI's JSON websocket encoding.
     """
-    from dataflux.ops.image import array_histogram, channel_count, select_channel, value_to_image
+    from sampleflux.ops.image import array_histogram, channel_count, select_channel, value_to_image
 
     hist = array_histogram(value, bins=bins, channel=channel)
     channels = int(hist.get("channels", channel_count(value)))
@@ -468,9 +468,9 @@ class ExtractMetadataNode:
     array, a mask. This node pulls ONE entry by ``key`` and emits it on three typed outputs so you wire
     the one your consumer expects:
 
-    * ``value`` (``DATAFLUX_VALUE``) — the entry VERBATIM (a list of boxes, a dict), to wire straight
+    * ``value`` (``SAMPLEFLUX_VALUE``) — the entry VERBATIM (a list of boxes, a dict), to wire straight
       into a nested-container param socket (``OverlayBoxes.boxes`` — see ``bridge._needs_value_socket``).
-    * ``array`` (``DATAFLUX_ARRAY``) — the entry as an array when it is array-like (a tensor / ndarray
+    * ``array`` (``SAMPLEFLUX_ARRAY``) — the entry as an array when it is array-like (a tensor / ndarray
       passes through, a PIL image becomes an ndarray), for the Array / Tensor Histogram viewer.
     * ``text`` (``STRING``) — a compact ``repr`` view for inspection (wire into *Display Any* / a sink).
 
@@ -515,8 +515,8 @@ class ExtractMetadataNode:
 class ArrayHistogramViewerNode:
     """Display the values of an array / tensor: a histogram, a colormapped image, and a hover readout.
 
-    A FluxStudio analogue of *ComfyUI-Olm-Histogram* for DataFlux data. Wire the ``array`` output of
-    **Extract from Sample** (``DATAFLUX_ARRAY``) — or a native ComfyUI ``IMAGE`` — into this node and
+    A FluxStudio analogue of *ComfyUI-Olm-Histogram* for SampleFlux data. Wire the ``array`` output of
+    **Extract from Sample** (``SAMPLEFLUX_ARRAY``) — or a native ComfyUI ``IMAGE`` — into this node and
     **Queue Prompt**. It renders, on the node itself:
 
     * a **histogram** of the value distribution (linear or log y-scale);
@@ -530,7 +530,7 @@ class ArrayHistogramViewerNode:
     toggle in the widget redraws instantly without a re-run.
 
     A sanctioned custom in-canvas VIEWER node (see the *Adapter Nodes Are Glue* mandate): the rendering
-    / analysis MATH lives in dataflux (``array_histogram`` / ``select_channel`` / ``value_to_image``)
+    / analysis MATH lives in sampleflux (``array_histogram`` / ``select_channel`` / ``value_to_image``)
     and the node is thin glue — it base64-encodes that output and ships it to ``web/array_histogram.js``
     to draw. Custom viewer nodes are how you inspect data under ``--no-default-nodes`` (which prunes
     ComfyUI's native viewers); the histogram + hover-readout has no native equivalent regardless. The
@@ -621,13 +621,13 @@ def _parse_class_names(raw: Any) -> Optional[List[str]]:
 def _build_confusion_payloads(metrics: Any, matrix: Any, class_names: Any) -> List[Dict[str, Any]]:
     """Build the LIST of confusion-matrix payloads the viewer ships to ``web/confusion_matrix.js``.
 
-    The extraction + normalization MATH lives in dataflux (``confusion_matrices_payload`` — finds every
+    The extraction + normalization MATH lives in sampleflux (``confusion_matrices_payload`` — finds every
     square-2D entry in a metrics result, builds raw counts + the three ``true``/``pred``/``all``
     normalizations per matrix); this is thin glue. Inputs (first non-empty wins): ``metrics`` = an
     evaluator's ``all_metrics`` JSON dict (every metric — the CMs are extracted by shape, not name),
     else a standalone raw ``matrix`` array. ``[]`` when nothing usable is wired (the JS shows a hint).
     """
-    from dataflux.ops.image import confusion_matrices_payload
+    from sampleflux.ops.image import confusion_matrices_payload
 
     names = _parse_class_names(class_names)
     if metrics is not None and str(metrics).strip() not in ("", "{}", "[]"):
@@ -648,7 +648,7 @@ class ConfusionMatrixViewerNode:
     """Display confusion matrices ON THE NODE: a class-labeled grid, normalize toggle, and hover readout.
 
     Wire the **``all_metrics``** output of a classification evaluator (a JSON ``STRING`` of every metric)
-    — or a standalone raw ``N×N`` matrix on the ``matrix`` (``DATAFLUX_ARRAY``) input plus optional
+    — or a standalone raw ``N×N`` matrix on the ``matrix`` (``SAMPLEFLUX_ARRAY``) input plus optional
     ``class_names`` — into this node and **Queue Prompt**. It extracts EVERY confusion matrix (the
     square-2D metrics — there can be several) and renders one at a time, on the node's own canvas:
 
@@ -661,7 +661,7 @@ class ConfusionMatrixViewerNode:
       count / fraction under the pointer.
 
     A sanctioned custom in-canvas VIEWER node (see the *Adapter Nodes Are Glue* mandate): the extraction
-    + normalization MATH lives in dataflux (``confusion_matrices_payload``) — the evaluator output stays
+    + normalization MATH lives in sampleflux (``confusion_matrices_payload``) — the evaluator output stays
     GENERIC (all metrics, no "which is the confusion matrix" knowledge); this node only ships the
     JSON-safe payloads to ``web/confusion_matrix.js`` to draw. It works regardless of
     ``--no-default-nodes`` (no native viewer needed). The first matrix's counts pass through the
@@ -1041,16 +1041,16 @@ def _retag_options(kind: str) -> List[str]:
 
 
 class RetagObjectNode:
-    """Re-tag a DataFlux object's ROLE (and task guidance) so it docks into a different role slot.
+    """Re-tag a SampleFlux object's ROLE (and task guidance) so it docks into a different role slot.
 
-    Object-member sockets are ROLE-qualified and TASK-AGNOSTIC (``DATAFLUX_OBJECT:model`` — see
+    Object-member sockets are ROLE-qualified and TASK-AGNOSTIC (``SAMPLEFLUX_OBJECT:model`` — see
     ``bridge._object_socket_for_class``), so a node connects where its ROLE matches regardless of
     task. This is the deliberate, visible ESCAPE HATCH: wire any object in, pick a ``target_role``,
     and the object passes through re-stamped — ``web/retag.js`` retypes the OUTPUT socket to the
-    chosen ``DATAFLUX_OBJECT:<role>`` so it docks into that role's slots (a generic object made to
+    chosen ``SAMPLEFLUX_OBJECT:<role>`` so it docks into that role's slots (a generic object made to
     fit a ``model`` slot, or a model re-cast as a ``loss``). ``target_task`` re-stamps only the
     guidance tag (palette / navigaitor ranking) — it no longer affects the socket. ``(keep)`` leaves
-    the existing tag; ``(none)`` clears it (generic ``DATAFLUX_OBJECT``). Per-INSTANCE (never mutates
+    the existing tag; ``(none)`` clears it (generic ``SAMPLEFLUX_OBJECT``). Per-INSTANCE (never mutates
     the class).
 
     Round-trip caveat: graphio's whole-graph YAML export does not yet handle Retag nodes (no
@@ -1102,7 +1102,7 @@ class RetagObjectNode:
 class ComposeSampleNode:
     """Build a new Sample by plucking each field from a different source Sample.
 
-    Takes three ``DATAFLUX_SAMPLE`` inputs and assembles a fresh Sample where:
+    Takes three ``SAMPLEFLUX_SAMPLE`` inputs and assembles a fresh Sample where:
 
     * ``input``    comes from ``input_sample``
     * ``target``   comes from ``target_sample``
@@ -1192,7 +1192,7 @@ def compile_subgraph_ops(prompt: Any, unique_id: Any, node_mappings: Optional[Di
     **target mode** over the terminator's sample-ancestor cone — exactly the ops that compute
     the sample wired into the terminator, fan-out/``Mix`` fan-in flattened with stash/unstash —
     and materializes the resulting op-list into live callables (the same
-    ``confluid.load`` → ``materialize`` path :meth:`dataflux.core.Flux.from_ops_yaml` uses).
+    ``confluid.load`` → ``materialize`` path :meth:`sampleflux.core.Flux.from_ops_yaml` uses).
 
     Self-contained by design: no widget snapshot and no compile route are needed because the
     flat prompt already carries the whole inner DAG. Returns ``[]`` for an unwired terminator
@@ -1226,20 +1226,20 @@ def compile_subgraph_ops(prompt: Any, unique_id: Any, node_mappings: Optional[Di
 
 
 class SubgraphOpExtractNode:
-    """Turn an upstream op DAG into a single ``DATAFLUX_OP`` — the "subgraph as an Op" terminator.
+    """Turn an upstream op DAG into a single ``SAMPLEFLUX_OP`` — the "subgraph as an Op" terminator.
 
     Draw a normal ``Sample -> Sample`` op pipeline (an arbitrary DAG — fan-out, ``Tee``/``Mix``
     fan-in allowed) and wire its terminal sample into this node's ``sample`` input. The node
-    compiles that whole sub-pipeline into ONE ``dataflux.ops.transform_chain.TransformChain``
+    compiles that whole sub-pipeline into ONE ``sampleflux.ops.transform_chain.TransformChain``
     (DAG→sequential, via the ops-export compiler) and emits it on the ``op`` output
-    (``DATAFLUX_OP``), so the transformation is reusable as a single Op: feed it into a
+    (``SAMPLEFLUX_OP``), so the transformation is reusable as a single Op: feed it into a
     higher-order op (``Parallel`` / ``Tee`` / ``Enable``), a single-op slot
     (``ConfigureOp.target`` / ``RandomApply.op``), or chain it.
 
     The headline use is INSIDE a ComfyUI native subgraph: build the inner pipeline starting
-    from the subgraph's ``DATAFLUX_SAMPLE`` input boundary, drop this node at the end, and
+    from the subgraph's ``SAMPLEFLUX_SAMPLE`` input boundary, drop this node at the end, and
     promote its ``op`` output to the subgraph boundary — the subgraph instance then exposes a
-    ``DATAFLUX_OP`` output and acts as an Op when wired into another node (or as a graph when a
+    ``SAMPLEFLUX_OP`` output and acts as an Op when wired into another node (or as a graph when a
     sample is run through the boundary inline). It also works on the flat canvas.
 
     Adapter glue, NOT a data op (it assembles the real ``TransformChain``), so it lives here
@@ -1283,7 +1283,7 @@ class SubgraphOpExtractNode:
         return []
 
     def extract(self, sample: Any = None, prompt: Any = None, unique_id: Any = None) -> Tuple[Any, ...]:
-        from dataflux.ops.transform_chain import TransformChain
+        from sampleflux.ops.transform_chain import TransformChain
 
         ops = compile_subgraph_ops(prompt, unique_id)
         logger.debug(f"SubgraphOpExtractNode: compiled {len(ops)} op(s) from the upstream DAG into a TransformChain.")
@@ -1320,7 +1320,7 @@ def _to_yaml_str(obj: Any) -> str:
 class YamlDumpNode:
     """Serialize any Taidal op, source, configurable object, or plain Python value to YAML.
 
-    Wire any object — a DataFlux op, a source, a trained model, a bounding-box list, a
+    Wire any object — a SampleFlux op, a source, a trained model, a bounding-box list, a
     metadata dict — into the ``object`` socket and read the YAML text from ``yaml``.
 
     * Taidal ``@configurable`` objects are dumped with ``confluid.dump`` (round-trippable
@@ -1569,14 +1569,14 @@ def _shape_of(value: Any, _depth: int = 0) -> str:
     """A compact structural summary of any value — shapes of tensors/arrays, recursive for containers.
 
     Used by :class:`DisplayAnyNode`'s "tensor shape" mode: ``Tensor(shape=…, dtype=…)`` / ``ndarray(…)``
-    for arrays, walks dicts / lists / tuples (capped) and unpacks a DataFlux ``Sample``; anything else
+    for arrays, walks dicts / lists / tuples (capped) and unpacks a SampleFlux ``Sample``; anything else
     falls back to a short ``repr``.
     """
     if torch.is_tensor(value):
         return f"Tensor(shape={tuple(value.shape)}, dtype={value.dtype})"
     if isinstance(value, np.ndarray):
         return f"ndarray(shape={value.shape}, dtype={value.dtype})"
-    # DataFlux Sample (a NamedTuple — check BEFORE the tuple branch below).
+    # SampleFlux Sample (a NamedTuple — check BEFORE the tuple branch below).
     if hasattr(value, "input") and hasattr(value, "target") and hasattr(value, "metadata"):
         return f"Sample(input={_shape_of(value.input, _depth + 1)}, target={_shape_of(value.target, _depth + 1)})"
     if _depth > 6:
@@ -1609,7 +1609,7 @@ class DisplayAnyNode:
     """Show ANY wired value as text ON the node — a debug / inspection viewer.
 
     A Taidal-native analogue of WAA's *Display Any*: wire any output (a scalar, a list, a metadata
-    dict, a tensor, a ``Sample``, a DataFlux op/source) into ``value`` and its text representation
+    dict, a tensor, a ``Sample``, a SampleFlux op/source) into ``value`` and its text representation
     appears on the node after **Queue Prompt** (``web/display_any.js`` fills a read-only multiline
     widget). ``mode`` picks the view:
 
@@ -1730,7 +1730,7 @@ class ValueNode:
 
     Many constructor params can't be sensibly typed into a single scalar widget — a list of bounding
     boxes (``[(20, 10, 80, 50), (200, 100, 300, 150)]``), a list of colours, a dict of lists. The bridge
-    renders such a param as a wired ``DATAFLUX_VALUE`` input socket (``bridge._needs_value_socket``);
+    renders such a param as a wired ``SAMPLEFLUX_VALUE`` input socket (``bridge._needs_value_socket``);
     THIS node is its producer: type a **Python or JSON literal** in ``value`` and it parses it (via
     :func:`parse_value_literal`) into the real object on the ``value`` output, which you wire into the
     param's socket. Reusable — one Value node can feed several consumers.
@@ -1762,16 +1762,16 @@ class ValueNode:
 
 
 def _text_positions() -> List[str]:
-    """The 9-grid text-anchor options — the closed ``dataflux.ops.image.TextPosition`` set.
+    """The 9-grid text-anchor options — the closed ``sampleflux.ops.image.TextPosition`` set.
 
-    Single source of truth (== ``get_args(TextPosition)``); falls back to one option if dataflux's
+    Single source of truth (== ``get_args(TextPosition)``); falls back to one option if sampleflux's
     image module can't be imported (degrades like ``_colormap_choices``).
     """
     try:
-        from dataflux.ops.image import TEXT_POSITIONS
+        from sampleflux.ops.image import TEXT_POSITIONS
 
         return list(TEXT_POSITIONS)
-    except ImportError:  # pragma: no cover - dataflux is a hard dep; defensive
+    except ImportError:  # pragma: no cover - sampleflux is a hard dep; defensive
         return ["top-left"]
 
 
@@ -1785,7 +1785,7 @@ class DrawTextNode:
     Feed the ``IMAGE`` output into *Preview Image*, the *Array / Tensor Histogram*, or a save node.
 
     Adapter glue (bridges ComfyUI's ``STRING`` + ``IMAGE`` to an ``IMAGE``, like *Image Grid*): the
-    text-drawing MATH lives in ``dataflux.ops.image.draw_text`` — this node only converts ComfyUI's
+    text-drawing MATH lives in ``sampleflux.ops.image.draw_text`` — this node only converts ComfyUI's
     ``[B,H,W,C]`` float image to/from the ``(H,W,3)`` uint8 array that function works in.
     """
 
@@ -1826,7 +1826,7 @@ class DrawTextNode:
         height: int = 256,
         image: Any = None,
     ) -> Tuple[Any, ...]:
-        from dataflux.ops.image import draw_text
+        from sampleflux.ops.image import draw_text
 
         bg: Optional[np.ndarray] = None
         if image is not None:

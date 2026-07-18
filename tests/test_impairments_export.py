@@ -31,12 +31,12 @@ _FIXTURE = Path(__file__).parent / "fixtures" / "impairments.json"
 # (not by kind), and native / third-party nodes (Reroute, PreviewImage, subgraph-instance UUIDs) are
 # deliberately absent → classified as non-op and dropped/contracted.
 _NODE_KINDS = {
-    "Taidal_dataflux_op_image_ConvertToImageOp": "op",
-    "Taidal_dataflux_op_numpy_ConnectedComponentsOp": "op",
-    "Taidal_dataflux_op_numpy_MaxOp": "op",
-    "Taidal_dataflux_op_numpy_ThresholdOp": "op",
-    "Taidal_dataflux_op_structure_StashInputOp": "op",
-    "Taidal_dataflux_op_torch_SqueezeOp": "op",
+    "Taidal_sampleflux_op_image_ConvertToImageOp": "op",
+    "Taidal_sampleflux_op_numpy_ConnectedComponentsOp": "op",
+    "Taidal_sampleflux_op_numpy_MaxOp": "op",
+    "Taidal_sampleflux_op_numpy_ThresholdOp": "op",
+    "Taidal_sampleflux_op_structure_StashInputOp": "op",
+    "Taidal_sampleflux_op_torch_SqueezeOp": "op",
     "Taidal_waivefront_op_noise_NoiseFloorOp": "op",
     "Taidal_waivefront_op_regions_BboxesToRegionsOp": "op",
     "Taidal_waivefront_op_regions_RegionPowerAnalysisOp": "op",

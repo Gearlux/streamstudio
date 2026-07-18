@@ -8,7 +8,7 @@ console.log("ComfyFlux: Loaded Taidal.HFMetadataChooser extension");
 // comma-separated list and stays freely editable. This adds an "add column" combo that APPENDS the
 // picked column (multi-select by picking repeatedly), and offers a special "*" entry meaning
 // "every column except input/target" (the METADATA_ALL_FEATURES sentinel resolved by
-// dataflux.sources). Columns come from /taidal/hf_dataset_features (the same route the feature
+// sampleflux.sources). Columns come from /taidal/hf_dataset_features (the same route the feature
 // picker uses) for the node's current dataset-id field, minus whatever is currently mapped as
 // input_feature / target_feature (those are already consumed, and "*" covers "the rest" anyway).
 
