@@ -14,7 +14,7 @@ that ties them together — between a Confluid YAML document and a ComfyUI ``wor
 * :func:`workflow_to_yaml` — ``workflow.json`` (or the prompt/API form) → YAML. Builds
   Fluid markers per node (recovering the class from each node's ``TAIDAL_CALLABLE_PATH``),
   **hoists** every node to a top-level key wired by ``!ref:`` (matching the navigaitor
-  output shape, e.g. ``waivefront-rfuav/config/train_efficientvit_b0.yaml``), and serialises
+  output shape, e.g. ``waivefront/config/train_efficientvit_b0.yaml``), and serialises
   with the canonical :func:`confluid.dump`.
 
 The **Fluid graph is the shared IR**: confluid owns YAML↔Fluid (``resolve``/``dump``);

@@ -1755,7 +1755,7 @@ def test_stamped_op_list_branch_ops_not_named_after_their_helios_param() -> None
 def _converter_nodes_available() -> bool:
     """True iff every modelled node type in converter.json resolves in NODE_CLASS_MAPPINGS.
 
-    The fixture is the real Helios→YOLO converter (waivefront / waivefront-torchsig / raidar /
+    The fixture is the real Helios→YOLO converter (waivefront incl. waivefront.torchsig / raidar /
     waivefront-helios nodes). CI hosts without those packages skip the integration tests below.
     """
     import fluxstudio

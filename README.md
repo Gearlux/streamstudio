@@ -427,7 +427,7 @@ fluxstudio export-workflow workflow.json -o config.yaml # whole canvas → hoist
 
 ### The exported shape (hoisted `!ref:`)
 
-Every node becomes a **top-level key** named by the socket it feeds (path-prefixed on collision); a wire becomes a `!ref:`; shared scalar dimensions (`num_classes` / `image_size`) are hoisted. A deferred member (optimizer / loaders / Lightning Trainer) emits `!lazy:`, an eager one `!class:`. This matches the navigaitor / hand-written reference configs (e.g. [`waivefront-rfuav/config/train_efficientvit_b0.yaml`](../waivefront-rfuav/config/train_efficientvit_b0.yaml)):
+Every node becomes a **top-level key** named by the socket it feeds (path-prefixed on collision); a wire becomes a `!ref:`; shared scalar dimensions (`num_classes` / `image_size`) are hoisted. A deferred member (optimizer / loaders / Lightning Trainer) emits `!lazy:`, an eager one `!class:`. This matches the navigaitor / hand-written reference configs (e.g. [`waivefront/config/train_efficientvit_b0.yaml`](../waivefront/config/train_efficientvit_b0.yaml)):
 
 ```yaml
 num_classes: 37
