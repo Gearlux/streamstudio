@@ -2,7 +2,7 @@ import { app } from "../../scripts/app.js";
 
 console.log("ComfyFlux: Loaded Taidal.OpListInputs extension");
 
-// Dynamic op-list inputs for higher-order op nodes (Parallel/Tee/Enable/Flux — any op whose
+// Dynamic op-list inputs for higher-order op nodes (Parallel/TransformChain/Enable/Flux — any op whose
 // constructor takes a list of ops; tagged by a seed `<prefix>_0` input of type SAMPLEFLUX_OP in
 // bridge._build_op_node / _build_source_node). Wire an op node's `op` output into `<prefix>_0`; a
 // fresh `<prefix>_1` slot appears, and so on — so you build the op-list visually. The Python side

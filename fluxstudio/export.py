@@ -46,9 +46,8 @@ DAG into ONE SEQUENTIAL Confluid ``!class:...()`` op-list per weakly-connected c
   at call time).
 
 ``op_N`` links (an op consumed as a ``SAMPLEFLUX_OP`` value by a higher-order op such as
-``Tee`` / ``Enable`` / ``Parallel``) compile too: each wired producer embeds as a nested
-``!class:`` instance in the consumer's op-list kwarg (``branches`` entries are wrapped as
-1-op branches, mirroring the live node).
+``TransformChain`` / ``Enable`` / ``Parallel``) compile too: each wired producer embeds as a nested
+``!class:`` instance in the consumer's op-list kwarg (mirroring the live node).
 
 Input format — the ComfyUI prompt / API graph (what ``app.graphToPrompt()`` emits and
 ``/prompt`` consumes), NOT the richer UI ``workflow.json``::
@@ -117,7 +116,6 @@ _PRIMITIVE_VALUE_NODES = {
 
 # Legacy metadata-key prefix of the RETIRED stash/unstash lowering — kept ONLY so graphio's
 # importer still recognises documents exported before the context-ops compiler (2026-07).
-_STASH_KEY_PREFIX = "__taidal_stash_"
 
 # Per-sample Context cells used by the inserted Save/Use/Mix context ops (the graph data
 # plane — sample.metadata is never used for wiring). Namespaced so they can't collide with
@@ -819,7 +817,7 @@ def _embed_op_values(
     (a helios ``HeliosIfOp`` → ``true_transforms`` + ``false_transforms``), so links are grouped by param
     and ordered by socket index within each. Each wired producer embeds as a nested ``!class:`` Instance
     (its wired widgets fold through the same pass), or — for a Subgraph-Op terminator — its compiled cone
-    as a nested ``TransformChain``. A ``branches`` param wraps each op as its own 1-op branch, mirroring
+    as a nested ``TransformChain``, mirroring
     the live node (``bridge._build_op_node``). A family with no valid producer is omitted.
     """
     by_param: Dict[str, List[Tuple[int, Any]]] = {}
@@ -846,7 +844,7 @@ def _embed_op_values(
                 continue
             instances.append(_op_to_instance(src, upstream, fold.node_mappings, dropped_notes=fold.notes, fold=fold))
         if instances:
-            result[param] = [[op] for op in instances] if param == "branches" else instances
+            result[param] = instances
     return result
 
 

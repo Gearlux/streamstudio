@@ -562,9 +562,9 @@ def test_export_folds_sample_chains_into_flux_pipelines() -> None:
     assert "in_max: 255.0" in yaml_text
 
 
-def test_export_folds_fan_out_into_tee() -> None:
-    # Fan-out inside a chain (one op's sample output feeding two ops) folds into a nested Tee,
-    # exactly like the ops-export shape.
+def test_export_folds_fan_out_into_save_use_cells() -> None:
+    # Fan-out inside a chain (one op's sample output feeding two ops) folds into Save/Use
+    # context cells (isolated branches), exactly like the ops-export shape.
     workflow = _canvas_workflow()
     workflow["nodes"].append(
         {
@@ -576,11 +576,16 @@ def test_export_folds_fan_out_into_tee() -> None:
     )
     workflow["links"].append([7, 3, 0, 8, 0, "SAMPLEFLUX_SAMPLE"])  # node 3 now fans out to 4 AND 8
     yaml_text = workflow_to_yaml(workflow, _canvas_mappings())
+    assert "!class:sampleflux.ops.context.Save" in yaml_text
+    assert "!class:sampleflux.ops.context.Use" in yaml_text
     graph = confluid.resolve(yaml_text)
     ops = graph["pipeline"].kwargs["ops"]
-    assert len(ops) == 2  # head op + the Tee
-    assert "Tee" in str(ops[1])
-    assert "in_max: 99.0" in yaml_text  # the second branch's op rode inside the Tee
+    # head op, Save(cell), branch-1 op, Use(cell, drop=True), branch-2 op
+    assert len(ops) == 5
+    assert "Save" in str(ops[1].target) and str(ops[1].kwargs["name"]).startswith("__taidal_cell_")
+    use = ops[3]
+    assert "Use" in str(use.target) and use.kwargs.get("drop") is True
+    assert "in_max: 99.0" in yaml_text  # the second branch's op rode after the Use
 
 
 def test_export_failing_taidal_node_is_isolated_with_warning() -> None:
@@ -1229,10 +1234,10 @@ def test_value_chain_compiles_to_configure_op_in_pipeline() -> None:
     assert "FormulaOp" in str(compute[1].target)
 
 
-def test_output_capture_compiles_to_configure_op_in_pipeline() -> None:
+def test_output_capture_compiles_to_capture_and_apply_in_pipeline() -> None:
     # The whole-graph export compiles an op-@output → param wire (within one pipeline) like the
-    # ops-export: a CaptureOutputOp on the producer + a ConfigureOp(UnstashInputOp) on the consumer,
-    # both folded into the SAME Flux pipeline so the captured value rides the metadata bus between them.
+    # ops-export: a context Capture on the producer + an Apply on the consumer, both folded into
+    # the SAME Flux pipeline so the captured value rides the per-sample Context between them.
     nm = {
         "src": create_comfy_node(HuggingFaceSource, "src"),
         "emit": create_comfy_node(EmitOp, "emit"),
@@ -1244,23 +1249,22 @@ def test_output_capture_compiles_to_configure_op_in_pipeline() -> None:
         "3": {"class_type": "threshold", "inputs": {"sample": ["2", 0], "low_level": ["2", 2], "gain": 1.5}},
     }
     yaml_text = workflow_to_yaml(prompt, nm)
-    assert "!class:sampleflux.ops.capture.CaptureOutputOp" in yaml_text
-    assert "!class:sampleflux.ops.configure.ConfigureOp" in yaml_text
-    assert "!class:sampleflux.ops.stash.UnstashInputOp" in yaml_text
+    assert "!class:sampleflux.ops.context.Capture" in yaml_text
+    assert "!class:sampleflux.ops.context.Apply" in yaml_text
     assert "__taidal_output_2_emitted" in yaml_text
     assert ".low_level" not in yaml_text  # the wire compiled — no dropped-wire comment
 
     graph = confluid.resolve(yaml_text)
     flux = next(v for v in graph.values() if isinstance(v, (Class, Instance)) and "Flux" in str(v.target))
     ops = flux.kwargs["ops"]
-    assert len(ops) == 2  # producer (CaptureOutputOp wrapping EmitOp) + consumer (ConfigureOp)
-    assert "CaptureOutputOp" in str(ops[0].target)
+    assert len(ops) == 2  # producer (Capture wrapping EmitOp) + consumer (Apply)
+    assert "Capture" in str(ops[0].target)
     assert "EmitOp" in str(ops[0].kwargs["op"].target)
     assert ops[0].kwargs["captures"] == {"emitted": "__taidal_output_2_emitted"}
     wrap = ops[1]
-    assert "ConfigureOp" in str(wrap.target) and wrap.kwargs["param"] == "low_level"
-    assert "ThresholdLikeOp" in str(wrap.kwargs["target"].target)
-    assert "UnstashInputOp" in str(wrap.kwargs["ops"][0].target)
+    assert "Apply" in str(wrap.target) and wrap.kwargs["param"] == "low_level"
+    assert "ThresholdLikeOp" in str(wrap.kwargs["op"].target)
+    assert wrap.kwargs["source"] == "__taidal_output_2_emitted"
 
 
 def test_value_chain_wraps_standalone_op_entry() -> None:

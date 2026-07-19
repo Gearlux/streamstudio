@@ -17,7 +17,7 @@ wired on the ComfyUI canvas — instead of every socket collapsing to ``STRING``
   constructor config as widgets, an OPTIONAL ``SAMPLEFLUX_SAMPLE`` input, and TWO outputs —
   ``sample`` (the op applied to the input sample, for linear chaining) and ``op`` (the constructed
   op as a ``SAMPLEFLUX_OP`` value, so it can feed a higher-order op). A higher-order op whose
-  constructor takes an op-list (``Enable`` / ``Parallel`` / ``Tee``) gets dynamic ``SAMPLEFLUX_OP``
+  constructor takes an op-list (``Enable`` / ``Parallel`` / ``TransformChain``) gets dynamic ``SAMPLEFLUX_OP``
   inputs (``op_0`` …) instead of a STRING widget.
 * **Generic** — any other callable (plain value functions): scalar widgets with a ``STRING``
   fallback (the original behaviour, preserved).
@@ -81,7 +81,7 @@ def _spec_to_dict(cls: Any, attr: str) -> Optional[Dict[str, Any]]:
 SAMPLE_TYPE = "SAMPLEFLUX_SAMPLE"
 SOURCE_TYPE = "SAMPLEFLUX_SOURCE"
 # A constructed op instance (a callable ``Sample -> Optional[Sample]``) ridden as a wire, so an op
-# node's ``op`` output can feed a higher-order op (``Enable`` / ``Parallel`` / ``Tee``) that takes
+# node's ``op`` output can feed a higher-order op (``Enable`` / ``Parallel`` / ``TransformChain``) that takes
 # ops as constructor input. Distinct from ``SAMPLEFLUX_SAMPLE`` (data) — this carries the op itself.
 OP_TYPE = "SAMPLEFLUX_OP"
 # A built "runnable" (a trainer / evaluator / processor — any class implementing ``run(self)``),
@@ -291,11 +291,10 @@ def _infer_member_role(name: str) -> Optional[str]:
 
 # Constructor params (on higher-order ops) that hold a LIST OF OPS — rendered as dynamic
 # ``SAMPLEFLUX_OP`` multi-inputs (``op_0``, ``op_1``, … via ``web/op_list.js``) instead of a STRING
-# widget, so concrete op nodes wire into them. ``Enable``/``Parallel`` take ``ops``; ``Tee`` takes
-# ``branches`` (a list of op-lists — v1 wraps each connected op as its own single-op branch);
+# widget, so concrete op nodes wire into them. ``Enable``/``Parallel``/``TransformChain`` take ``ops``;
 # ``transforms`` is the helios convention surfaced by waivefront-helios's auto-bridged composites
 # (``HeliosComposeOp`` & co mirror a helios ``*transforms`` variadic as a list param).
-_OP_LIST_PARAMS = {"ops", "branches", "transforms"}
+_OP_LIST_PARAMS = {"ops", "transforms"}
 
 # Single-op constructor params (one op VALUE, not a chain): ``RandomApply.op``,
 # ``ConfigureOp.target``. Rendered as ONE optional ``SAMPLEFLUX_OP`` input socket.
@@ -1515,7 +1514,7 @@ def _op_list_params(cls: Any) -> Dict[str, str]:
     """Map each op-LIST constructor param → its dynamic socket-family prefix.
 
     A param accepts a LIST of ops when its NAME is in ``_OP_LIST_PARAMS`` with a ``list`` annotation
-    (``Enable.ops`` / ``Tee.branches`` / a helios ``*transforms`` variadic mirror) OR it is stamped
+    (``Enable.ops`` / ``TransformChain.ops`` / a helios ``*transforms`` variadic mirror) OR it is stamped
     ``__taidal_op_list_params__`` by the waivefront-helios bridge (a ``List[Transform]`` slot whose
     helios name — ``true_transforms`` / ``default_transforms`` — the sampleflux-tuned allowlist can't
     know). The family prefix is ``"op"`` for the original name-set params (so existing ``op_N``
@@ -1867,8 +1866,7 @@ def _build_source_node(cls: Callable, name: str, category: str) -> Type:
         if op_list_param is not None:
             ops = _collect_ops(kwargs)
             kwargs = {k: v for k, v in kwargs.items() if not (k.startswith("op_") and k[3:].isdigit())}
-            # ``Tee.branches`` is a list of op-LISTS; v1 makes each connected op its own 1-op branch.
-            kwargs[op_list_param] = [[o] for o in ops] if op_list_param == "branches" else ops
+            kwargs[op_list_param] = ops
         obj = cls(**_coerce_kwargs(cls, kwargs))
         flux = obj if isinstance(obj, Flux) else Flux.from_source(obj)
         return (flux,)
@@ -1929,8 +1927,7 @@ def _build_op_node(cls: Callable, name: str, category: str) -> Type:
             list_values: Dict[str, Any] = {}
             for pname, prefix in op_list_params.items():
                 ops = _collect_indexed(kwargs, prefix)
-                # ``Tee.branches`` is a list of op-LISTS; v1 makes each connected op its own 1-op branch.
-                list_values[pname] = [[o] for o in ops] if pname == "branches" else ops
+                list_values[pname] = ops
             kwargs = {k: v for k, v in kwargs.items() if not _is_indexed_key(k, set(list_prefixes))}
             kwargs.update(list_values)
         # Post-construction injection (the confluid paradigm) of each wired single-op SAMPLEFLUX_OP value.
