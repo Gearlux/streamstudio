@@ -55,7 +55,7 @@ _BoundaryNode = type("WalkDatasetNode", (object,), {})
 
 # --------------------------------------------------------------------------- local fixture classes
 # Defined at module level so ``resolve_callable("test_export:<Name>")`` (the dump/load
-# round-trip) can re-import them — fluxstudio tests must not depend on waivefront-torchsig.
+# round-trip) can re-import them — fluxstudio tests must not depend on waivefront.torchsig.
 
 
 @configurable(category="op", group="test_export", constant=True)

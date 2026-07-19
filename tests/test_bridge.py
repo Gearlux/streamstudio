@@ -541,7 +541,7 @@ def test_package_tag_uses_dist_name_when_provided() -> None:
     """dist_name (ep.dist.name) takes precedence over the module path so companion namespace
     packages like waivefront-helios produce [WAIVEFRONT-HELIOS] instead of [WAIVEFRONT]."""
     assert _package_tag("waivefront.helios", dist_name="waivefront-helios") == "WAIVEFRONT-HELIOS"
-    assert _package_tag("waivefront.torchsig.synthetic", dist_name="waivefront-torchsig") == "WAIVEFRONT-TORCHSIG"
+    assert _package_tag("waivefront.torchsig.synthetic", dist_name="waivefront") == "WAIVEFRONT"
     assert _package_tag("waivefront.processing", dist_name="waivefront") == "WAIVEFRONT"
     assert _package_tag("sonair", dist_name="sonair") == "SONAIR"
 
