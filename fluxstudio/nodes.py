@@ -1228,12 +1228,12 @@ def compile_subgraph_ops(prompt: Any, unique_id: Any, node_mappings: Optional[Di
 class SubgraphOpExtractNode:
     """Turn an upstream op DAG into a single ``SAMPLEFLUX_OP`` — the "subgraph as an Op" terminator.
 
-    Draw a normal ``Sample -> Sample`` op pipeline (an arbitrary DAG — fan-out, ``Tee``/``Mix``
+    Draw a normal ``Sample -> Sample`` op pipeline (an arbitrary DAG — fan-out, ``Mix``
     fan-in allowed) and wire its terminal sample into this node's ``sample`` input. The node
     compiles that whole sub-pipeline into ONE ``sampleflux.ops.transform_chain.TransformChain``
     (DAG→sequential, via the ops-export compiler) and emits it on the ``op`` output
     (``SAMPLEFLUX_OP``), so the transformation is reusable as a single Op: feed it into a
-    higher-order op (``Parallel`` / ``Tee`` / ``Enable``), a single-op slot
+    higher-order op (``Parallel`` / ``TransformChain`` / ``Enable``), a single-op slot
     (``ConfigureOp.target`` / ``RandomApply.op``), or chain it.
 
     The headline use is INSIDE a ComfyUI native subgraph: build the inner pipeline starting

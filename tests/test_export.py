@@ -30,7 +30,6 @@ from sampleflux.ops.configure import ConfigureOp
 from sampleflux.ops.context import Apply, Capture, Mix, Save, Use
 from sampleflux.ops.formula import FormulaOp
 from sampleflux.ops.parallel import Parallel
-from sampleflux.ops.tee import Tee
 from sampleflux.ops.torch import RescaleOp
 from sampleflux.ops.transform_chain import TransformChain
 from sampleflux.sources import HuggingFaceSource
@@ -328,7 +327,7 @@ def _op_mappings() -> Dict[str, Any]:
         "Taidal_ConfigureLikeOp": create_comfy_node(ConfigureLikeOp, "Taidal_ConfigureLikeOp"),
         "Taidal_IfLikeOp": create_comfy_node(IfLikeOp, "Taidal_IfLikeOp"),
         "Taidal_RescaleOp": create_comfy_node(RescaleOp, "Taidal_RescaleOp"),
-        "Taidal_Tee": create_comfy_node(Tee, "Taidal_Tee"),
+        "Taidal_TransformChain": create_comfy_node(TransformChain, "Taidal_TransformChain"),
         "Taidal_ConstTxConfig": create_comfy_node(ConstTxConfig, "Taidal_ConstTxConfig"),
         "Taidal_ConstFactor": create_comfy_node(ConstFactor, "Taidal_ConstFactor"),
         "Taidal_ConstOffset": create_comfy_node(ConstOffset, "Taidal_ConstOffset"),
@@ -444,7 +443,7 @@ def test_sink_node_is_ignored_by_ops_export() -> None:
 def test_fan_out_compiles_to_flat_context_sequence() -> None:
     # DAG→sequential: the fork sample is Saved into a Context cell after node 2 and the
     # second branch restarts from it with Use, so the branchy wiring becomes ONE flat
-    # op-list (no Tee emitted, nothing on sample.metadata).
+    # op-list (no container op emitted, nothing on sample.metadata).
     prompt = {
         "1": {"class_type": "WalkDatasetNode", "inputs": {}},
         "2": _rescale_node(["1", 0], in_min=0.0, in_max=255.0),
@@ -1155,19 +1154,19 @@ def test_output_capture_producer_and_consumer_chain() -> None:
 
 def test_op_value_links_embed_into_higher_order_op() -> None:
     # Node 8 is consumed as a SAMPLEFLUX_OP value (op_0) and has no sample wiring — it embeds
-    # as a nested instance inside Tee.branches instead of joining the sample sequence.
+    # as a nested instance inside TransformChain.ops instead of joining the sample sequence.
     prompt = {
         "1": {"class_type": "WalkDatasetNode", "inputs": {}},
         "8": _rescale_node(None, in_min=0.0, in_max=1.0, out_max=5.0),
-        "9": {"class_type": "Taidal_Tee", "inputs": {"sample": ["1", 0], "op_0": ["8", 1]}},
+        "9": {"class_type": "Taidal_TransformChain", "inputs": {"sample": ["1", 0], "op_0": ["8", 1]}},
     }
     chains = compile_op_chains(prompt, _op_mappings())
     assert len(chains) == 1 and len(chains[0]) == 1
-    tee = chains[0][0]
-    assert tee.target is Tee
-    branches = tee.kwargs["branches"]
-    assert len(branches) == 1 and len(branches[0]) == 1  # each op its own 1-op branch
-    assert branches[0][0].target is RescaleOp and branches[0][0].kwargs["out_max"] == 5.0
+    chain = chains[0][0]
+    assert chain.target is TransformChain
+    embedded = chain.kwargs["ops"]
+    assert len(embedded) == 1
+    assert embedded[0].target is RescaleOp and embedded[0].kwargs["out_max"] == 5.0
 
 
 # --------------------------------------------------------------------------- Mix Samples fan-in

@@ -1,110 +1,60 @@
 # NOTE: ops-export compilation notes:
-#   - compiled for export target: node 378:371 (Taidal_waivefront_op_regions_RegionPowerAnalysisOp)
-#   - branching canvas wiring compiled to a sequential op-list — 4 stash/unstash ops inserted (metadata keys '__taidal_stash_*' remain on the sample)
+#   - compiled for export target: node 421 (Taidal_waivefront_op_regions_RegionPowerAnalysisOp)
+#   - branching canvas wiring compiled to a sequential op-list — 3 context ops (Save/Use/Mix over per-sample Context cells, freed by their last reader) inserted
 impairments_tx_config: !class:waivefront.torchsig.processing.ImpairmentsTxConfig
   quantize: true
-  quantize_probability: null
   clock_drift: false
-  clock_drift_probability: null
   clock_jitter: false
-  clock_jitter_probability: null
   passband_ripple: true
-  passband_ripple_probability: null
   iq_imbalance: true
-  iq_imbalance_probability: null
   carrier_phase_noise: false
-  carrier_phase_noise_probability: null
   carrier_frequency_drift: false
-  carrier_frequency_drift_probability: null
   carrier_phase_offset: false
-  carrier_phase_offset_probability: null
   intermodulation_products: true
-  intermodulation_products_probability: null
   nonlinear_amplifier: false
-  nonlinear_amplifier_probability: null
   spurs: true
-  spurs_probability: null
   fading: true
-  fading_probability: null
 impairments_rx_config: !class:waivefront.torchsig.processing.ImpairmentsRxConfig
   intermodulation_products: false
-  intermodulation_products_probability: null
   nonlinear_amplifier: false
-  nonlinear_amplifier_probability: null
   coarse_gain_change: false
-  coarse_gain_change_probability: null
   spurs: false
-  spurs_probability: null
   iq_imbalance: false
-  iq_imbalance_probability: null
   carrier_phase_noise: false
-  carrier_phase_noise_probability: null
   carrier_frequency_drift: false
-  carrier_frequency_drift_probability: null
   carrier_phase_offset: false
-  carrier_phase_offset_probability: null
   passband_ripple: false
-  passband_ripple_probability: null
   clock_drift: false
-  clock_drift_probability: null
   clock_jitter: false
-  clock_jitter_probability: null
   quantize: false
-  quantize_probability: null
   digital_agc: false
-  digital_agc_probability: null
 impairments_tx_config_2: !class:waivefront.torchsig.processing.ImpairmentsTxConfig
   quantize: false
-  quantize_probability: null
   clock_drift: false
-  clock_drift_probability: null
   clock_jitter: false
-  clock_jitter_probability: null
   passband_ripple: false
-  passband_ripple_probability: null
   iq_imbalance: false
-  iq_imbalance_probability: null
   carrier_phase_noise: false
-  carrier_phase_noise_probability: null
   carrier_frequency_drift: false
-  carrier_frequency_drift_probability: null
   carrier_phase_offset: false
-  carrier_phase_offset_probability: null
   intermodulation_products: false
-  intermodulation_products_probability: null
   nonlinear_amplifier: false
-  nonlinear_amplifier_probability: null
   spurs: false
-  spurs_probability: null
   fading: false
-  fading_probability: null
 impairments_rx_config_2: !class:waivefront.torchsig.processing.ImpairmentsRxConfig
   intermodulation_products: true
-  intermodulation_products_probability: null
   nonlinear_amplifier: false
-  nonlinear_amplifier_probability: null
   coarse_gain_change: true
-  coarse_gain_change_probability: null
   spurs: true
-  spurs_probability: null
   iq_imbalance: true
-  iq_imbalance_probability: null
   carrier_phase_noise: false
-  carrier_phase_noise_probability: null
   carrier_frequency_drift: false
-  carrier_frequency_drift_probability: null
   carrier_phase_offset: false
-  carrier_phase_offset_probability: null
   passband_ripple: true
-  passband_ripple_probability: null
   clock_drift: false
-  clock_drift_probability: null
   clock_jitter: false
-  clock_jitter_probability: null
   quantize: false
-  quantize_probability: null
   digital_agc: true
-  digital_agc_probability: null
 ops:
 - !class:sampleflux.ops.torch.SqueezeOp()
   dim: 0
@@ -112,10 +62,8 @@ ops:
   length: 10ms
   mode: front
   seed: null
-- !class:sampleflux.ops.stash.StashInputOp()
-  key: __taidal_stash_107_input
-- !class:sampleflux.ops.stash.StashTargetOp()
-  key: __taidal_stash_107_target
+- !class:sampleflux.ops.context.Save()
+  name: __taidal_cell_107
 - !class:waivefront.spectrogram.SpectrogramOp()
   fft_size: 1024
   hop_size: 512
@@ -151,10 +99,15 @@ ops:
 - !class:waivefront.spectrogram.BboxesToRegionsOp()
   role: predicted
   label: 5GNR
-- !class:sampleflux.ops.stash.UnstashInputOp()
-  key: __taidal_stash_107_input
-- !class:sampleflux.ops.stash.UnstashTargetOp()
-  key: __taidal_stash_107_target
+- !class:sampleflux.ops.context.Save()
+  name: __taidal_cell_399
+- !class:sampleflux.ops.context.Mix()
+  input_from: __taidal_cell_107
+  target_from: __taidal_cell_107
+  metadata_from: __taidal_cell_399
+  drop:
+  - __taidal_cell_107
+  - __taidal_cell_399
 - !class:waivefront.torchsig.processing.ImpairmentsChain()
   probability: 1
   impairment_level: 2
