@@ -429,7 +429,7 @@ def test_real_lightning_trainer_precision_defaults_to_blank() -> None:
     # Regression on the actual pl.Trainer: precision (Optional[Literal[64,32,16],…]=None) no longer
     # defaults to 64 — it defaults blank/omitted, so an imported Trainer uses Lightning's 32-bit default
     # (float32) instead of forcing float64 (which crashes on MPS).
-    import marainer.configurables  # noqa: F401
+    import marainer.lightning.configurables  # noqa: F401
     import pytorch_lightning as pl
 
     required = create_comfy_node(pl.Trainer, "PLTrainerPrec").INPUT_TYPES()["required"]
@@ -458,7 +458,7 @@ def test_optional_bool_none_default_is_tristate_combo() -> None:
 def test_real_lightning_trainer_enable_flags_default_blank() -> None:
     # Regression: pl.Trainer's Optional[bool]=None flags no longer force False (which disabled the
     # progress bar / checkpointing in an imported eval) — they default blank → Lightning's own default.
-    import marainer.configurables  # noqa: F401
+    import marainer.lightning.configurables  # noqa: F401
     import pytorch_lightning as pl
 
     required = create_comfy_node(pl.Trainer, "PLTrainerFlags").INPUT_TYPES()["required"]
@@ -1411,7 +1411,7 @@ def test_real_lightning_trainer_devices_default_builds() -> None:
     # default ('auto') is a STRING widget whose annotation (list[int] | str | int) contains
     # "list" — it must NOT be comma-split into ['auto'] (the "you passed a sequence of str"
     # crash that broke every freshly-created Trainer graph). It passes through and constructs.
-    import marainer.configurables  # noqa: F401
+    import marainer.lightning.configurables  # noqa: F401
     import pytorch_lightning as pl
 
     required = create_comfy_node(pl.Trainer, "PLTrainerDevices").INPUT_TYPES()["required"]
@@ -2470,7 +2470,7 @@ def test_object_node_collects_indexed_objects_into_list() -> None:
 def test_real_lightning_trainer_logger_is_a_dynamic_list_socket() -> None:
     # Regression on the actual pl.Trainer: logger/callbacks accept a LIST of objects, so they become
     # dynamic ``logger_0`` / ``callbacks_0`` seed sockets; the string-settable accelerator stays a widget.
-    import marainer.configurables  # noqa: F401 - registers the logger nodes
+    import marainer.lightning.configurables  # noqa: F401 - registers the logger nodes
     import pytorch_lightning as pl
     from pytorch_lightning.loggers import CSVLogger
 
