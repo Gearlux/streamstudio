@@ -46,7 +46,7 @@ from sampleflux.discovery import resolve_callable
 from sampleflux.ops.configure import ConfigureOp
 from sampleflux.ops.context import Apply as CtxApply
 from sampleflux.ops.context import Capture as CtxCapture
-from sampleflux.ops.context import MergeFields as CtxMix
+from sampleflux.ops.context import MergeFields as CtxMerge
 from sampleflux.ops.context import Save as CtxSave
 from sampleflux.ops.context import Use as CtxUse
 from sampleflux.ops.formula import FormulaOp
@@ -815,7 +815,7 @@ def ops_yaml_to_workflow(
             restored = cells.get(cell_name)
             live["input"] = live["target"] = live["metadata"] = restored
             continue
-        if cls is CtxMix and any(
+        if cls is CtxMerge and any(
             str(kwargs.get(slot, "")).startswith(_CELL_PREFIX)
             for slot in ("input_from", "target_from", "metadata_from")
         ):

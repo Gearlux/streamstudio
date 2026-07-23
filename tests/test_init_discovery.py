@@ -426,7 +426,7 @@ def test_export_ops_route_returns_yaml() -> None:
         asyncio.run(handler(_json_request({"prompt": prompt})))
     data, _kwargs = web.calls[-1]
     assert "ops:" in data["yaml"]
-    assert "RescaleOp" in data["yaml"]
+    assert "ToTensor" in data["yaml"]
     # A single chain → exactly one doc; `yaml` mirrors it for older clients of the route.
     assert data["yamls"] == [data["yaml"]]
 
@@ -447,7 +447,7 @@ def test_export_ops_route_flow_flag_returns_flow_document() -> None:
     data, _kwargs = web.calls[-1]
     assert "flow:" in data["yaml"] and "outputs:" in data["yaml"]
     assert "ops:" not in data["yaml"]  # the flow form, not the serial list
-    assert "RescaleOp" in data["yaml"]
+    assert "ToTensor" in data["yaml"]
 
 
 def test_export_ops_graph_route_returns_op_workflow() -> None:
@@ -530,7 +530,7 @@ def test_export_ops_route_multi_chain_returns_one_doc_per_chain(tmp_path: Path) 
         asyncio.run(handler(_json_request({"prompt": prompt, "path": str(tmp_path / "ops.yaml")})))
     data, _kwargs = web.calls[-1]
     assert len(data["yamls"]) == 2
-    assert all("RescaleOp" in doc for doc in data["yamls"])
+    assert all("ToTensor" in doc for doc in data["yamls"])
     assert data["yaml"] == data["yamls"][0]
     assert [Path(p).name for p in data["paths"]] == ["ops_1.yaml", "ops_2.yaml"]
     for written, doc in zip(data["paths"], data["yamls"]):

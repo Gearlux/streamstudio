@@ -589,7 +589,7 @@ def test_export_single_chain_writes_output_verbatim(tmp_path: Path, logger_mock:
     cli._export(argparse.Namespace(graph=graph, output=out))
 
     assert out.exists()
-    assert "RescaleOp" in out.read_text()
+    assert "ToTensor" in out.read_text()
     assert not (tmp_path / "ops_1.yaml").exists()
 
 
@@ -607,7 +607,7 @@ def test_export_skip_flag_excludes_marked_node(tmp_path: Path, logger_mock: Magi
     cli._export(argparse.Namespace(graph=graph, output=out, skip=["2"]))
 
     text = out.read_text()
-    assert "RescaleOp" not in text  # the marked op is gone — only the empty ops doc remains
+    assert "ToTensor" not in text  # the marked op is gone — only the empty ops doc remains
     assert "ops: []" in text
 
 
@@ -624,7 +624,7 @@ def test_export_multi_chain_writes_one_file_per_chain(tmp_path: Path, logger_moc
 
     assert not (tmp_path / "ops.yaml").exists()
     docs = [(tmp_path / name).read_text() for name in ("ops_1.yaml", "ops_2.yaml")]
-    assert all("ops:" in d and "RescaleOp" in d for d in docs)
+    assert all("ops:" in d and "ToTensor" in d for d in docs)
     assert "in_max: 255.0" in docs[0] and "in_max: 1.0" in docs[1]
     infos = [str(c.args[0]) for c in logger_mock.info.call_args_list]
     assert any("2 independent op chains" in i for i in infos)
