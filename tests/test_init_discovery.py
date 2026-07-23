@@ -414,7 +414,7 @@ def _json_request(body: Any) -> SimpleNamespace:
 def test_export_ops_route_returns_yaml() -> None:
     # The /taidal/export_ops POST handler compiles the posted graph's ops into a Confluid
     # YAML op-list using the live NODE_CLASS_MAPPINGS.
-    from sampleflux.ops.torch import RescaleOp
+    from sampleflux.ops.torch import ToTensor as RescaleOp
 
     from fluxstudio.bridge import create_comfy_node
 
@@ -434,7 +434,7 @@ def test_export_ops_route_returns_yaml() -> None:
 def test_export_ops_route_flow_flag_returns_flow_document() -> None:
     # ``flow: true`` in the POST body switches the route to the readable named-step
     # flow: document (the canvas twin of the CLI's ``--flow``).
-    from sampleflux.ops.torch import RescaleOp
+    from sampleflux.ops.torch import ToTensor as RescaleOp
 
     from fluxstudio.bridge import create_comfy_node
 
@@ -453,7 +453,7 @@ def test_export_ops_route_flow_flag_returns_flow_document() -> None:
 def test_export_ops_graph_route_returns_op_workflow() -> None:
     # The /taidal/export_ops_graph POST handler extracts JUST the op-DAG nodes from the posted UI
     # workflow into a standalone workflow.json (the raw graph as drawn, no compilation).
-    from sampleflux.ops.torch import RescaleOp
+    from sampleflux.ops.torch import ToTensor as RescaleOp
 
     from fluxstudio.bridge import create_comfy_node
 
@@ -478,7 +478,7 @@ def test_export_ops_graph_route_returns_op_workflow() -> None:
 
 def test_import_yaml_route_returns_workflow() -> None:
     # The /taidal/import_yaml POST handler converts a posted YAML config into a workflow.json.
-    from sampleflux.ops.torch import RescaleOp
+    from sampleflux.ops.torch import ToTensor as RescaleOp
     from sampleflux.sources import HuggingFaceSource
 
     from fluxstudio.bridge import create_comfy_node
@@ -516,7 +516,7 @@ def test_export_workflow_route_returns_yaml() -> None:
 def test_export_ops_route_multi_chain_returns_one_doc_per_chain(tmp_path: Path) -> None:
     # Two disconnected chains no longer 400: the route compiles EACH chain into its own YAML
     # doc and (with `path`) writes one stem-suffixed file per chain.
-    from sampleflux.ops.torch import RescaleOp
+    from sampleflux.ops.torch import ToTensor as RescaleOp
 
     from fluxstudio.bridge import create_comfy_node
 
@@ -540,7 +540,7 @@ def test_export_ops_route_multi_chain_returns_one_doc_per_chain(tmp_path: Path) 
 def test_export_ops_route_400_on_bad_topology() -> None:
     # A structurally-unexportable graph (a sample-wire CYCLE) -> UnsupportedTopologyError -> 400.
     # (A widget driven by a link is no longer an error — it's omitted with a note.)
-    from sampleflux.ops.torch import RescaleOp
+    from sampleflux.ops.torch import ToTensor as RescaleOp
 
     from fluxstudio.bridge import create_comfy_node
 

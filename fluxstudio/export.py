@@ -73,7 +73,8 @@ from confluid.fluid import Class, Instance, Reference
 from loggair import get_logger
 from sampleflux.discovery import resolve_callable
 from sampleflux.ops.configure import ConfigureOp
-from sampleflux.ops.context import Apply, Capture, Mix, Save, Use
+from sampleflux.ops.context import Apply, Capture, Save, Use
+from sampleflux.ops.context import MergeFields as Mix
 from sampleflux.ops.formula import FormulaOp
 from sampleflux.ops.transform_chain import TransformChain
 

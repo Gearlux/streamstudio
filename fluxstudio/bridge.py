@@ -62,19 +62,29 @@ from annotated_types import Ge, Gt, Interval, Le, Lt
 from confluid import mandatory_param_names, output_specs, parse_param_docs
 from loggair import get_logger
 from sampleflux.discovery import get_callable_path, resolve_callable, scan_module
-from sampleflux.sample import Sample as _Sample
-from sampleflux.typespec import infer_sample_type
+from sampleflux import Sample as _Sample
 
 logger = get_logger(__name__)
 
 
-def _spec_to_dict(cls: Any, attr: str) -> Optional[Dict[str, Any]]:
-    """JSON-serialize a callable's declared ``ACCEPTS`` / ``PRODUCES`` (:class:`SampleType`), or
-    ``None`` when undeclared — the form the ``/taidal/node_specs`` route and the JS validator consume.
+def _spec_to_dict(cls: Any, attr: str) -> Optional[List[str]]:
+    """JSON-serialize a typed :class:`~sampleflux.Transform`'s item-type I/O contract into a list of
+    item-type names, or ``None`` when undeclared — the form the ``/taidal/node_specs`` route and the JS
+    connection-validator consume.
+
+    ``attr`` is the typed-surface attribute ``"consumes"`` (input item types the transform reads) or
+    ``"produces"`` (item types it writes) — the replacement for the removed ``SampleType``-based
+    ``ACCEPTS`` / ``PRODUCES`` contract. Each entry is an item class (``Image`` / ``Mask`` / ``Regions``
+    / ``Label`` / ``NDArrayItem``); we surface their class names.
     """
     spec = getattr(cls, attr, None)
-    to_dict = getattr(spec, "to_dict", None)
-    return to_dict() if callable(to_dict) else None
+    if not spec:
+        return None
+    try:
+        names = [getattr(t, "__name__", str(t)) for t in spec]
+    except TypeError:
+        return None
+    return names or None
 
 
 # Custom ComfyUI socket types for live SampleFlux objects passed between nodes.
@@ -1879,7 +1889,7 @@ def _build_source_node(cls: Callable, name: str, category: str) -> Type:
         execute,
         return_names=("source",),
         optional_inputs=optional or None,
-        produces=_spec_to_dict(cls, "PRODUCES"),
+        produces=_spec_to_dict(cls, "produces"),
         kind="source",
         callable_path=_safe_callable_path(cls),
         is_random=getattr(cls, "__confluid_random__", False),
@@ -1903,7 +1913,6 @@ def _build_op_node(cls: Callable, name: str, category: str) -> Type:
     output sockets appended after ``(sample, op)`` — read from the live op instance after
     ``__call__`` completes (or their pre-call default when ``sample`` is unconnected).
     """
-    accepts = getattr(cls, "ACCEPTS", None)
     op_list_params = _op_list_params(cls)  # {param: socket-family prefix}
     single_op_params = _single_op_params(cls)  # [param, …] — each ONE op VALUE
     list_prefixes = sorted(set(op_list_params.values()))
@@ -1938,15 +1947,10 @@ def _build_op_node(cls: Callable, name: str, category: str) -> Type:
                 setattr(op, pname, wired)
         applied: Any = None
         if sample is not None:
-            # Runtime accept-check (authoritative) before applying — see the type-spec mandate.
-            if accepts is not None:
-                got = infer_sample_type(sample)
-                if not accepts.accepts(got):
-                    detail = accepts.explain_mismatch(got)
-                    raise RuntimeError(
-                        f"{getattr(cls, '__name__', 'op')} cannot accept the upstream sample — {detail}. "
-                        f"(op expects {accepts.input}, upstream produces {got.input})"
-                    )
+            # The typed bag is self-describing (each field carries its item type), so an incompatible
+            # op raises naturally when applied — the old SampleType-based pre-flight accept-check (and
+            # its ``infer_sample_type`` / ``SampleType.accepts`` machinery) was removed with the legacy
+            # type contract.
             applied = op(sample)
             if applied is None:
                 raise RuntimeError(
@@ -1972,8 +1976,8 @@ def _build_op_node(cls: Callable, name: str, category: str) -> Type:
         execute,
         return_names=("sample", "op", *[s["name"] for s in out_specs]),
         optional_inputs=optional,
-        accepts=_spec_to_dict(cls, "ACCEPTS"),
-        produces=_spec_to_dict(cls, "PRODUCES"),
+        accepts=_spec_to_dict(cls, "consumes"),
+        produces=_spec_to_dict(cls, "produces"),
         kind="op",
         callable_path=_safe_callable_path(cls),
         is_random=getattr(cls, "__confluid_random__", False),
@@ -2042,8 +2046,8 @@ def _build_model_node(cls: Callable, name: str, category: str) -> Type:
         execute,
         return_names=("sample", "model", *[s["name"] for s in out_specs]),
         optional_inputs=optional,
-        accepts=_spec_to_dict(cls, "ACCEPTS"),
-        produces=_spec_to_dict(cls, "PRODUCES"),
+        accepts=_spec_to_dict(cls, "consumes"),
+        produces=_spec_to_dict(cls, "produces"),
         kind="model",
         callable_path=_safe_callable_path(cls),
         is_random=getattr(cls, "__confluid_random__", False),
