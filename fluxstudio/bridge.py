@@ -67,26 +67,6 @@ from sampleflux.discovery import get_callable_path, resolve_callable, scan_modul
 logger = get_logger(__name__)
 
 
-def _spec_to_dict(cls: Any, attr: str) -> Optional[List[str]]:
-    """JSON-serialize a typed :class:`~sampleflux.Transform`'s item-type I/O contract into a list of
-    item-type names, or ``None`` when undeclared — the form the ``/taidal/node_specs`` route and the JS
-    connection-validator consume.
-
-    ``attr`` is the typed-surface attribute ``"consumes"`` (input item types the transform reads) or
-    ``"produces"`` (item types it writes) — the replacement for the removed ``SampleType``-based
-    ``ACCEPTS`` / ``PRODUCES`` contract. Each entry is an item class (``Image`` / ``Mask`` / ``Regions``
-    / ``Label`` / ``NDArrayItem``); we surface their class names.
-    """
-    spec = getattr(cls, attr, None)
-    if not spec:
-        return None
-    try:
-        names = [getattr(t, "__name__", str(t)) for t in spec]
-    except TypeError:
-        return None
-    return names or None
-
-
 # Custom ComfyUI socket types for live SampleFlux objects passed between nodes.
 SAMPLE_TYPE = "SAMPLEFLUX_SAMPLE"
 SOURCE_TYPE = "SAMPLEFLUX_SOURCE"
@@ -1722,8 +1702,6 @@ def _node_class(
     return_types: Tuple[str, ...],
     execute: Callable,
     return_names: Optional[Tuple[str, ...]] = None,
-    accepts: Optional[List[str]] = None,
-    produces: Optional[List[str]] = None,
     kind: Optional[str] = None,
     callable_path: Optional[str] = None,
     optional_inputs: Optional[Dict[str, Any]] = None,
@@ -1739,12 +1717,6 @@ def _node_class(
     Queue) — used by runnable nodes, which RUN on execute (:func:`_build_runnable_node`). ``hidden``
     is folded into ``INPUT_TYPES`` (e.g. ``{"unique_id": "UNIQUE_ID"}`` so a runnable node can address
     its own live-output widget). Most generated nodes pass neither.
-
-    ``accepts`` / ``produces`` are the source callable's declared item-type names (the typed-surface
-    ``consumes`` / ``produces`` contract, via :func:`_spec_to_dict`, or ``None``); they ride on the
-    node class as ``TAIDAL_ACCEPTS`` / ``TAIDAL_PRODUCES`` so the
-    ``/taidal/node_specs`` route and the canvas connection-validator can read them. They do NOT change
-    the ComfyUI socket strings (every Sample wire stays ``SAMPLEFLUX_SAMPLE`` so the pipeline still chains).
 
     ``kind`` (``"op"`` / ``"source"`` / ``"generic"``) and ``callable_path`` (importable
     ``module:qualname``) ride on the class as ``TAIDAL_NODE_KIND`` / ``TAIDAL_CALLABLE_PATH`` so the
@@ -1805,8 +1777,6 @@ def _node_class(
         "FUNCTION": "execute",
         "CATEGORY": category,
         "execute": _timed_execute,
-        "TAIDAL_ACCEPTS": accepts,
-        "TAIDAL_PRODUCES": produces,
         "TAIDAL_NODE_KIND": kind,
         "TAIDAL_CALLABLE_PATH": callable_path,
         "TAIDAL_CONSTANT": is_constant,
@@ -1890,7 +1860,6 @@ def _build_source_node(cls: Callable, name: str, category: str) -> Type:
         execute,
         return_names=("source",),
         optional_inputs=optional or None,
-        produces=_spec_to_dict(cls, "produces"),
         kind="source",
         callable_path=_safe_callable_path(cls),
         is_random=getattr(cls, "__confluid_random__", False),
@@ -1949,9 +1918,7 @@ def _build_op_node(cls: Callable, name: str, category: str) -> Type:
         applied: Any = None
         if sample is not None:
             # The typed bag is self-describing (each field carries its item type), so an incompatible
-            # op raises naturally when applied — the old SampleType-based pre-flight accept-check (and
-            # its ``infer_sample_type`` / ``SampleType.accepts`` machinery) was removed with the legacy
-            # type contract.
+            # op raises naturally when applied.
             applied = op(sample)
             if applied is None:
                 raise RuntimeError(
@@ -1977,8 +1944,6 @@ def _build_op_node(cls: Callable, name: str, category: str) -> Type:
         execute,
         return_names=("sample", "op", *[s["name"] for s in out_specs]),
         optional_inputs=optional,
-        accepts=_spec_to_dict(cls, "consumes"),
-        produces=_spec_to_dict(cls, "produces"),
         kind="op",
         callable_path=_safe_callable_path(cls),
         is_random=getattr(cls, "__confluid_random__", False),
@@ -2047,8 +2012,6 @@ def _build_model_node(cls: Callable, name: str, category: str) -> Type:
         execute,
         return_names=("sample", "model", *[s["name"] for s in out_specs]),
         optional_inputs=optional,
-        accepts=_spec_to_dict(cls, "consumes"),
-        produces=_spec_to_dict(cls, "produces"),
         kind="model",
         callable_path=_safe_callable_path(cls),
         is_random=getattr(cls, "__confluid_random__", False),
