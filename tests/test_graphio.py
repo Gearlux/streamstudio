@@ -131,7 +131,7 @@ def test_dataset_processor_sink_round_trips_to_yaml() -> None:
     EXISTING whole-graph converter (no graphio change): the sink imports as an object-member node
     wired into the runnable's ``sink`` slot, and re-exports as a ``!class:`` sink the role-less
     ``dataset_processor`` root references. This is what makes a canvas sink pipeline serializable."""
-    from marainer.processing import DatasetProcessor
+    from sampleflux.processing import DatasetProcessor
     from sampleflux.storage.hdf5 import HDF5Sink
 
     nm = {
@@ -957,7 +957,7 @@ def test_mnist_config_round_trip() -> None:
     wf = yaml_to_workflow(str(_MNIST_CFG), nm)
     # trainer + model + 2 sources + logger
     type_tails = {n["type"].split("_")[-1] for n in wf["nodes"]}
-    assert "LightningClassificationTrainer" in type_tails
+    assert "LightningClassifier" in type_tails
     assert "TimmModel" in type_tails
     assert sum(t == "HuggingFaceSource" for t in (n["type"].split("_")[-1] for n in wf["nodes"])) == 2
 
