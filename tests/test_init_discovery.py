@@ -287,7 +287,7 @@ class _FakeRoutes:
     def __iter__(self) -> Iterator[SimpleNamespace]:
         # When ``existing`` is True, report ALL taidal routes as already registered so the
         # skip branch of every registration block is exercised (there are several POST/GET
-        # routes now — choose_directory, export_ops, hf_datasets, node_specs).
+        # routes now — choose_directory, export_ops, hf_datasets).
         if self._existing:
             yield SimpleNamespace(path="/taidal/choose_directory", method="POST")
             yield SimpleNamespace(path="/taidal/export_ops", method="POST")
@@ -297,7 +297,6 @@ class _FakeRoutes:
             yield SimpleNamespace(path="/taidal/hf_datasets", method="GET")
             yield SimpleNamespace(path="/taidal/hf_dataset_features", method="GET")
             yield SimpleNamespace(path="/taidal/hf_dataset_splits", method="GET")
-            yield SimpleNamespace(path="/taidal/node_specs", method="GET")
 
     def post(self, path: str):  # type: ignore[no-untyped-def]
         def decorator(fn):  # type: ignore[no-untyped-def]
@@ -686,18 +685,3 @@ def test_list_hf_dataset_splits_degrades_to_empty_on_error() -> None:
     with patch.dict(sys.modules, {"datasets": fake}):
         # Must never raise — the picker is a convenience over a free-text field.
         assert fluxstudio.list_hf_dataset_splits("nonexistent/dataset") == []
-
-
-def test_node_specs_route_returns_declared_specs() -> None:
-    # The /taidal/node_specs GET handler surfaces each node's TAIDAL_ACCEPTS/PRODUCES so the
-    # canvas connection-validator can fetch them.
-    with _fake_comfy() as (routes, web):
-        assert routes.get_path == "/taidal/node_specs"
-        handler = routes.get_handler
-        assert handler is not None
-        fluxstudio.NODE_CLASS_MAPPINGS["Taidal_X"] = type(
-            "Taidal_X", (), {"TAIDAL_ACCEPTS": {"kind": "any"}, "TAIDAL_PRODUCES": None}
-        )
-        asyncio.run(handler(SimpleNamespace()))
-    data, _kwargs = web.calls[-1]
-    assert data["Taidal_X"] == {"accepts": {"kind": "any"}, "produces": None}

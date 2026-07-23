@@ -376,24 +376,6 @@ try:
             name = query.get("name") or None
             return web.json_response({"splits": list_hf_dataset_splits(path, name=name)})
 
-    # Serve each node's declared input/output type spec so the canvas connection-validator
-    # (web/connection_validator.js) can reject incompatible Sample wires live in the editor.
-    specs_route_exists = any(
-        r.path == "/taidal/node_specs" and r.method == "GET" for r in server.PromptServer.instance.routes
-    )
-    if not specs_route_exists:
-
-        @server.PromptServer.instance.routes.get("/taidal/node_specs")
-        async def node_specs_handler(request: Any) -> Any:
-            specs = {
-                node_name: {
-                    "accepts": getattr(node_cls, "TAIDAL_ACCEPTS", None),
-                    "produces": getattr(node_cls, "TAIDAL_PRODUCES", None),
-                }
-                for node_name, node_cls in NODE_CLASS_MAPPINGS.items()
-            }
-            return web.json_response(specs)
-
     # Compile the current canvas's ops into Confluid YAML op-lists (drops the source +
     # Walk/Extract adapters) so they can be reattached to any source via
     # ``Flux.from_ops_yaml`` / ``confluid.materialize(confluid.load(path)["ops"])``.

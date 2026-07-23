@@ -510,14 +510,9 @@ A HuggingFace dataset source's identifier is a **name**, not a folder — `sampl
 
 Each widget's hover tooltip is sourced from the wrapped callable's docstring `Args:` block (parsed by `confluid.parse_param_docs`) — the **same** per-parameter help [navigaitor](https://github.com/Gearlux/navigaitor) surfaces as JSON-Schema `description`s in its visual editor. Document a constructor parameter once in the upstream class's `Args:` and it shows up in both GUIs. A parameter with no `Args:` entry simply has no tooltip; the fix is to document it in sampleflux / waivefront, never to hand-write a tooltip in FluxStudio.
 
-## Connection filtering
+## Connection typing
 
-Every `Sample` wire keeps the single `SAMPLEFLUX_SAMPLE` socket string (so any op *can* be wired and the pipeline still chains). The richer SampleFlux type contract — declared as `ACCEPTS` / `PRODUCES` on each op/source in sampleflux/waivefront (see *SampleFlux → Type Specs*) — is layered on top to filter incompatible connections, two ways:
-
-- **Runtime (authoritative):** a generated op node's `execute()` checks the actual incoming sample against the op's `ACCEPTS` and raises a clear `expects … but got …` error on a mismatch.
-- **Canvas (advisory):** `web/connection_validator.js` fetches each node's spec from the `/taidal/node_specs` route and rejects an incompatible Sample wire live in the editor (via litegraph's `onConnectInput`). It is a faithful port of `sampleflux.typespec.compatible()` — permissive, so un-annotated ops (spec `None`) connect freely. Drag-drop only; graph-load wiring falls back to the runtime check.
-
-Specs come exclusively from sampleflux/waivefront — to fix or add a contract, edit the op's `ACCEPTS`/`PRODUCES` there, not here.
+Every `Sample` wire keeps the single `SAMPLEFLUX_SAMPLE` socket string, so any op *can* be wired and the pipeline still chains. The typed bag is self-describing — each field carries its own item type — so an op that receives an incompatible sample raises naturally when it is applied at execution; there is no separate connection-time type filter.
 
 ## Dependencies
 

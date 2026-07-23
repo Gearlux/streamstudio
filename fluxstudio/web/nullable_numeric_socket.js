@@ -59,7 +59,7 @@ app.registerExtension({
 
         // Just-in-time: when a wire is dragged onto one of these inputs, ensure the slot carries the
         // numeric type BEFORE litegraph's type-equality check, so a numeric output connects. Chains the
-        // previous onConnectInput (e.g. web/connection_validator.js) and respects any block it returns.
+        // previous onConnectInput (if any other extension defines one) and respects any block it returns.
         const onConnectInput = nodeType.prototype.onConnectInput;
         nodeType.prototype.onConnectInput = function (inputIndex) {
             const inp = this.inputs && this.inputs[inputIndex];
