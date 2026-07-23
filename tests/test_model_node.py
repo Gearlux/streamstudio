@@ -10,7 +10,7 @@ from typing import Optional, cast
 import pytest
 from confluid import configurable
 from confluid.decorators import output
-from sampleflux.sample import Sample
+from sampleflux import Sample
 
 from fluxstudio.bridge import (
     _NODE_CATEGORIES,

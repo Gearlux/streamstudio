@@ -42,6 +42,56 @@ logger = get_logger(__name__)
 _FLUXSTUDIO_CATEGORY = "/".join(p for p in (node_root(), "FluxStudio") if p)
 
 
+def _primary_field_value(sample: Any, role: str) -> Any:
+    """The primary ``input``/``target`` payload of a typed :class:`~sampleflux.Sample`, or ``None``.
+
+    A :class:`~sampleflux.Label` yields its ``.value``; an array item yields its payload."""
+    from sampleflux import Label, item_data, primary
+
+    try:
+        _, item = primary(sample, role)
+    except KeyError:
+        return None
+    if isinstance(item, Label):
+        return item.value
+    return item_data(item)
+
+
+def _sample_meta_dict(sample: Any) -> Dict[str, Any]:
+    """The free-form metadata dict — a typed bag's ``aux`` fields (the removed ``Sample.metadata``)."""
+    if hasattr(sample, "aux"):
+        return dict(sample.aux())
+    return getattr(sample, "metadata", None) or {}
+
+
+def _mix_typed_samples(input_sample: Any, target_sample: Any, metadata_sample: Any, *, merge_all: bool = True) -> Any:
+    """Build a typed :class:`~sampleflux.Sample` taking the input field from ``input_sample``, the target
+    field from ``target_sample``, and aux metadata from ``metadata_sample`` (``merge_all=True`` unions all
+    three, input lowest priority) — the typed-bag replacement for the removed ``Sample._replace``."""
+    from sampleflux import Sample, primary
+
+    fields: Dict[str, Any] = {}
+    roles: Dict[str, str] = {}
+    try:
+        ik, iitem = primary(input_sample, "input")
+        fields[ik] = iitem
+        roles[ik] = "input"
+    except KeyError:
+        pass
+    try:
+        tk, titem = primary(target_sample, "target")
+        fields[tk] = titem
+        roles[tk] = "target"
+    except KeyError:
+        pass
+    meta_sources = (input_sample, target_sample, metadata_sample) if merge_all else (metadata_sample,)
+    for src in meta_sources:
+        for key, value in _sample_meta_dict(src).items():
+            fields[key] = value
+            roles[key] = "aux"
+    return Sample(fields, roles)
+
+
 def _colormap_choices() -> List[str]:
     """The colormap dropdown options — the closed ``waivefront.visualizers.Colormap`` set.
 
@@ -201,7 +251,7 @@ class SampleExtractorNode:
                 "not need to run during a pipeline execution; wire it to a live source to preview, "
                 "or move it off the compiled op path."
             )
-        value = sample.input if field == "input" else sample.target
+        value = _primary_field_value(sample, "input" if field == "input" else "target")
         spec = self._field_spec(sample, field, value)
         scalar = self._scalar(value)
         image = self._to_image(value, colormap, max_size)
@@ -229,14 +279,20 @@ class SampleExtractorNode:
 
     @staticmethod
     def _field_spec(sample: Any, field: str, value: Any) -> Any:
-        """The selected field's TypeSpec — from declared features, else inferred from the value."""
-        from sampleflux.typespec import infer_type
+        """A short descriptor of the field — the typed-bag item's class name (``Image`` / ``Mask`` /
+        ``Regions`` / ``Label`` / ``NDArrayItem``), else the raw value's Python type name.
 
+        The typed bag is self-describing (each field carries its item type), so the descriptor comes
+        straight off the primary item's class — the removed ``Sample.describe()`` / ``infer_type``
+        ``TypeSpec`` model is gone."""
+        from sampleflux import primary
+
+        role = "input" if field == "input" else "target"
         try:
-            described = sample.describe()
-            return described.input if field == "input" else described.target
-        except Exception:  # pragma: no cover - defensive: malformed stored type metadata
-            return infer_type(value)
+            _, item = primary(sample, role)
+            return type(item).__name__
+        except KeyError:
+            return type(value).__name__
 
     @staticmethod
     def _scalar(value: Any) -> Optional[float]:
@@ -314,7 +370,7 @@ class SampleExtractorNode:
         if isinstance(value, str):
             return value
         if scalar is not None:
-            label = (sample.metadata or {}).get("label_name") if field == "target" else None
+            label = _sample_meta_dict(sample).get("label_name") if field == "target" else None
             n: Any = int(scalar) if float(scalar).is_integer() else scalar
             return f"{label} (id={n})" if label is not None else str(n)
         # Lists and dicts: show full content as YAML so bounding-box annotations, metadata
@@ -500,9 +556,7 @@ class ExtractMetadataNode:
                 "Extract from Metadata received an empty sample (None) — its upstream op produced no "
                 "sample. Wire it to a live source / model output to read metadata."
             )
-        meta = getattr(sample, "meta", None)
-        if meta is None:
-            meta = getattr(sample, "metadata", {}) or {}
+        meta = _sample_meta_dict(sample)
         value = meta.get(key) if hasattr(meta, "get") else None
         array_val = SampleExtractorNode._to_array(value)  # PIL→ndarray; tensor/ndarray/list pass verbatim
         text = "" if value is None else repr(value)
@@ -1131,10 +1185,7 @@ class ComposeSampleNode:
         }
 
     def compose(self, input_sample: Any, target_sample: Any, metadata_sample: Any) -> Tuple[Any, ...]:
-        result = input_sample._replace(
-            target=target_sample.target,
-            metadata=metadata_sample.metadata,
-        )
+        result = _mix_typed_samples(input_sample, target_sample, metadata_sample, merge_all=False)
         return (result,)
 
 
@@ -1167,13 +1218,7 @@ class MixSamplesNode:
         }
 
     def mix(self, input_sample: Any, target_sample: Any, metadata_sample: Any) -> Tuple[Any, ...]:
-        m1 = input_sample.metadata if isinstance(input_sample.metadata, dict) else {}
-        m2 = target_sample.metadata if isinstance(target_sample.metadata, dict) else {}
-        m3 = metadata_sample.metadata if isinstance(metadata_sample.metadata, dict) else {}
-        result = input_sample._replace(
-            target=target_sample.target,
-            metadata={**m1, **m2, **m3},
-        )
+        result = _mix_typed_samples(input_sample, target_sample, metadata_sample)
         return (result,)
 
 

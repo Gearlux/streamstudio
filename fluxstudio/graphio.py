@@ -46,7 +46,7 @@ from sampleflux.discovery import resolve_callable
 from sampleflux.ops.configure import ConfigureOp
 from sampleflux.ops.context import Apply as CtxApply
 from sampleflux.ops.context import Capture as CtxCapture
-from sampleflux.ops.context import Mix as CtxMix
+from sampleflux.ops.context import MergeFields as CtxMix
 from sampleflux.ops.context import Save as CtxSave
 from sampleflux.ops.context import Use as CtxUse
 from sampleflux.ops.formula import FormulaOp
