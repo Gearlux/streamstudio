@@ -21,7 +21,7 @@ import re
 import string
 import sys
 import threading
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
+from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Tuple, Type
 
 import numpy as np
 import torch
@@ -35,6 +35,9 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+# The closed set of typed-bag field roles (mirrors ``sampleflux.Sample`` role literals).
+SampleRole = Literal["input", "target", "aux", "pred"]
+
 # Palette folder for the hand-written adapter nodes. Mirrors the auto-discovered nodes' root: nested
 # under ``Taidal/`` by default, or at the palette root (``FluxStudio``) when the CLI's
 # ``--no-default-nodes`` flag is active (see bridge.node_root). Computed at import — the CLI exports
@@ -42,7 +45,7 @@ logger = get_logger(__name__)
 _FLUXSTUDIO_CATEGORY = "/".join(p for p in (node_root(), "FluxStudio") if p)
 
 
-def _primary_field_value(sample: Any, role: str) -> Any:
+def _primary_field_value(sample: Any, role: Literal["input", "target"]) -> Any:
     """The primary ``input``/``target`` payload of a typed :class:`~sampleflux.Sample`, or ``None``.
 
     A :class:`~sampleflux.Label` yields its ``.value``; an array item yields its payload."""
@@ -71,7 +74,7 @@ def _mix_typed_samples(input_sample: Any, target_sample: Any, metadata_sample: A
     from sampleflux import Sample, primary
 
     fields: Dict[str, Any] = {}
-    roles: Dict[str, str] = {}
+    roles: Dict[str, SampleRole] = {}
     try:
         ik, iitem = primary(input_sample, "input")
         fields[ik] = iitem
@@ -287,7 +290,7 @@ class SampleExtractorNode:
         ``TypeSpec`` model is gone."""
         from sampleflux import primary
 
-        role = "input" if field == "input" else "target"
+        role: Literal["input", "target"] = "input" if field == "input" else "target"
         try:
             _, item = primary(sample, role)
             return type(item).__name__

@@ -4,7 +4,7 @@ Discovered callables are classified into three node shapes so a real pipeline ca
 wired on the ComfyUI canvas — instead of every socket collapsing to ``STRING``:
 
 * **Source** — a class whose ``__getitem__`` / ``__iter__`` yields a
-  :class:`sampleflux.sample.Sample` (e.g. ``HuggingFaceSource``). The node exposes the
+  :class:`sampleflux.Sample` (e.g. ``HuggingFaceSource``). The node exposes the
   constructor config as widgets and outputs a ``SAMPLEFLUX_SOURCE`` (a
   :class:`sampleflux.core.Flux` wrapping the constructed source). The engines / view-sources
   (``DatasetSplit`` / ``Flux`` / ``JointFlux``) are the same shape, but their source-typed
@@ -61,8 +61,8 @@ import datasets
 from annotated_types import Ge, Gt, Interval, Le, Lt
 from confluid import mandatory_param_names, output_specs, parse_param_docs
 from loggair import get_logger
-from sampleflux.discovery import get_callable_path, resolve_callable, scan_module
 from sampleflux import Sample as _Sample
+from sampleflux.discovery import get_callable_path, resolve_callable, scan_module
 
 logger = get_logger(__name__)
 
@@ -1722,8 +1722,8 @@ def _node_class(
     return_types: Tuple[str, ...],
     execute: Callable,
     return_names: Optional[Tuple[str, ...]] = None,
-    accepts: Optional[Dict[str, Any]] = None,
-    produces: Optional[Dict[str, Any]] = None,
+    accepts: Optional[List[str]] = None,
+    produces: Optional[List[str]] = None,
     kind: Optional[str] = None,
     callable_path: Optional[str] = None,
     optional_inputs: Optional[Dict[str, Any]] = None,
@@ -1740,8 +1740,9 @@ def _node_class(
     is folded into ``INPUT_TYPES`` (e.g. ``{"unique_id": "UNIQUE_ID"}`` so a runnable node can address
     its own live-output widget). Most generated nodes pass neither.
 
-    ``accepts`` / ``produces`` are the source callable's declared ``SampleType.to_dict()`` (or
-    ``None``); they ride on the node class as ``TAIDAL_ACCEPTS`` / ``TAIDAL_PRODUCES`` so the
+    ``accepts`` / ``produces`` are the source callable's declared item-type names (the typed-surface
+    ``consumes`` / ``produces`` contract, via :func:`_spec_to_dict`, or ``None``); they ride on the
+    node class as ``TAIDAL_ACCEPTS`` / ``TAIDAL_PRODUCES`` so the
     ``/taidal/node_specs`` route and the canvas connection-validator can read them. They do NOT change
     the ComfyUI socket strings (every Sample wire stays ``SAMPLEFLUX_SAMPLE`` so the pipeline still chains).
 

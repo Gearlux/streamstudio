@@ -33,9 +33,7 @@ class _FakeModel:
         self.k = k
 
     def __call__(self, sample: Sample) -> Sample:
-        meta = dict(sample.meta)
-        meta["detection_labels"] = ["WLAN"]
-        return sample._replace(metadata=meta)
+        return sample.replace_field("detection_labels", ["WLAN"]).set_role("detection_labels", "aux")
 
 
 @configurable(category="model")
@@ -91,9 +89,9 @@ def test_model_object_socket_is_role_qualified() -> None:
 
 def test_model_node_execute_applies_and_returns_model() -> None:
     node = create_comfy_node(_FakeModel, "Taidal__FakeModel")()
-    s = Sample(input=1, target=None, metadata={})
+    s = Sample({"input": 1}, roles={"input": "input"})
     applied, model = node.execute(sample=s, model_uri="maf:/X/1.0", k=3)["result"]
-    assert applied.metadata["detection_labels"] == ["WLAN"]  # inference ran
+    assert applied.aux()["detection_labels"] == ["WLAN"]  # inference ran
     assert isinstance(model, _FakeModel)  # the model object is the second output
     assert model.model_uri == "maf:/X/1.0" and model.k == 3
 
@@ -108,7 +106,7 @@ def test_model_node_without_sample_returns_model_only() -> None:
 def test_model_node_raises_on_none_result() -> None:
     node = create_comfy_node(_NoneModel, "Taidal__NoneModel")()
     with pytest.raises(RuntimeError):
-        node.execute(sample=Sample(input=1, target=None, metadata={}))
+        node.execute(sample=Sample({"input": 1}, roles={"input": "input"}))
 
 
 # --------------------------------------------------- wired model input (ModelInference decoupling)
@@ -133,10 +131,10 @@ def test_model_input_param_is_wired_socket_not_widget() -> None:
 def test_model_node_wires_model_and_delegates() -> None:
     inference = create_comfy_node(_FakeInference, "Taidal__FakeInference")()
     loader = _FakeModel(model_uri="maf:/X/1.0")  # a Loader node's model output (a model object)
-    s = Sample(input=1, target=None, metadata={})
+    s = Sample({"input": 1}, roles={"input": "input"})
     applied, model_obj = inference.execute(sample=s, model=loader, threshold=0.7)["result"]
     # The wired model ran inference (delegated through _FakeInference.__call__ → loader).
-    assert applied.metadata["detection_labels"] == ["WLAN"]
+    assert applied.aux()["detection_labels"] == ["WLAN"]
     assert isinstance(model_obj, _FakeInference)  # the node outputs ITSELF as the model object
     assert model_obj.model is loader and model_obj.threshold == 0.7  # wired model set, widget coerced
 

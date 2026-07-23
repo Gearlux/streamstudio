@@ -73,8 +73,7 @@ from confluid.fluid import Class, Instance, Reference
 from loggair import get_logger
 from sampleflux.discovery import resolve_callable
 from sampleflux.ops.configure import ConfigureOp
-from sampleflux.ops.context import Apply, Capture, Save, Use
-from sampleflux.ops.context import MergeFields as Mix
+from sampleflux.ops.context import Apply, Capture, MergeFields, Save, Use
 from sampleflux.ops.formula import FormulaOp
 from sampleflux.ops.transform_chain import TransformChain
 
@@ -1248,10 +1247,13 @@ def _compile_component(
             _emit(pred)
         if universe[nid] == "mix":
             (_, x), (_, y), (_, z) = preds[nid]
+            # NOTE: deferred Mix->MergeFields compiler port. This still emits the legacy 3-cell
+            # ``input_from``/``target_from``/``metadata_from`` cell kwargs; the field-union
+            # ``MergeFields(sources, keys, drop)`` semantics port is not yet done (see graphio.py).
             ops_out.append(
                 _marker(
                     Instance,
-                    Mix,
+                    MergeFields,
                     {"input_from": _cell(x), "target_from": _cell(y), "metadata_from": _cell(z)},
                 )
             )
@@ -1281,7 +1283,7 @@ def _compile_component(
             continue
         if op.target is Use:
             reads.setdefault(str(op.kwargs.get("name")), []).append(i)
-        elif op.target is Mix:
+        elif op.target is MergeFields:
             for slot in ("input_from", "target_from", "metadata_from"):
                 cell = op.kwargs.get(slot)
                 if cell:
@@ -1297,7 +1299,7 @@ def _compile_component(
             drops = [c for c in (last.kwargs.get("drop") or [])]
             if cell not in drops:
                 drops.append(cell)
-            ops_out[i] = _marker(Instance, Mix, {**last.kwargs, "drop": drops})
+            ops_out[i] = _marker(Instance, MergeFields, {**last.kwargs, "drop": drops})
 
     # A Save whose cell is never read (defensive — a conservatively-forked node whose
     # extra consumers all rode the stream) would leak; drop such Saves outright.
@@ -1312,7 +1314,7 @@ def _compile_component(
         )
     ]
 
-    inserted = sum(1 for op in ops_out if isinstance(op, Instance) and op.target in (Save, Use, Mix))
+    inserted = sum(1 for op in ops_out if isinstance(op, Instance) and op.target in (Save, Use, MergeFields))
     if inserted:
         fold.notes.append(
             f"branching canvas wiring compiled to a sequential op-list — {inserted} context ops "
