@@ -1,6 +1,6 @@
 """Dual-mode runnable nodes + SAMPLEFLUX_RUNNABLE input sockets (workflow combinators, Phase B).
 
-A workflow COMBINATOR (marainer.workflow Sequence / Conditional / Switch) is a runnable that HOLDS
+A workflow COMBINATOR (sampleflux.workflow Sequence / Conditional / Switch) is a runnable that HOLDS
 other runnables. FluxStudio renders its runnable-typed members as SAMPLEFLUX_RUNNABLE input sockets
 (single, or a dynamic ``<name>_N`` family), and a runnable node feeding such a socket switches to
 INSTANCE mode (built, not run) so the combinator runs the selected branch — no double-run.

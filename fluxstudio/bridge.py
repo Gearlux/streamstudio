@@ -160,7 +160,7 @@ def _is_socket_type(socket_type: Any) -> bool:
 
 # A runnable's constructor params / body slots that hold a DATASET / SOURCE / FLUX — rendered as a
 # wired ``SAMPLEFLUX_SOURCE`` socket (fed by a Source / ``Flux`` engine node) instead of a STRING
-# widget. ``flux`` covers ``marainer.processing.DatasetProcessor`` (its sole non-sink input is the
+# widget. ``flux`` covers ``sampleflux.processing.DatasetProcessor`` (its sole non-sink input is the
 # ``Flux`` to write); ``source`` is also handled by ``_SOURCE_PARAM``. Detected by name (same
 # convention as the op/source-list params); a runnable's other object members ride ``SAMPLEFLUX_OBJECT``
 # sockets.
@@ -171,7 +171,7 @@ _DATASET_MEMBER_PARAMS = {"train_set", "val_set", "test_set", "dataset", "flux"}
 # fed into the ``pytorch_lightning.Trainer`` ``logger`` slot). Datasets are SOURCE nodes (role
 # ``"dataset"`` is routed to ``_build_source_node``), not object nodes. The role-less runtime members
 # (``torch.optim.*`` / ``DataLoader`` / ``pytorch_lightning.Trainer``, registered in
-# ``marainer.configurables``) are detected instead by the confluid **``lazy`` mark**
+# ``marainer.lightning.configurables``) are detected instead by the confluid **``lazy`` mark**
 # (``__confluid_lazy__``) — deliberately NOT a category, so they don't leak into navigaitor's
 # form-spec slot pickers (which resolve a picker FROM the slot's default-target category and would
 # then offer the raw ``params``-taking optimizer). Loggers carry ``role="logger"`` (NOT ``lazy``) so
@@ -306,7 +306,7 @@ _SOURCE_LIST_PARAMS = {"fluxes", "sources"}
 # DatasetProcessor / nested combinator), rendered as ``SAMPLEFLUX_RUNNABLE`` INPUT sockets instead of a
 # generic ``SAMPLEFLUX_OBJECT`` socket — the consuming half of the dual-mode runnable node. SINGLE-runnable
 # params get one socket each; LIST params get a dynamic ``<name>_N`` family grown by ``web/runnable_list.js``
-# (collected by :func:`_collect_indexed`). marainer.workflow's ``Conditional.if_true``/``if_false`` +
+# (collected by :func:`_collect_indexed`). sampleflux.workflow's ``Conditional.if_true``/``if_false`` +
 # ``Switch.default`` (single) and ``Sequence.steps`` (list). Detected by NAME (like ``_OP_LIST_PARAMS`` /
 # ``_SINGLE_OP_PARAMS``), never per-class — a combinator HOLDS runnables and runs the selected one(s).
 _RUNNABLE_PARAMS = {"if_true", "if_false", "default"}
@@ -2769,8 +2769,8 @@ def register_module_nodes(
     1. ``scan_module(module_path)`` — module-local callables (functions + locally-defined classes).
     2. ``@configurable`` classes listed in the module's ``__all__`` — its deliberate public exports,
        regardless of ``__module__``. This surfaces a package's re-exported runnables / models /
-       datasets (``sonair`` re-exports ``LightningClassificationTrainer`` from ``sonair.trainer``)
-       AND registered third-party members (``marainer.configurables``'s ``torch`` optimizers /
+       datasets (``sonair`` re-exports ``LightningClassifier`` from ``sonair.classifier``)
+       AND registered third-party members (``marainer.lightning.configurables``'s ``torch`` optimizers /
        ``DataLoader`` / ``pl.Trainer``). Gated on ``__all__`` so a module's imported-for-use
        configurables (not re-exported) don't leak into the palette.
 

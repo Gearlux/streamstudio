@@ -3,7 +3,7 @@ import { app } from "../../scripts/app.js";
 console.log("ComfyFlux: Loaded Taidal.RunnableListInputs extension");
 
 // Dynamic runnable-list inputs for a workflow COMBINATOR node whose constructor takes a LIST of
-// runnables (marainer.workflow.Sequence's `steps` — tagged by a seed `<name>_0` input of type
+// runnables (sampleflux.workflow.Sequence's `steps` — tagged by a seed `<name>_0` input of type
 // SAMPLEFLUX_RUNNABLE in bridge._build_runnable_node, via _RUNNABLE_LIST_PARAMS). Wire a trainer /
 // evaluator / nested-combinator node's `runnable` output into `steps_0`; a fresh `steps_1` slot
 // appears, and so on — so you build the workflow step list visually. The Python side
