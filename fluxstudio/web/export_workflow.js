@@ -8,7 +8,7 @@ console.log("ComfyFlux: Loaded Taidal.ExportWorkflow extension");
 // runnable, and their wiring — not just the op chain that "Export Taidal Ops" handles) and converts
 // it to a hoisted-!ref: Confluid YAML server-side via fluxstudio.graphio.workflow_to_yaml, then
 // downloads it. The output matches the navigaitor / hand-written reference config shape, so it runs
-// directly with `marainer train -c config.yaml`.
+// directly with `sampleflux run config.yaml`.
 
 function downloadYaml(text, filename) {
     const blob = new Blob([text], { type: "text/yaml" });

@@ -960,7 +960,7 @@ def run_runnable(runnable: Any, unique_id: Optional[str] = None) -> str:
     holder: Dict[str, BaseException] = {}
 
     # Native ComfyUI per-node progress bar (the green overlay). A runnable that supports the
-    # comfy-free marainer.progress.ProgressReporting protocol records its latest (value, total) into
+    # comfy-free sampleflux.runnable.ProgressReporting protocol records its latest (value, total) into
     # `progress` from the WORKER thread (just a dict write); the poll loop below drives the ProgressBar
     # from THIS (calling) thread — so all websocket I/O stays on the same thread as _send_run_output,
     # with no new cross-thread send concerns. Absent comfy / no unique_id ⇒ progress_bar is None.

@@ -2240,8 +2240,8 @@ def _assign_ref_names(
     used: Dict[str, int] = {}
     for nid in specs:
         cls = specs[nid][0]
-        # A runnable root is named by its confluid role (trainer / evaluator) — the marainer CLI
-        # bind key, so the exported YAML is directly runnable (`marainer train -c …`).
+        # A runnable root is named by its confluid role (trainer / evaluator) — the config
+        # bind key, so the exported YAML is directly runnable (`sampleflux run …`).
         role = getattr(cls, "__confluid_role__", None)
         if nid not in fed_as and role in ("trainer", "evaluator"):
             base = role
