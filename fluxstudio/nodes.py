@@ -1,10 +1,11 @@
-"""Static ComfyUI adapter nodes for FluxStudio: walk a SampleFlux source by index, and extract a Sample.
+"""Static ComfyUI adapter nodes for FluxStudio: walk a SampleFlux source by index, and extract a record key.
 
 These are ComfyUI orchestration/adapter glue — NOT SampleFlux data ops — so they live here rather
-than in sampleflux / waivefront. ``SampleExtractorNode`` unpacks a ``Sample``'s ``input`` / ``target``
-onto statically-typed ComfyUI sockets (IMAGE / MASK / STRING / INT / FLOAT) so it wires into NATIVE
-ComfyUI viewers (Preview Image, a text node, …) instead of a bespoke in-canvas viewer — the relevant
-type is derived from the sample's declared/inferred features (``Sample.describe()``). The actual
+than in sampleflux / waivefront. A sample is a PLAIN dict (``sampleflux.items.Record``) of typed
+items; ``SampleExtractorNode`` unpacks one record entry (a ``field`` key, with ``input``/``target``
+falling back to a key-preference scan) onto statically-typed ComfyUI sockets (IMAGE / MASK / STRING /
+INT / FLOAT) so it wires into NATIVE ComfyUI viewers (Preview Image, a text node, …) instead of a
+bespoke in-canvas viewer — the relevant type is derived from the entry's item class. The actual
 image rendering is delegated to ``waivefront.visualizers.value_to_image`` (per the "no
 FluxStudio-only visualizers" mandate); this module only bridges to ComfyUI's tensor protocols and
 provides the index-walk stepper.
@@ -21,7 +22,7 @@ import re
 import string
 import sys
 import threading
-from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Tuple, Type
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
 
 import numpy as np
 import torch
@@ -35,64 +36,93 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-# The closed set of typed-bag field roles (mirrors ``sampleflux.Sample`` role literals).
-SampleRole = Literal["input", "target", "aux", "pred"]
-
 # Palette folder for the hand-written adapter nodes. Mirrors the auto-discovered nodes' root: nested
 # under ``Taidal/`` by default, or at the palette root (``FluxStudio``) when the CLI's
 # ``--no-default-nodes`` flag is active (see bridge.node_root). Computed at import — the CLI exports
 # the env var before launching ComfyUI, so it is set by the time this module is imported.
 _FLUXSTUDIO_CATEGORY = "/".join(p for p in (node_root(), "FluxStudio") if p)
 
+# Key-preference scan backing the legacy ``input`` / ``target`` field selections: a record is a
+# plain dict with NO role tags, so the conventional key names carry the meaning (exactly like every
+# torch batch dict). ``input`` falls back to the record's FIRST key, ``target`` to its SECOND.
+_KEY_PREFERENCES: Dict[str, Tuple[str, ...]] = {
+    "input": ("input", "image", "signal", "iq"),
+    "target": ("target", "label", "mask", "class"),
+}
 
-def _primary_field_value(sample: Any, role: Literal["input", "target"]) -> Any:
-    """The primary ``input``/``target`` payload of a typed :class:`~sampleflux.Sample`, or ``None``.
+# Every conventional primary-entry name — the record keys the Mix/Compose nodes treat as
+# input/target payloads rather than metadata. A record has no role tags, so METADATA is defined
+# as "every key not conventionally named as a primary" (a positional fallback pick must NOT
+# exclude ordinary metadata keys from the union — only the name convention does).
+_ALL_PRIMARY_NAMES = frozenset(_KEY_PREFERENCES["input"]) | frozenset(_KEY_PREFERENCES["target"])
 
-    A :class:`~sampleflux.Label` yields its ``.value``; an array item yields its payload."""
-    from sampleflux import Label, item_data, primary
 
-    try:
-        _, item = primary(sample, role)
-    except KeyError:
+def _resolve_field_key(record: Any, field: str) -> Optional[str]:
+    """Resolve a ``field`` selection to an actual record KEY, or ``None``.
+
+    ``field`` names a record key directly; the legacy ``input`` / ``target`` selections (or a name
+    not present in the record) fall back to the :data:`_KEY_PREFERENCES` scan — ``input`` → the
+    first of ``input``/``image``/… else the record's FIRST key; ``target`` → ``target``/``label``/…
+    else the record's SECOND key (``None`` for a single-entry record). ``None`` for an empty /
+    non-dict carrier or an unknown non-role name, so a typo degrades gracefully.
+    """
+    if not isinstance(record, dict) or not record:
         return None
+    if field in record:
+        return field
+    for pref in _KEY_PREFERENCES.get(field, ()):
+        if pref in record:
+            return pref
+    keys = list(record.keys())
+    if field == "input":
+        return keys[0]
+    if field == "target":
+        return keys[1] if len(keys) > 1 else None
+    return None
+
+
+def _field_payload(record: Any, key: Optional[str]) -> Any:
+    """The payload behind ``record[key]``: a :class:`~sampleflux.Label` yields its ``.value``, any
+    other typed item its ``item_data`` payload, a plain value passes through. ``None`` when absent."""
+    from sampleflux import Label, item_data
+
+    if key is None or not isinstance(record, dict):
+        return None
+    item = record.get(key)
     if isinstance(item, Label):
         return item.value
     return item_data(item)
 
 
-def _sample_meta_dict(sample: Any) -> Dict[str, Any]:
-    """The free-form metadata dict — a typed bag's ``aux`` fields (the removed ``Sample.metadata``)."""
-    if hasattr(sample, "aux"):
-        return dict(sample.aux())
-    return getattr(sample, "metadata", None) or {}
+def _mix_records(
+    input_record: Any, target_record: Any, metadata_record: Any, *, merge_all: bool = True
+) -> Dict[str, Any]:
+    """Build a new record dict: the primary-input entry from ``input_record``, the target entry from
+    ``target_record``, and the remaining (metadata-like) entries from ``metadata_record`` —
+    ``merge_all=True`` unions the non-primary entries of all three (input lowest priority).
 
-
-def _mix_typed_samples(input_sample: Any, target_sample: Any, metadata_sample: Any, *, merge_all: bool = True) -> Any:
-    """Build a typed :class:`~sampleflux.Sample` taking the input field from ``input_sample``, the target
-    field from ``target_sample``, and aux metadata from ``metadata_sample`` (``merge_all=True`` unions all
-    three, input lowest priority) — the typed-bag replacement for the removed ``Sample._replace``."""
-    from sampleflux import Sample, primary
-
-    fields: Dict[str, Any] = {}
-    roles: Dict[str, SampleRole] = {}
-    try:
-        ik, iitem = primary(input_sample, "input")
-        fields[ik] = iitem
-        roles[ik] = "input"
-    except KeyError:
-        pass
-    try:
-        tk, titem = primary(target_sample, "target")
-        fields[tk] = titem
-        roles[tk] = "target"
-    except KeyError:
-        pass
-    meta_sources = (input_sample, target_sample, metadata_sample) if merge_all else (metadata_sample,)
+    A sample is a plain dict with no role tags, so "input"/"target" resolve via the same
+    key-preference scan the extractor uses (:func:`_resolve_field_key`) and "metadata" is every
+    key NOT conventionally named as a primary (:data:`_ALL_PRIMARY_NAMES` — an unconventionally
+    named primary rides the metadata union, the price of a tag-less carrier). The chosen
+    input/target entries are written LAST, so the node contract ("input comes from
+    ``input_record``") always holds on a key collision.
+    """
+    out: Dict[str, Any] = {}
+    ik = _resolve_field_key(input_record, "input")
+    tk = _resolve_field_key(target_record, "target")
+    meta_sources = (input_record, target_record, metadata_record) if merge_all else (metadata_record,)
     for src in meta_sources:
-        for key, value in _sample_meta_dict(src).items():
-            fields[key] = value
-            roles[key] = "aux"
-    return Sample(fields, roles)
+        if not isinstance(src, dict):
+            continue
+        for key, value in src.items():
+            if key not in _ALL_PRIMARY_NAMES:
+                out[key] = value
+    if ik is not None and isinstance(input_record, dict):
+        out[ik] = input_record[ik]
+    if tk is not None and isinstance(target_record, dict):
+        out[tk] = target_record[tk]
+    return out
 
 
 def _colormap_choices() -> List[str]:
@@ -122,7 +152,7 @@ _INDEX_CONTROL_DEFAULT = "increment"
 
 
 class WalkDatasetNode:
-    """Emit the ``Sample`` at ``index`` from a ``SAMPLEFLUX_SOURCE``; ``index`` auto-increments each run.
+    """Emit the sample record at ``index`` from a ``SAMPLEFLUX_SOURCE``; ``index`` auto-increments each run.
 
     The ``index`` widget uses ComfyUI's ``control_after_generate``, defaulting to **increment** so every
     Queue Prompt advances to the next sample in order (set the control to "fixed" / index 0 to reset, or
@@ -179,17 +209,18 @@ class WalkDatasetNode:
 
 
 class SampleExtractorNode:
-    """Unpack a ``Sample``'s ``input`` or ``target`` onto typed ComfyUI sockets.
+    """Unpack one entry of a sample record (a plain dict) onto typed ComfyUI sockets.
 
-    Takes a ``SAMPLEFLUX_SAMPLE`` and a ``field`` selector (``input`` / ``target``) and
+    Takes a ``SAMPLEFLUX_SAMPLE`` (a record dict) and a ``field`` KEY — type any record key;
+    the legacy ``input`` / ``target`` selections fall back to a key-preference scan
+    (``input``/``image``/… else the first key; ``target``/``label``/… else the second) — and
     exposes the selected value on several statically-typed outputs — ``IMAGE``,
     ``MASK``, ``STRING``, ``INT``, ``FLOAT``, ``SAMPLEFLUX_ARRAY`` — so you wire the one
     your viewer / consumer expects (Preview Image, a text node, a math node, the
     **Array / Tensor Histogram** viewer, …). ComfyUI types sockets statically, so
     rather than retype one socket per run we surface every plausible type; which one
-    is meaningful is *derived from the sample's features* (``Sample.describe()`` —
-    stored ``__features__`` / ``__spec__`` when present, else inferred from the live
-    value):
+    is meaningful is *derived from the entry's item class* (``Image`` / ``Mask`` /
+    ``Regions`` / ``Label`` / …, else the live value's Python type):
 
     * ``IMAGE`` — the field rendered via ``waivefront.visualizers.value_to_image``
       (PIL / tensor / 2-D map → ``[1, H, W, 3]`` float in ``[0, 1]``). A non-visual
@@ -227,7 +258,10 @@ class SampleExtractorNode:
         return {
             "required": {
                 "sample": (SAMPLE_TYPE,),
-                "field": (["input", "target"], {"default": "input"}),
+                # A free-text record KEY (the record model has no closed role set). The default
+                # ``input`` — like a saved canvas's ``input``/``target`` combo value — resolves
+                # via the key-preference scan (see _resolve_field_key), so old canvases keep working.
+                "field": ("STRING", {"default": "input"}),
                 # A combo (enumeration), not free text — the closed waivefront ``Colormap`` set, so the
                 # dropdown can only offer colormaps ``value_to_image`` actually accepts. Single source of
                 # truth: the options come from ``COLORMAPS`` (== ``get_args(Colormap)``).
@@ -244,9 +278,9 @@ class SampleExtractorNode:
         max_size: int = 512,
     ) -> Tuple[Any, ...]:
         if sample is None:
-            # A required input arriving as None means the upstream op produced no sample (e.g. an
+            # A required input arriving as None means the upstream op produced no record (e.g. an
             # op chain executed with no source feeding it). Fail with a legible message instead of
-            # an opaque ``AttributeError: 'NoneType' object has no attribute 'input'``.
+            # an opaque ``AttributeError`` / ``KeyError`` downstream.
             raise ValueError(
                 "Extract from Sample received an empty sample (None) — its upstream op produced no "
                 "sample, which usually means the op chain ran with no source. If this viewer sits "
@@ -254,8 +288,9 @@ class SampleExtractorNode:
                 "not need to run during a pipeline execution; wire it to a live source to preview, "
                 "or move it off the compiled op path."
             )
-        value = _primary_field_value(sample, "input" if field == "input" else "target")
-        spec = self._field_spec(sample, field, value)
+        key = _resolve_field_key(sample, field)
+        value = _field_payload(sample, key)
+        spec = self._field_spec(sample, key, value)
         scalar = self._scalar(value)
         image = self._to_image(value, colormap, max_size)
         mask = self._to_mask(value)
@@ -281,21 +316,15 @@ class SampleExtractorNode:
         return value
 
     @staticmethod
-    def _field_spec(sample: Any, field: str, value: Any) -> Any:
-        """A short descriptor of the field — the typed-bag item's class name (``Image`` / ``Mask`` /
+    def _field_spec(sample: Any, key: Optional[str], value: Any) -> Any:
+        """A short descriptor of the selected entry — its item class name (``Image`` / ``Mask`` /
         ``Regions`` / ``Label`` / ``NDArrayItem``), else the raw value's Python type name.
 
-        The typed bag is self-describing (each field carries its item type), so the descriptor comes
-        straight off the primary item's class — the removed ``Sample.describe()`` / ``infer_type``
-        ``TypeSpec`` model is gone."""
-        from sampleflux import primary
-
-        role: Literal["input", "target"] = "input" if field == "input" else "target"
-        try:
-            _, item = primary(sample, role)
-            return type(item).__name__
-        except KeyError:
-            return type(value).__name__
+        A record's values are typed items (each carries its own type), so the descriptor comes
+        straight off the entry's class."""
+        if isinstance(sample, dict) and key in sample:
+            return type(sample[key]).__name__
+        return type(value).__name__
 
     @staticmethod
     def _scalar(value: Any) -> Optional[float]:
@@ -373,7 +402,9 @@ class SampleExtractorNode:
         if isinstance(value, str):
             return value
         if scalar is not None:
-            label = _sample_meta_dict(sample).get("label_name") if field == "target" else None
+            # ``label_name`` is simply another record key on the record model.
+            meta = sample if isinstance(sample, dict) else {}
+            label = meta.get("label_name") if field == "target" else None
             n: Any = int(scalar) if float(scalar).is_integer() else scalar
             return f"{label} (id={n})" if label is not None else str(n)
         # Lists and dicts: show full content as YAML so bounding-box annotations, metadata
@@ -386,13 +417,10 @@ class SampleExtractorNode:
 
     @staticmethod
     def _spec_summary(spec: Any) -> str:
-        """Compact, human-readable summary of a derived TypeSpec (avoids the verbose dataclass repr)."""
-        semantic = getattr(spec, "semantic", None)
-        dtype = getattr(spec, "dtype", None)
-        if semantic is not None or dtype is not None:
-            return " ".join(p for p in (semantic, dtype) if p) or "array"
-        name = getattr(spec, "qualname", None)  # PythonType.qualname (e.g. "list")
-        return name if isinstance(name, str) else type(spec).__name__
+        """Compact, human-readable summary of the field descriptor (an item/type class name)."""
+        if isinstance(spec, str):
+            return spec  # _field_spec emits the item class name directly on the record model
+        return type(spec).__name__
 
 
 # --------------------------------------------------------------------------- #
@@ -520,12 +548,13 @@ def _build_histogram_payload(
 
 
 class ExtractMetadataNode:
-    """Extract one entry from a Sample's ``metadata`` by KEY → a wireable value.
+    """Extract one metadata entry from a sample record by KEY → a wireable value.
 
-    Models / ops stamp structured results into ``sample.metadata`` — a list of detection boxes under
+    Models / ops stamp structured results into the record — a list of detection boxes under
     ``"detection_boxes"``, per-detection ``"detection_labels"`` / ``"detection_scores"``, an embedding
-    array, a mask. This node pulls ONE entry by ``key`` and emits it on three typed outputs so you wire
-    the one your consumer expects:
+    array, a mask. On the record model metadata is simply another dict key (or an attribute riding on
+    a typed item value). This node pulls ONE entry by ``key`` and emits it on three typed outputs so
+    you wire the one your consumer expects:
 
     * ``value`` (``SAMPLEFLUX_VALUE``) — the entry VERBATIM (a list of boxes, a dict), to wire straight
       into a nested-container param socket (``OverlayBoxes.boxes`` — see ``bridge._needs_value_socket``).
@@ -534,8 +563,8 @@ class ExtractMetadataNode:
     * ``text`` (``STRING``) — a compact ``repr`` view for inspection (wire into *Display Any* / a sink).
 
     A missing key yields ``None`` / an empty array / ``""`` (never raises), so a key typo degrades
-    gracefully. Pairs with **Extract from Sample** (which unpacks ``input``/``target``); this unpacks
-    ``metadata[key]`` — the canonical flow ``model → (metadata['detection_boxes']) → OverlayBoxes.boxes``.
+    gracefully. Pairs with **Extract from Sample** (which unpacks an entry's PAYLOAD); this emits
+    ``record[key]`` verbatim — the canonical flow ``model → (record['detection_boxes']) → OverlayBoxes.boxes``.
     """
 
     __confluid_display_name__ = "Extract from Metadata"
@@ -559,8 +588,16 @@ class ExtractMetadataNode:
                 "Extract from Metadata received an empty sample (None) — its upstream op produced no "
                 "sample. Wire it to a live source / model output to read metadata."
             )
-        meta = _sample_meta_dict(sample)
-        value = meta.get(key) if hasattr(meta, "get") else None
+        meta = sample if isinstance(sample, dict) else {}
+        value = meta.get(key)
+        if value is None:
+            # Metadata may also ride as an ATTRIBUTE on a typed item value (an Image's layout,
+            # a Regions' canvas) — scan the record's items for one so named.
+            for item in meta.values():
+                attr = getattr(item, key, None)
+                if attr is not None:
+                    value = attr
+                    break
         array_val = SampleExtractorNode._to_array(value)  # PIL→ndarray; tensor/ndarray/list pass verbatim
         text = "" if value is None else repr(value)
         if len(text) > _MAX_DISPLAY_CHARS:
@@ -1157,15 +1194,15 @@ class RetagObjectNode:
 
 
 class ComposeSampleNode:
-    """Build a new Sample by plucking each field from a different source Sample.
+    """Build a new sample record by plucking each part from a different source record.
 
-    Takes three ``SAMPLEFLUX_SAMPLE`` inputs and assembles a fresh Sample where:
+    Takes three ``SAMPLEFLUX_SAMPLE`` inputs (record dicts) and assembles a fresh record where:
 
-    * ``input``    comes from ``input_sample``
-    * ``target``   comes from ``target_sample``
-    * ``metadata`` comes from ``metadata_sample``
+    * the primary-input entry comes from ``input_sample`` (its ``input``/``image``/… key),
+    * the target entry comes from ``target_sample`` (its ``target``/``label``/… key),
+    * every remaining (metadata-like) entry comes from ``metadata_sample``.
 
-    Use this when three parallel pipeline branches each carry the "right" field
+    Use this when three parallel pipeline branches each carry the "right" entry
     and you need to reunite them — e.g. the left branch produced a rendered
     image, the right branch produced detection boxes, and a third carries the
     original provenance metadata.
@@ -1188,20 +1225,20 @@ class ComposeSampleNode:
         }
 
     def compose(self, input_sample: Any, target_sample: Any, metadata_sample: Any) -> Tuple[Any, ...]:
-        result = _mix_typed_samples(input_sample, target_sample, metadata_sample, merge_all=False)
+        result = _mix_records(input_sample, target_sample, metadata_sample, merge_all=False)
         return (result,)
 
 
 class MixSamplesNode:
-    """Build a new Sample by combining fields from three source Samples and merging all metadata.
+    """Build a new sample record combining entries from three source records, merging all metadata.
 
-    * ``input``    comes from ``input_sample``
-    * ``target``   comes from ``target_sample``
-    * ``metadata`` is the shallow dict union of all three samples' metadata dicts
-      (``input_sample`` lowest priority, ``metadata_sample`` highest — later keys win)
+    * the primary-input entry comes from ``input_sample`` (its ``input``/``image``/… key),
+    * the target entry comes from ``target_sample`` (its ``target``/``label``/… key),
+    * the metadata is the shallow union of all three records' NON-primary entries
+      (``input_sample`` lowest priority, ``metadata_sample`` highest — later keys win).
 
     Use this when you want to accumulate metadata produced at different pipeline
-    stages rather than discard two samples' metadata entirely.
+    stages rather than discard two records' metadata entirely.
     """
 
     __confluid_display_name__ = "Mix Samples (merge metadata)"
@@ -1221,7 +1258,7 @@ class MixSamplesNode:
         }
 
     def mix(self, input_sample: Any, target_sample: Any, metadata_sample: Any) -> Tuple[Any, ...]:
-        result = _mix_typed_samples(input_sample, target_sample, metadata_sample)
+        result = _mix_records(input_sample, target_sample, metadata_sample)
         return (result,)
 
 
@@ -1231,20 +1268,20 @@ class MixSamplesNode:
 
 
 def compile_subgraph_ops(prompt: Any, unique_id: Any, node_mappings: Optional[Dict[str, Any]] = None) -> List[Any]:
-    """Compile the op DAG feeding ``unique_id`` into a flat list of LIVE ``Sample -> Sample`` ops.
+    """Compile the op DAG feeding ``unique_id`` into a flat list of LIVE ``record -> record`` ops.
 
     The engine behind :class:`SubgraphOpExtractNode`. Given ComfyUI's hidden ``PROMPT`` (the
     flat API graph — native subgraph instances are already expanded into their inner nodes by
     the frontend, so the inner op DAG is present) and the terminator's own ``UNIQUE_ID``, it
     runs the ops-export DAG→sequential compiler (:func:`fluxstudio.export.export_ops_yaml`) in
     **target mode** over the terminator's sample-ancestor cone — exactly the ops that compute
-    the sample wired into the terminator, fan-out/``Mix`` fan-in flattened with stash/unstash —
-    and materializes the resulting op-list into live callables (the same
+    the record wired into the terminator, fan-out/``Mix`` fan-in flattened with context
+    Save/Use — and materializes the resulting op-list into live callables (the same
     ``confluid.load`` → ``materialize`` path :meth:`sampleflux.core.Flux.from_ops_yaml` uses).
 
     Self-contained by design: no widget snapshot and no compile route are needed because the
     flat prompt already carries the whole inner DAG. Returns ``[]`` for an unwired terminator
-    (``TransformChain([])`` is the identity).
+    (``Pipeline([])`` is the identity).
 
     Args:
         prompt: ComfyUI's hidden ``PROMPT`` — the flat ``{node_id: {class_type, inputs}}`` graph.
@@ -1276,12 +1313,12 @@ def compile_subgraph_ops(prompt: Any, unique_id: Any, node_mappings: Optional[Di
 class SubgraphOpExtractNode:
     """Turn an upstream op DAG into a single ``SAMPLEFLUX_OP`` — the "subgraph as an Op" terminator.
 
-    Draw a normal ``Sample -> Sample`` op pipeline (an arbitrary DAG — fan-out, ``Mix``
+    Draw a normal ``record -> record`` op pipeline (an arbitrary DAG — fan-out, ``Mix``
     fan-in allowed) and wire its terminal sample into this node's ``sample`` input. The node
-    compiles that whole sub-pipeline into ONE ``sampleflux.ops.transform_chain.TransformChain``
+    compiles that whole sub-pipeline into ONE ``sampleflux.transform.Pipeline``
     (DAG→sequential, via the ops-export compiler) and emits it on the ``op`` output
     (``SAMPLEFLUX_OP``), so the transformation is reusable as a single Op: feed it into a
-    higher-order op (``Parallel`` / ``TransformChain`` / ``Enable``), a single-op slot
+    higher-order op (``Parallel`` / ``Pipeline`` / ``Enable``), a single-op slot
     (``ConfigureOp.target`` / ``RandomApply.op``), or chain it.
 
     The headline use is INSIDE a ComfyUI native subgraph: build the inner pipeline starting
@@ -1290,7 +1327,7 @@ class SubgraphOpExtractNode:
     ``SAMPLEFLUX_OP`` output and acts as an Op when wired into another node (or as a graph when a
     sample is run through the boundary inline). It also works on the flat canvas.
 
-    Adapter glue, NOT a data op (it assembles the real ``TransformChain``), so it lives here
+    Adapter glue, NOT a data op (it assembles the real ``Pipeline``), so it lives here
     with Walk/Extract/Mix. Self-contained at runtime: it reads ComfyUI's hidden ``PROMPT`` +
     ``UNIQUE_ID`` and compiles its own ancestor cone (see :func:`compile_subgraph_ops`) — no
     snapshot widget, no compile route.
@@ -1298,7 +1335,7 @@ class SubgraphOpExtractNode:
     The ``sample`` input is **LAZY** (``check_lazy_status`` always returns ``[]``): the node
     compiles STATICALLY from the ``PROMPT`` and never reads the runtime sample VALUE, so it must
     never force ComfyUI to execute the upstream op cone. That matters because the cone is an
-    op-only ``Sample -> Sample`` transform with NO source on the canvas (the source feeds the
+    op-only ``record -> record`` transform with NO source on the canvas (the source feeds the
     Flux at runtime, not the op chain) — eager evaluation would run the head op on ``None`` and
     crash a downstream viewer / value-chain ``Extract from Sample``. Lazy gating
     (``comfy_execution/graph.py``: a lazy link is not added as a dependency unless requested)
@@ -1331,11 +1368,11 @@ class SubgraphOpExtractNode:
         return []
 
     def extract(self, sample: Any = None, prompt: Any = None, unique_id: Any = None) -> Tuple[Any, ...]:
-        from sampleflux.ops.transform_chain import TransformChain
+        from sampleflux import Pipeline
 
         ops = compile_subgraph_ops(prompt, unique_id)
-        logger.debug(f"SubgraphOpExtractNode: compiled {len(ops)} op(s) from the upstream DAG into a TransformChain.")
-        return (TransformChain(ops=ops),)
+        logger.debug(f"SubgraphOpExtractNode: compiled {len(ops)} op(s) from the upstream DAG into a Pipeline.")
+        return (Pipeline(transforms=ops),)
 
 
 # ---------------------------------------------------------------------------
@@ -1617,16 +1654,13 @@ def _shape_of(value: Any, _depth: int = 0) -> str:
     """A compact structural summary of any value — shapes of tensors/arrays, recursive for containers.
 
     Used by :class:`DisplayAnyNode`'s "tensor shape" mode: ``Tensor(shape=…, dtype=…)`` / ``ndarray(…)``
-    for arrays, walks dicts / lists / tuples (capped) and unpacks a SampleFlux ``Sample``; anything else
-    falls back to a short ``repr``.
+    for arrays, walks dicts / lists / tuples (capped); a sample record is a plain dict, so the dict
+    branch already unpacks it key by key. Anything else falls back to a short ``repr``.
     """
     if torch.is_tensor(value):
         return f"Tensor(shape={tuple(value.shape)}, dtype={value.dtype})"
     if isinstance(value, np.ndarray):
         return f"ndarray(shape={value.shape}, dtype={value.dtype})"
-    # SampleFlux Sample (a NamedTuple — check BEFORE the tuple branch below).
-    if hasattr(value, "input") and hasattr(value, "target") and hasattr(value, "metadata"):
-        return f"Sample(input={_shape_of(value.input, _depth + 1)}, target={_shape_of(value.target, _depth + 1)})"
     if _depth > 6:
         return f"{type(value).__name__}(…)"
     if isinstance(value, dict):
@@ -1656,14 +1690,14 @@ def _describe_any(value: Any, mode: str = "raw value") -> str:
 class DisplayAnyNode:
     """Show ANY wired value as text ON the node — a debug / inspection viewer.
 
-    A Taidal-native analogue of WAA's *Display Any*: wire any output (a scalar, a list, a metadata
-    dict, a tensor, a ``Sample``, a SampleFlux op/source) into ``value`` and its text representation
+    A Taidal-native analogue of WAA's *Display Any*: wire any output (a scalar, a list, a sample
+    record dict, a tensor, a SampleFlux op/source) into ``value`` and its text representation
     appears on the node after **Queue Prompt** (``web/display_any.js`` fills a read-only multiline
     widget). ``mode`` picks the view:
 
     * ``raw value`` — ``repr(value)`` (strings shown verbatim), truncated for huge values.
     * ``tensor shape`` — a structural summary: shapes/dtypes of tensors & arrays, recursively through
-      lists / dicts / a ``Sample`` (answers "what shape is this actually?").
+      lists / dicts (a sample record included — answers "what shape is this actually?").
 
     The text is also emitted on the ``text`` STRING output so it can be chained. Works regardless of
     ``--no-default-nodes`` / ``--only-taidal-nodes`` (no native viewer needed).

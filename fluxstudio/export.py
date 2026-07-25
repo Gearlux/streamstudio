@@ -42,11 +42,11 @@ DAG into ONE SEQUENTIAL Confluid ``!class:...()`` op-list per weakly-connected c
   Canonical case: ``ImpairmentsTxConfig.disabled`` feeding ``ImpairmentsChain.tx_disabled``;
 * anything else is omitted with a note (the op keeps its constructor default) — a
   per-sample runtime value should ride **metadata** instead (expression-capable params
-  like ``ThresholdOp.low_level`` accept ``"{meta_key}"`` resolved from ``sample.meta``
-  at call time).
+  like ``ThresholdOp.low_level`` accept ``"{meta_key}"`` resolved from the record's
+  metadata at call time).
 
 ``op_N`` links (an op consumed as a ``SAMPLEFLUX_OP`` value by a higher-order op such as
-``TransformChain`` / ``Enable`` / ``Parallel``) compile too: each wired producer embeds as a nested
+``Pipeline`` / ``Enable`` / ``Parallel``) compile too: each wired producer embeds as a nested
 ``!class:`` instance in the consumer's op-list kwarg (mirroring the live node).
 
 Input format — the ComfyUI prompt / API graph (what ``app.graphToPrompt()`` emits and
@@ -71,11 +71,11 @@ from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple, Union, cas
 from confluid import dump
 from confluid.fluid import Class, Instance, Reference
 from loggair import get_logger
+from sampleflux import Pipeline
 from sampleflux.discovery import resolve_callable
 from sampleflux.ops.configure import ConfigureOp
 from sampleflux.ops.context import Apply, Capture, MergeFields, Save, Use
 from sampleflux.ops.formula import FormulaOp
-from sampleflux.ops.transform_chain import TransformChain
 
 from fluxstudio.bridge import _SINGLE_OP_PARAMS, _coerce_kwargs, _op_list_params, _single_op_params
 
@@ -91,8 +91,8 @@ _MIX_CLASS_TYPE = "Taidal_MixSamples"
 _MIX_ARGS = ("input_sample", "target_sample", "metadata_sample")
 
 # The "subgraph as an Op" terminator (``fluxstudio.nodes.SubgraphOpExtractNode``): its ``op``
-# output (slot 0) is the upstream op DAG compiled to ONE ``TransformChain``. When that output
-# feeds a consumer's op slot, the export embeds ``TransformChain(ops=<compiled ancestor cone>)``
+# output (slot 0) is the upstream op DAG compiled to ONE ``Pipeline``. When that output feeds a
+# consumer's op slot, the export embeds ``Pipeline(transforms=<compiled ancestor cone>)``
 # (DAG→sequential, the same compiler) and the cone's inner ops drop from the standalone schedule.
 _SUBGRAPH_OP_CLASS_TYPE = "Taidal_SubgraphOp"
 # The hand-written ``Value`` node (``nodes.ValueNode``): a STRING ``value`` widget echoed to a
@@ -671,7 +671,7 @@ def _runtime_value_hint(target: Any, key: str) -> Optional[str]:
     """
     hint = f"; for a per-sample value wrap the op in sampleflux ConfigureOp " f"(compute ops + target + param={key!r})"
     if _param_admits_str(target, key):
-        hint += " or set the widget to a '{meta_key}' expression resolved from sample.meta at call time"
+        hint += " or set the widget to a '{meta_key}' expression resolved from the record's metadata at call time"
     return hint
 
 
@@ -693,7 +693,7 @@ def _resolve_widget_link(target: Any, key: str, link: Any, fold: _FoldContext) -
     if class_type == _SUBGRAPH_OP_CLASS_TYPE:
         # A Subgraph-Op terminator's ``op`` output (slot 0) wired into a single-op slot
         # (``ConfigureOp.target`` / ``RandomApply.op``): embed its compiled ancestor cone as a
-        # nested ``TransformChain`` instance, the "subgraph as an Op" landing in that slot.
+        # nested ``Pipeline`` instance, the "subgraph as an Op" landing in that slot.
         if slot == 0:
             return ("literal", _subgraph_op_instance(upstream_id, fold.prompt, fold.node_mappings, fold))
         return ("drop", _runtime_value_hint(target, key))
@@ -817,7 +817,7 @@ def _embed_op_values(
     (a helios ``HeliosIfOp`` → ``true_transforms`` + ``false_transforms``), so links are grouped by param
     and ordered by socket index within each. Each wired producer embeds as a nested ``!class:`` Instance
     (its wired widgets fold through the same pass), or — for a Subgraph-Op terminator — its compiled cone
-    as a nested ``TransformChain``, mirroring
+    as a nested ``Pipeline``, mirroring
     the live node (``bridge._build_op_node``). A family with no valid producer is omitted.
     """
     by_param: Dict[str, List[Tuple[int, Any]]] = {}
@@ -832,7 +832,7 @@ def _embed_op_values(
             upstream_type = str(upstream.get("class_type", "")) if upstream else ""
             if upstream is not None and upstream_type == _SUBGRAPH_OP_CLASS_TYPE:
                 # A Subgraph-Op terminator in this higher-order op's list (e.g. Parallel(ops=[…]))
-                # → embed its compiled cone as a nested TransformChain (the subgraph as one Op).
+                # → embed its compiled cone as a nested Pipeline (the subgraph as one Op).
                 instances.append(_subgraph_op_instance(src, fold.prompt, fold.node_mappings, fold))
                 continue
             upstream_cls = fold.node_mappings.get(upstream_type) if upstream else None
@@ -967,12 +967,12 @@ def _op_to_instance(
 def _subgraph_op_instance(
     terminator_id: str, prompt: Dict[str, Any], node_mappings: Dict[str, Any], fold: _FoldContext
 ) -> Instance:
-    """Compile a Subgraph-Op terminator's ancestor cone into a ``TransformChain`` Instance.
+    """Compile a Subgraph-Op terminator's ancestor cone into a ``Pipeline`` Instance.
 
-    The cone (the ops computing the sample wired into the terminator) is flattened with the
+    The cone (the ops computing the record wired into the terminator) is flattened with the
     SAME DAG→sequential machinery the top level uses — fan-out and ``Mix`` fan-in become
-    ``Stash``/``Unstash`` sequences — so the whole drawn sub-pipeline lands as one
-    ``!class:sampleflux.ops.transform_chain.TransformChain(ops=[…])``. The shared ``fold`` means a
+    context ``Save``/``Use`` sequences — so the whole drawn sub-pipeline lands as one
+    ``!class:sampleflux.transform.Pipeline(transforms=[…])``. The shared ``fold`` means a
     ``constant=True`` value node inside the subgraph still hoists ONCE to the document top
     level and the nested ops dotted-``!ref:`` it. ``fold.excluded`` (value-chain members) is
     honoured; the standalone-schedule exclusion (:func:`_subgraph_cone_excluded`) is NOT applied
@@ -984,7 +984,7 @@ def _subgraph_op_instance(
     for members in _components(universe, preds):
         _check_component(members, preds, boundary_feeds)
         ops.extend(_compile_component(members, universe, preds, prompt, node_mappings, fold))
-    return cast(Instance, _marker(Instance, TransformChain, {"ops": ops}))
+    return cast(Instance, _marker(Instance, Pipeline, {"transforms": ops}))
 
 
 def _op_value_consumed(node_id: str, prompt: Dict[str, Any], node_mappings: Dict[str, Any]) -> bool:
@@ -1012,7 +1012,7 @@ def _subgraph_cone_excluded(
     """Inner ops of each CONSUMED Subgraph-Op terminator → dropped from the standalone schedule.
 
     When a terminator's ``op`` output feeds an op slot, its ancestor cone is embedded as a
-    nested ``TransformChain`` in that consumer, so those inner ops must not ALSO compile to a
+    nested ``Pipeline`` in that consumer, so those inner ops must not ALSO compile to a
     standalone pipeline. A cone op whose sample is consumed OUTSIDE the cone too (a node reused
     in graph mode) stays scheduled — it is then both embedded and scheduled (the shared-node
     case). A terminator whose ``op`` output is unwired excludes nothing (its inner ops, if any,
@@ -1426,7 +1426,7 @@ def compile_op_chains(
     # Both stay scheduled (the producer also transforms the sample), so captures add NOTHING to
     # schedule_excluded.
     output_captures = _collect_output_captures(prompt, node_mappings)
-    # A consumed Subgraph-Op terminator's inner ops embed as a nested TransformChain in the
+    # A consumed Subgraph-Op terminator's inner ops embed as a nested Pipeline in the
     # consumer (see _subgraph_op_instance), so they drop from the STANDALONE schedule — but NOT
     # from the cone compile (fold.excluded carries only the value-chain set). EXEMPT the resolved
     # targets: when SubgraphOpExtractNode compiles its OWN cone (target_ids=[terminator]), that

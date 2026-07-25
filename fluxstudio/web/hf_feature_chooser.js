@@ -8,7 +8,7 @@ console.log("ComfyFlux: Loaded Taidal.HFFeatureChooser extension");
 // freely editable — you can type any column name. This adds a dropdown of the SELECTED dataset's
 // actual feature columns (image, label, …), fetched from /taidal/hf_dataset_features for the node's
 // current dataset-id field (HF_DATASET_ID). It is the cached-dataset picker one level down: there
-// you pick which dataset, here you pick which of its columns maps onto Sample.input / .target.
+// you pick which dataset, here you pick which of its columns maps onto the record's input / target key.
 
 const PLACEHOLDER = "— pick a column —";
 const _featuresCache = new Map(); // "path|name|split" -> array of feature names

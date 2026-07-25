@@ -3,27 +3,29 @@
 Discovered callables are classified into three node shapes so a real pipeline can be
 wired on the ComfyUI canvas — instead of every socket collapsing to ``STRING``:
 
-* **Source** — a class whose ``__getitem__`` / ``__iter__`` yields a
-  :class:`sampleflux.Sample` (e.g. ``HuggingFaceSource``). The node exposes the
-  constructor config as widgets and outputs a ``SAMPLEFLUX_SOURCE`` (a
+* **Source** — a class whose ``__getitem__`` / ``__iter__`` yields sample records (plain
+  dicts of typed items — :data:`sampleflux.items.Record`; e.g. ``HuggingFaceSource``). The
+  node exposes the constructor config as widgets and outputs a ``SAMPLEFLUX_SOURCE`` (a
   :class:`sampleflux.core.Flux` wrapping the constructed source). The engines / view-sources
   (``DatasetSplit`` / ``Flux`` / ``JointFlux``) are the same shape, but their source-typed
   constructor params ride WIRED sockets instead of widgets — a single ``source`` →
   ``SAMPLEFLUX_SOURCE`` input, a source-list (``fluxes``) → dynamic ``source_N`` inputs, an op-list
   (``ops``) → dynamic ``op_N`` ``SAMPLEFLUX_OP`` inputs — so they compose on the canvas from other
   Source/Op nodes (which already output themselves as ``SAMPLEFLUX_SOURCE`` / ``SAMPLEFLUX_OP``).
-* **Op** — a ``@configurable`` class with ``__call__(self, sample: Sample) ->
-  Optional[Sample]`` (e.g. ``RescaleOp``, ``ConvertToImageOp``). The node is **dual-mode**:
+* **Op** — a ``@configurable(category="op")`` class (``__call__(record) -> Optional[Record]``,
+  e.g. ``RescaleOp``, ``ConvertToImageOp``) — classified by the POSITIVE category tag, the
+  same allowlist the palette uses (a kernel-only ``Transform`` subclass inherits its
+  ``__call__``, so a signature sniff can't see it). The node is **dual-mode**:
   constructor config as widgets, an OPTIONAL ``SAMPLEFLUX_SAMPLE`` input, and TWO outputs —
-  ``sample`` (the op applied to the input sample, for linear chaining) and ``op`` (the constructed
+  ``sample`` (the op applied to the input record, for linear chaining) and ``op`` (the constructed
   op as a ``SAMPLEFLUX_OP`` value, so it can feed a higher-order op). A higher-order op whose
-  constructor takes an op-list (``Enable`` / ``Parallel`` / ``TransformChain``) gets dynamic ``SAMPLEFLUX_OP``
+  constructor takes an op-list (``Enable`` / ``Parallel`` / ``Pipeline``) gets dynamic ``SAMPLEFLUX_OP``
   inputs (``op_0`` …) instead of a STRING widget.
 * **Generic** — any other callable (plain value functions): scalar widgets with a ``STRING``
   fallback (the original behaviour, preserved).
 
 The custom socket type strings ``SAMPLEFLUX_SOURCE`` / ``SAMPLEFLUX_SAMPLE`` / ``SAMPLEFLUX_OP`` carry the
-live Python objects (``Flux`` / ``Sample`` / a constructed op) between nodes — ComfyUI connects two
+live Python objects (``Flux`` / a record dict / a constructed op) between nodes — ComfyUI connects two
 sockets iff their type strings are equal — which is what lets ops chain (via ``SAMPLEFLUX_SAMPLE``) and
 compose into higher-order ops (via ``SAMPLEFLUX_OP``).
 """
@@ -61,17 +63,19 @@ import datasets
 from annotated_types import Ge, Gt, Interval, Le, Lt
 from confluid import mandatory_param_names, output_specs, parse_param_docs
 from loggair import get_logger
-from sampleflux import Sample as _Sample
+from sampleflux import Record as _Record
 from sampleflux.discovery import get_callable_path, resolve_callable, scan_module
 
 logger = get_logger(__name__)
 
 
 # Custom ComfyUI socket types for live SampleFlux objects passed between nodes.
+# ``SAMPLEFLUX_SAMPLE`` carries a sample RECORD — a plain dict of typed items (the socket type
+# string is unchanged so saved canvases keep their wires).
 SAMPLE_TYPE = "SAMPLEFLUX_SAMPLE"
 SOURCE_TYPE = "SAMPLEFLUX_SOURCE"
-# A constructed op instance (a callable ``Sample -> Optional[Sample]``) ridden as a wire, so an op
-# node's ``op`` output can feed a higher-order op (``Enable`` / ``Parallel`` / ``TransformChain``) that takes
+# A constructed op instance (a callable ``record -> Optional[Record]``) ridden as a wire, so an op
+# node's ``op`` output can feed a higher-order op (``Enable`` / ``Parallel`` / ``Pipeline``) that takes
 # ops as constructor input. Distinct from ``SAMPLEFLUX_SAMPLE`` (data) — this carries the op itself.
 OP_TYPE = "SAMPLEFLUX_OP"
 # A built "runnable" (a trainer / evaluator / processor — any class implementing ``run(self)``),
@@ -81,8 +85,8 @@ RUNNABLE_TYPE = "SAMPLEFLUX_RUNNABLE"
 # deferred ``LazyClass`` of one (when the member class is tagged ``lazy``) — ridden as a wire so an
 # object node feeds a runnable's member slot. Distinct from SOURCE (datasets ride SAMPLEFLUX_SOURCE).
 OBJECT_TYPE = "SAMPLEFLUX_OBJECT"
-# A raw numpy array / torch tensor ridden as a wire — the field value behind a Sample, carried OUT of
-# the Sample extractor and INTO the Array/Tensor Histogram viewer for value inspection. A hand-wired
+# A raw numpy array / torch tensor ridden as a wire — the value behind a record entry, carried OUT of
+# the record extractor and INTO the Array/Tensor Histogram viewer for value inspection. A hand-wired
 # ADAPTER socket only (``nodes.py``); deliberately NOT in ``TYPE_MAP`` — no op-param annotation maps
 # to it, so auto-generated op nodes are unaffected (an ``np.ndarray`` param stays a STRING widget).
 ARRAY_TYPE = "SAMPLEFLUX_ARRAY"
@@ -281,9 +285,10 @@ def _infer_member_role(name: str) -> Optional[str]:
 
 # Constructor params (on higher-order ops) that hold a LIST OF OPS — rendered as dynamic
 # ``SAMPLEFLUX_OP`` multi-inputs (``op_0``, ``op_1``, … via ``web/op_list.js``) instead of a STRING
-# widget, so concrete op nodes wire into them. ``Enable``/``Parallel``/``TransformChain`` take ``ops``;
-# ``transforms`` is the helios convention surfaced by waivefront-helios's auto-bridged composites
-# (``HeliosComposeOp`` & co mirror a helios ``*transforms`` variadic as a list param).
+# widget, so concrete op nodes wire into them. ``Enable``/``Parallel`` take ``ops``; ``transforms``
+# is ``sampleflux.transform.Pipeline``'s param (ALSO the helios convention surfaced by
+# waivefront-helios's auto-bridged composites — ``HeliosComposeOp`` & co mirror a helios
+# ``*transforms`` variadic as a list param).
 _OP_LIST_PARAMS = {"ops", "transforms"}
 
 # Single-op constructor params (one op VALUE, not a chain): ``RandomApply.op``,
@@ -327,7 +332,7 @@ _HF_DATASET_ID_PARAMS = {"path", "repo_id"}
 _MELODY_DATASET_ID_PARAMS = {"name", "dataset"}
 
 # Constructor params (on HuggingFace dataset sources) that name a dataset *feature/column* to map
-# onto a Sample field — ``HuggingFaceSource.input_feature`` / ``target_feature``. Rendered as a
+# onto a record key — ``HuggingFaceSource.input_feature`` / ``target_feature``. Rendered as a
 # free-text STRING (so any column name still types in) tagged ``taidal_widget="HF_FEATURE"``, which
 # ``web/hf_feature_chooser.js`` augments with a dropdown of the SELECTED dataset's actual columns
 # (fetched from ``/taidal/hf_dataset_features`` for the node's current dataset-id field). Recognised
@@ -353,9 +358,9 @@ _HF_METADATA_PARAM = "metadata_features"
 
 # FluxStudio surfaces a node ONLY when its ``@configurable`` discovery category is one of these
 # (a POSITIVE allowlist — see sampleflux/confluid taxonomy). This is what a canvas can build:
-#   * ``op``      — concrete Sample→Sample ops (``RescaleOp``, ``SpectrogramOp`` …).
+#   * ``op``      — concrete record→record ops (``RescaleOp``, ``SpectrogramOp`` …).
 #   * ``source``  — concrete data sources (``HuggingFaceSource``, ``RFUAVSource`` …) AND
-#                   ``DatasetSplit`` (a source-view: it yields Samples and wraps another source).
+#                   ``DatasetSplit`` (a source-view: it yields records and wraps another source).
 #   * ``engine``  — the generic composition primitives ``Flux`` / ``JointFlux``. They ARE buildable
 #                   on a canvas: their source-typed constructor params render as WIRED sockets
 #                   (``_build_source_node``) — ``Flux.source`` (single ``SAMPLEFLUX_SOURCE`` input) +
@@ -363,7 +368,7 @@ _HF_METADATA_PARAM = "metadata_features"
 #                   (dynamic ``source_N`` ``SAMPLEFLUX_SOURCE`` inputs). So a Source/Op node's output
 #                   (it already exposes itself as ``SAMPLEFLUX_SOURCE`` / ``SAMPLEFLUX_OP``) feeds them.
 #   * ``sink``    — the SampleFlux storage sinks (``HDF5Sink`` / ``YoloSink`` / ``JsonSink`` …) that
-#                   write a whole Flux (``write(sample)`` / ``open`` / ``flush`` / ``close``). A sink
+#                   write a whole Flux (``write(record)`` / ``open`` / ``flush`` / ``close``). A sink
 #                   is an object-member PRODUCER (``_build_object_node`` → an ``instance`` + ``class``
 #                   output on a ROLE-qualified ``SAMPLEFLUX_OBJECT:sink`` wire, see ``_is_sink_class`` /
 #                   ``_role_for_class``) that docks into a ``DatasetProcessor`` runnable node's
@@ -377,7 +382,7 @@ _HF_METADATA_PARAM = "metadata_features"
 #     stay out (correct — they're not buildable).
 #   * task ``dataset``s (``classification_dataset`` …) — a trainer/model-config concept (a
 #     task-scoped, model-ready dataset slot), meaningful for navigaitor's config composition but
-#     NOT for a per-sample SampleFlux canvas, which only needs a ``source`` to yield Samples.
+#     NOT for a per-sample SampleFlux canvas, which only needs a ``source`` to yield records.
 #   * uncategorised module-level helper functions (no ``__confluid_category__``); an UNtagged sink
 #     (a raw ``Storage`` subclass without ``category="sink"``) is likewise excluded.
 # To surface another role add it here AND tag the classes.
@@ -522,7 +527,7 @@ def _is_hf_feature_param(param_name: str, owner: Optional[Callable]) -> bool:
     """True when ``param_name`` is a feature-selector arg of a HuggingFace dataset source.
 
     These (``input_feature`` / ``target_feature``) name a dataset *column* mapped onto a
-    ``Sample`` field. Gated on the SAME ``HuggingFace`` class-name convention as
+    record key. Gated on the SAME ``HuggingFace`` class-name convention as
     :func:`_is_hf_dataset_id_param` (a naming rule, not a per-node special-case) so a
     like-named param on a non-HF class is unaffected and stays a plain STRING widget.
     """
@@ -723,7 +728,10 @@ _ANNOTATION_NS: Dict[str, Any] = {
     **vars(typing),
     "datasets": datasets,
     "Path": Path,
-    "Sample": _Sample,
+    # The record carrier: ``Record`` is the current spelling; ``Sample`` is kept so a stringized
+    # legacy annotation still resolves to the same alias (harmless — both mean "the sample dict").
+    "Record": _Record,
+    "Sample": _Record,
     "NoneType": type(None),
 }
 
@@ -744,12 +752,31 @@ def _resolve_annotation(annotation: Any) -> Any:
 def _type_mentions(annotation: Any, target: type) -> bool:
     """True if ``target`` IS ``annotation`` or appears anywhere in its type arguments (recursively).
 
-    Structural replacement for ``target.__name__ in str(annotation)`` — matches a bare ``Sample``,
-    ``Optional[Sample]``, ``Iterator[Sample]``, ``Union[…, datasets.Dataset]`` by IDENTITY, not repr.
+    Structural replacement for ``target.__name__ in str(annotation)`` — matches a bare ``Path``,
+    ``Optional[Path]``, ``Union[…, datasets.Dataset]`` by IDENTITY, not repr.
     """
     if annotation is target:
         return True
     return any(arg is target or _type_mentions(arg, target) for arg in get_args(annotation))
+
+
+def _mentions_record(annotation: Any) -> bool:
+    """True if ``annotation`` IS the sample-record alias (``Record`` == ``Dict[str, Any]``) or
+    carries it anywhere in its type arguments (``Optional[Record]`` / ``Iterator[Record]``).
+
+    The record carrier is a typing ALIAS, not a class, so the identity test used for real types
+    (:func:`_type_mentions`) cannot see it — generic-alias EQUALITY is the structural match. A
+    plain ``Dict[str, Any]`` annotation is indistinguishable from ``Record`` at runtime (the alias
+    erases); ops annotate their carrier with ``Record``, and the config-dict params on the palette
+    surface use narrower value types (``Dict[str, str]``, ``Dict[int, str]``), so alias equality
+    is the record signal in practice.
+    """
+    try:
+        if annotation == _Record:
+            return True
+    except Exception:  # noqa: BLE001 - exotic annotation objects may not support ==
+        return False
+    return any(_mentions_record(arg) for arg in get_args(annotation))
 
 
 def _strip_annotated(t: Any) -> Any:
@@ -814,8 +841,11 @@ def _map_type(param_name: str, annotation: Any) -> str:
     if get_origin(annotation) is Annotated:
         return _map_type(param_name, get_args(annotation)[0])
 
-    # SampleFlux Sample (bare / Optional[Sample] / Iterator[Sample]) → the sample wire.
-    if _type_mentions(annotation, _Sample):
+    # A sample record (bare ``Record`` / ``Optional[Record]`` / ``Iterator[Record]``) → the sample
+    # wire. ``Record`` erases to ``Dict[str, Any]`` at runtime, so the match is alias EQUALITY
+    # (see :func:`_mentions_record`), not class identity. MUST precede the container branch —
+    # a record IS a dict, but it rides the wire, never a STRING widget.
+    if _mentions_record(annotation):
         return SAMPLE_TYPE
     # HuggingFace dataset → the HF_DATASET wire.
     if _type_mentions(annotation, datasets.Dataset):
@@ -1352,37 +1382,57 @@ def _coerce_kwargs(func: Callable, kwargs: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
-def _is_sample_annotation(annotation: Any) -> bool:
-    """True if an annotation refers to a SampleFlux ``Sample`` (handles ``Iterator[Sample]`` etc.)."""
-    return "Sample" in str(annotation)
+def _is_record_annotation(annotation: Any) -> bool:
+    """True if an annotation refers to a sample record (handles ``Iterator[Record]`` etc.).
+
+    Accepts the runtime-erased alias (``Record`` == ``Dict[str, Any]``, matched structurally via
+    :func:`_mentions_record`) AND the spelled-out ``Record`` / legacy ``Sample`` names — a
+    stringized / unresolvable forward-ref annotation keeps its source text, so the token scan
+    still catches it.
+    """
+    if _mentions_record(annotation):
+        return True
+    text = str(annotation)
+    return "Record" in text or "Sample" in text
 
 
 def _op_call_signature(obj: Any) -> Optional[inspect.Signature]:
-    """Return ``obj.__call__``'s signature iff ``obj`` is a class whose call takes a ``Sample``."""
-    if not inspect.isclass(obj) or "__call__" not in vars(obj):
+    """Return ``obj.__call__``'s signature iff ``obj`` is a record-taking op class.
+
+    Classification is the POSITIVE ``@configurable(category="op")`` tag — the same allowlist the
+    palette admission uses — NOT an annotation sniff: the record carrier is a plain dict (there
+    is no marker class to identity-match), and a kernel-only ``Transform`` subclass INHERITS its
+    ``__call__`` from the base (nothing in ``vars(cls)``), which the old ``vars``-scan
+    mis-classified as generic. The signature is resolved through the MRO (``inspect.signature``
+    sees the inherited method). A tagged class whose ``__call__`` takes NO carrier param (an
+    older ``category="op"`` + ``constant=True`` value producer with a no-arg ``__call__``)
+    returns ``None`` so it still falls through to the value-node dispatch, as before.
+    """
+    if not inspect.isclass(obj) or getattr(obj, "__confluid_category__", None) != "op":
+        return None
+    call = getattr(obj, "__call__", None)  # MRO-resolved — an inherited __call__ counts
+    if call is None:
         return None
     try:
-        sig = inspect.signature(obj.__call__)
+        sig = inspect.signature(call)
     except (
         ValueError,
         TypeError,
     ):  # pragma: no cover - defensive: inspect rejects rare callables
         return None
     params = [p for n, p in sig.parameters.items() if n not in ("self", "cls")]
-    if params and _is_sample_annotation(params[0].annotation):
-        return sig
-    return None
+    return sig if params else None
 
 
 def _value_call_signature(obj: Any) -> Optional[inspect.Signature]:
     """Return ``obj.__call__``'s signature iff ``obj`` is a class whose call takes NO inputs (beyond self).
 
     A no-arg ``__call__(self)`` marks a VALUE-PRODUCER node — a configurable class that produces values
-    purely from its constructor config (surfaced as ``@output`` sockets), with NO Sample/data input. The
+    purely from its constructor config (surfaced as ``@output`` sockets), with NO record/data input. The
     canonical users are the ImpairmentsChain config utilities (``ImpairmentsTxConfig`` /
-    ``ImpairmentsRxConfig``). Distinct from :func:`_op_call_signature` (first param is a ``Sample``) and
-    :func:`_is_runnable` (a no-arg ``run`` method, not ``__call__``); checked LAST in the dispatch so a
-    source/op/object/runnable always wins.
+    ``ImpairmentsRxConfig``). Distinct from :func:`_op_call_signature` (a ``category="op"`` class whose
+    ``__call__`` takes the record) and :func:`_is_runnable` (a no-arg ``run`` method, not ``__call__``);
+    checked LAST in the dispatch so a source/op/object/runnable always wins.
     """
     if not inspect.isclass(obj) or "__call__" not in vars(obj):
         return None
@@ -1398,7 +1448,7 @@ def _value_call_signature(obj: Any) -> Optional[inspect.Signature]:
 
 
 def _is_source(obj: Any) -> bool:
-    """True if ``obj`` is a class whose indexing/iteration yields ``Sample`` objects."""
+    """True if ``obj`` is a class whose indexing/iteration yields sample records."""
     if not inspect.isclass(obj):
         return False
     for meth_name in ("__getitem__", "__iter__"):
@@ -1412,7 +1462,7 @@ def _is_source(obj: Any) -> bool:
             TypeError,
         ):  # pragma: no cover - defensive: inspect rejects rare callables
             continue
-        if _is_sample_annotation(ret):
+        if _is_record_annotation(ret):
             return True
     return bool(obj.__name__.endswith("Source"))
 
@@ -1421,8 +1471,8 @@ def _is_runnable(obj: Any) -> bool:
     """True if ``obj`` is a class implementing the run interface — a no-arg ``run(self)`` method.
 
     This is the structural signal (mirroring :func:`_is_source` / :func:`_op_call_signature`) that a
-    class is a trainer / evaluator / processor: an orchestration entry point, not a per-sample op or a
-    Sample source. Such classes become buildable runnable nodes (members as wired sockets) regardless
+    class is a trainer / evaluator / processor: an orchestration entry point, not a per-record op or a
+    record source. Such classes become buildable runnable nodes (members as wired sockets) regardless
     of their ``@configurable`` category (e.g. ``classification_trainer``).
     """
     if not inspect.isclass(obj):
@@ -1470,8 +1520,8 @@ def _is_sink_class(obj: Any) -> bool:
     """True if ``obj`` is a SampleFlux storage sink tagged ``@configurable(category="sink")``.
 
     A sink (``HDF5Sink`` / ``YoloSink`` / ``JsonSink`` …) writes a whole Flux via
-    ``write(sample)`` / ``open`` / ``flush`` / ``close`` — it has NO ``run()`` (not a runnable), NO
-    ``__call__(sample)`` (not an op), and carries no ``role``/``lazy`` mark (not an object member by
+    ``write(record)`` / ``open`` / ``flush`` / ``close`` — it has NO ``run()`` (not a runnable), NO
+    op ``category`` tag (not an op), and carries no ``role``/``lazy`` mark (not an object member by
     the role gate), so it matches none of the signature/role dispatch predicates. It is admitted via
     ``category="sink"`` in :data:`_NODE_CATEGORIES` and routed here: a sink builds as an OBJECT
     producer node (``_build_object_node``) whose output sockets as ``SAMPLEFLUX_OBJECT:sink`` (see
@@ -1504,7 +1554,7 @@ def _op_list_params(cls: Any) -> Dict[str, str]:
     """Map each op-LIST constructor param → its dynamic socket-family prefix.
 
     A param accepts a LIST of ops when its NAME is in ``_OP_LIST_PARAMS`` with a ``list`` annotation
-    (``Enable.ops`` / ``TransformChain.ops`` / a helios ``*transforms`` variadic mirror) OR it is stamped
+    (``Enable.ops`` / ``Pipeline.transforms`` / a helios ``*transforms`` variadic mirror) OR it is stamped
     ``__taidal_op_list_params__`` by the waivefront-helios bridge (a ``List[Transform]`` slot whose
     helios name — ``true_transforms`` / ``default_transforms`` — the sampleflux-tuned allowlist can't
     know). The family prefix is ``"op"`` for the original name-set params (so existing ``op_N``
@@ -1519,7 +1569,10 @@ def _op_list_params(cls: Any) -> Dict[str, str]:
         return result
     stamped = set(getattr(cls, "__taidal_op_list_params__", ()) or ())
     for pname, param in sig.parameters.items():
-        by_name = pname in _OP_LIST_PARAMS and "list" in str(param.annotation).lower()
+        # ``list`` OR ``sequence``: ``Pipeline.transforms`` is ``Optional[Sequence[Any]]``, the
+        # other op-lists are ``List``-annotated — both are op-list sockets.
+        anno_low = str(param.annotation).lower()
+        by_name = pname in _OP_LIST_PARAMS and ("list" in anno_low or "sequence" in anno_low)
         if by_name or pname in stamped:
             result[pname] = "op" if pname in _OP_LIST_PARAMS else pname
     return result
@@ -1917,8 +1970,8 @@ def _build_op_node(cls: Callable, name: str, category: str) -> Type:
                 setattr(op, pname, wired)
         applied: Any = None
         if sample is not None:
-            # The typed bag is self-describing (each field carries its item type), so an incompatible
-            # op raises naturally when applied.
+            # The record's values are typed items (each carries its own type/metadata), so an
+            # incompatible op raises naturally when applied.
             applied = op(sample)
             if applied is None:
                 raise RuntimeError(
@@ -1959,7 +2012,7 @@ def _build_model_node(cls: Callable, name: str, category: str) -> Type:
     widgets and outputs the applied ``sample``, but its SECOND output is the constructed model on a
     role-qualified ``SAMPLEFLUX_OBJECT:model`` socket (it outputs ITSELF as the model object — so it can
     also dock into a downstream evaluator's ``model`` slot) rather than a ``SAMPLEFLUX_OP``. The wrapped
-    class must be callable as ``model(sample) -> sample`` (the waivefront-helios bridge generates such a
+    class must be callable as ``model(record) -> record`` (the waivefront-helios bridge generates such a
     wrapper around a helios ``infer``). ``@output`` properties, if any, are appended as extra sockets.
 
     A ``model``-typed ctor param (``_model_params`` — the ``ModelInference.model`` loader→runner
@@ -2023,7 +2076,7 @@ def _build_value_node(cls: Callable, name: str, category: str) -> Type:
     """Build a VALUE-producer node: ``(config widgets) -> (@output sockets…)``.
 
     For a configurable class with a no-arg ``__call__(self)`` (:func:`_value_call_signature`) — a pure
-    value producer with NO Sample input. ``execute`` builds the object from its config widgets, invokes
+    value producer with NO record input. ``execute`` builds the object from its config widgets, invokes
     it (``obj()`` — honouring the producer contract), and surfaces each declared ``@output`` property as
     a typed output socket (containers → JSON ``STRING``, via the same machinery as op/runnable nodes).
     Unlike an op node there are NO ``sample`` input or ``sample``/``op`` outputs — the only outputs are
@@ -2625,19 +2678,19 @@ def create_comfy_node(
     """Dynamically construct a ComfyUI node class from a Python callable.
 
     Dispatches on the callable's SampleFlux role: a ``run()``-implementing class (trainer / evaluator /
-    processor) becomes a buildable RUNNABLE node (members as wired sockets); ``Sample``-taking op
-    classes become ``SAMPLE -> SAMPLE`` nodes; ``Sample``-yielding sources (and task ``role="dataset"``
-    classes) become ``-> SOURCE`` nodes; runnable MEMBER classes (model / loss / metric / optimizer /
-    loader / lightning) AND ``category="sink"`` storage sinks become ``-> OBJECT`` nodes (a sink
-    outputs ``SAMPLEFLUX_OBJECT:sink``, docking into a ``DatasetProcessor`` node's ``sink`` slot); a
-    no-arg ``__call__(self)`` class becomes a VALUE node (config widgets -> ``@output`` sockets, no
-    Sample I/O); everything else falls back to generic.
+    processor) becomes a buildable RUNNABLE node (members as wired sockets); ``category="op"``
+    classes (record-taking ops) become ``SAMPLE -> SAMPLE`` nodes; record-yielding sources (and task
+    ``role="dataset"`` classes) become ``-> SOURCE`` nodes; runnable MEMBER classes (model / loss /
+    metric / optimizer / loader / lightning) AND ``category="sink"`` storage sinks become ``-> OBJECT``
+    nodes (a sink outputs ``SAMPLEFLUX_OBJECT:sink``, docking into a ``DatasetProcessor`` node's
+    ``sink`` slot); a no-arg ``__call__(self)`` class becomes a VALUE node (config widgets ->
+    ``@output`` sockets, no record I/O); everything else falls back to generic.
     """
     if _is_runnable(func):
         return _build_runnable_node(func, name, category)
-    # A MODEL node (``category="model"``) also has ``__call__(self, sample)`` — so it must be
-    # dispatched BEFORE the op check, which would otherwise build it as an op (a model RUNS
-    # inference and additionally exposes its model object; see :func:`_build_model_node`).
+    # A MODEL node (``category="model"``) also has a record-taking ``__call__`` — it is
+    # dispatched BEFORE the op check by its own category tag (a model RUNS inference and
+    # additionally exposes its model object; see :func:`_build_model_node`).
     if getattr(func, "__confluid_category__", None) == "model":
         return _build_model_node(func, name, category)
     if _op_call_signature(func) is not None:

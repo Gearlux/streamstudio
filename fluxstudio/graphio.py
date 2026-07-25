@@ -41,7 +41,7 @@ from confluid import load as _confluid_load
 from confluid import resolve as _confluid_resolve
 from confluid.registry import resolve_class
 from loggair import get_logger
-from sampleflux import Flux
+from sampleflux import Flux, Pipeline
 from sampleflux.discovery import resolve_callable
 from sampleflux.ops.configure import ConfigureOp
 from sampleflux.ops.context import Apply as CtxApply
@@ -50,7 +50,6 @@ from sampleflux.ops.context import MergeFields as CtxMerge
 from sampleflux.ops.context import Save as CtxSave
 from sampleflux.ops.context import Use as CtxUse
 from sampleflux.ops.formula import FormulaOp
-from sampleflux.ops.transform_chain import TransformChain
 
 from fluxstudio.bridge import (
     _OP_LIST_PARAMS,
@@ -1811,7 +1810,7 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
     # WHOLE-GRAPH "Subgraph as an Op" support: a ``Taidal_SubgraphOp`` terminator (Extract as Op)
     # has no ``TAIDAL_CALLABLE_PATH``, so on its own it would be skipped — but its ``op`` output
     # (consumed by e.g. a ``Flux``'s ``op_N``) IS the subgraph's inner cone compiled to ONE
-    # ``TransformChain``. Reuse the SHARED ops-export compiler (:func:`export._subgraph_op_instance`)
+    # ``Pipeline``. Reuse the SHARED ops-export compiler (:func:`export._subgraph_op_instance`)
     # so the whole-graph export EMBEDS that chain in the consumer's op-list instead of dropping the
     # wire and fragmenting the inner ops into stray ``pipeline_N`` entries. All terminators share ONE
     # ``fold`` so a ``constant=True`` config (``ImpairmentsTx/RxConfig``) hoists exactly once.
@@ -1833,7 +1832,7 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
             sg_cone_excluded |= _forward_sample_closure(cone, sg_prompt)
         except Exception as e:  # pragma: no cover - defensive: fall back to skip-with-comment
             logger.warning(
-                f"workflow_to_yaml: could not compile Subgraph-Op {tid} into a TransformChain "
+                f"workflow_to_yaml: could not compile Subgraph-Op {tid} into a Pipeline "
                 f"({type(e).__name__}: {e}); it is skipped-with-comment (use the ops-export instead)."
             )
     # The hoisted constants' source nodes are emitted by the fold (top-level + dotted refs), so drop
@@ -1882,13 +1881,9 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
         elif nid in compiled_adapters:
             logger.debug(f"workflow_to_yaml: node {nid} ({pnode.class_type}) compiled into a ConfigureOp value chain.")
         elif nid in sg_cone_excluded:
-            logger.debug(
-                f"workflow_to_yaml: node {nid} ({pnode.class_type}) compiled into a Subgraph-Op TransformChain."
-            )
+            logger.debug(f"workflow_to_yaml: node {nid} ({pnode.class_type}) compiled into a Subgraph-Op Pipeline.")
         elif nid in subgraph_op_instances:
-            logger.debug(
-                f"workflow_to_yaml: Subgraph-Op {nid} compiled to a TransformChain (embedded in its consumer)."
-            )
+            logger.debug(f"workflow_to_yaml: Subgraph-Op {nid} compiled to a Pipeline (embedded in its consumer).")
         elif getattr(node_cls, "TAIDAL_CALLABLE_PATH", None):
             try:
                 specs[nid] = _build_fluid(pnode, node_mappings)
@@ -1944,7 +1939,7 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
 
     def _op_value_for(src_id: str, src_slot: int) -> Any:
         """The value for a SINGLE op-slot wire (``op``/``target``): a Subgraph-Op terminator
-        embeds its compiled ``TransformChain`` inline; every other source is a plain/dotted
+        embeds its compiled ``Pipeline`` inline; every other source is a plain/dotted
         ``!ref:`` to its node. (For sequential op-LISTs the cone ops are spliced inline instead
         — see the list branch below.)"""
         if src_id in subgraph_op_instances:
@@ -1961,7 +1956,7 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
         configured |= {param for param, _cap in output_captures.get(nid, [])}  # capture wraps inject these
         wired: Dict[str, List[Tuple[str, str, int]]] = {}
         for input_name, (src_id, src_slot) in pnode.links.items():
-            base = _strip_index(input_name)
+            base = _strip_index_for(cls, input_name)
             if base == _SAMPLE_INPUT:
                 # The op-chaining data-flow socket — never a constructor kwarg (the chain
                 # structure is captured by the folded Flux pipeline entries below).
@@ -1971,7 +1966,7 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
             if src_id not in specs:
                 if src_id in subgraph_op_instances:
                     # A Subgraph-Op terminator feeding this op slot → embed its compiled
-                    # TransformChain inline (not dropped); _op_value_for resolves it below.
+                    # Pipeline inline (not dropped); _op_value_for resolves it below.
                     wired.setdefault(base, []).append((input_name, src_id, src_slot))
                     continue
                 literal = _primitive_literal(src_id, pnodes)
@@ -1988,17 +1983,19 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
                 kwargs[base] = _op_value_for(items[0][1], items[0][2])
             else:  # dynamic op_N / source_N → a list, ordered by slot index
                 ordered = sorted(items, key=lambda it: _index_of(it[0]))
-                sequential = base == "ops" and isinstance(cls, type) and issubclass(cls, (Flux, TransformChain))
+                sequential = isinstance(cls, type) and (
+                    (base == "ops" and issubclass(cls, Flux)) or (base == "transforms" and issubclass(cls, Pipeline))
+                )
                 value_list: List[Any] = []
                 for _n, src, slot in ordered:
                     if sequential and src in subgraph_op_instances:
-                        # A sequential op-list (Flux/TransformChain ``ops``) makes a nested
-                        # ``TransformChain`` equivalent to its ops SPLICED inline — and inline
-                        # Instance ops materialize cleanly via ``DatasetProcessor.run()``'s per-op
-                        # ``flow()``, whereas a nested deferred ``TransformChain`` marker left in
+                        # A sequential op-list (Flux ``ops`` / Pipeline ``transforms``) makes a
+                        # nested ``Pipeline`` equivalent to its transforms SPLICED inline — and
+                        # inline Instance ops materialize cleanly via ``DatasetProcessor.run()``'s
+                        # per-op ``flow()``, whereas a nested deferred ``Pipeline`` marker left in
                         # ``flux.ops`` does NOT (the Flux rejects it when it iterates ``ops``).
                         # Fan-out containers (Parallel) keep the single embedded chain.
-                        value_list.extend(subgraph_op_instances[src].kwargs.get("ops", []))
+                        value_list.extend(subgraph_op_instances[src].kwargs.get("transforms", []))
                     else:
                         value_list.append(_op_value_for(src, slot))
                 kwargs[base] = value_list
@@ -2013,7 +2010,7 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
         configured = {param for param, _chain in configure_specs.get(nid, [])}
         configured |= {param for param, _cap in output_captures.get(nid, [])}  # capture wraps inject these
         for input_name, (src_id, src_slot) in pnodes[nid].links.items():
-            base = _strip_index(input_name)
+            base = _strip_index_for(cls, input_name)
             if base == _SAMPLE_INPUT:
                 continue  # the chain itself — expressed by the ops-list order
             if base in configured:
@@ -2072,7 +2069,7 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
         chain_entries.append((key, Class(Flux, **flux_kwargs)))
 
     document = _hoist_document(fluids, names, referenced, specs)
-    # `constant=True` configs hoisted while compiling the Subgraph-Op TransformChain(s) — emit them
+    # `constant=True` configs hoisted while compiling the Subgraph-Op Pipeline(s) — emit them
     # as top-level entries so the nested chain's dotted `!ref:<name>.<output>` consumers resolve
     # against the same document (the ops-export shape).
     for cname, cval in sg_fold.constants.items():
@@ -2123,8 +2120,9 @@ def _collect_op_chains(
         if cnid not in specs:
             continue
         captured_params = {param for param, _cap in captures.get(cnid, [])}
+        consumer_cls = _op_class_of(node_mappings.get(pnode.class_type))
         for input_name, (src_id, _slot) in pnode.links.items():
-            base = _strip_index(input_name)
+            base = _strip_index_for(consumer_cls, input_name)
             if base == _SAMPLE_INPUT or src_id not in op_ids:
                 continue
             # A capture wire (op-@output → param) is NOT an op-value reference: the producer stays
@@ -2213,14 +2211,14 @@ def _assign_ref_names(
     for nid, pnode in pnodes.items():
         if nid not in specs:
             continue
+        consumer_op_cls = _op_class_of(node_mappings.get(pnode.class_type))
         for input_name, (src_id, _slot) in pnode.links.items():
-            base = _strip_index(input_name)
+            base = _strip_index_for(consumer_op_cls, input_name)
             if base == _SAMPLE_INPUT:
                 continue
             src_cls = node_mappings.get(pnodes[src_id].class_type) if src_id in pnodes else None
             if getattr(src_cls, "TAIDAL_NODE_KIND", None) == "value":
                 continue
-            consumer_op_cls = _op_class_of(node_mappings.get(pnode.class_type))
             if (
                 base in _OP_LIST_PARAMS
                 or base in _SOURCE_LIST_PARAMS
@@ -2291,13 +2289,15 @@ def _hoist_document(
 
 
 def _strip_index(name: str) -> str:
-    """Map a dynamic list-socket name back to its underlying list PARAM name.
+    """Map a dynamic list-socket name back to its underlying list PARAM name (fixed name map).
 
     ``op_0`` → ``ops`` / ``source_3`` → ``fluxes`` (the socket prefix differs from the param name);
     a generic ``<name>_<digit>`` (object-list members ``logger_0`` / ``callbacks_0``, where the socket
     prefix IS the param name) → ``<name>``; a non-indexed socket (``model`` / ``train_set``) is
     returned unchanged. So the exporter collapses ``logger_0`` / ``logger_1`` back into one ``logger``
-    list member (the inverse of the importer's object-list wiring).
+    list member (the inverse of the importer's object-list wiring). Prefer the CLASS-AWARE
+    :func:`_strip_index_for` wherever the consuming class is at hand — the fixed ``op_N → ops`` map
+    here is only the fallback (a ``Pipeline``'s op list is named ``transforms``, not ``ops``).
     """
     if name.startswith("op_") and name[3:].isdigit():
         return "ops"
@@ -2307,6 +2307,25 @@ def _strip_index(name: str) -> str:
     if head and tail.isdigit():
         return head
     return name
+
+
+def _strip_index_for(cls: Any, name: str) -> str:
+    """Class-aware :func:`_strip_index`: collapse a dynamic op-list socket into the CONSUMING class's
+    REAL list param.
+
+    Resolves the socket-family prefix through the same authority the bridge uses for op-list
+    params (``bridge._op_list_params`` — a reverse prefix→param lookup): a ``Pipeline`` node's
+    ``op_N`` collapses into ``transforms``, a ``Flux``'s into ``ops``, a stamped helios family
+    (``true_transforms_N``) into its own param. Falls back to the fixed name map
+    (:func:`_strip_index`) when ``cls`` is unknown (a non-Taidal node) or the prefix is not one
+    of its op-list families (``source_N`` → ``fluxes``, object lists, plain sockets).
+    """
+    head, _, tail = name.rpartition("_")
+    if cls is not None and head and tail.isdigit():
+        for param, prefix in _op_list_params(cls).items():
+            if head == prefix:
+                return param
+    return _strip_index(name)
 
 
 def _index_of(name: str) -> int:
