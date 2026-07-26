@@ -73,7 +73,7 @@ def _resolve_field_key(record: Any, field: str) -> Optional[str]:
     for pref in _KEY_PREFERENCES.get(field, ()):
         if pref in record:
             return pref
-    keys = list(record.keys())
+    keys: List[str] = list(record.keys())
     if field == "input":
         return keys[0]
     if field == "target":
