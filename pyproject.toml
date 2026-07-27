@@ -37,7 +37,11 @@ dev = [
     "pytest>=7.0.0,<9.0.0",
     "pytest-cov>=4.0.0,<7.0.0",
 ]
-waivefront = ["waivefront"]
+
+# The signal-domain node set. waivefront transitively depends on torchsig via a git URL,
+# and uv forbids transitive URL deps unless they're also declared at top-level — so the
+# URL is restated here. Unpublished on PyPI, so the git URL is the only option.
+waivefront = ["waivefront", "torchsig @ git+https://github.com/TorchDSP/torchsig.git"]
 
 [project.scripts]
 streamstudio = "streamstudio.cli:main"
