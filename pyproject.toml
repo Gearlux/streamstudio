@@ -19,6 +19,12 @@ dependencies = [
     # min/max. Already transitive via confluid[pydantic]->pydantic; declared because
     # bridge.py imports it directly.
     "annotated-types",
+    # Shell completion for the argparse CLI (cli.py calls argcomplete.autocomplete).
+    # StreamStudio is not a `liquifai.apps` entry point and is not a click app, so
+    # neither of the workspace's other two completion paths applies. Declared rather
+    # than leaned on transitively (it currently arrives via fiftyone, which is not a
+    # dependency of this package); the import in cli.py stays guarded regardless.
+    "argcomplete>=3.0",
 ]
 requires-python = ">=3.12"
 

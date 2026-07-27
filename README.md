@@ -20,6 +20,19 @@ pip install "streamstudio[waivefront] @ git+https://github.com/Gearlux/streamstu
 
 ComfyUI itself is **not** a Python dependency — the CLI clones it on first run (see below).
 
+### Shell completion
+
+The CLI is argparse-based and ships [argcomplete](https://kislyuk.github.io/argcomplete/)
+support (`cli.py` calls `argcomplete.autocomplete` before parsing). Enable it with:
+
+```bash
+eval "$(register-python-argcomplete streamstudio)"     # add to your ~/.bashrc / ~/.zshrc
+streamstudio exp<TAB>                                   # -> export  export-workflow
+```
+
+The import is guarded, so an environment without argcomplete still runs the CLI normally —
+completion is a convenience, never a hard requirement.
+
 ## Quick start
 
 ```bash

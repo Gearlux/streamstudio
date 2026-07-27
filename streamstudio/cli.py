@@ -459,6 +459,19 @@ def main() -> None:
     expw_parser.add_argument("workflow", type=Path, help="ComfyUI workflow JSON (UI or API form).")
     expw_parser.add_argument("-o", "--output", type=Path, default=None, help="Write the YAML here (default: stdout).")
 
+    # Shell completion. StreamStudio is an argparse app, so it gets NEITHER liquifai's
+    # completion (that walks the `liquifai.apps` entry-point group — see aisland/setup.sh)
+    # NOR click's built-in `_PROG_COMPLETE` protocol; argcomplete is the argparse
+    # equivalent. It must run AFTER the parser is fully built (it introspects it) and
+    # BEFORE parse_args. The import is guarded so a venv without argcomplete still runs
+    # the CLI normally — completion is a convenience, never a hard requirement.
+    try:
+        import argcomplete
+    except ImportError:
+        pass
+    else:
+        argcomplete.autocomplete(parser)
+
     args = parser.parse_args()
 
     if args.command == "export":
