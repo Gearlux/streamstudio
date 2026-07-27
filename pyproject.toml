@@ -3,9 +3,9 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "fluxstudio"
+name = "streamstudio"
 version = "0.2.0"
-description = "Auto-generating ComfyUI nodes from SampleFlux/HuggingFace operations."
+description = "Auto-generating ComfyUI nodes from RecordStream/HuggingFace operations."
 authors = [{name = "Taidal"}]
 license = {text = "MIT"}
 dependencies = [
@@ -13,7 +13,7 @@ dependencies = [
     "loggair>=0.1.0",
     # [pydantic] extra: bridge.py enumerates fields via confluid.to_pydantic.
     "confluid[pydantic]>=0.1.0",
-    "sampleflux>=0.1.0",
+    "recordstream>=0.1.0",
     "datasets",
     # PEP-593 range marks: the bridge reads Annotated[..., Interval/Ge/Le] into widget
     # min/max. Already transitive via confluid[pydantic]->pydantic; declared because
@@ -34,25 +34,25 @@ dev = [
 waivefront = ["waivefront"]
 
 [project.scripts]
-fluxstudio = "fluxstudio.cli:main"
+streamstudio = "streamstudio.cli:main"
 
 # Custom-node repos the launcher installs into ComfyUI's custom_nodes/ on every launch
 # ("generally available" — no flags or env vars needed). ANY installed package may declare
-# this group; the target must resolve to a git-URL str or an iterable of them. fluxstudio's
-# own declaration bundles ComfyUI-Manager (see fluxstudio/custom_nodes.py). NOTE: editable
+# this group; the target must resolve to a git-URL str or an iterable of them. streamstudio's
+# own declaration bundles ComfyUI-Manager (see streamstudio/custom_nodes.py). NOTE: editable
 # installs freeze entry-point metadata — after adding/renaming an entry point here, reinstall
-# (`uv pip install -e ./fluxstudio`); editing the URL tuple in custom_nodes.py needs no reinstall.
-[project.entry-points."fluxstudio.custom_nodes"]
-fluxstudio = "fluxstudio.custom_nodes:CUSTOM_NODE_URLS"
+# (`uv pip install -e ./streamstudio`); editing the URL tuple in custom_nodes.py needs no reinstall.
+[project.entry-points."streamstudio.custom_nodes"]
+streamstudio = "streamstudio.custom_nodes:CUSTOM_NODE_URLS"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["fluxstudio*"]
+include = ["streamstudio*"]
 
 [tool.setuptools.package-data]
 # Ship the default palette config (the fallback used when the user has no own config) + the py.typed
-# marker. `config.default.yaml` is read at runtime by fluxstudio.bridge.
-fluxstudio = ["py.typed", "config.default.yaml"]
+# marker. `config.default.yaml` is read at runtime by streamstudio.bridge.
+streamstudio = ["py.typed", "config.default.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

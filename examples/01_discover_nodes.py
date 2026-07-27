@@ -1,27 +1,27 @@
-"""Enumerate the ComfyUI nodes FluxStudio auto-generates from installed packages.
+"""Enumerate the ComfyUI nodes StreamStudio auto-generates from installed packages.
 
-Importing ``fluxstudio`` triggers ``_discover_and_register_nodes`` (see
-``fluxstudio/__init__.py``), which walks the ``confluid.configurables``
+Importing ``streamstudio`` triggers ``_discover_and_register_nodes`` (see
+``streamstudio/__init__.py``), which walks the ``confluid.configurables``
 entry-point group and wraps every compatible callable into a ComfyUI node via
-``fluxstudio.bridge``. This dumps the resulting node palette as JSON.
+``streamstudio.bridge``. This dumps the resulting node palette as JSON.
 
 Runs headlessly — no ComfyUI process required. CI verifies this exits 0 and finds
-at least one node (``sampleflux`` is a hard dependency, so the palette is never
+at least one node (``recordstream`` is a hard dependency, so the palette is never
 empty).
 """
 
 import json
 import sys
 
-import fluxstudio
+import streamstudio
 
 
 def main() -> int:
-    mappings = fluxstudio.NODE_CLASS_MAPPINGS
+    mappings = streamstudio.NODE_CLASS_MAPPINGS
     palette = [
         {
             "key": key,
-            "display_name": fluxstudio.NODE_DISPLAY_NAME_MAPPINGS.get(key, key),
+            "display_name": streamstudio.NODE_DISPLAY_NAME_MAPPINGS.get(key, key),
             "category": node_cls.CATEGORY,
             "inputs": list(node_cls.INPUT_TYPES().get("required", {})),
             "return_types": list(node_cls.RETURN_TYPES),

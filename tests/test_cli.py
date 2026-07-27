@@ -1,7 +1,7 @@
-"""Tests for ``fluxstudio.cli.main`` — the ComfyUI bootstrap + launch flow.
+"""Tests for ``streamstudio.cli.main`` — the ComfyUI bootstrap + launch flow.
 
 ``main`` does four things on each run: clone ComfyUI if missing, install custom
-nodes (entry-point-declared / env / flags), (re)point the ``custom_nodes/fluxstudio``
+nodes (entry-point-declared / env / flags), (re)point the ``custom_nodes/streamstudio``
 symlink at this package, then launch ``main.py`` under the active interpreter.
 ``subprocess.run`` is always mocked so no real clone / pip install / ComfyUI launch
 happens, but the symlink branches use a real ``tmp_path`` and real ``os.symlink`` —
@@ -19,8 +19,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from fluxstudio import cli
-from fluxstudio.custom_nodes import CUSTOM_NODE_URLS
+from streamstudio import cli
+from streamstudio.custom_nodes import CUSTOM_NODE_URLS
 
 # The symlink target main() computes: this installed package's directory.
 SOURCE = Path(cli.__file__).parent.resolve()
@@ -42,19 +42,19 @@ class _FakeEntryPoint:
 
 @pytest.fixture(autouse=True)
 def _no_ambient_custom_nodes(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep call-count assertions hermetic — ignore any ambient FLUXSTUDIO_CUSTOM_NODES export."""
+    """Keep call-count assertions hermetic — ignore any ambient STREAMSTUDIO_CUSTOM_NODES export."""
     monkeypatch.delenv(cli.CUSTOM_NODES_ENV_VAR, raising=False)
 
 
 @pytest.fixture(autouse=True)
 def _hermetic_declared_nodes(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Pin the declared tier to fluxstudio's own bundled list.
+    """Pin the declared tier to streamstudio's own bundled list.
 
     The real ``entry_points()`` reads the whole venv — another installed package declaring
-    ``fluxstudio.custom_nodes`` would leak into call-count assertions. The real loading logic
-    still runs, fed fluxstudio's actual ``CUSTOM_NODE_URLS`` declaration.
+    ``streamstudio.custom_nodes`` would leak into call-count assertions. The real loading logic
+    still runs, fed streamstudio's actual ``CUSTOM_NODE_URLS`` declaration.
     """
-    eps = [_FakeEntryPoint("fluxstudio", CUSTOM_NODE_URLS)]
+    eps = [_FakeEntryPoint("streamstudio", CUSTOM_NODE_URLS)]
     monkeypatch.setattr(cli, "entry_points", lambda group: eps if group == cli.CUSTOM_NODES_ENTRY_POINT_GROUP else [])
 
 
@@ -76,8 +76,8 @@ def _preinstall_manager(comfy_dir: Path) -> Path:
 def test_main_clones_when_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, logger_mock: MagicMock) -> None:
     # No --comfy-dir -> the default is built from Path.home(); point it at tmp.
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    monkeypatch.setattr(sys, "argv", ["fluxstudio"])
-    comfy = tmp_path / ".fluxstudio" / "ComfyUI"
+    monkeypatch.setattr(sys, "argv", ["streamstudio"])
+    comfy = tmp_path / ".streamstudio" / "ComfyUI"
 
     with patch("subprocess.run") as run_mock:
         cli.main()
@@ -93,7 +93,7 @@ def test_main_clones_when_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     assert calls[-1].args[0] == [sys.executable, "main.py"]
     assert calls[-1].kwargs["cwd"] == comfy
     # symlink freshly created, pointing at this package
-    link = comfy / "custom_nodes" / "fluxstudio"
+    link = comfy / "custom_nodes" / "streamstudio"
     assert link.is_symlink()
     assert link.resolve() == SOURCE
 
@@ -105,12 +105,12 @@ def test_main_uses_existing_and_updates_stale_symlink(
     custom = comfy / "custom_nodes"
     custom.mkdir(parents=True)
     _preinstall_manager(comfy)  # default custom-node install already done -> no clone for it
-    link = custom / "fluxstudio"
+    link = custom / "streamstudio"
     stale_target = tmp_path / "somewhere_else"
     stale_target.mkdir()
     os.symlink(stale_target, link)  # pre-existing symlink pointing at the wrong place
 
-    monkeypatch.setattr(sys, "argv", ["fluxstudio", "--comfy-dir", str(comfy)])
+    monkeypatch.setattr(sys, "argv", ["streamstudio", "--comfy-dir", str(comfy)])
 
     with patch("subprocess.run") as run_mock:
         cli.main()
@@ -130,12 +130,12 @@ def test_main_leaves_correct_symlink_untouched(
     comfy = tmp_path / "ComfyUI"
     custom = comfy / "custom_nodes"
     custom.mkdir(parents=True)
-    link = custom / "fluxstudio"
+    link = custom / "streamstudio"
     os.symlink(SOURCE, link)  # already correct
 
-    monkeypatch.setattr(sys, "argv", ["fluxstudio", "--comfy-dir", str(comfy)])
+    monkeypatch.setattr(sys, "argv", ["streamstudio", "--comfy-dir", str(comfy)])
 
-    with patch("subprocess.run"), patch("fluxstudio.cli.os.symlink") as symlink_mock:
+    with patch("subprocess.run"), patch("streamstudio.cli.os.symlink") as symlink_mock:
         cli.main()
 
     # An already-correct link must not be unlinked/recreated.
@@ -149,12 +149,12 @@ def test_main_warns_on_non_symlink_path(
     comfy = tmp_path / "ComfyUI"
     custom = comfy / "custom_nodes"
     custom.mkdir(parents=True)
-    link = custom / "fluxstudio"
+    link = custom / "streamstudio"
     link.mkdir()  # a real directory squatting where the symlink should go
 
-    monkeypatch.setattr(sys, "argv", ["fluxstudio", "--comfy-dir", str(comfy)])
+    monkeypatch.setattr(sys, "argv", ["streamstudio", "--comfy-dir", str(comfy)])
 
-    with patch("subprocess.run"), patch("fluxstudio.cli.os.symlink") as symlink_mock:
+    with patch("subprocess.run"), patch("streamstudio.cli.os.symlink") as symlink_mock:
         cli.main()
 
     symlink_mock.assert_not_called()
@@ -169,7 +169,7 @@ def test_main_handles_keyboard_interrupt(
     comfy = tmp_path / "ComfyUI"
     comfy.mkdir()
     _preinstall_manager(comfy)  # exists -> only the launch subprocess.run call fires
-    monkeypatch.setattr(sys, "argv", ["fluxstudio", "--comfy-dir", str(comfy)])
+    monkeypatch.setattr(sys, "argv", ["streamstudio", "--comfy-dir", str(comfy)])
 
     with patch("subprocess.run", side_effect=KeyboardInterrupt):
         cli.main()  # Ctrl-C during launch must be swallowed, not propagated
@@ -182,35 +182,35 @@ def test_main_default_nodes_shown_exports_env_zero(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, logger_mock: MagicMock
 ) -> None:
     # Default (no flag): ComfyUI's built-in nodes stay visible -> the launched ComfyUI gets
-    # FLUXSTUDIO_HIDE_DEFAULT_NODES="0" (explicit, so the flag wins over any ambient shell export).
+    # STREAMSTUDIO_HIDE_DEFAULT_NODES="0" (explicit, so the flag wins over any ambient shell export).
     comfy = tmp_path / "ComfyUI"
     comfy.mkdir()
-    monkeypatch.setattr(sys, "argv", ["fluxstudio", "--comfy-dir", str(comfy)])
+    monkeypatch.setattr(sys, "argv", ["streamstudio", "--comfy-dir", str(comfy)])
     # An ambient export of the var must NOT leak through when the flag defaults to shown.
-    monkeypatch.setenv("FLUXSTUDIO_HIDE_DEFAULT_NODES", "1")
+    monkeypatch.setenv("STREAMSTUDIO_HIDE_DEFAULT_NODES", "1")
 
     with patch("subprocess.run") as run_mock:
         cli.main()
 
     launch = run_mock.call_args
     assert launch.args[0] == [sys.executable, "main.py"]
-    assert launch.kwargs["env"]["FLUXSTUDIO_HIDE_DEFAULT_NODES"] == "0"
+    assert launch.kwargs["env"]["STREAMSTUDIO_HIDE_DEFAULT_NODES"] == "0"
 
 
 def test_main_no_default_nodes_exports_env_one(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, logger_mock: MagicMock
 ) -> None:
-    # --no-default-nodes hides ComfyUI's built-ins -> FLUXSTUDIO_HIDE_DEFAULT_NODES="1" so the
-    # fluxstudio import inside ComfyUI prunes the defaults and surfaces Taidal nodes at the root.
+    # --no-default-nodes hides ComfyUI's built-ins -> STREAMSTUDIO_HIDE_DEFAULT_NODES="1" so the
+    # streamstudio import inside ComfyUI prunes the defaults and surfaces Taidal nodes at the root.
     comfy = tmp_path / "ComfyUI"
     comfy.mkdir()
-    monkeypatch.setattr(sys, "argv", ["fluxstudio", "--comfy-dir", str(comfy), "--no-default-nodes"])
+    monkeypatch.setattr(sys, "argv", ["streamstudio", "--comfy-dir", str(comfy), "--no-default-nodes"])
 
     with patch("subprocess.run") as run_mock:
         cli.main()
 
     launch = run_mock.call_args
-    assert launch.kwargs["env"]["FLUXSTUDIO_HIDE_DEFAULT_NODES"] == "1"
+    assert launch.kwargs["env"]["STREAMSTUDIO_HIDE_DEFAULT_NODES"] == "1"
     # The rest of the parent environment is forwarded, not replaced.
     assert "PATH" in launch.kwargs["env"]
     infos = [str(c.args[0]) for c in logger_mock.info.call_args_list]
@@ -220,44 +220,44 @@ def test_main_no_default_nodes_exports_env_one(
 def test_main_config_exports_config_env(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, logger_mock: MagicMock
 ) -> None:
-    # --config <file> is forwarded as FLUXSTUDIO_CONFIG (the PATH; the keep-list lives IN the file).
+    # --config <file> is forwarded as STREAMSTUDIO_CONFIG (the PATH; the keep-list lives IN the file).
     comfy = tmp_path / "ComfyUI"
     comfy.mkdir()
     cfg = tmp_path / "palette.yaml"
     cfg.write_text("keep_nodes: [MaskToImage]\n")
-    monkeypatch.setattr(sys, "argv", ["fluxstudio", "--comfy-dir", str(comfy), "--config", str(cfg)])
+    monkeypatch.setattr(sys, "argv", ["streamstudio", "--comfy-dir", str(comfy), "--config", str(cfg)])
     with patch("subprocess.run") as run_mock:
         cli.main()
-    assert run_mock.call_args.kwargs["env"]["FLUXSTUDIO_CONFIG"] == str(cfg)
+    assert run_mock.call_args.kwargs["env"]["STREAMSTUDIO_CONFIG"] == str(cfg)
 
 
 def test_main_no_config_clears_config_env(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, logger_mock: MagicMock
 ) -> None:
-    # Without --config the flag is authoritative: FLUXSTUDIO_CONFIG is set to "" (clearing any ambient
-    # export) so the bridge uses its default ~/.fluxstudio/config.yaml.
+    # Without --config the flag is authoritative: STREAMSTUDIO_CONFIG is set to "" (clearing any ambient
+    # export) so the bridge uses its default ~/.streamstudio/config.yaml.
     comfy = tmp_path / "ComfyUI"
     comfy.mkdir()
-    monkeypatch.setenv("FLUXSTUDIO_CONFIG", "/ambient/leak.yaml")
-    monkeypatch.setattr(sys, "argv", ["fluxstudio", "--comfy-dir", str(comfy)])
+    monkeypatch.setenv("STREAMSTUDIO_CONFIG", "/ambient/leak.yaml")
+    monkeypatch.setattr(sys, "argv", ["streamstudio", "--comfy-dir", str(comfy)])
     with patch("subprocess.run") as run_mock:
         cli.main()
-    assert run_mock.call_args.kwargs["env"]["FLUXSTUDIO_CONFIG"] == ""
+    assert run_mock.call_args.kwargs["env"]["STREAMSTUDIO_CONFIG"] == ""
 
 
 def test_main_only_taidal_nodes_exports_both_envs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, logger_mock: MagicMock
 ) -> None:
-    # --only-taidal-nodes sets FLUXSTUDIO_ONLY_TAIDAL_NODES=1 AND implies hiding built-ins
-    # (FLUXSTUDIO_HIDE_DEFAULT_NODES=1) so the backend prunes defaults + the palette roots.
+    # --only-taidal-nodes sets STREAMSTUDIO_ONLY_TAIDAL_NODES=1 AND implies hiding built-ins
+    # (STREAMSTUDIO_HIDE_DEFAULT_NODES=1) so the backend prunes defaults + the palette roots.
     comfy = tmp_path / "ComfyUI"
     comfy.mkdir()
-    monkeypatch.setattr(sys, "argv", ["fluxstudio", "--comfy-dir", str(comfy), "--only-taidal-nodes"])
+    monkeypatch.setattr(sys, "argv", ["streamstudio", "--comfy-dir", str(comfy), "--only-taidal-nodes"])
     with patch("subprocess.run") as run_mock:
         cli.main()
     env = run_mock.call_args.kwargs["env"]
-    assert env["FLUXSTUDIO_ONLY_TAIDAL_NODES"] == "1"
-    assert env["FLUXSTUDIO_HIDE_DEFAULT_NODES"] == "1"
+    assert env["STREAMSTUDIO_ONLY_TAIDAL_NODES"] == "1"
+    assert env["STREAMSTUDIO_HIDE_DEFAULT_NODES"] == "1"
     infos = [str(c.args[0]) for c in logger_mock.info.call_args_list]
     assert any("ONLY Taidal nodes" in i for i in infos)
 
@@ -266,7 +266,7 @@ def test_module_run_as_script_invokes_main(tmp_path: Path, monkeypatch: pytest.M
     # Exercise the ``if __name__ == "__main__": main()`` entry guard.
     comfy = tmp_path / "ComfyUI"
     comfy.mkdir()
-    monkeypatch.setattr(sys, "argv", ["fluxstudio", "--comfy-dir", str(comfy)])
+    monkeypatch.setattr(sys, "argv", ["streamstudio", "--comfy-dir", str(comfy)])
 
     with patch("loggair.get_logger", return_value=MagicMock()), patch("subprocess.run"), patch("os.symlink"):
         runpy.run_path(cli.__file__, run_name="__main__")
@@ -287,7 +287,7 @@ def test_main_installs_comfyui_manager_by_default(
 ) -> None:
     comfy = tmp_path / "ComfyUI"
     comfy.mkdir()
-    monkeypatch.setattr(sys, "argv", ["fluxstudio", "--comfy-dir", str(comfy)])
+    monkeypatch.setattr(sys, "argv", ["streamstudio", "--comfy-dir", str(comfy)])
 
     with patch("subprocess.run") as run_mock:
         cli.main()
@@ -304,7 +304,7 @@ def test_main_no_manager_skips_manager_install(
 ) -> None:
     comfy = tmp_path / "ComfyUI"
     comfy.mkdir()
-    monkeypatch.setattr(sys, "argv", ["fluxstudio", "--comfy-dir", str(comfy), "--no-manager"])
+    monkeypatch.setattr(sys, "argv", ["streamstudio", "--comfy-dir", str(comfy), "--no-manager"])
 
     with patch("subprocess.run") as run_mock:
         cli.main()
@@ -320,7 +320,7 @@ def test_main_skips_already_installed_custom_node(
     comfy = tmp_path / "ComfyUI"
     comfy.mkdir()
     _preinstall_manager(comfy)
-    monkeypatch.setattr(sys, "argv", ["fluxstudio", "--comfy-dir", str(comfy)])
+    monkeypatch.setattr(sys, "argv", ["streamstudio", "--comfy-dir", str(comfy)])
 
     with patch("subprocess.run") as run_mock:
         cli.main()
@@ -333,7 +333,7 @@ def test_main_skips_already_installed_custom_node(
 def test_custom_node_flag_and_env_combine(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, logger_mock: MagicMock
 ) -> None:
-    # Install order: declared tier (fluxstudio's bundled manager), then FLUXSTUDIO_CUSTOM_NODES
+    # Install order: declared tier (streamstudio's bundled manager), then STREAMSTUDIO_CUSTOM_NODES
     # entries, then --custom-node flags.
     comfy = tmp_path / "ComfyUI"
     comfy.mkdir()
@@ -341,7 +341,7 @@ def test_custom_node_flag_and_env_combine(
     monkeypatch.setattr(
         sys,
         "argv",
-        ["fluxstudio", "--comfy-dir", str(comfy), "--custom-node", "https://github.com/c/FlagNode"],
+        ["streamstudio", "--comfy-dir", str(comfy), "--custom-node", "https://github.com/c/FlagNode"],
     )
 
     with patch("subprocess.run") as run_mock:
@@ -360,7 +360,7 @@ def test_custom_node_requirements_installed_after_clone(
     # A cloned custom node that ships a requirements.txt gets it pip-installed into this env.
     comfy = tmp_path / "ComfyUI"
     comfy.mkdir()
-    monkeypatch.setattr(sys, "argv", ["fluxstudio", "--comfy-dir", str(comfy)])
+    monkeypatch.setattr(sys, "argv", ["streamstudio", "--comfy-dir", str(comfy)])
 
     def fake_run(cmd: list[str], **kwargs: object) -> MagicMock:
         if cmd[:2] == ["git", "clone"]:  # simulate the clone materializing the repo
@@ -383,7 +383,7 @@ def test_custom_node_clone_failure_warns_and_launch_continues(
     comfy = tmp_path / "ComfyUI"
     comfy.mkdir()
     bad = "https://github.com/nowhere/Missing"
-    monkeypatch.setattr(sys, "argv", ["fluxstudio", "--comfy-dir", str(comfy), "--no-manager", "--custom-node", bad])
+    monkeypatch.setattr(sys, "argv", ["streamstudio", "--comfy-dir", str(comfy), "--no-manager", "--custom-node", bad])
 
     def fake_run(cmd: list[str], **kwargs: object) -> MagicMock:
         if cmd[:2] == ["git", "clone"]:
@@ -403,7 +403,7 @@ def test_custom_node_pip_failure_warns_and_launch_continues(
 ) -> None:
     comfy = tmp_path / "ComfyUI"
     comfy.mkdir()
-    monkeypatch.setattr(sys, "argv", ["fluxstudio", "--comfy-dir", str(comfy)])
+    monkeypatch.setattr(sys, "argv", ["streamstudio", "--comfy-dir", str(comfy)])
 
     def fake_run(cmd: list[str], **kwargs: object) -> MagicMock:
         if cmd[:2] == ["git", "clone"]:
@@ -425,14 +425,14 @@ def test_custom_node_pip_failure_warns_and_launch_continues(
 # ------------------------------------------------------------------- entry-point-declared nodes
 
 
-def test_fluxstudio_declares_manager_via_entry_point() -> None:
-    # The REAL installed metadata (bypassing the autouse fake): fluxstudio itself declares the
+def test_streamstudio_declares_manager_via_entry_point() -> None:
+    # The REAL installed metadata (bypassing the autouse fake): streamstudio itself declares the
     # group, so the manager is "generally available" with no flags. A failure here means the
-    # editable install's *.dist-info is stale — reinstall (`uv pip install -e ./fluxstudio`).
+    # editable install's *.dist-info is stale — reinstall (`uv pip install -e ./streamstudio`).
     import importlib.metadata as md
 
-    ours = [ep for ep in md.entry_points(group=cli.CUSTOM_NODES_ENTRY_POINT_GROUP) if ep.name == "fluxstudio"]
-    assert ours, "fluxstudio.custom_nodes entry point missing from installed metadata (stale editable?)"
+    ours = [ep for ep in md.entry_points(group=cli.CUSTOM_NODES_ENTRY_POINT_GROUP) if ep.name == "streamstudio"]
+    assert ours, "streamstudio.custom_nodes entry point missing from installed metadata (stale editable?)"
     assert cli.COMFYUI_MANAGER_URL in tuple(ours[0].load())
 
 
@@ -475,15 +475,15 @@ def test_declared_custom_nodes_broken_or_junk_entries_warn_and_skip(
 def test_main_installs_declared_nodes_from_any_package(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, logger_mock: MagicMock
 ) -> None:
-    # Any installed package's declaration installs alongside fluxstudio's bundled manager.
+    # Any installed package's declaration installs alongside streamstudio's bundled manager.
     comfy = tmp_path / "ComfyUI"
     comfy.mkdir()
     eps = [
-        _FakeEntryPoint("fluxstudio", CUSTOM_NODE_URLS),
+        _FakeEntryPoint("streamstudio", CUSTOM_NODE_URLS),
         _FakeEntryPoint("acme", ["https://github.com/acme/AcmeNodes"]),
     ]
     monkeypatch.setattr(cli, "entry_points", lambda group: eps)
-    monkeypatch.setattr(sys, "argv", ["fluxstudio", "--comfy-dir", str(comfy)])
+    monkeypatch.setattr(sys, "argv", ["streamstudio", "--comfy-dir", str(comfy)])
 
     with patch("subprocess.run") as run_mock:
         cli.main()
@@ -500,7 +500,7 @@ def test_main_no_declared_nodes_skips_package_declared_tier(
     comfy = tmp_path / "ComfyUI"
     comfy.mkdir()
     eps = [
-        _FakeEntryPoint("fluxstudio", CUSTOM_NODE_URLS),
+        _FakeEntryPoint("streamstudio", CUSTOM_NODE_URLS),
         _FakeEntryPoint("acme", ["https://github.com/acme/AcmeNodes"]),
     ]
     monkeypatch.setattr(cli, "entry_points", lambda group: eps)
@@ -508,7 +508,7 @@ def test_main_no_declared_nodes_skips_package_declared_tier(
         sys,
         "argv",
         [
-            "fluxstudio",
+            "streamstudio",
             "--comfy-dir",
             str(comfy),
             "--no-declared-nodes",
@@ -530,7 +530,7 @@ def test_main_dedups_urls_across_tiers(tmp_path: Path, monkeypatch: pytest.Monke
     comfy.mkdir()
     monkeypatch.setenv(cli.CUSTOM_NODES_ENV_VAR, cli.COMFYUI_MANAGER_URL)
     monkeypatch.setattr(
-        sys, "argv", ["fluxstudio", "--comfy-dir", str(comfy), "--custom-node", cli.COMFYUI_MANAGER_URL]
+        sys, "argv", ["streamstudio", "--comfy-dir", str(comfy), "--custom-node", cli.COMFYUI_MANAGER_URL]
     )
 
     with patch("subprocess.run") as run_mock:
@@ -550,7 +550,7 @@ def test_no_manager_filters_declared_tier_only(
     monkeypatch.setattr(
         sys,
         "argv",
-        ["fluxstudio", "--comfy-dir", str(comfy), "--no-manager", "--custom-node", cli.COMFYUI_MANAGER_URL],
+        ["streamstudio", "--comfy-dir", str(comfy), "--no-manager", "--custom-node", cli.COMFYUI_MANAGER_URL],
     )
 
     with patch("subprocess.run") as run_mock:
@@ -565,16 +565,16 @@ def test_no_manager_filters_declared_tier_only(
 
 def _register_rescale_node() -> None:
     """Put the generated RescaleOp op node into the live NODE_CLASS_MAPPINGS the CLI reads."""
-    from sampleflux.ops.torch import ToTensor as RescaleOp
+    from recordstream.ops.torch import ToTensor as RescaleOp
 
-    import fluxstudio
-    from fluxstudio.bridge import create_comfy_node
+    import streamstudio
+    from streamstudio.bridge import create_comfy_node
 
-    fluxstudio.NODE_CLASS_MAPPINGS["Taidal_RescaleOp"] = create_comfy_node(RescaleOp, "Taidal_RescaleOp")
+    streamstudio.NODE_CLASS_MAPPINGS["Taidal_RescaleOp"] = create_comfy_node(RescaleOp, "Taidal_RescaleOp")
 
 
-def _rescale_prompt_node(sample_src: object, in_max: float) -> dict:
-    return {"class_type": "Taidal_RescaleOp", "inputs": {"sample": sample_src, "in_min": 0.0, "in_max": in_max}}
+def _rescale_prompt_node(record_src: object, in_max: float) -> dict:
+    return {"class_type": "Taidal_RescaleOp", "inputs": {"record": record_src, "in_min": 0.0, "in_max": in_max}}
 
 
 def test_export_single_chain_writes_output_verbatim(tmp_path: Path, logger_mock: MagicMock) -> None:

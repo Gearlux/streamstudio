@@ -1,6 +1,6 @@
 # NOTE: ops-export compilation notes:
 #   - compiled for export target: node 421 (Taidal_waivefront_op_regions_RegionPowerAnalysisOp)
-#   - branching canvas wiring compiled to a sequential op-list — 3 context ops (Save/Use/Mix over per-sample Context cells, freed by their last reader) inserted
+#   - branching canvas wiring compiled to a sequential op-list — 3 context ops (Save/Use/Mix over per-record Context cells, freed by their last reader) inserted
 impairments_tx_config: !class:waivefront.torchsig.processing.ImpairmentsTxConfig
   quantize: true
   clock_drift: false
@@ -56,13 +56,13 @@ impairments_rx_config_2: !class:waivefront.torchsig.processing.ImpairmentsRxConf
   quantize: false
   digital_agc: true
 ops:
-- !class:sampleflux.ops.torch.SqueezeOp()
+- !class:recordstream.ops.torch.SqueezeOp()
   dim: 0
 - !class:waivefront.processing.CropSignalLengthOp()
   length: 10ms
   mode: front
   seed: null
-- !class:sampleflux.ops.context.Save()
+- !class:recordstream.ops.context.Save()
   name: __taidal_cell_107
 - !class:waivefront.spectrogram.SpectrogramOp()
   fft_size: 1024
@@ -77,31 +77,31 @@ ops:
   eps: 1.0e-12
   to_db: true
   floor_db: null
-- !class:sampleflux.ops.configure.ConfigureOp()
+- !class:recordstream.ops.configure.ConfigureOp()
   ops:
-  - !class:sampleflux.ops.numpy.MaxOp()
+  - !class:recordstream.ops.numpy.MaxOp()
     axis: null
     keepdims: false
-  - !class:sampleflux.ops.formula.FormulaOp()
+  - !class:recordstream.ops.formula.FormulaOp()
     formula: a * 0.2
     var: a
-  target: !class:sampleflux.ops.numpy.ThresholdOp()
+  target: !class:recordstream.ops.numpy.ThresholdOp()
     high_level: NaN
     low_op: '>'
     high_op: <
   param: low_level
-- !class:sampleflux.ops.stash.StashInputOp()
+- !class:recordstream.ops.stash.StashInputOp()
   key: mask
   copy: false
-- !class:sampleflux.ops.numpy.ConnectedComponentsOp()
+- !class:recordstream.ops.numpy.ConnectedComponentsOp()
   min_area_bins: 10
   connectivity: 4
 - !class:waivefront.spectrogram.BboxesToRegionsOp()
   role: predicted
   label: 5GNR
-- !class:sampleflux.ops.context.Save()
+- !class:recordstream.ops.context.Save()
   name: __taidal_cell_399
-- !class:sampleflux.ops.context.Mix()
+- !class:recordstream.ops.context.Mix()
   input_from: __taidal_cell_107
   target_from: __taidal_cell_107
   metadata_from: __taidal_cell_399

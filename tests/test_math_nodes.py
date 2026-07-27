@@ -1,8 +1,8 @@
-"""Tests for the FluxStudio MathNode scalar expression node."""
+"""Tests for the StreamStudio MathNode scalar expression node."""
 
 import pytest
 
-from fluxstudio.nodes import MathNode, _eval_formula
+from streamstudio.nodes import MathNode, _eval_formula
 
 # ---------------------------------------------------------------------------
 # _eval_formula
@@ -150,20 +150,20 @@ def test_math_node_bad_formula_raises() -> None:
 
 
 def test_math_node_has_math_category() -> None:
-    from fluxstudio.nodes import _MATH_CATEGORY
+    from streamstudio.nodes import _MATH_CATEGORY
 
     assert MathNode.CATEGORY == _MATH_CATEGORY
 
 
 def test_math_node_registered_in_mappings() -> None:
-    from fluxstudio.nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
+    from streamstudio.nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
 
     assert NODE_CLASS_MAPPINGS["Taidal_Math"] is MathNode
     assert NODE_DISPLAY_NAME_MAPPINGS["Taidal_Math"] == "Math"
 
 
 def test_old_math_nodes_removed_from_mappings() -> None:
-    from fluxstudio.nodes import NODE_CLASS_MAPPINGS
+    from streamstudio.nodes import NODE_CLASS_MAPPINGS
 
     for old_key in ("Taidal_FloatMath", "Taidal_IntMath", "Taidal_FloatToInt", "Taidal_IntToFloat"):
         assert old_key not in NODE_CLASS_MAPPINGS
