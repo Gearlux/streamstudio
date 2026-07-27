@@ -2,7 +2,7 @@
 
 This is the exact workflow that exposed the export bugs, so it is the right fixture to pin them:
 
-* it routes the sample THROUGH 6 ComfyUI **subgraph instances** (a naive op-only filter severed it);
+* it routes the record THROUGH 6 ComfyUI **subgraph instances** (a naive op-only filter severed it);
 * it feeds the two ``ImpairmentsChain`` ops from ``value``-kind **config producers**
   (``ImpairmentsTxConfig`` / ``ImpairmentsRxConfig``) — which a value-blind filter dropped;
 * it hangs **dead-end viewer/analysis taps** (``RenderSignalPlotOp`` / ``RegionPowerAnalysisOp``
@@ -21,22 +21,22 @@ from pathlib import Path
 
 import pytest
 
-from fluxstudio.export import collect_export_marks
-from fluxstudio.graphio import extract_ops_workflow
+from streamstudio.export import collect_export_marks
+from streamstudio.graphio import extract_ops_workflow
 
 _FIXTURE = Path(__file__).parent / "fixtures" / "impairments.json"
 
-# The classification fluxstudio's discovery assigns to each Taidal node type in the fixture. Baked so
-# the test needs no optional packages; ``Taidal_MixSamples`` is handled by ``export._MIX_CLASS_TYPE``
+# The classification streamstudio's discovery assigns to each Taidal node type in the fixture. Baked so
+# the test needs no optional packages; ``Taidal_MixRecords`` is handled by ``export._MIX_CLASS_TYPE``
 # (not by kind), and native / third-party nodes (Reroute, PreviewImage, subgraph-instance UUIDs) are
 # deliberately absent → classified as non-op and dropped/contracted.
 _NODE_KINDS = {
-    "Taidal_sampleflux_op_image_ConvertToImageOp": "op",
-    "Taidal_sampleflux_op_numpy_ConnectedComponentsOp": "op",
-    "Taidal_sampleflux_op_numpy_MaxOp": "op",
-    "Taidal_sampleflux_op_numpy_ThresholdOp": "op",
-    "Taidal_sampleflux_op_structure_StashInputOp": "op",
-    "Taidal_sampleflux_op_torch_SqueezeOp": "op",
+    "Taidal_recordstream_op_image_ConvertToImageOp": "op",
+    "Taidal_recordstream_op_numpy_ConnectedComponentsOp": "op",
+    "Taidal_recordstream_op_numpy_MaxOp": "op",
+    "Taidal_recordstream_op_numpy_ThresholdOp": "op",
+    "Taidal_recordstream_op_structure_StashInputOp": "op",
+    "Taidal_recordstream_op_torch_SqueezeOp": "op",
     "Taidal_waivefront_op_noise_NoiseFloorOp": "op",
     "Taidal_waivefront_op_regions_BboxesToRegionsOp": "op",
     "Taidal_waivefront_op_regions_RegionPowerAnalysisOp": "op",
@@ -129,10 +129,10 @@ def test_fixture_carries_the_export_target_mark() -> None:
 def test_baked_node_kinds_match_real_discovery() -> None:
     # Guard the baked _NODE_KINDS against drifting from what discovery would actually assign. Runs only
     # where the classes are importable (the [waivefront] extra); skips cleanly otherwise.
-    import fluxstudio
-    from fluxstudio.export import _node_kind
+    import streamstudio
+    from streamstudio.export import _node_kind
 
-    mappings = fluxstudio.NODE_CLASS_MAPPINGS
+    mappings = streamstudio.NODE_CLASS_MAPPINGS
     checked = 0
     for node_type, baked_kind in _NODE_KINDS.items():
         real_kind = _node_kind(node_type, mappings)
@@ -231,13 +231,13 @@ def test_without_a_mark_the_flattened_export_brings_back_the_viewer_taps() -> No
 def test_graph_export_normalizes_collapsed_widget_input_slots() -> None:
     # ComfyUI's in-memory graphToPrompt() (what the graph export reads) can represent a CONVERTED widget
     # as a single input slot and omit the unconverted widgets — so an ImpairmentsChain arrives with only
-    # [sample, tx_disabled, rx_disabled] (tx_disabled @slot 1), not the full 8 slots. The export must
+    # [record, tx_disabled, rx_disabled] (tx_disabled @slot 1), not the full 8 slots. The export must
     # NORMALISE to the full class slot list so the config link stays at its real slot index (slot 3) and
     # renders after re-import. Simulate that collapsed in-memory form and assert the export restores it.
     # Needs the real classes (INPUT_TYPES), so skips without the [waivefront] extra discovered.
-    import fluxstudio
+    import streamstudio
 
-    mappings = fluxstudio.NODE_CLASS_MAPPINGS
+    mappings = streamstudio.NODE_CLASS_MAPPINGS
     if "Taidal_waivefront_op_signal_ImpairmentsChain" not in mappings:
         pytest.skip("requires the [waivefront] extra discovered (ImpairmentsChain not registered)")
 
@@ -281,10 +281,10 @@ def test_ops_yaml_roundtrip_reconnects_the_config_nodes() -> None:
     # disconnected, because the reconstructed node had an incomplete input-slot list so the wired-widget
     # link landed at the wrong slot index (`_complete_widget_input_slots` fix). Materialising the !class:
     # markers needs the real classes, so this skips without the [waivefront] extra discovered.
-    import fluxstudio
-    from fluxstudio.graphio import yaml_to_workflow
+    import streamstudio
+    from streamstudio.graphio import yaml_to_workflow
 
-    mappings = fluxstudio.NODE_CLASS_MAPPINGS
+    mappings = streamstudio.NODE_CLASS_MAPPINGS
     if "Taidal_waivefront_op_signal_ImpairmentsChain" not in mappings:
         pytest.skip("requires the [waivefront] extra discovered (ImpairmentsChain not registered)")
 

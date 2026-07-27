@@ -1,7 +1,7 @@
-"""Dual-mode runnable nodes + SAMPLEFLUX_RUNNABLE input sockets (workflow combinators, Phase B).
+"""Dual-mode runnable nodes + RECORDSTREAM_RUNNABLE input sockets (workflow combinators, Phase B).
 
-A workflow COMBINATOR (sampleflux.workflow Sequence / Conditional / Switch) is a runnable that HOLDS
-other runnables. FluxStudio renders its runnable-typed members as SAMPLEFLUX_RUNNABLE input sockets
+A workflow COMBINATOR (recordstream.workflow Sequence / Conditional / Switch) is a runnable that HOLDS
+other runnables. StreamStudio renders its runnable-typed members as RECORDSTREAM_RUNNABLE input sockets
 (single, or a dynamic ``<name>_N`` family), and a runnable node feeding such a socket switches to
 INSTANCE mode (built, not run) so the combinator runs the selected branch — no double-run.
 """
@@ -10,7 +10,7 @@ from typing import Any, List, Optional
 
 from confluid import configurable
 
-from fluxstudio.bridge import RUNNABLE_TYPE, _runnable_consumed_as_instance, create_comfy_node
+from streamstudio.bridge import RUNNABLE_TYPE, _runnable_consumed_as_instance, create_comfy_node
 
 
 @configurable
@@ -95,7 +95,7 @@ def test_runnable_node_output_slot0_is_runnable() -> None:
 # --------------------------------------------------------------------------- #
 def test_execute_collects_indexed_steps_in_order(monkeypatch: Any) -> None:
     ran: List[Any] = []
-    monkeypatch.setattr("fluxstudio.nodes.run_runnable", _run_recorder(ran))
+    monkeypatch.setattr("streamstudio.nodes.run_runnable", _run_recorder(ran))
     r1, r2 = _Runnable("1"), _Runnable("2")
     res = _node()().execute(steps_0=r1, steps_1=r2)
     obj = res["result"][0]
@@ -105,15 +105,15 @@ def test_execute_collects_indexed_steps_in_order(monkeypatch: Any) -> None:
 
 def test_execute_terminal_runs_when_not_consumed(monkeypatch: Any) -> None:
     ran: List[Any] = []
-    monkeypatch.setattr("fluxstudio.nodes.run_runnable", _run_recorder(ran))
+    monkeypatch.setattr("streamstudio.nodes.run_runnable", _run_recorder(ran))
     _node()().execute()  # no prompt -> not consumed -> terminal
     assert len(ran) == 1
 
 
 def test_execute_dual_mode_returns_instance_without_running(monkeypatch: Any) -> None:
     ran: List[Any] = []
-    monkeypatch.setattr("fluxstudio.nodes.run_runnable", _run_recorder(ran))
-    monkeypatch.setattr("fluxstudio.bridge._runnable_consumed_as_instance", lambda *a, **k: True)
+    monkeypatch.setattr("streamstudio.nodes.run_runnable", _run_recorder(ran))
+    monkeypatch.setattr("streamstudio.bridge._runnable_consumed_as_instance", lambda *a, **k: True)
     r1 = _Runnable("t")
     res = _node()().execute(if_true=r1)
     obj = res["result"][0]
@@ -140,7 +140,7 @@ def test_consumed_true_for_runnable_input() -> None:
 
 def test_consumed_false_for_non_runnable_input() -> None:
     prompt = {"9": {"class_type": "Obj", "inputs": {"model": ["5", 0]}}}
-    assert _runnable_consumed_as_instance(prompt, "5", {"Obj": _consumer("model", "SAMPLEFLUX_OBJECT")}) is False
+    assert _runnable_consumed_as_instance(prompt, "5", {"Obj": _consumer("model", "RECORDSTREAM_OBJECT")}) is False
 
 
 def test_consumed_false_without_prompt() -> None:

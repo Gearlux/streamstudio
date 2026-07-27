@@ -1,4 +1,4 @@
-"""Tests for ``fluxstudio.__init__`` — entry-point discovery and the ComfyUI
+"""Tests for ``streamstudio.__init__`` — entry-point discovery and the ComfyUI
 directory-picker route.
 
 Two surfaces live here, both awkward to reach because they run at *import*
@@ -31,7 +31,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-import fluxstudio
+import streamstudio
 
 
 @pytest.fixture(autouse=True)
@@ -41,12 +41,12 @@ def _reset_discovery_cache() -> Iterator[None]:
     ``_discover_and_register_nodes`` caches its result on the ``sys`` singleton so a
     second module identity (editable install + ComfyUI custom_nodes symlink) reuses
     it instead of re-scanning. That cache is populated during the real
-    ``import fluxstudio`` at collection time, so the direct-call tests below must
+    ``import streamstudio`` at collection time, so the direct-call tests below must
     reset it to exercise a fresh scan.
     """
-    sys.__dict__.pop("_fluxstudio_discovered_nodes", None)
+    sys.__dict__.pop("_streamstudio_discovered_nodes", None)
     yield
-    sys.__dict__.pop("_fluxstudio_discovered_nodes", None)
+    sys.__dict__.pop("_streamstudio_discovered_nodes", None)
 
 
 # --------------------------------------------------------------------------- #
@@ -56,10 +56,10 @@ def _reset_discovery_cache() -> Iterator[None]:
 
 def test_discover_returns_quietly_when_entry_points_fail() -> None:
     fake_logger = MagicMock()
-    with patch.object(fluxstudio, "logger", fake_logger):
+    with patch.object(streamstudio, "logger", fake_logger):
         with patch("importlib.metadata.entry_points", side_effect=RuntimeError("boom")):
             # Must not raise — a broken metadata read should not crash ComfyUI.
-            fluxstudio._discover_and_register_nodes()
+            streamstudio._discover_and_register_nodes()
     fake_logger.error.assert_called_once()
 
 
@@ -70,14 +70,14 @@ def test_discover_forwards_module_to_register() -> None:
     fake_ep = SimpleNamespace(value="waivefront.helios", dist=fake_dist)
     fake_register = MagicMock()
     with patch("importlib.metadata.entry_points", return_value=[fake_ep]):
-        with patch.object(fluxstudio, "register_module_nodes", fake_register):
-            fluxstudio._discover_and_register_nodes()
+        with patch.object(streamstudio, "register_module_nodes", fake_register):
+            streamstudio._discover_and_register_nodes()
 
     fake_register.assert_called_once()
     args, kwargs = fake_register.call_args
     assert args[0] == "waivefront.helios"
-    assert args[1] is fluxstudio.NODE_CLASS_MAPPINGS
-    assert args[2] is fluxstudio.NODE_DISPLAY_NAME_MAPPINGS
+    assert args[1] is streamstudio.NODE_CLASS_MAPPINGS
+    assert args[2] is streamstudio.NODE_DISPLAY_NAME_MAPPINGS
     # dist_name carries the distribution package name for the [PKG] label.
     assert kwargs.get("dist_name") == "waivefront-helios"
     # No category/root override — the bridge builds the path from the module + class tags.
@@ -90,8 +90,8 @@ def test_discover_forwards_none_dist_name_when_dist_absent() -> None:
     fake_ep = SimpleNamespace(value="waivefront.sinks")  # no .dist attribute
     fake_register = MagicMock()
     with patch("importlib.metadata.entry_points", return_value=[fake_ep]):
-        with patch.object(fluxstudio, "register_module_nodes", fake_register):
-            fluxstudio._discover_and_register_nodes()
+        with patch.object(streamstudio, "register_module_nodes", fake_register):
+            streamstudio._discover_and_register_nodes()
 
     fake_register.assert_called_once()
     _, kwargs = fake_register.call_args
@@ -101,21 +101,21 @@ def test_discover_forwards_none_dist_name_when_dist_absent() -> None:
 def test_discover_is_one_shot_per_process() -> None:
     """The second call reuses the ``sys``-cached mappings — it does NOT re-scan.
 
-    FluxStudio's ``__init__`` runs twice (editable install + ComfyUI custom_nodes symlink); the
+    StreamStudio's ``__init__`` runs twice (editable install + ComfyUI custom_nodes symlink); the
     scan/log must happen once while a second module identity still ends up with the full node set.
     """
     fake_ep = SimpleNamespace(value="waivefront.sinks")
     fake_register = MagicMock(side_effect=lambda mod, cmap, dmap, **kw: cmap.update({"Taidal_X": object()}))
     with patch("importlib.metadata.entry_points", return_value=[fake_ep]):
-        with patch.object(fluxstudio, "register_module_nodes", fake_register):
-            fluxstudio._discover_and_register_nodes()  # first call: scans
+        with patch.object(streamstudio, "register_module_nodes", fake_register):
+            streamstudio._discover_and_register_nodes()  # first call: scans
             # Simulate the second module identity: its own (empty) mappings.
-            fluxstudio.NODE_CLASS_MAPPINGS.clear()
-            fluxstudio._discover_and_register_nodes()  # second call: must reuse cache, no re-scan
+            streamstudio.NODE_CLASS_MAPPINGS.clear()
+            streamstudio._discover_and_register_nodes()  # second call: must reuse cache, no re-scan
 
     fake_register.assert_called_once()  # scanned exactly once
     # ...yet the second identity's mappings were repopulated from the cache.
-    assert "Taidal_X" in fluxstudio.NODE_CLASS_MAPPINGS
+    assert "Taidal_X" in streamstudio.NODE_CLASS_MAPPINGS
 
 
 def test_discover_dedups_duplicate_entry_points() -> None:
@@ -123,8 +123,8 @@ def test_discover_dedups_duplicate_entry_points() -> None:
     eps = [SimpleNamespace(value="waivefront.sinks"), SimpleNamespace(value="waivefront.sinks")]
     fake_register = MagicMock()
     with patch("importlib.metadata.entry_points", return_value=eps):
-        with patch.object(fluxstudio, "register_module_nodes", fake_register):
-            fluxstudio._discover_and_register_nodes()
+        with patch.object(streamstudio, "register_module_nodes", fake_register):
+            streamstudio._discover_and_register_nodes()
     fake_register.assert_called_once()
 
 
@@ -132,9 +132,9 @@ def test_discover_skips_failing_module_at_debug_level() -> None:
     fake_ep = SimpleNamespace(value="broken.module")
     fake_logger = MagicMock()
     with patch("importlib.metadata.entry_points", return_value=[fake_ep]):
-        with patch.object(fluxstudio, "register_module_nodes", side_effect=ImportError("nope")):
-            with patch.object(fluxstudio, "logger", fake_logger):
-                fluxstudio._discover_and_register_nodes()
+        with patch.object(streamstudio, "register_module_nodes", side_effect=ImportError("nope")):
+            with patch.object(streamstudio, "logger", fake_logger):
+                streamstudio._discover_and_register_nodes()
     # Per the mandate, a module that fails to scan is skipped quietly (debug),
     # never warning/info, so one bad package can't empty the palette.
     fake_logger.debug.assert_called_once()
@@ -167,9 +167,9 @@ def test_prune_default_comfy_nodes_keeps_only_custom_nodes() -> None:
 
     fake_nodes = _fake_comfy_nodes(mappings, displays)
     with patch.dict(sys.modules, {"nodes": fake_nodes}):
-        removed = fluxstudio._prune_default_comfy_nodes()
+        removed = streamstudio._prune_default_comfy_nodes()
         # Idempotent: a second call (the other module identity) removes nothing.
-        again = fluxstudio._prune_default_comfy_nodes()
+        again = streamstudio._prune_default_comfy_nodes()
 
     assert removed == 3
     assert again == 0
@@ -182,7 +182,7 @@ def test_prune_default_comfy_nodes_spares_keep_list(tmp_path: Path, monkeypatch:
     # even though those are built-ins — so the native viewers the user relies on stay available.
     cfg = tmp_path / "config.yaml"
     cfg.write_text("keep_nodes: [MaskToImage]\n")
-    monkeypatch.setenv("FLUXSTUDIO_CONFIG", str(cfg))
+    monkeypatch.setenv("STREAMSTUDIO_CONFIG", str(cfg))
     preview_img = type("PreviewImage", (), {})  # built-in (default "nodes" module)
     preview_any = type("PreviewAny", (), {})  # built-in
     mask = type("MaskToImage", (), {"RELATIVE_PYTHON_MODULE": "comfy_extras.nodes_mask"})  # extra, but kept
@@ -192,17 +192,17 @@ def test_prune_default_comfy_nodes_spares_keep_list(tmp_path: Path, monkeypatch:
 
     fake_nodes = _fake_comfy_nodes(mappings, displays)
     with patch.dict(sys.modules, {"nodes": fake_nodes}):
-        removed = fluxstudio._prune_default_comfy_nodes()
+        removed = streamstudio._prune_default_comfy_nodes()
 
     assert removed == 1  # only KSampler pruned
     assert set(mappings) == {"PreviewImage", "PreviewAny", "MaskToImage"}
 
 
 def test_import_block_prunes_when_hide_env_set(monkeypatch: pytest.MonkeyPatch) -> None:
-    """With FLUXSTUDIO_HIDE_DEFAULT_NODES set, the in-ComfyUI import block prunes the default nodes."""
-    monkeypatch.setenv("FLUXSTUDIO_HIDE_DEFAULT_NODES", "1")
+    """With STREAMSTUDIO_HIDE_DEFAULT_NODES set, the in-ComfyUI import block prunes the default nodes."""
+    monkeypatch.setenv("STREAMSTUDIO_HIDE_DEFAULT_NODES", "1")
     base = type("KSampler", (), {})
-    custom = type("Taidal_X", (), {"RELATIVE_PYTHON_MODULE": "custom_nodes.fluxstudio"})
+    custom = type("Taidal_X", (), {"RELATIVE_PYTHON_MODULE": "custom_nodes.streamstudio"})
     mappings = {"KSampler": base, "Taidal_X": custom}
     displays = {"KSampler": "KSampler", "Taidal_X": "X"}
 
@@ -217,7 +217,7 @@ def test_import_block_prunes_when_hide_env_set(monkeypatch: pytest.MonkeyPatch) 
     sys.modules["nodes"] = _fake_comfy_nodes(mappings, displays)
     try:
         with patch("importlib.metadata.entry_points", return_value=[]):
-            importlib.reload(fluxstudio)
+            importlib.reload(streamstudio)
     finally:
         for key, mod in saved.items():
             if mod is None:
@@ -225,7 +225,7 @@ def test_import_block_prunes_when_hide_env_set(monkeypatch: pytest.MonkeyPatch) 
             else:
                 sys.modules[key] = mod
         with patch("importlib.metadata.entry_points", return_value=[]):
-            importlib.reload(fluxstudio)
+            importlib.reload(streamstudio)
 
     # The built-in KSampler was pruned from ComfyUI's global registry; the custom node stayed.
     assert set(mappings) == {"Taidal_X"}
@@ -233,7 +233,7 @@ def test_import_block_prunes_when_hide_env_set(monkeypatch: pytest.MonkeyPatch) 
 
 def test_import_block_skips_prune_when_hide_env_unset(monkeypatch: pytest.MonkeyPatch) -> None:
     """Default (flag not set): the import block leaves ComfyUI's global node registry untouched."""
-    monkeypatch.delenv("FLUXSTUDIO_HIDE_DEFAULT_NODES", raising=False)
+    monkeypatch.delenv("STREAMSTUDIO_HIDE_DEFAULT_NODES", raising=False)
     base = type("KSampler", (), {})
     mappings = {"KSampler": base}
     displays = {"KSampler": "KSampler"}
@@ -249,7 +249,7 @@ def test_import_block_skips_prune_when_hide_env_unset(monkeypatch: pytest.Monkey
     sys.modules["nodes"] = _fake_comfy_nodes(mappings, displays)
     try:
         with patch("importlib.metadata.entry_points", return_value=[]):
-            importlib.reload(fluxstudio)
+            importlib.reload(streamstudio)
     finally:
         for key, mod in saved.items():
             if mod is None:
@@ -257,7 +257,7 @@ def test_import_block_skips_prune_when_hide_env_unset(monkeypatch: pytest.Monkey
             else:
                 sys.modules[key] = mod
         with patch("importlib.metadata.entry_points", return_value=[]):
-            importlib.reload(fluxstudio)
+            importlib.reload(streamstudio)
 
     assert set(mappings) == {"KSampler"}  # nothing pruned — defaults stay visible
 
@@ -330,7 +330,7 @@ class _FakeWeb:
 
 @contextmanager
 def _fake_comfy(existing_route: bool = False) -> Iterator[tuple]:
-    """Reload ``fluxstudio`` with a fake ComfyUI ``server`` + ``aiohttp`` present.
+    """Reload ``streamstudio`` with a fake ComfyUI ``server`` + ``aiohttp`` present.
 
     ``entry_points`` is stubbed to ``[]`` during the reload so node discovery is
     a no-op (fast, side-effect-free); only the route-registration block is the
@@ -349,7 +349,7 @@ def _fake_comfy(existing_route: bool = False) -> Iterator[tuple]:
     sys.modules["aiohttp"] = fake_aiohttp
     try:
         with patch("importlib.metadata.entry_points", return_value=[]):
-            importlib.reload(fluxstudio)
+            importlib.reload(streamstudio)
         yield routes, fake_web
     finally:
         for key, mod in saved.items():
@@ -358,7 +358,7 @@ def _fake_comfy(existing_route: bool = False) -> Iterator[tuple]:
             else:
                 sys.modules[key] = mod
         with patch("importlib.metadata.entry_points", return_value=[]):
-            importlib.reload(fluxstudio)
+            importlib.reload(streamstudio)
 
 
 def test_route_registered_and_returns_selected_path() -> None:
@@ -413,14 +413,14 @@ def _json_request(body: Any) -> SimpleNamespace:
 def test_export_ops_route_returns_yaml() -> None:
     # The /taidal/export_ops POST handler compiles the posted graph's ops into a Confluid
     # YAML op-list using the live NODE_CLASS_MAPPINGS.
-    from sampleflux.ops.torch import ToTensor as RescaleOp
+    from recordstream.ops.torch import ToTensor as RescaleOp
 
-    from fluxstudio.bridge import create_comfy_node
+    from streamstudio.bridge import create_comfy_node
 
     with _fake_comfy() as (routes, web):
         handler = routes.post_handlers.get("/taidal/export_ops")
         assert handler is not None
-        fluxstudio.NODE_CLASS_MAPPINGS["Taidal_RescaleOp"] = create_comfy_node(RescaleOp, "Taidal_RescaleOp")
+        streamstudio.NODE_CLASS_MAPPINGS["Taidal_RescaleOp"] = create_comfy_node(RescaleOp, "Taidal_RescaleOp")
         prompt = {"1": {"class_type": "Taidal_RescaleOp", "inputs": {"in_min": 0.0, "in_max": 255.0}}}
         asyncio.run(handler(_json_request({"prompt": prompt})))
     data, _kwargs = web.calls[-1]
@@ -433,14 +433,14 @@ def test_export_ops_route_returns_yaml() -> None:
 def test_export_ops_route_flow_flag_returns_flow_document() -> None:
     # ``flow: true`` in the POST body switches the route to the readable named-step
     # flow: document (the canvas twin of the CLI's ``--flow``).
-    from sampleflux.ops.torch import ToTensor as RescaleOp
+    from recordstream.ops.torch import ToTensor as RescaleOp
 
-    from fluxstudio.bridge import create_comfy_node
+    from streamstudio.bridge import create_comfy_node
 
     with _fake_comfy() as (routes, web):
         handler = routes.post_handlers.get("/taidal/export_ops")
         assert handler is not None
-        fluxstudio.NODE_CLASS_MAPPINGS["Taidal_RescaleOp"] = create_comfy_node(RescaleOp, "Taidal_RescaleOp")
+        streamstudio.NODE_CLASS_MAPPINGS["Taidal_RescaleOp"] = create_comfy_node(RescaleOp, "Taidal_RescaleOp")
         prompt = {"1": {"class_type": "Taidal_RescaleOp", "inputs": {"in_min": 0.0, "in_max": 255.0}}}
         asyncio.run(handler(_json_request({"prompt": prompt, "flow": True})))
     data, _kwargs = web.calls[-1]
@@ -452,20 +452,20 @@ def test_export_ops_route_flow_flag_returns_flow_document() -> None:
 def test_export_ops_graph_route_returns_op_workflow() -> None:
     # The /taidal/export_ops_graph POST handler extracts JUST the op-DAG nodes from the posted UI
     # workflow into a standalone workflow.json (the raw graph as drawn, no compilation).
-    from sampleflux.ops.torch import ToTensor as RescaleOp
+    from recordstream.ops.torch import ToTensor as RescaleOp
 
-    from fluxstudio.bridge import create_comfy_node
+    from streamstudio.bridge import create_comfy_node
 
     with _fake_comfy() as (routes, web):
         handler = routes.post_handlers.get("/taidal/export_ops_graph")
         assert handler is not None
-        fluxstudio.NODE_CLASS_MAPPINGS["rescale"] = create_comfy_node(RescaleOp, "rescale")
+        streamstudio.NODE_CLASS_MAPPINGS["rescale"] = create_comfy_node(RescaleOp, "rescale")
         workflow = {
             "nodes": [
                 {"id": 1, "type": "src", "inputs": []},  # a non-op node (unmapped) → dropped
-                {"id": 2, "type": "rescale", "inputs": [{"name": "sample", "link": 1}]},
+                {"id": 2, "type": "rescale", "inputs": [{"name": "record", "link": 1}]},
             ],
-            "links": [[1, 1, 0, 2, 0, "SAMPLEFLUX_SOURCE"]],
+            "links": [[1, 1, 0, 2, 0, "RECORDSTREAM_SOURCE"]],
         }
         asyncio.run(handler(_json_request({"workflow": workflow})))
     data, _kwargs = web.calls[-1]
@@ -477,17 +477,17 @@ def test_export_ops_graph_route_returns_op_workflow() -> None:
 
 def test_import_yaml_route_returns_workflow() -> None:
     # The /taidal/import_yaml POST handler converts a posted YAML config into a workflow.json.
-    from sampleflux.ops.torch import ToTensor as RescaleOp
-    from sampleflux.sources import HuggingFaceSource
+    from recordstream.ops.torch import ToTensor as RescaleOp
+    from recordstream.sources import HuggingFaceSource
 
-    from fluxstudio.bridge import create_comfy_node
+    from streamstudio.bridge import create_comfy_node
 
     with _fake_comfy() as (routes, web):
         handler = routes.post_handlers.get("/taidal/import_yaml")
         assert handler is not None
-        fluxstudio.NODE_CLASS_MAPPINGS["src"] = create_comfy_node(HuggingFaceSource, "src")
-        fluxstudio.NODE_CLASS_MAPPINGS["rescale"] = create_comfy_node(RescaleOp, "rescale")
-        yaml = "raw: !class:sampleflux.sources.HuggingFaceSource()\n  path: mnist\n"
+        streamstudio.NODE_CLASS_MAPPINGS["src"] = create_comfy_node(HuggingFaceSource, "src")
+        streamstudio.NODE_CLASS_MAPPINGS["rescale"] = create_comfy_node(RescaleOp, "rescale")
+        yaml = "raw: !class:recordstream.sources.HuggingFaceSource()\n  path: mnist\n"
         asyncio.run(handler(_json_request({"yaml": yaml, "as": "graph"})))
     data, _kwargs = web.calls[-1]
     assert "workflow" in data
@@ -496,16 +496,16 @@ def test_import_yaml_route_returns_workflow() -> None:
 
 def test_export_workflow_route_returns_yaml() -> None:
     # The /taidal/export_workflow POST handler converts a whole workflow.json into hoisted YAML.
-    from sampleflux.sources import HuggingFaceSource
+    from recordstream.sources import HuggingFaceSource
 
-    from fluxstudio.bridge import create_comfy_node
-    from fluxstudio.graphio import yaml_to_workflow
+    from streamstudio.bridge import create_comfy_node
+    from streamstudio.graphio import yaml_to_workflow
 
     with _fake_comfy() as (routes, web):
         handler = routes.post_handlers.get("/taidal/export_workflow")
         assert handler is not None
         nm = {"src": create_comfy_node(HuggingFaceSource, "src")}
-        fluxstudio.NODE_CLASS_MAPPINGS["src"] = nm["src"]
+        streamstudio.NODE_CLASS_MAPPINGS["src"] = nm["src"]
         workflow = yaml_to_workflow({"raw": __import__("confluid").Instance(HuggingFaceSource, path="mnist")}, nm)
         asyncio.run(handler(_json_request({"workflow": workflow})))
     data, _kwargs = web.calls[-1]
@@ -515,16 +515,16 @@ def test_export_workflow_route_returns_yaml() -> None:
 def test_export_ops_route_multi_chain_returns_one_doc_per_chain(tmp_path: Path) -> None:
     # Two disconnected chains no longer 400: the route compiles EACH chain into its own YAML
     # doc and (with `path`) writes one stem-suffixed file per chain.
-    from sampleflux.ops.torch import ToTensor as RescaleOp
+    from recordstream.ops.torch import ToTensor as RescaleOp
 
-    from fluxstudio.bridge import create_comfy_node
+    from streamstudio.bridge import create_comfy_node
 
     with _fake_comfy() as (routes, web):
         handler = routes.post_handlers["/taidal/export_ops"]
-        fluxstudio.NODE_CLASS_MAPPINGS["Taidal_RescaleOp"] = create_comfy_node(RescaleOp, "Taidal_RescaleOp")
+        streamstudio.NODE_CLASS_MAPPINGS["Taidal_RescaleOp"] = create_comfy_node(RescaleOp, "Taidal_RescaleOp")
         prompt = {
-            "2": {"class_type": "Taidal_RescaleOp", "inputs": {"sample": ["x", 0], "in_min": 0.0, "in_max": 255.0}},
-            "3": {"class_type": "Taidal_RescaleOp", "inputs": {"sample": ["y", 0], "in_min": 0.0, "in_max": 1.0}},
+            "2": {"class_type": "Taidal_RescaleOp", "inputs": {"record": ["x", 0], "in_min": 0.0, "in_max": 255.0}},
+            "3": {"class_type": "Taidal_RescaleOp", "inputs": {"record": ["y", 0], "in_min": 0.0, "in_max": 1.0}},
         }
         asyncio.run(handler(_json_request({"prompt": prompt, "path": str(tmp_path / "ops.yaml")})))
     data, _kwargs = web.calls[-1]
@@ -537,18 +537,18 @@ def test_export_ops_route_multi_chain_returns_one_doc_per_chain(tmp_path: Path) 
 
 
 def test_export_ops_route_400_on_bad_topology() -> None:
-    # A structurally-unexportable graph (a sample-wire CYCLE) -> UnsupportedTopologyError -> 400.
+    # A structurally-unexportable graph (a record-wire CYCLE) -> UnsupportedTopologyError -> 400.
     # (A widget driven by a link is no longer an error — it's omitted with a note.)
-    from sampleflux.ops.torch import ToTensor as RescaleOp
+    from recordstream.ops.torch import ToTensor as RescaleOp
 
-    from fluxstudio.bridge import create_comfy_node
+    from streamstudio.bridge import create_comfy_node
 
     with _fake_comfy() as (routes, web):
         handler = routes.post_handlers["/taidal/export_ops"]
-        fluxstudio.NODE_CLASS_MAPPINGS["Taidal_RescaleOp"] = create_comfy_node(RescaleOp, "Taidal_RescaleOp")
+        streamstudio.NODE_CLASS_MAPPINGS["Taidal_RescaleOp"] = create_comfy_node(RescaleOp, "Taidal_RescaleOp")
         prompt = {
-            "2": {"class_type": "Taidal_RescaleOp", "inputs": {"sample": ["3", 0], "in_min": 0.0, "in_max": 255.0}},
-            "3": {"class_type": "Taidal_RescaleOp", "inputs": {"sample": ["2", 0], "in_min": 0.0, "in_max": 1.0}},
+            "2": {"class_type": "Taidal_RescaleOp", "inputs": {"record": ["3", 0], "in_min": 0.0, "in_max": 255.0}},
+            "3": {"class_type": "Taidal_RescaleOp", "inputs": {"record": ["2", 0], "in_min": 0.0, "in_max": 1.0}},
         }
         asyncio.run(handler(_json_request({"prompt": prompt})))
     data, kwargs = web.calls[-1]
@@ -562,7 +562,7 @@ def test_hf_datasets_route_lists_cached_datasets() -> None:
     with _fake_comfy() as (routes, web):
         handler = routes.get_handlers.get("/taidal/hf_datasets")
         assert handler is not None
-        with patch.object(fluxstudio, "list_cached_hf_datasets", return_value=["cifar10", "mnist"]):
+        with patch.object(streamstudio, "list_cached_hf_datasets", return_value=["cifar10", "mnist"]):
             asyncio.run(handler(SimpleNamespace()))
     data, _kwargs = web.calls[-1]
     assert data == {"datasets": ["cifar10", "mnist"]}
@@ -574,7 +574,7 @@ def test_list_cached_hf_datasets_filters_to_dataset_repos() -> None:
     fake_hub = ModuleType("huggingface_hub")
     fake_hub.scan_cache_dir = lambda: SimpleNamespace(repos=[model, ds])  # type: ignore[attr-defined]
     with patch.dict(sys.modules, {"huggingface_hub": fake_hub}):
-        assert fluxstudio.list_cached_hf_datasets() == ["mnist"]
+        assert streamstudio.list_cached_hf_datasets() == ["mnist"]
 
 
 def test_list_cached_hf_datasets_degrades_to_empty_on_error() -> None:
@@ -585,7 +585,7 @@ def test_list_cached_hf_datasets_degrades_to_empty_on_error() -> None:
     fake_hub.scan_cache_dir = _boom  # type: ignore[attr-defined]
     with patch.dict(sys.modules, {"huggingface_hub": fake_hub}):
         # Must never raise — the picker is a convenience over a free-text field.
-        assert fluxstudio.list_cached_hf_datasets() == []
+        assert streamstudio.list_cached_hf_datasets() == []
 
 
 def test_hf_dataset_features_route_lists_features() -> None:
@@ -595,7 +595,7 @@ def test_hf_dataset_features_route_lists_features() -> None:
         handler = routes.get_handlers.get("/taidal/hf_dataset_features")
         assert handler is not None
         request = SimpleNamespace(query={"path": "mnist", "name": "", "split": "train"})
-        with patch.object(fluxstudio, "list_hf_dataset_features", return_value=["image", "label"]) as feat_mock:
+        with patch.object(streamstudio, "list_hf_dataset_features", return_value=["image", "label"]) as feat_mock:
             asyncio.run(handler(request))
         # path is forwarded; blank name -> None; split forwarded.
         feat_mock.assert_called_once_with("mnist", name=None, split="train")
@@ -626,28 +626,28 @@ def _fake_datasets(builder_features: Any = None, stream_rows: Any = None) -> Mod
 
 def test_list_hf_dataset_features_empty_path_returns_empty() -> None:
     # No dataset id -> nothing to introspect; never touches `datasets`.
-    assert fluxstudio.list_hf_dataset_features("") == []
+    assert streamstudio.list_hf_dataset_features("") == []
 
 
 def test_list_hf_dataset_features_from_builder_metadata() -> None:
     # The cheap path: builder.info.features carries the column schema (insertion order preserved).
     fake = _fake_datasets(builder_features={"image": object(), "label": object()})
     with patch.dict(sys.modules, {"datasets": fake}):
-        assert fluxstudio.list_hf_dataset_features("mnist") == ["image", "label"]
+        assert streamstudio.list_hf_dataset_features("mnist") == ["image", "label"]
 
 
 def test_list_hf_dataset_features_streaming_fallback() -> None:
     # builder.info.features is None (e.g. an imagefolder) -> stream one example and read its keys.
     fake = _fake_datasets(builder_features=None, stream_rows=[{"img": 1, "lbl": 2}])
     with patch.dict(sys.modules, {"datasets": fake}):
-        assert fluxstudio.list_hf_dataset_features("local/imgs", split="train") == ["img", "lbl"]
+        assert streamstudio.list_hf_dataset_features("local/imgs", split="train") == ["img", "lbl"]
 
 
 def test_list_hf_dataset_features_degrades_to_empty_on_error() -> None:
     # Both paths fail (no builder features, no streaming rows) -> [] and never raises.
     fake = _fake_datasets(builder_features=None, stream_rows=None)
     with patch.dict(sys.modules, {"datasets": fake}):
-        assert fluxstudio.list_hf_dataset_features("nonexistent/dataset") == []
+        assert streamstudio.list_hf_dataset_features("nonexistent/dataset") == []
 
 
 def test_hf_dataset_splits_route_lists_splits() -> None:
@@ -657,7 +657,7 @@ def test_hf_dataset_splits_route_lists_splits() -> None:
         handler = routes.get_handlers.get("/taidal/hf_dataset_splits")
         assert handler is not None
         request = SimpleNamespace(query={"path": "mnist", "name": ""})
-        with patch.object(fluxstudio, "list_hf_dataset_splits", return_value=["train", "test"]) as split_mock:
+        with patch.object(streamstudio, "list_hf_dataset_splits", return_value=["train", "test"]) as split_mock:
             asyncio.run(handler(request))
         split_mock.assert_called_once_with("mnist", name=None)  # blank name -> None
     data, _kwargs = web.calls[-1]
@@ -666,14 +666,14 @@ def test_hf_dataset_splits_route_lists_splits() -> None:
 
 def test_list_hf_dataset_splits_empty_path_returns_empty() -> None:
     # No dataset id -> nothing to introspect; never touches `datasets`.
-    assert fluxstudio.list_hf_dataset_splits("") == []
+    assert streamstudio.list_hf_dataset_splits("") == []
 
 
 def test_list_hf_dataset_splits_from_datasets_api() -> None:
     fake = ModuleType("datasets")
     fake.get_dataset_split_names = lambda path, config_name=None: ["train", "test"]  # type: ignore[attr-defined]
     with patch.dict(sys.modules, {"datasets": fake}):
-        assert fluxstudio.list_hf_dataset_splits("mnist") == ["train", "test"]
+        assert streamstudio.list_hf_dataset_splits("mnist") == ["train", "test"]
 
 
 def test_list_hf_dataset_splits_degrades_to_empty_on_error() -> None:
@@ -684,4 +684,4 @@ def test_list_hf_dataset_splits_degrades_to_empty_on_error() -> None:
     fake.get_dataset_split_names = _boom  # type: ignore[attr-defined]
     with patch.dict(sys.modules, {"datasets": fake}):
         # Must never raise — the picker is a convenience over a free-text field.
-        assert fluxstudio.list_hf_dataset_splits("nonexistent/dataset") == []
+        assert streamstudio.list_hf_dataset_splits("nonexistent/dataset") == []

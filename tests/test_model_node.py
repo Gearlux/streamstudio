@@ -1,8 +1,8 @@
-"""Tests for the FluxStudio MODEL node type, the path-output socket fix, and the Melody picker tag.
+"""Tests for the StreamStudio MODEL node type, the path-output socket fix, and the Melody picker tag.
 
 A MODEL node (``@configurable(category="model")``) RUNS inference: like an op it takes an optional
-``sample`` (a plain-dict ``Record`` on the ``SAMPLEFLUX_SAMPLE`` wire) and outputs the applied
-record, but its second output is the constructed model on a ``SAMPLEFLUX_OBJECT:model`` socket
+``record`` (a plain-dict ``Record`` on the ``RECORDSTREAM_RECORD`` wire) and outputs the applied
+record, but its second output is the constructed model on a ``RECORDSTREAM_OBJECT:model`` socket
 (dockable into a downstream evaluator).
 """
 
@@ -11,12 +11,12 @@ from typing import Optional, cast
 import pytest
 from confluid import configurable
 from confluid.decorators import output
-from sampleflux import Record
+from recordstream import Record
 
-from fluxstudio.bridge import (
+from streamstudio.bridge import (
     _NODE_CATEGORIES,
     OBJECT_TYPE,
-    SAMPLE_TYPE,
+    RECORD_TYPE,
     _is_melody_dataset_id_param,
     _model_params,
     _object_socket,
@@ -50,7 +50,7 @@ class _FakeInference:
     """A ``ModelInference``-style node: a WIRED ``model`` (stamped) + config widget, delegating infer.
 
     Mirrors the waivefront-helios ``HeliosModelInference`` shape — ``__taidal_model_params__`` marks
-    ``model`` as a wired ``SAMPLEFLUX_OBJECT:model`` input; ``__call__`` delegates to it.
+    ``model`` as a wired ``RECORDSTREAM_OBJECT:model`` input; ``__call__`` delegates to it.
     """
 
     __taidal_model_params__ = ("model",)
@@ -74,14 +74,14 @@ def test_model_in_node_categories() -> None:
 
 def test_model_class_becomes_model_node_not_op() -> None:
     node = create_comfy_node(_FakeModel, "Taidal__FakeModel")
-    # Applied record + the model object on a role-qualified SAMPLEFLUX_OBJECT:model socket.
-    assert node.RETURN_TYPES == (SAMPLE_TYPE, _object_socket("model"))
-    assert node.RETURN_NAMES == ("sample", "model")
+    # Applied record + the model object on a role-qualified RECORDSTREAM_OBJECT:model socket.
+    assert node.RETURN_TYPES == (RECORD_TYPE, _object_socket("model"))
+    assert node.RETURN_NAMES == ("record", "model")
     assert node.TAIDAL_NODE_KIND == "model"  # NOT "op"
     spec = node.INPUT_TYPES()
     assert spec["required"]["model_uri"][0] == "STRING"
     assert spec["required"]["k"][0] == "INT"
-    assert spec["optional"]["sample"] == (SAMPLE_TYPE,)
+    assert spec["optional"]["record"] == (RECORD_TYPE,)
 
 
 def test_model_object_socket_is_role_qualified() -> None:
@@ -91,23 +91,23 @@ def test_model_object_socket_is_role_qualified() -> None:
 def test_model_node_execute_applies_and_returns_model() -> None:
     node = create_comfy_node(_FakeModel, "Taidal__FakeModel")()
     s: Record = {"input": 1}
-    applied, model = node.execute(sample=s, model_uri="maf:/X/1.0", k=3)["result"]
+    applied, model = node.execute(record=s, model_uri="maf:/X/1.0", k=3)["result"]
     assert applied["detection_labels"] == ["WLAN"]  # inference ran
     assert isinstance(model, _FakeModel)  # the model object is the second output
     assert model.model_uri == "maf:/X/1.0" and model.k == 3
 
 
-def test_model_node_without_sample_returns_model_only() -> None:
+def test_model_node_without_record_returns_model_only() -> None:
     node = create_comfy_node(_FakeModel, "Taidal__FakeModel")()
     applied, model = node.execute(model_uri="", k=5)["result"]
-    assert applied is None  # no sample wired → no inference
+    assert applied is None  # no record wired → no inference
     assert isinstance(model, _FakeModel)
 
 
 def test_model_node_raises_on_none_result() -> None:
     node = create_comfy_node(_NoneModel, "Taidal__NoneModel")()
     with pytest.raises(RuntimeError):
-        node.execute(sample={"input": 1})
+        node.execute(record={"input": 1})
 
 
 # --------------------------------------------------- wired model input (ModelInference decoupling)
@@ -121,19 +121,19 @@ def test_model_params_reads_stamp() -> None:
 def test_model_input_param_is_wired_socket_not_widget() -> None:
     node = create_comfy_node(_FakeInference, "Taidal__FakeInference")
     spec = node.INPUT_TYPES()
-    # `model` rides a SAMPLEFLUX_OBJECT:model input socket; it is NOT a widget.
+    # `model` rides a RECORDSTREAM_OBJECT:model input socket; it is NOT a widget.
     assert spec["optional"]["model"] == (_object_socket("model"),)
     assert "model" not in spec["required"]
     # Other config params stay widgets.
     assert spec["required"]["threshold"][0] == "FLOAT"
-    assert spec["optional"]["sample"] == (SAMPLE_TYPE,)
+    assert spec["optional"]["record"] == (RECORD_TYPE,)
 
 
 def test_model_node_wires_model_and_delegates() -> None:
     inference = create_comfy_node(_FakeInference, "Taidal__FakeInference")()
     loader = _FakeModel(model_uri="maf:/X/1.0")  # a Loader node's model output (a model object)
     s: Record = {"input": 1}
-    applied, model_obj = inference.execute(sample=s, model=loader, threshold=0.7)["result"]
+    applied, model_obj = inference.execute(record=s, model=loader, threshold=0.7)["result"]
     # The wired model ran inference (delegated through _FakeInference.__call__ → loader).
     assert applied["detection_labels"] == ["WLAN"]
     assert isinstance(model_obj, _FakeInference)  # the node outputs ITSELF as the model object
@@ -142,7 +142,7 @@ def test_model_node_wires_model_and_delegates() -> None:
 
 def test_model_node_unwired_model_is_none() -> None:
     inference = create_comfy_node(_FakeInference, "Taidal__FakeInference")()
-    # No sample wired → no inference attempt; model object built with model=None.
+    # No record wired → no inference attempt; model object built with model=None.
     applied, model_obj = inference.execute(threshold=0.5)["result"]
     assert applied is None
     assert model_obj.model is None

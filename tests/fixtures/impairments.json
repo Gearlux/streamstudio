@@ -33,7 +33,7 @@
         {
           "localized_name": "source",
           "name": "source",
-          "type": "SAMPLEFLUX_SOURCE",
+          "type": "RECORDSTREAM_SOURCE",
           "links": [
             1
           ]
@@ -43,7 +43,7 @@
         "Node name for S&R": "Taidal_waivefront_source_HeliosFileSource"
       },
       "widgets_values": [
-        "/home/user/data/Helios_training_data_samples/1.0/5GNR/",
+        "/home/user/data/Helios_training_data_records/1.0/5GNR/",
         "browse"
       ]
     },
@@ -65,7 +65,7 @@
         {
           "localized_name": "source",
           "name": "source",
-          "type": "SAMPLEFLUX_SOURCE",
+          "type": "RECORDSTREAM_SOURCE",
           "link": 1
         },
         {
@@ -89,9 +89,9 @@
       ],
       "outputs": [
         {
-          "localized_name": "sample",
-          "name": "sample",
-          "type": "SAMPLEFLUX_SAMPLE",
+          "localized_name": "record",
+          "name": "record",
+          "type": "RECORDSTREAM_RECORD",
           "links": [
             42
           ]
@@ -108,7 +108,7 @@
     },
     {
       "id": 9,
-      "type": "Taidal_sampleflux_op_torch_SqueezeOp",
+      "type": "Taidal_recordstream_op_torch_SqueezeOp",
       "pos": [
         -1124.220872162449,
         -772.1421306689118
@@ -123,11 +123,11 @@
       "inputs": [
         {
           "color_off": "#7d8590",
-          "label": "sample (optional)",
-          "localized_name": "sample",
-          "name": "sample",
+          "label": "record (optional)",
+          "localized_name": "record",
+          "name": "record",
           "shape": 7,
-          "type": "SAMPLEFLUX_SAMPLE",
+          "type": "RECORDSTREAM_RECORD",
           "link": 42
         },
         {
@@ -144,9 +144,9 @@
       ],
       "outputs": [
         {
-          "localized_name": "sample",
-          "name": "sample",
-          "type": "SAMPLEFLUX_SAMPLE",
+          "localized_name": "record",
+          "name": "record",
+          "type": "RECORDSTREAM_RECORD",
           "links": [
             162
           ]
@@ -154,12 +154,12 @@
         {
           "localized_name": "op",
           "name": "op",
-          "type": "SAMPLEFLUX_OP",
+          "type": "RECORDSTREAM_OP",
           "links": null
         }
       ],
       "properties": {
-        "Node name for S&R": "Taidal_sampleflux_op_torch_SqueezeOp"
+        "Node name for S&R": "Taidal_recordstream_op_torch_SqueezeOp"
       },
       "widgets_values": [
         0
@@ -182,11 +182,11 @@
       "inputs": [
         {
           "color_off": "#7d8590",
-          "label": "sample (optional)",
-          "localized_name": "sample",
-          "name": "sample",
+          "label": "record (optional)",
+          "localized_name": "record",
+          "name": "record",
           "shape": 7,
-          "type": "SAMPLEFLUX_SAMPLE",
+          "type": "RECORDSTREAM_RECORD",
           "link": 162
         },
         {
@@ -219,9 +219,9 @@
       ],
       "outputs": [
         {
-          "localized_name": "sample",
-          "name": "sample",
-          "type": "SAMPLEFLUX_SAMPLE",
+          "localized_name": "record",
+          "name": "record",
+          "type": "RECORDSTREAM_RECORD",
           "links": [
             540
           ]
@@ -229,7 +229,7 @@
         {
           "localized_name": "op",
           "name": "op",
-          "type": "SAMPLEFLUX_OP",
+          "type": "RECORDSTREAM_OP",
           "links": null
         }
       ],
@@ -259,10 +259,10 @@
       "inputs": [
         {
           "color_off": "#7d8590",
-          "label": "sample (IQ)",
-          "localized_name": "sample",
-          "name": "sample",
-          "type": "SAMPLEFLUX_SAMPLE",
+          "label": "record (IQ)",
+          "localized_name": "record",
+          "name": "record",
+          "type": "RECORDSTREAM_RECORD",
           "link": 540
         }
       ],
@@ -274,21 +274,21 @@
           "links": []
         },
         {
-          "label": "sample (spectrogram)",
-          "name": "sample",
-          "type": "SAMPLEFLUX_SAMPLE",
+          "label": "record (spectrogram)",
+          "name": "record",
+          "type": "RECORDSTREAM_RECORD",
           "links": [
             541
           ]
         },
         {
-          "label": "image_sample",
-          "name": "sample_1",
-          "type": "SAMPLEFLUX_SAMPLE",
+          "label": "image_record",
+          "name": "record_1",
+          "type": "RECORDSTREAM_RECORD",
           "links": null
         },
         {
-          "label": "sample (IQ)",
+          "label": "record (IQ)",
           "name": "",
           "type": "*",
           "links": [
@@ -306,7 +306,7 @@
     },
     {
       "id": 292,
-      "type": "Taidal_MixSamples",
+      "type": "Taidal_MixRecords",
       "pos": [
         -706.6887350033987,
         -563.4644749105884
@@ -320,29 +320,29 @@
       "mode": 0,
       "inputs": [
         {
-          "localized_name": "input_sample",
-          "name": "input_sample",
-          "type": "SAMPLEFLUX_SAMPLE",
+          "localized_name": "input_record",
+          "name": "input_record",
+          "type": "RECORDSTREAM_RECORD",
           "link": 543
         },
         {
-          "localized_name": "target_sample",
-          "name": "target_sample",
-          "type": "SAMPLEFLUX_SAMPLE",
+          "localized_name": "target_record",
+          "name": "target_record",
+          "type": "RECORDSTREAM_RECORD",
           "link": 544
         },
         {
-          "localized_name": "metadata_sample",
-          "name": "metadata_sample",
-          "type": "SAMPLEFLUX_SAMPLE",
+          "localized_name": "metadata_record",
+          "name": "metadata_record",
+          "type": "RECORDSTREAM_RECORD",
           "link": 545
         }
       ],
       "outputs": [
         {
-          "localized_name": "sample",
-          "name": "sample",
-          "type": "SAMPLEFLUX_SAMPLE",
+          "localized_name": "record",
+          "name": "record",
+          "type": "RECORDSTREAM_RECORD",
           "links": [
             555,
             653
@@ -350,7 +350,7 @@
         }
       ],
       "properties": {
-        "Node name for S&R": "Taidal_MixSamples"
+        "Node name for S&R": "Taidal_MixRecords"
       },
       "widgets_values": []
     },
@@ -669,11 +669,11 @@
       "inputs": [
         {
           "color_off": "#7d8590",
-          "label": "sample (optional)",
-          "localized_name": "sample",
-          "name": "sample",
+          "label": "record (optional)",
+          "localized_name": "record",
+          "name": "record",
           "shape": 7,
-          "type": "SAMPLEFLUX_SAMPLE",
+          "type": "RECORDSTREAM_RECORD",
           "link": 541
         }
       ],
@@ -688,9 +688,9 @@
         },
         {
           "label": "boxes",
-          "localized_name": "sample",
-          "name": "sample",
-          "type": "SAMPLEFLUX_SAMPLE",
+          "localized_name": "record",
+          "name": "record",
+          "type": "RECORDSTREAM_RECORD",
           "links": [
             545
           ]
@@ -1306,11 +1306,11 @@
       "inputs": [
         {
           "color_off": "#7d8590",
-          "label": "sample (optional)",
-          "localized_name": "sample",
-          "name": "sample",
+          "label": "record (optional)",
+          "localized_name": "record",
+          "name": "record",
           "shape": 7,
-          "type": "SAMPLEFLUX_SAMPLE",
+          "type": "RECORDSTREAM_RECORD",
           "link": 617
         },
         {
@@ -1379,9 +1379,9 @@
       ],
       "outputs": [
         {
-          "localized_name": "sample",
-          "name": "sample",
-          "type": "SAMPLEFLUX_SAMPLE",
+          "localized_name": "record",
+          "name": "record",
+          "type": "RECORDSTREAM_RECORD",
           "links": [
             620
           ]
@@ -1389,7 +1389,7 @@
         {
           "localized_name": "op",
           "name": "op",
-          "type": "SAMPLEFLUX_OP",
+          "type": "RECORDSTREAM_OP",
           "links": null
         },
         {
@@ -1431,11 +1431,11 @@
       "inputs": [
         {
           "color_off": "#7d8590",
-          "label": "sample (optional)",
-          "localized_name": "sample",
-          "name": "sample",
+          "label": "record (optional)",
+          "localized_name": "record",
+          "name": "record",
           "shape": 7,
-          "type": "SAMPLEFLUX_SAMPLE",
+          "type": "RECORDSTREAM_RECORD",
           "link": 605
         },
         {
@@ -1594,9 +1594,9 @@
       ],
       "outputs": [
         {
-          "localized_name": "sample",
-          "name": "sample",
-          "type": "SAMPLEFLUX_SAMPLE",
+          "localized_name": "record",
+          "name": "record",
+          "type": "RECORDSTREAM_RECORD",
           "links": [
             606,
             617
@@ -1605,7 +1605,7 @@
         {
           "localized_name": "op",
           "name": "op",
-          "type": "SAMPLEFLUX_OP",
+          "type": "RECORDSTREAM_OP",
           "links": null
         },
         {
@@ -1667,22 +1667,22 @@
       "inputs": [
         {
           "color_off": "#7d8590",
-          "label": "sample (IQ)",
-          "localized_name": "sample",
-          "name": "sample",
-          "type": "SAMPLEFLUX_SAMPLE",
+          "label": "record (IQ)",
+          "localized_name": "record",
+          "name": "record",
+          "type": "RECORDSTREAM_RECORD",
           "link": 606
         }
       ],
       "outputs": [
         {
-          "label": "sample (IQ)",
-          "name": "sample",
-          "type": "SAMPLEFLUX_SAMPLE",
+          "label": "record (IQ)",
+          "name": "record",
+          "type": "RECORDSTREAM_RECORD",
           "links": null
         },
         {
-          "label": "sample (spectrogram)",
+          "label": "record (spectrogram)",
           "name": "",
           "type": "*",
           "links": null
@@ -1696,9 +1696,9 @@
           ]
         },
         {
-          "label": "sample (image)",
-          "name": "sample_1",
-          "type": "SAMPLEFLUX_SAMPLE",
+          "label": "record (image)",
+          "name": "record_1",
+          "type": "RECORDSTREAM_RECORD",
           "links": null
         },
         {
@@ -1744,22 +1744,22 @@
       "inputs": [
         {
           "color_off": "#7d8590",
-          "label": "sample (IQ)",
-          "localized_name": "sample",
-          "name": "sample",
-          "type": "SAMPLEFLUX_SAMPLE",
+          "label": "record (IQ)",
+          "localized_name": "record",
+          "name": "record",
+          "type": "RECORDSTREAM_RECORD",
           "link": 585
         }
       ],
       "outputs": [
         {
-          "label": "sample (IQ)",
-          "name": "sample",
-          "type": "SAMPLEFLUX_SAMPLE",
+          "label": "record (IQ)",
+          "name": "record",
+          "type": "RECORDSTREAM_RECORD",
           "links": null
         },
         {
-          "label": "sample (spectrogram)",
+          "label": "record (spectrogram)",
           "name": "",
           "type": "*",
           "links": null
@@ -1773,9 +1773,9 @@
           ]
         },
         {
-          "label": "sample (image)",
-          "name": "sample_1",
-          "type": "SAMPLEFLUX_SAMPLE",
+          "label": "record (image)",
+          "name": "record_1",
+          "type": "RECORDSTREAM_RECORD",
           "links": null
         },
         {
@@ -1821,22 +1821,22 @@
       "inputs": [
         {
           "color_off": "#7d8590",
-          "label": "sample (IQ)",
-          "localized_name": "sample",
-          "name": "sample",
-          "type": "SAMPLEFLUX_SAMPLE",
+          "label": "record (IQ)",
+          "localized_name": "record",
+          "name": "record",
+          "type": "RECORDSTREAM_RECORD",
           "link": 555
         }
       ],
       "outputs": [
         {
-          "label": "sample (IQ)",
-          "name": "sample",
-          "type": "SAMPLEFLUX_SAMPLE",
+          "label": "record (IQ)",
+          "name": "record",
+          "type": "RECORDSTREAM_RECORD",
           "links": []
         },
         {
-          "label": "sample (spectrogram)",
+          "label": "record (spectrogram)",
           "name": "",
           "type": "*",
           "links": null
@@ -1850,9 +1850,9 @@
           ]
         },
         {
-          "label": "sample (image)",
-          "name": "sample_1",
-          "type": "SAMPLEFLUX_SAMPLE",
+          "label": "record (image)",
+          "name": "record_1",
+          "type": "RECORDSTREAM_RECORD",
           "links": null
         },
         {
@@ -2419,11 +2419,11 @@
       "inputs": [
         {
           "color_off": "#7d8590",
-          "label": "sample (optional)",
-          "localized_name": "sample",
-          "name": "sample",
+          "label": "record (optional)",
+          "localized_name": "record",
+          "name": "record",
           "shape": 7,
-          "type": "SAMPLEFLUX_SAMPLE",
+          "type": "RECORDSTREAM_RECORD",
           "link": 652
         },
         {
@@ -2501,9 +2501,9 @@
       ],
       "outputs": [
         {
-          "localized_name": "sample",
-          "name": "sample",
-          "type": "SAMPLEFLUX_SAMPLE",
+          "localized_name": "record",
+          "name": "record",
+          "type": "RECORDSTREAM_RECORD",
           "links": [
             94
           ]
@@ -2511,7 +2511,7 @@
         {
           "localized_name": "op",
           "name": "op",
-          "type": "SAMPLEFLUX_OP",
+          "type": "RECORDSTREAM_OP",
           "links": null
         }
       ],
@@ -2533,7 +2533,7 @@
     },
     {
       "id": 62,
-      "type": "Taidal_ExtractSample",
+      "type": "Taidal_ExtractRecord",
       "pos": [
         2270.3932822337524,
         -389.26508418675763
@@ -2547,9 +2547,9 @@
       "mode": 0,
       "inputs": [
         {
-          "localized_name": "sample",
-          "name": "sample",
-          "type": "SAMPLEFLUX_SAMPLE",
+          "localized_name": "record",
+          "name": "record",
+          "type": "RECORDSTREAM_RECORD",
           "link": 94
         },
         {
@@ -2616,12 +2616,12 @@
         {
           "localized_name": "array",
           "name": "array",
-          "type": "SAMPLEFLUX_ARRAY",
+          "type": "RECORDSTREAM_ARRAY",
           "links": null
         }
       ],
       "properties": {
-        "Node name for S&R": "Taidal_ExtractSample"
+        "Node name for S&R": "Taidal_ExtractRecord"
       },
       "widgets_values": [
         "input",
@@ -2964,22 +2964,22 @@
       "inputs": [
         {
           "color_off": "#7d8590",
-          "label": "sample (IQ)",
-          "localized_name": "sample",
-          "name": "sample",
-          "type": "SAMPLEFLUX_SAMPLE",
+          "label": "record (IQ)",
+          "localized_name": "record",
+          "name": "record",
+          "type": "RECORDSTREAM_RECORD",
           "link": 620
         }
       ],
       "outputs": [
         {
-          "label": "sample (IQ)",
-          "name": "sample",
-          "type": "SAMPLEFLUX_SAMPLE",
+          "label": "record (IQ)",
+          "name": "record",
+          "type": "RECORDSTREAM_RECORD",
           "links": null
         },
         {
-          "label": "sample (spectrogram)",
+          "label": "record (spectrogram)",
           "name": "",
           "type": "*",
           "links": []
@@ -2993,9 +2993,9 @@
           ]
         },
         {
-          "label": "sample (image)",
-          "name": "sample_1",
-          "type": "SAMPLEFLUX_SAMPLE",
+          "label": "record (image)",
+          "name": "record_1",
+          "type": "RECORDSTREAM_RECORD",
           "links": [
             652
           ]
@@ -3043,11 +3043,11 @@
       "inputs": [
         {
           "color_off": "#7d8590",
-          "label": "sample (optional)",
-          "localized_name": "sample",
-          "name": "sample",
+          "label": "record (optional)",
+          "localized_name": "record",
+          "name": "record",
           "shape": 7,
-          "type": "SAMPLEFLUX_SAMPLE",
+          "type": "RECORDSTREAM_RECORD",
           "link": 653
         },
         {
@@ -3116,9 +3116,9 @@
       ],
       "outputs": [
         {
-          "localized_name": "sample",
-          "name": "sample",
-          "type": "SAMPLEFLUX_SAMPLE",
+          "localized_name": "record",
+          "name": "record",
+          "type": "RECORDSTREAM_RECORD",
           "links": [
             585,
             605
@@ -3127,7 +3127,7 @@
         {
           "localized_name": "op",
           "name": "op",
-          "type": "SAMPLEFLUX_OP",
+          "type": "RECORDSTREAM_OP",
           "links": null
         },
         {
@@ -3160,7 +3160,7 @@
       0,
       2,
       0,
-      "SAMPLEFLUX_SOURCE"
+      "RECORDSTREAM_SOURCE"
     ],
     [
       42,
@@ -3168,7 +3168,7 @@
       0,
       9,
       0,
-      "SAMPLEFLUX_SAMPLE"
+      "RECORDSTREAM_RECORD"
     ],
     [
       94,
@@ -3176,7 +3176,7 @@
       0,
       62,
       0,
-      "SAMPLEFLUX_SAMPLE"
+      "RECORDSTREAM_RECORD"
     ],
     [
       162,
@@ -3184,7 +3184,7 @@
       0,
       107,
       0,
-      "SAMPLEFLUX_SAMPLE"
+      "RECORDSTREAM_RECORD"
     ],
     [
       316,
@@ -3200,7 +3200,7 @@
       0,
       288,
       0,
-      "SAMPLEFLUX_SAMPLE"
+      "RECORDSTREAM_RECORD"
     ],
     [
       541,
@@ -3208,7 +3208,7 @@
       1,
       179,
       0,
-      "SAMPLEFLUX_SAMPLE"
+      "RECORDSTREAM_RECORD"
     ],
     [
       543,
@@ -3216,7 +3216,7 @@
       3,
       292,
       0,
-      "SAMPLEFLUX_SAMPLE"
+      "RECORDSTREAM_RECORD"
     ],
     [
       544,
@@ -3224,7 +3224,7 @@
       3,
       292,
       1,
-      "SAMPLEFLUX_SAMPLE"
+      "RECORDSTREAM_RECORD"
     ],
     [
       545,
@@ -3232,7 +3232,7 @@
       1,
       292,
       2,
-      "SAMPLEFLUX_SAMPLE"
+      "RECORDSTREAM_RECORD"
     ],
     [
       555,
@@ -3240,7 +3240,7 @@
       0,
       317,
       0,
-      "SAMPLEFLUX_SAMPLE"
+      "RECORDSTREAM_RECORD"
     ],
     [
       579,
@@ -3272,7 +3272,7 @@
       0,
       342,
       0,
-      "SAMPLEFLUX_SAMPLE"
+      "RECORDSTREAM_RECORD"
     ],
     [
       586,
@@ -3320,7 +3320,7 @@
       0,
       281,
       0,
-      "SAMPLEFLUX_SAMPLE"
+      "RECORDSTREAM_RECORD"
     ],
     [
       606,
@@ -3328,7 +3328,7 @@
       0,
       360,
       0,
-      "SAMPLEFLUX_SAMPLE"
+      "RECORDSTREAM_RECORD"
     ],
     [
       607,
@@ -3368,7 +3368,7 @@
       0,
       365,
       0,
-      "SAMPLEFLUX_SAMPLE"
+      "RECORDSTREAM_RECORD"
     ],
     [
       618,
@@ -3392,7 +3392,7 @@
       0,
       378,
       0,
-      "SAMPLEFLUX_SAMPLE"
+      "RECORDSTREAM_RECORD"
     ],
     [
       624,
@@ -3496,7 +3496,7 @@
       3,
       61,
       0,
-      "SAMPLEFLUX_SAMPLE"
+      "RECORDSTREAM_RECORD"
     ],
     [
       653,
@@ -3504,7 +3504,7 @@
       0,
       331,
       0,
-      "SAMPLEFLUX_SAMPLE"
+      "RECORDSTREAM_RECORD"
     ]
   ],
   "groups": [
@@ -3592,14 +3592,14 @@
         "inputs": [
           {
             "id": "e224a7be-75e8-4d52-bb2f-852fa5af3148",
-            "name": "sample",
-            "type": "SAMPLEFLUX_SAMPLE",
+            "name": "record",
+            "type": "RECORDSTREAM_RECORD",
             "linkIds": [
               223,
               224
             ],
-            "localized_name": "sample",
-            "label": "sample (optional)",
+            "localized_name": "record",
+            "label": "record (optional)",
             "shape": 7,
             "color_off": "#7d8590",
             "pos": [
@@ -3611,12 +3611,12 @@
         "outputs": [
           {
             "id": "4914e7b7-be45-438c-8c0f-0d57e0cb7f33",
-            "name": "sample",
-            "type": "SAMPLEFLUX_SAMPLE",
+            "name": "record",
+            "type": "RECORDSTREAM_RECORD",
             "linkIds": [
               225
             ],
-            "localized_name": "sample",
+            "localized_name": "record",
             "pos": [
               1443.6939843609136,
               142.40632441859097
@@ -3640,7 +3640,7 @@
         "nodes": [
           {
             "id": 138,
-            "type": "Taidal_sampleflux_op_numpy_MaxOp",
+            "type": "Taidal_recordstream_op_numpy_MaxOp",
             "pos": [
               463.6699340103247,
               -4.978586098441838
@@ -3655,11 +3655,11 @@
             "inputs": [
               {
                 "color_off": "#7d8590",
-                "label": "sample (optional)",
-                "localized_name": "sample",
-                "name": "sample",
+                "label": "record (optional)",
+                "localized_name": "record",
+                "name": "record",
                 "shape": 7,
-                "type": "SAMPLEFLUX_SAMPLE",
+                "type": "RECORDSTREAM_RECORD",
                 "link": 223
               },
               {
@@ -3685,9 +3685,9 @@
             ],
             "outputs": [
               {
-                "localized_name": "sample",
-                "name": "sample",
-                "type": "SAMPLEFLUX_SAMPLE",
+                "localized_name": "record",
+                "name": "record",
+                "type": "RECORDSTREAM_RECORD",
                 "links": [
                   220
                 ]
@@ -3695,12 +3695,12 @@
               {
                 "localized_name": "op",
                 "name": "op",
-                "type": "SAMPLEFLUX_OP",
+                "type": "RECORDSTREAM_OP",
                 "links": []
               }
             ],
             "properties": {
-              "Node name for S&R": "Taidal_sampleflux_op_numpy_MaxOp"
+              "Node name for S&R": "Taidal_recordstream_op_numpy_MaxOp"
             },
             "widgets_values": [
               "",
@@ -3709,7 +3709,7 @@
           },
           {
             "id": 139,
-            "type": "Taidal_ExtractSample",
+            "type": "Taidal_ExtractRecord",
             "pos": [
               771.9073053102425,
               -19.534118768442625
@@ -3723,9 +3723,9 @@
             "mode": 0,
             "inputs": [
               {
-                "localized_name": "sample",
-                "name": "sample",
-                "type": "SAMPLEFLUX_SAMPLE",
+                "localized_name": "record",
+                "name": "record",
+                "type": "RECORDSTREAM_RECORD",
                 "link": 220
               },
               {
@@ -3792,12 +3792,12 @@
               {
                 "localized_name": "array",
                 "name": "array",
-                "type": "SAMPLEFLUX_ARRAY",
+                "type": "RECORDSTREAM_ARRAY",
                 "links": null
               }
             ],
             "properties": {
-              "Node name for S&R": "Taidal_ExtractSample"
+              "Node name for S&R": "Taidal_ExtractRecord"
             },
             "widgets_values": [
               "input",
@@ -3912,7 +3912,7 @@
           },
           {
             "id": 143,
-            "type": "Taidal_ExtractSample",
+            "type": "Taidal_ExtractRecord",
             "pos": [
               777.5097883471216,
               311.12080102597764
@@ -3926,9 +3926,9 @@
             "mode": 0,
             "inputs": [
               {
-                "localized_name": "sample",
-                "name": "sample",
-                "type": "SAMPLEFLUX_SAMPLE",
+                "localized_name": "record",
+                "name": "record",
+                "type": "RECORDSTREAM_RECORD",
                 "link": 228
               },
               {
@@ -3996,12 +3996,12 @@
               {
                 "localized_name": "array",
                 "name": "array",
-                "type": "SAMPLEFLUX_ARRAY",
+                "type": "RECORDSTREAM_ARRAY",
                 "links": null
               }
             ],
             "properties": {
-              "Node name for S&R": "Taidal_ExtractSample"
+              "Node name for S&R": "Taidal_ExtractRecord"
             },
             "widgets_values": [
               "input",
@@ -4050,7 +4050,7 @@
           },
           {
             "id": 141,
-            "type": "Taidal_sampleflux_op_numpy_ThresholdOp",
+            "type": "Taidal_recordstream_op_numpy_ThresholdOp",
             "pos": [
               444.88056302924673,
               245.7493049754902
@@ -4065,11 +4065,11 @@
             "inputs": [
               {
                 "color_off": "#7d8590",
-                "label": "sample (optional)",
-                "localized_name": "sample",
-                "name": "sample",
+                "label": "record (optional)",
+                "localized_name": "record",
+                "name": "record",
                 "shape": 7,
-                "type": "SAMPLEFLUX_SAMPLE",
+                "type": "RECORDSTREAM_RECORD",
                 "link": 224
               },
               {
@@ -4115,9 +4115,9 @@
             ],
             "outputs": [
               {
-                "localized_name": "sample",
-                "name": "sample",
-                "type": "SAMPLEFLUX_SAMPLE",
+                "localized_name": "record",
+                "name": "record",
+                "type": "RECORDSTREAM_RECORD",
                 "links": [
                   225,
                   228
@@ -4126,12 +4126,12 @@
               {
                 "localized_name": "op",
                 "name": "op",
-                "type": "SAMPLEFLUX_OP",
+                "type": "RECORDSTREAM_OP",
                 "links": []
               }
             ],
             "properties": {
-              "Node name for S&R": "Taidal_sampleflux_op_numpy_ThresholdOp"
+              "Node name for S&R": "Taidal_recordstream_op_numpy_ThresholdOp"
             },
             "widgets_values": [
               ">",
@@ -4149,7 +4149,7 @@
             "origin_slot": 0,
             "target_id": 139,
             "target_slot": 0,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           },
           {
             "id": 221,
@@ -4173,7 +4173,7 @@
             "origin_slot": 0,
             "target_id": 138,
             "target_slot": 0,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           },
           {
             "id": 224,
@@ -4181,7 +4181,7 @@
             "origin_slot": 0,
             "target_id": 141,
             "target_slot": 0,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           },
           {
             "id": 225,
@@ -4189,7 +4189,7 @@
             "origin_slot": 0,
             "target_id": -20,
             "target_slot": 0,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           },
           {
             "id": 228,
@@ -4197,7 +4197,7 @@
             "origin_slot": 0,
             "target_id": 143,
             "target_slot": 0,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           },
           {
             "id": 230,
@@ -4251,13 +4251,13 @@
         "inputs": [
           {
             "id": "d106e583-f8de-4424-848e-0740de71e98f",
-            "name": "sample",
-            "type": "SAMPLEFLUX_SAMPLE",
+            "name": "record",
+            "type": "RECORDSTREAM_RECORD",
             "linkIds": [
               226
             ],
-            "localized_name": "sample",
-            "label": "sample (optional)",
+            "localized_name": "record",
+            "label": "record (optional)",
             "shape": 7,
             "color_off": "#7d8590",
             "pos": [
@@ -4282,12 +4282,12 @@
           },
           {
             "id": "4f461b3f-8839-4710-9ea1-0218f266472f",
-            "name": "sample",
-            "type": "SAMPLEFLUX_SAMPLE",
+            "name": "record",
+            "type": "RECORDSTREAM_RECORD",
             "linkIds": [
               90
             ],
-            "localized_name": "sample",
+            "localized_name": "record",
             "label": "boxes",
             "pos": [
               1639.1579487387244,
@@ -4299,7 +4299,7 @@
         "nodes": [
           {
             "id": 56,
-            "type": "Taidal_sampleflux_op_numpy_ConnectedComponentsOp",
+            "type": "Taidal_recordstream_op_numpy_ConnectedComponentsOp",
             "pos": [
               811.9362609608253,
               326.8409089647822
@@ -4314,11 +4314,11 @@
             "inputs": [
               {
                 "color_off": "#7d8590",
-                "label": "sample (optional)",
-                "localized_name": "sample",
-                "name": "sample",
+                "label": "record (optional)",
+                "localized_name": "record",
+                "name": "record",
                 "shape": 7,
-                "type": "SAMPLEFLUX_SAMPLE",
+                "type": "RECORDSTREAM_RECORD",
                 "link": 616
               },
               {
@@ -4342,9 +4342,9 @@
             ],
             "outputs": [
               {
-                "localized_name": "sample",
-                "name": "sample",
-                "type": "SAMPLEFLUX_SAMPLE",
+                "localized_name": "record",
+                "name": "record",
+                "type": "RECORDSTREAM_RECORD",
                 "links": [
                   88
                 ]
@@ -4352,12 +4352,12 @@
               {
                 "localized_name": "op",
                 "name": "op",
-                "type": "SAMPLEFLUX_OP",
+                "type": "RECORDSTREAM_OP",
                 "links": null
               }
             ],
             "properties": {
-              "Node name for S&R": "Taidal_sampleflux_op_numpy_ConnectedComponentsOp"
+              "Node name for S&R": "Taidal_recordstream_op_numpy_ConnectedComponentsOp"
             },
             "widgets_values": [
               10,
@@ -4381,11 +4381,11 @@
             "inputs": [
               {
                 "color_off": "#7d8590",
-                "label": "sample (optional)",
-                "localized_name": "sample",
-                "name": "sample",
+                "label": "record (optional)",
+                "localized_name": "record",
+                "name": "record",
                 "shape": 7,
-                "type": "SAMPLEFLUX_SAMPLE",
+                "type": "RECORDSTREAM_RECORD",
                 "link": 88
               },
               {
@@ -4409,9 +4409,9 @@
             ],
             "outputs": [
               {
-                "localized_name": "sample",
-                "name": "sample",
-                "type": "SAMPLEFLUX_SAMPLE",
+                "localized_name": "record",
+                "name": "record",
+                "type": "RECORDSTREAM_RECORD",
                 "links": [
                   90
                 ]
@@ -4419,7 +4419,7 @@
               {
                 "localized_name": "op",
                 "name": "op",
-                "type": "SAMPLEFLUX_OP",
+                "type": "RECORDSTREAM_OP",
                 "links": null
               }
             ],
@@ -4448,19 +4448,19 @@
             "inputs": [
               {
                 "color_off": "#7d8590",
-                "label": "sample (optional)",
-                "localized_name": "sample",
-                "name": "sample",
+                "label": "record (optional)",
+                "localized_name": "record",
+                "name": "record",
                 "shape": 7,
-                "type": "SAMPLEFLUX_SAMPLE",
+                "type": "RECORDSTREAM_RECORD",
                 "link": 226
               }
             ],
             "outputs": [
               {
-                "localized_name": "sample",
-                "name": "sample",
-                "type": "SAMPLEFLUX_SAMPLE",
+                "localized_name": "record",
+                "name": "record",
+                "type": "RECORDSTREAM_RECORD",
                 "links": [
                   615
                 ]
@@ -4483,7 +4483,7 @@
           },
           {
             "id": 364,
-            "type": "Taidal_sampleflux_op_structure_StashInputOp",
+            "type": "Taidal_recordstream_op_structure_StashInputOp",
             "pos": [
               1016.7291446327479,
               85.34302537588631
@@ -4498,11 +4498,11 @@
             "inputs": [
               {
                 "color_off": "#7d8590",
-                "label": "sample (optional)",
-                "localized_name": "sample",
-                "name": "sample",
+                "label": "record (optional)",
+                "localized_name": "record",
+                "name": "record",
                 "shape": 7,
-                "type": "SAMPLEFLUX_SAMPLE",
+                "type": "RECORDSTREAM_RECORD",
                 "link": 615
               },
               {
@@ -4526,9 +4526,9 @@
             ],
             "outputs": [
               {
-                "localized_name": "sample",
-                "name": "sample",
-                "type": "SAMPLEFLUX_SAMPLE",
+                "localized_name": "record",
+                "name": "record",
+                "type": "RECORDSTREAM_RECORD",
                 "links": [
                   616
                 ]
@@ -4536,12 +4536,12 @@
               {
                 "localized_name": "op",
                 "name": "op",
-                "type": "SAMPLEFLUX_OP",
+                "type": "RECORDSTREAM_OP",
                 "links": null
               }
             ],
             "properties": {
-              "Node name for S&R": "Taidal_sampleflux_op_structure_StashInputOp"
+              "Node name for S&R": "Taidal_recordstream_op_structure_StashInputOp"
             },
             "widgets_values": [
               "mask",
@@ -4557,7 +4557,7 @@
             "origin_slot": 0,
             "target_id": 59,
             "target_slot": 0,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           },
           {
             "id": 226,
@@ -4565,7 +4565,7 @@
             "origin_slot": 0,
             "target_id": 142,
             "target_slot": 0,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           },
           {
             "id": 297,
@@ -4581,7 +4581,7 @@
             "origin_slot": 0,
             "target_id": -20,
             "target_slot": 1,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           },
           {
             "id": 615,
@@ -4589,7 +4589,7 @@
             "origin_slot": 0,
             "target_id": 364,
             "target_slot": 0,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           },
           {
             "id": 616,
@@ -4597,7 +4597,7 @@
             "origin_slot": 0,
             "target_id": 56,
             "target_slot": 0,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           }
         ],
         "extra": {}
@@ -4635,14 +4635,14 @@
         "inputs": [
           {
             "id": "4e800e82-45bf-4a43-b8bb-5b51a2551b66",
-            "name": "sample",
-            "type": "SAMPLEFLUX_SAMPLE",
+            "name": "record",
+            "type": "RECORDSTREAM_RECORD",
             "linkIds": [
               536,
               539
             ],
-            "localized_name": "sample",
-            "label": "sample (IQ)",
+            "localized_name": "record",
+            "label": "record (IQ)",
             "shape": 7,
             "color_off": "#7d8590",
             "pos": [
@@ -4667,12 +4667,12 @@
           },
           {
             "id": "24cc0538-746d-4617-b33a-e40d1a07dae4",
-            "name": "sample",
-            "type": "SAMPLEFLUX_SAMPLE",
+            "name": "record",
+            "type": "RECORDSTREAM_RECORD",
             "linkIds": [
               203
             ],
-            "label": "sample (spectrogram)",
+            "label": "record (spectrogram)",
             "pos": [
               1659.3274322752509,
               -876.8278910327209
@@ -4680,12 +4680,12 @@
           },
           {
             "id": "52e128d3-2783-48cc-b5ff-643dd4c6354e",
-            "name": "sample_1",
-            "type": "SAMPLEFLUX_SAMPLE",
+            "name": "record_1",
+            "type": "RECORDSTREAM_RECORD",
             "linkIds": [
               204
             ],
-            "label": "image_sample",
+            "label": "image_record",
             "pos": [
               1659.3274322752509,
               -856.8278910327209
@@ -4698,7 +4698,7 @@
             "linkIds": [
               537
             ],
-            "label": "sample (IQ)",
+            "label": "record (IQ)",
             "pos": [
               1659.3274322752509,
               -836.8278910327209
@@ -4724,11 +4724,11 @@
             "inputs": [
               {
                 "color_off": "#7d8590",
-                "label": "sample (optional)",
-                "localized_name": "sample",
-                "name": "sample",
+                "label": "record (optional)",
+                "localized_name": "record",
+                "name": "record",
                 "shape": 7,
-                "type": "SAMPLEFLUX_SAMPLE",
+                "type": "RECORDSTREAM_RECORD",
                 "link": 194
               },
               {
@@ -4761,9 +4761,9 @@
             ],
             "outputs": [
               {
-                "localized_name": "sample",
-                "name": "sample",
-                "type": "SAMPLEFLUX_SAMPLE",
+                "localized_name": "record",
+                "name": "record",
+                "type": "RECORDSTREAM_RECORD",
                 "links": [
                   195,
                   196,
@@ -4773,7 +4773,7 @@
               {
                 "localized_name": "op",
                 "name": "op",
-                "type": "SAMPLEFLUX_OP",
+                "type": "RECORDSTREAM_OP",
                 "links": []
               }
             ],
@@ -4788,7 +4788,7 @@
           },
           {
             "id": 287,
-            "type": "Taidal_ExtractSample",
+            "type": "Taidal_ExtractRecord",
             "pos": [
               1331.557982608633,
               -1197.792348762874
@@ -4802,9 +4802,9 @@
             "mode": 0,
             "inputs": [
               {
-                "localized_name": "sample",
-                "name": "sample",
-                "type": "SAMPLEFLUX_SAMPLE",
+                "localized_name": "record",
+                "name": "record",
+                "type": "RECORDSTREAM_RECORD",
                 "link": 195
               },
               {
@@ -4871,12 +4871,12 @@
               {
                 "localized_name": "array",
                 "name": "array",
-                "type": "SAMPLEFLUX_ARRAY",
+                "type": "RECORDSTREAM_ARRAY",
                 "links": null
               }
             ],
             "properties": {
-              "Node name for S&R": "Taidal_ExtractSample"
+              "Node name for S&R": "Taidal_ExtractRecord"
             },
             "widgets_values": [
               "input",
@@ -4929,7 +4929,7 @@
           },
           {
             "id": 286,
-            "type": "Taidal_sampleflux_op_image_ConvertToImageOp",
+            "type": "Taidal_recordstream_op_image_ConvertToImageOp",
             "pos": [
               1197.002670186914,
               -873.8600565711636
@@ -4944,11 +4944,11 @@
             "inputs": [
               {
                 "color_off": "#7d8590",
-                "label": "sample (optional)",
-                "localized_name": "sample",
-                "name": "sample",
+                "label": "record (optional)",
+                "localized_name": "record",
+                "name": "record",
                 "shape": 7,
-                "type": "SAMPLEFLUX_SAMPLE",
+                "type": "RECORDSTREAM_RECORD",
                 "link": 196
               },
               {
@@ -4999,9 +4999,9 @@
             ],
             "outputs": [
               {
-                "localized_name": "sample",
-                "name": "sample",
-                "type": "SAMPLEFLUX_SAMPLE",
+                "localized_name": "record",
+                "name": "record",
+                "type": "RECORDSTREAM_RECORD",
                 "links": [
                   204
                 ]
@@ -5009,12 +5009,12 @@
               {
                 "localized_name": "op",
                 "name": "op",
-                "type": "SAMPLEFLUX_OP",
+                "type": "RECORDSTREAM_OP",
                 "links": []
               }
             ],
             "properties": {
-              "Node name for S&R": "Taidal_sampleflux_op_image_ConvertToImageOp"
+              "Node name for S&R": "Taidal_recordstream_op_image_ConvertToImageOp"
             },
             "widgets_values": [
               "viridis",
@@ -5041,11 +5041,11 @@
             "inputs": [
               {
                 "color_off": "#7d8590",
-                "label": "sample (optional)",
-                "localized_name": "sample",
-                "name": "sample",
+                "label": "record (optional)",
+                "localized_name": "record",
+                "name": "record",
                 "shape": 7,
-                "type": "SAMPLEFLUX_SAMPLE",
+                "type": "RECORDSTREAM_RECORD",
                 "link": 539
               },
               {
@@ -5123,9 +5123,9 @@
             ],
             "outputs": [
               {
-                "localized_name": "sample",
-                "name": "sample",
-                "type": "SAMPLEFLUX_SAMPLE",
+                "localized_name": "record",
+                "name": "record",
+                "type": "RECORDSTREAM_RECORD",
                 "links": [
                   194
                 ]
@@ -5133,7 +5133,7 @@
               {
                 "localized_name": "op",
                 "name": "op",
-                "type": "SAMPLEFLUX_OP",
+                "type": "RECORDSTREAM_OP",
                 "links": []
               }
             ],
@@ -5160,7 +5160,7 @@
             "origin_slot": 0,
             "target_id": 285,
             "target_slot": 0,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           },
           {
             "id": 195,
@@ -5168,7 +5168,7 @@
             "origin_slot": 0,
             "target_id": 287,
             "target_slot": 0,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           },
           {
             "id": 196,
@@ -5176,7 +5176,7 @@
             "origin_slot": 0,
             "target_id": 286,
             "target_slot": 0,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           },
           {
             "id": 199,
@@ -5192,7 +5192,7 @@
             "origin_slot": 0,
             "target_id": -20,
             "target_slot": 1,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           },
           {
             "id": 204,
@@ -5200,7 +5200,7 @@
             "origin_slot": 0,
             "target_id": -20,
             "target_slot": 2,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           },
           {
             "id": 536,
@@ -5224,7 +5224,7 @@
             "origin_slot": 0,
             "target_id": 284,
             "target_slot": 0,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           }
         ],
         "extra": {}
@@ -5262,14 +5262,14 @@
         "inputs": [
           {
             "id": "4e800e82-45bf-4a43-b8bb-5b51a2551b66",
-            "name": "sample",
-            "type": "SAMPLEFLUX_SAMPLE",
+            "name": "record",
+            "type": "RECORDSTREAM_RECORD",
             "linkIds": [
               536,
               539
             ],
-            "localized_name": "sample",
-            "label": "sample (IQ)",
+            "localized_name": "record",
+            "label": "record (IQ)",
             "shape": 7,
             "color_off": "#7d8590",
             "pos": [
@@ -5294,12 +5294,12 @@
           },
           {
             "id": "24cc0538-746d-4617-b33a-e40d1a07dae4",
-            "name": "sample",
-            "type": "SAMPLEFLUX_SAMPLE",
+            "name": "record",
+            "type": "RECORDSTREAM_RECORD",
             "linkIds": [
               203
             ],
-            "label": "sample (spectrogram)",
+            "label": "record (spectrogram)",
             "pos": [
               1659.3274322752509,
               -876.8278910327209
@@ -5307,12 +5307,12 @@
           },
           {
             "id": "52e128d3-2783-48cc-b5ff-643dd4c6354e",
-            "name": "sample_1",
-            "type": "SAMPLEFLUX_SAMPLE",
+            "name": "record_1",
+            "type": "RECORDSTREAM_RECORD",
             "linkIds": [
               204
             ],
-            "label": "image_sample",
+            "label": "image_record",
             "pos": [
               1659.3274322752509,
               -856.8278910327209
@@ -5325,7 +5325,7 @@
             "linkIds": [
               537
             ],
-            "label": "sample (IQ)",
+            "label": "record (IQ)",
             "pos": [
               1659.3274322752509,
               -836.8278910327209
@@ -5351,11 +5351,11 @@
             "inputs": [
               {
                 "color_off": "#7d8590",
-                "label": "sample (optional)",
-                "localized_name": "sample",
-                "name": "sample",
+                "label": "record (optional)",
+                "localized_name": "record",
+                "name": "record",
                 "shape": 7,
-                "type": "SAMPLEFLUX_SAMPLE",
+                "type": "RECORDSTREAM_RECORD",
                 "link": 194
               },
               {
@@ -5388,9 +5388,9 @@
             ],
             "outputs": [
               {
-                "localized_name": "sample",
-                "name": "sample",
-                "type": "SAMPLEFLUX_SAMPLE",
+                "localized_name": "record",
+                "name": "record",
+                "type": "RECORDSTREAM_RECORD",
                 "links": [
                   195,
                   196,
@@ -5400,7 +5400,7 @@
               {
                 "localized_name": "op",
                 "name": "op",
-                "type": "SAMPLEFLUX_OP",
+                "type": "RECORDSTREAM_OP",
                 "links": []
               }
             ],
@@ -5415,7 +5415,7 @@
           },
           {
             "id": 309,
-            "type": "Taidal_ExtractSample",
+            "type": "Taidal_ExtractRecord",
             "pos": [
               1331.557982608633,
               -1197.792348762874
@@ -5429,9 +5429,9 @@
             "mode": 0,
             "inputs": [
               {
-                "localized_name": "sample",
-                "name": "sample",
-                "type": "SAMPLEFLUX_SAMPLE",
+                "localized_name": "record",
+                "name": "record",
+                "type": "RECORDSTREAM_RECORD",
                 "link": 195
               },
               {
@@ -5498,12 +5498,12 @@
               {
                 "localized_name": "array",
                 "name": "array",
-                "type": "SAMPLEFLUX_ARRAY",
+                "type": "RECORDSTREAM_ARRAY",
                 "links": null
               }
             ],
             "properties": {
-              "Node name for S&R": "Taidal_ExtractSample"
+              "Node name for S&R": "Taidal_ExtractRecord"
             },
             "widgets_values": [
               "input",
@@ -5528,11 +5528,11 @@
             "inputs": [
               {
                 "color_off": "#7d8590",
-                "label": "sample (optional)",
-                "localized_name": "sample",
-                "name": "sample",
+                "label": "record (optional)",
+                "localized_name": "record",
+                "name": "record",
                 "shape": 7,
-                "type": "SAMPLEFLUX_SAMPLE",
+                "type": "RECORDSTREAM_RECORD",
                 "link": 539
               },
               {
@@ -5610,9 +5610,9 @@
             ],
             "outputs": [
               {
-                "localized_name": "sample",
-                "name": "sample",
-                "type": "SAMPLEFLUX_SAMPLE",
+                "localized_name": "record",
+                "name": "record",
+                "type": "RECORDSTREAM_RECORD",
                 "links": [
                   194
                 ]
@@ -5620,7 +5620,7 @@
               {
                 "localized_name": "op",
                 "name": "op",
-                "type": "SAMPLEFLUX_OP",
+                "type": "RECORDSTREAM_OP",
                 "links": []
               }
             ],
@@ -5683,7 +5683,7 @@
           },
           {
             "id": 312,
-            "type": "Taidal_sampleflux_op_image_ConvertToImageOp",
+            "type": "Taidal_recordstream_op_image_ConvertToImageOp",
             "pos": [
               1197.002670186914,
               -873.8600565711636
@@ -5698,11 +5698,11 @@
             "inputs": [
               {
                 "color_off": "#7d8590",
-                "label": "sample (optional)",
-                "localized_name": "sample",
-                "name": "sample",
+                "label": "record (optional)",
+                "localized_name": "record",
+                "name": "record",
                 "shape": 7,
-                "type": "SAMPLEFLUX_SAMPLE",
+                "type": "RECORDSTREAM_RECORD",
                 "link": 196
               },
               {
@@ -5753,9 +5753,9 @@
             ],
             "outputs": [
               {
-                "localized_name": "sample",
-                "name": "sample",
-                "type": "SAMPLEFLUX_SAMPLE",
+                "localized_name": "record",
+                "name": "record",
+                "type": "RECORDSTREAM_RECORD",
                 "links": [
                   204
                 ]
@@ -5763,12 +5763,12 @@
               {
                 "localized_name": "op",
                 "name": "op",
-                "type": "SAMPLEFLUX_OP",
+                "type": "RECORDSTREAM_OP",
                 "links": []
               }
             ],
             "properties": {
-              "Node name for S&R": "Taidal_sampleflux_op_image_ConvertToImageOp"
+              "Node name for S&R": "Taidal_recordstream_op_image_ConvertToImageOp"
             },
             "widgets_values": [
               "viridis",
@@ -5787,7 +5787,7 @@
             "origin_slot": 0,
             "target_id": 308,
             "target_slot": 0,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           },
           {
             "id": 195,
@@ -5795,7 +5795,7 @@
             "origin_slot": 0,
             "target_id": 309,
             "target_slot": 0,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           },
           {
             "id": 196,
@@ -5803,7 +5803,7 @@
             "origin_slot": 0,
             "target_id": 312,
             "target_slot": 0,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           },
           {
             "id": 199,
@@ -5819,7 +5819,7 @@
             "origin_slot": 0,
             "target_id": -20,
             "target_slot": 1,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           },
           {
             "id": 204,
@@ -5827,7 +5827,7 @@
             "origin_slot": 0,
             "target_id": -20,
             "target_slot": 2,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           },
           {
             "id": 536,
@@ -5851,7 +5851,7 @@
             "origin_slot": 0,
             "target_id": 310,
             "target_slot": 0,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           }
         ],
         "extra": {}
@@ -5889,13 +5889,13 @@
         "inputs": [
           {
             "id": "ea47f0e6-dcfa-404c-9ba7-d756a923c199",
-            "name": "sample",
-            "type": "SAMPLEFLUX_SAMPLE",
+            "name": "record",
+            "type": "RECORDSTREAM_RECORD",
             "linkIds": [
               554
             ],
-            "localized_name": "sample",
-            "label": "sample (IQ)",
+            "localized_name": "record",
+            "label": "record (IQ)",
             "color_off": "#7d8590",
             "pos": [
               -1844.7476045279723,
@@ -5906,12 +5906,12 @@
         "outputs": [
           {
             "id": "034e5523-0583-426e-b69a-935cfeb3b84e",
-            "name": "sample",
-            "type": "SAMPLEFLUX_SAMPLE",
+            "name": "record",
+            "type": "RECORDSTREAM_RECORD",
             "linkIds": [
               560
             ],
-            "label": "sample (IQ)",
+            "label": "record (IQ)",
             "pos": [
               -542.5336348964233,
               -1238.576304935089
@@ -5924,7 +5924,7 @@
             "linkIds": [
               561
             ],
-            "label": "sample (spectrogram)",
+            "label": "record (spectrogram)",
             "pos": [
               -542.5336348964233,
               -1218.576304935089
@@ -5945,12 +5945,12 @@
           },
           {
             "id": "788a8c96-9996-4f24-98ee-4a04376c01f8",
-            "name": "sample_1",
-            "type": "SAMPLEFLUX_SAMPLE",
+            "name": "record_1",
+            "type": "RECORDSTREAM_RECORD",
             "linkIds": [
               563
             ],
-            "label": "sample (image)",
+            "label": "record (image)",
             "pos": [
               -542.5336348964233,
               -1178.576304935089
@@ -6002,10 +6002,10 @@
             "inputs": [
               {
                 "color_off": "#7d8590",
-                "label": "sample (IQ)",
-                "localized_name": "sample",
-                "name": "sample",
-                "type": "SAMPLEFLUX_SAMPLE",
+                "label": "record (IQ)",
+                "localized_name": "record",
+                "name": "record",
+                "type": "RECORDSTREAM_RECORD",
                 "link": 554
               }
             ],
@@ -6019,9 +6019,9 @@
                 ]
               },
               {
-                "label": "sample (spectrogram)",
-                "name": "sample",
-                "type": "SAMPLEFLUX_SAMPLE",
+                "label": "record (spectrogram)",
+                "name": "record",
+                "type": "RECORDSTREAM_RECORD",
                 "links": [
                   552,
                   557,
@@ -6029,15 +6029,15 @@
                 ]
               },
               {
-                "label": "image_sample",
-                "name": "sample_1",
-                "type": "SAMPLEFLUX_SAMPLE",
+                "label": "image_record",
+                "name": "record_1",
+                "type": "RECORDSTREAM_RECORD",
                 "links": [
                   563
                 ]
               },
               {
-                "label": "sample (IQ)",
+                "label": "record (IQ)",
                 "name": "",
                 "type": "*",
                 "links": [
@@ -6056,7 +6056,7 @@
           },
           {
             "id": 307,
-            "type": "Taidal_ExtractSample",
+            "type": "Taidal_ExtractRecord",
             "pos": [
               -924.4277065459264,
               -1140.1153920550964
@@ -6070,9 +6070,9 @@
             "mode": 0,
             "inputs": [
               {
-                "localized_name": "sample",
-                "name": "sample",
-                "type": "SAMPLEFLUX_SAMPLE",
+                "localized_name": "record",
+                "name": "record",
+                "type": "RECORDSTREAM_RECORD",
                 "link": 551
               },
               {
@@ -6139,12 +6139,12 @@
               {
                 "localized_name": "array",
                 "name": "array",
-                "type": "SAMPLEFLUX_ARRAY",
+                "type": "RECORDSTREAM_ARRAY",
                 "links": []
               }
             ],
             "properties": {
-              "Node name for S&R": "Taidal_ExtractSample"
+              "Node name for S&R": "Taidal_ExtractRecord"
             },
             "widgets_values": [
               "input",
@@ -6256,11 +6256,11 @@
             "inputs": [
               {
                 "color_off": "#7d8590",
-                "label": "sample (optional)",
-                "localized_name": "sample",
-                "name": "sample",
+                "label": "record (optional)",
+                "localized_name": "record",
+                "name": "record",
                 "shape": 7,
-                "type": "SAMPLEFLUX_SAMPLE",
+                "type": "RECORDSTREAM_RECORD",
                 "link": 552
               },
               {
@@ -6293,15 +6293,15 @@
             ],
             "outputs": [
               {
-                "localized_name": "sample",
-                "name": "sample",
-                "type": "SAMPLEFLUX_SAMPLE",
+                "localized_name": "record",
+                "name": "record",
+                "type": "RECORDSTREAM_RECORD",
                 "links": []
               },
               {
                 "localized_name": "op",
                 "name": "op",
-                "type": "SAMPLEFLUX_OP",
+                "type": "RECORDSTREAM_OP",
                 "links": []
               },
               {
@@ -6381,11 +6381,11 @@
             "inputs": [
               {
                 "color_off": "#7d8590",
-                "label": "sample (optional)",
-                "localized_name": "sample",
-                "name": "sample",
+                "label": "record (optional)",
+                "localized_name": "record",
+                "name": "record",
                 "shape": 7,
-                "type": "SAMPLEFLUX_SAMPLE",
+                "type": "RECORDSTREAM_RECORD",
                 "link": 553
               },
               {
@@ -6418,9 +6418,9 @@
             ],
             "outputs": [
               {
-                "localized_name": "sample",
-                "name": "sample",
-                "type": "SAMPLEFLUX_SAMPLE",
+                "localized_name": "record",
+                "name": "record",
+                "type": "RECORDSTREAM_RECORD",
                 "links": [
                   551
                 ]
@@ -6428,7 +6428,7 @@
               {
                 "localized_name": "op",
                 "name": "op",
-                "type": "SAMPLEFLUX_OP",
+                "type": "RECORDSTREAM_OP",
                 "links": []
               }
             ],
@@ -6450,7 +6450,7 @@
             "origin_slot": 1,
             "target_id": 300,
             "target_slot": 0,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           },
           {
             "id": 553,
@@ -6458,7 +6458,7 @@
             "origin_slot": 3,
             "target_id": 306,
             "target_slot": 0,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           },
           {
             "id": 551,
@@ -6466,7 +6466,7 @@
             "origin_slot": 0,
             "target_id": 307,
             "target_slot": 0,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           },
           {
             "id": 554,
@@ -6474,7 +6474,7 @@
             "origin_slot": 0,
             "target_id": 313,
             "target_slot": 0,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           },
           {
             "id": 560,
@@ -6490,7 +6490,7 @@
             "origin_slot": 1,
             "target_id": -20,
             "target_slot": 1,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           },
           {
             "id": 562,
@@ -6506,7 +6506,7 @@
             "origin_slot": 2,
             "target_id": -20,
             "target_slot": 3,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           },
           {
             "id": 564,
@@ -6592,13 +6592,13 @@
         "inputs": [
           {
             "id": "ea47f0e6-dcfa-404c-9ba7-d756a923c199",
-            "name": "sample",
-            "type": "SAMPLEFLUX_SAMPLE",
+            "name": "record",
+            "type": "RECORDSTREAM_RECORD",
             "linkIds": [
               554
             ],
-            "localized_name": "sample",
-            "label": "sample (IQ)",
+            "localized_name": "record",
+            "label": "record (IQ)",
             "color_off": "#7d8590",
             "pos": [
               -1844.7476045279723,
@@ -6609,12 +6609,12 @@
         "outputs": [
           {
             "id": "034e5523-0583-426e-b69a-935cfeb3b84e",
-            "name": "sample",
-            "type": "SAMPLEFLUX_SAMPLE",
+            "name": "record",
+            "type": "RECORDSTREAM_RECORD",
             "linkIds": [
               560
             ],
-            "label": "sample (IQ)",
+            "label": "record (IQ)",
             "pos": [
               -542.5336348964233,
               -1238.576304935089
@@ -6627,7 +6627,7 @@
             "linkIds": [
               561
             ],
-            "label": "sample (spectrogram)",
+            "label": "record (spectrogram)",
             "pos": [
               -542.5336348964233,
               -1218.576304935089
@@ -6648,12 +6648,12 @@
           },
           {
             "id": "788a8c96-9996-4f24-98ee-4a04376c01f8",
-            "name": "sample_1",
-            "type": "SAMPLEFLUX_SAMPLE",
+            "name": "record_1",
+            "type": "RECORDSTREAM_RECORD",
             "linkIds": [
               563
             ],
-            "label": "sample (image)",
+            "label": "record (image)",
             "pos": [
               -542.5336348964233,
               -1178.576304935089
@@ -6705,10 +6705,10 @@
             "inputs": [
               {
                 "color_off": "#7d8590",
-                "label": "sample (IQ)",
-                "localized_name": "sample",
-                "name": "sample",
-                "type": "SAMPLEFLUX_SAMPLE",
+                "label": "record (IQ)",
+                "localized_name": "record",
+                "name": "record",
+                "type": "RECORDSTREAM_RECORD",
                 "link": 554
               }
             ],
@@ -6722,9 +6722,9 @@
                 ]
               },
               {
-                "label": "sample (spectrogram)",
-                "name": "sample",
-                "type": "SAMPLEFLUX_SAMPLE",
+                "label": "record (spectrogram)",
+                "name": "record",
+                "type": "RECORDSTREAM_RECORD",
                 "links": [
                   552,
                   557,
@@ -6732,15 +6732,15 @@
                 ]
               },
               {
-                "label": "image_sample",
-                "name": "sample_1",
-                "type": "SAMPLEFLUX_SAMPLE",
+                "label": "image_record",
+                "name": "record_1",
+                "type": "RECORDSTREAM_RECORD",
                 "links": [
                   563
                 ]
               },
               {
-                "label": "sample (IQ)",
+                "label": "record (IQ)",
                 "name": "",
                 "type": "*",
                 "links": [
@@ -6759,7 +6759,7 @@
           },
           {
             "id": 333,
-            "type": "Taidal_ExtractSample",
+            "type": "Taidal_ExtractRecord",
             "pos": [
               -924.4277065459264,
               -1140.1153920550964
@@ -6773,9 +6773,9 @@
             "mode": 0,
             "inputs": [
               {
-                "localized_name": "sample",
-                "name": "sample",
-                "type": "SAMPLEFLUX_SAMPLE",
+                "localized_name": "record",
+                "name": "record",
+                "type": "RECORDSTREAM_RECORD",
                 "link": 551
               },
               {
@@ -6842,12 +6842,12 @@
               {
                 "localized_name": "array",
                 "name": "array",
-                "type": "SAMPLEFLUX_ARRAY",
+                "type": "RECORDSTREAM_ARRAY",
                 "links": []
               }
             ],
             "properties": {
-              "Node name for S&R": "Taidal_ExtractSample"
+              "Node name for S&R": "Taidal_ExtractRecord"
             },
             "widgets_values": [
               "input",
@@ -6959,11 +6959,11 @@
             "inputs": [
               {
                 "color_off": "#7d8590",
-                "label": "sample (optional)",
-                "localized_name": "sample",
-                "name": "sample",
+                "label": "record (optional)",
+                "localized_name": "record",
+                "name": "record",
                 "shape": 7,
-                "type": "SAMPLEFLUX_SAMPLE",
+                "type": "RECORDSTREAM_RECORD",
                 "link": 552
               },
               {
@@ -6996,15 +6996,15 @@
             ],
             "outputs": [
               {
-                "localized_name": "sample",
-                "name": "sample",
-                "type": "SAMPLEFLUX_SAMPLE",
+                "localized_name": "record",
+                "name": "record",
+                "type": "RECORDSTREAM_RECORD",
                 "links": []
               },
               {
                 "localized_name": "op",
                 "name": "op",
-                "type": "SAMPLEFLUX_OP",
+                "type": "RECORDSTREAM_OP",
                 "links": []
               },
               {
@@ -7084,11 +7084,11 @@
             "inputs": [
               {
                 "color_off": "#7d8590",
-                "label": "sample (optional)",
-                "localized_name": "sample",
-                "name": "sample",
+                "label": "record (optional)",
+                "localized_name": "record",
+                "name": "record",
                 "shape": 7,
-                "type": "SAMPLEFLUX_SAMPLE",
+                "type": "RECORDSTREAM_RECORD",
                 "link": 553
               },
               {
@@ -7121,9 +7121,9 @@
             ],
             "outputs": [
               {
-                "localized_name": "sample",
-                "name": "sample",
-                "type": "SAMPLEFLUX_SAMPLE",
+                "localized_name": "record",
+                "name": "record",
+                "type": "RECORDSTREAM_RECORD",
                 "links": [
                   551
                 ]
@@ -7131,7 +7131,7 @@
               {
                 "localized_name": "op",
                 "name": "op",
-                "type": "SAMPLEFLUX_OP",
+                "type": "RECORDSTREAM_OP",
                 "links": []
               }
             ],
@@ -7153,7 +7153,7 @@
             "origin_slot": 1,
             "target_id": 335,
             "target_slot": 0,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           },
           {
             "id": 553,
@@ -7161,7 +7161,7 @@
             "origin_slot": 3,
             "target_id": 336,
             "target_slot": 0,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           },
           {
             "id": 551,
@@ -7169,7 +7169,7 @@
             "origin_slot": 0,
             "target_id": 333,
             "target_slot": 0,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           },
           {
             "id": 554,
@@ -7177,7 +7177,7 @@
             "origin_slot": 0,
             "target_id": 332,
             "target_slot": 0,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           },
           {
             "id": 560,
@@ -7193,7 +7193,7 @@
             "origin_slot": 1,
             "target_id": -20,
             "target_slot": 1,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           },
           {
             "id": 562,
@@ -7209,7 +7209,7 @@
             "origin_slot": 2,
             "target_id": -20,
             "target_slot": 3,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           },
           {
             "id": 564,
@@ -7295,14 +7295,14 @@
         "inputs": [
           {
             "id": "4e800e82-45bf-4a43-b8bb-5b51a2551b66",
-            "name": "sample",
-            "type": "SAMPLEFLUX_SAMPLE",
+            "name": "record",
+            "type": "RECORDSTREAM_RECORD",
             "linkIds": [
               536,
               539
             ],
-            "localized_name": "sample",
-            "label": "sample (IQ)",
+            "localized_name": "record",
+            "label": "record (IQ)",
             "shape": 7,
             "color_off": "#7d8590",
             "pos": [
@@ -7327,12 +7327,12 @@
           },
           {
             "id": "24cc0538-746d-4617-b33a-e40d1a07dae4",
-            "name": "sample",
-            "type": "SAMPLEFLUX_SAMPLE",
+            "name": "record",
+            "type": "RECORDSTREAM_RECORD",
             "linkIds": [
               203
             ],
-            "label": "sample (spectrogram)",
+            "label": "record (spectrogram)",
             "pos": [
               1659.3274322752509,
               -876.8278910327209
@@ -7340,12 +7340,12 @@
           },
           {
             "id": "52e128d3-2783-48cc-b5ff-643dd4c6354e",
-            "name": "sample_1",
-            "type": "SAMPLEFLUX_SAMPLE",
+            "name": "record_1",
+            "type": "RECORDSTREAM_RECORD",
             "linkIds": [
               204
             ],
-            "label": "image_sample",
+            "label": "image_record",
             "pos": [
               1659.3274322752509,
               -856.8278910327209
@@ -7358,7 +7358,7 @@
             "linkIds": [
               537
             ],
-            "label": "sample (IQ)",
+            "label": "record (IQ)",
             "pos": [
               1659.3274322752509,
               -836.8278910327209
@@ -7384,11 +7384,11 @@
             "inputs": [
               {
                 "color_off": "#7d8590",
-                "label": "sample (optional)",
-                "localized_name": "sample",
-                "name": "sample",
+                "label": "record (optional)",
+                "localized_name": "record",
+                "name": "record",
                 "shape": 7,
-                "type": "SAMPLEFLUX_SAMPLE",
+                "type": "RECORDSTREAM_RECORD",
                 "link": 194
               },
               {
@@ -7421,9 +7421,9 @@
             ],
             "outputs": [
               {
-                "localized_name": "sample",
-                "name": "sample",
-                "type": "SAMPLEFLUX_SAMPLE",
+                "localized_name": "record",
+                "name": "record",
+                "type": "RECORDSTREAM_RECORD",
                 "links": [
                   195,
                   196,
@@ -7433,7 +7433,7 @@
               {
                 "localized_name": "op",
                 "name": "op",
-                "type": "SAMPLEFLUX_OP",
+                "type": "RECORDSTREAM_OP",
                 "links": []
               }
             ],
@@ -7448,7 +7448,7 @@
           },
           {
             "id": 338,
-            "type": "Taidal_ExtractSample",
+            "type": "Taidal_ExtractRecord",
             "pos": [
               1331.557982608633,
               -1197.792348762874
@@ -7462,9 +7462,9 @@
             "mode": 0,
             "inputs": [
               {
-                "localized_name": "sample",
-                "name": "sample",
-                "type": "SAMPLEFLUX_SAMPLE",
+                "localized_name": "record",
+                "name": "record",
+                "type": "RECORDSTREAM_RECORD",
                 "link": 195
               },
               {
@@ -7531,12 +7531,12 @@
               {
                 "localized_name": "array",
                 "name": "array",
-                "type": "SAMPLEFLUX_ARRAY",
+                "type": "RECORDSTREAM_ARRAY",
                 "links": null
               }
             ],
             "properties": {
-              "Node name for S&R": "Taidal_ExtractSample"
+              "Node name for S&R": "Taidal_ExtractRecord"
             },
             "widgets_values": [
               "input",
@@ -7561,11 +7561,11 @@
             "inputs": [
               {
                 "color_off": "#7d8590",
-                "label": "sample (optional)",
-                "localized_name": "sample",
-                "name": "sample",
+                "label": "record (optional)",
+                "localized_name": "record",
+                "name": "record",
                 "shape": 7,
-                "type": "SAMPLEFLUX_SAMPLE",
+                "type": "RECORDSTREAM_RECORD",
                 "link": 539
               },
               {
@@ -7643,9 +7643,9 @@
             ],
             "outputs": [
               {
-                "localized_name": "sample",
-                "name": "sample",
-                "type": "SAMPLEFLUX_SAMPLE",
+                "localized_name": "record",
+                "name": "record",
+                "type": "RECORDSTREAM_RECORD",
                 "links": [
                   194
                 ]
@@ -7653,7 +7653,7 @@
               {
                 "localized_name": "op",
                 "name": "op",
-                "type": "SAMPLEFLUX_OP",
+                "type": "RECORDSTREAM_OP",
                 "links": []
               }
             ],
@@ -7716,7 +7716,7 @@
           },
           {
             "id": 341,
-            "type": "Taidal_sampleflux_op_image_ConvertToImageOp",
+            "type": "Taidal_recordstream_op_image_ConvertToImageOp",
             "pos": [
               1197.002670186914,
               -873.8600565711636
@@ -7731,11 +7731,11 @@
             "inputs": [
               {
                 "color_off": "#7d8590",
-                "label": "sample (optional)",
-                "localized_name": "sample",
-                "name": "sample",
+                "label": "record (optional)",
+                "localized_name": "record",
+                "name": "record",
                 "shape": 7,
-                "type": "SAMPLEFLUX_SAMPLE",
+                "type": "RECORDSTREAM_RECORD",
                 "link": 196
               },
               {
@@ -7786,9 +7786,9 @@
             ],
             "outputs": [
               {
-                "localized_name": "sample",
-                "name": "sample",
-                "type": "SAMPLEFLUX_SAMPLE",
+                "localized_name": "record",
+                "name": "record",
+                "type": "RECORDSTREAM_RECORD",
                 "links": [
                   204
                 ]
@@ -7796,12 +7796,12 @@
               {
                 "localized_name": "op",
                 "name": "op",
-                "type": "SAMPLEFLUX_OP",
+                "type": "RECORDSTREAM_OP",
                 "links": []
               }
             ],
             "properties": {
-              "Node name for S&R": "Taidal_sampleflux_op_image_ConvertToImageOp"
+              "Node name for S&R": "Taidal_recordstream_op_image_ConvertToImageOp"
             },
             "widgets_values": [
               "viridis",
@@ -7820,7 +7820,7 @@
             "origin_slot": 0,
             "target_id": 337,
             "target_slot": 0,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           },
           {
             "id": 195,
@@ -7828,7 +7828,7 @@
             "origin_slot": 0,
             "target_id": 338,
             "target_slot": 0,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           },
           {
             "id": 196,
@@ -7836,7 +7836,7 @@
             "origin_slot": 0,
             "target_id": 341,
             "target_slot": 0,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           },
           {
             "id": 199,
@@ -7852,7 +7852,7 @@
             "origin_slot": 0,
             "target_id": -20,
             "target_slot": 1,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           },
           {
             "id": 204,
@@ -7860,7 +7860,7 @@
             "origin_slot": 0,
             "target_id": -20,
             "target_slot": 2,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           },
           {
             "id": 536,
@@ -7884,7 +7884,7 @@
             "origin_slot": 0,
             "target_id": 339,
             "target_slot": 0,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           }
         ],
         "extra": {}
@@ -7922,13 +7922,13 @@
         "inputs": [
           {
             "id": "ea47f0e6-dcfa-404c-9ba7-d756a923c199",
-            "name": "sample",
-            "type": "SAMPLEFLUX_SAMPLE",
+            "name": "record",
+            "type": "RECORDSTREAM_RECORD",
             "linkIds": [
               554
             ],
-            "localized_name": "sample",
-            "label": "sample (IQ)",
+            "localized_name": "record",
+            "label": "record (IQ)",
             "color_off": "#7d8590",
             "pos": [
               -1844.7476045279723,
@@ -7939,12 +7939,12 @@
         "outputs": [
           {
             "id": "034e5523-0583-426e-b69a-935cfeb3b84e",
-            "name": "sample",
-            "type": "SAMPLEFLUX_SAMPLE",
+            "name": "record",
+            "type": "RECORDSTREAM_RECORD",
             "linkIds": [
               560
             ],
-            "label": "sample (IQ)",
+            "label": "record (IQ)",
             "pos": [
               -542.5336348964233,
               -1238.576304935089
@@ -7957,7 +7957,7 @@
             "linkIds": [
               561
             ],
-            "label": "sample (spectrogram)",
+            "label": "record (spectrogram)",
             "pos": [
               -542.5336348964233,
               -1218.576304935089
@@ -7978,12 +7978,12 @@
           },
           {
             "id": "788a8c96-9996-4f24-98ee-4a04376c01f8",
-            "name": "sample_1",
-            "type": "SAMPLEFLUX_SAMPLE",
+            "name": "record_1",
+            "type": "RECORDSTREAM_RECORD",
             "linkIds": [
               563
             ],
-            "label": "sample (image)",
+            "label": "record (image)",
             "pos": [
               -542.5336348964233,
               -1178.576304935089
@@ -8020,7 +8020,7 @@
         "nodes": [
           {
             "id": 351,
-            "type": "Taidal_ExtractSample",
+            "type": "Taidal_ExtractRecord",
             "pos": [
               -924.4277065459264,
               -1140.1153920550964
@@ -8034,9 +8034,9 @@
             "mode": 0,
             "inputs": [
               {
-                "localized_name": "sample",
-                "name": "sample",
-                "type": "SAMPLEFLUX_SAMPLE",
+                "localized_name": "record",
+                "name": "record",
+                "type": "RECORDSTREAM_RECORD",
                 "link": 551
               },
               {
@@ -8103,12 +8103,12 @@
               {
                 "localized_name": "array",
                 "name": "array",
-                "type": "SAMPLEFLUX_ARRAY",
+                "type": "RECORDSTREAM_ARRAY",
                 "links": []
               }
             ],
             "properties": {
-              "Node name for S&R": "Taidal_ExtractSample"
+              "Node name for S&R": "Taidal_ExtractRecord"
             },
             "widgets_values": [
               "input",
@@ -8220,11 +8220,11 @@
             "inputs": [
               {
                 "color_off": "#7d8590",
-                "label": "sample (optional)",
-                "localized_name": "sample",
-                "name": "sample",
+                "label": "record (optional)",
+                "localized_name": "record",
+                "name": "record",
                 "shape": 7,
-                "type": "SAMPLEFLUX_SAMPLE",
+                "type": "RECORDSTREAM_RECORD",
                 "link": 552
               },
               {
@@ -8257,15 +8257,15 @@
             ],
             "outputs": [
               {
-                "localized_name": "sample",
-                "name": "sample",
-                "type": "SAMPLEFLUX_SAMPLE",
+                "localized_name": "record",
+                "name": "record",
+                "type": "RECORDSTREAM_RECORD",
                 "links": []
               },
               {
                 "localized_name": "op",
                 "name": "op",
-                "type": "SAMPLEFLUX_OP",
+                "type": "RECORDSTREAM_OP",
                 "links": []
               },
               {
@@ -8345,11 +8345,11 @@
             "inputs": [
               {
                 "color_off": "#7d8590",
-                "label": "sample (optional)",
-                "localized_name": "sample",
-                "name": "sample",
+                "label": "record (optional)",
+                "localized_name": "record",
+                "name": "record",
                 "shape": 7,
-                "type": "SAMPLEFLUX_SAMPLE",
+                "type": "RECORDSTREAM_RECORD",
                 "link": 553
               },
               {
@@ -8382,9 +8382,9 @@
             ],
             "outputs": [
               {
-                "localized_name": "sample",
-                "name": "sample",
-                "type": "SAMPLEFLUX_SAMPLE",
+                "localized_name": "record",
+                "name": "record",
+                "type": "RECORDSTREAM_RECORD",
                 "links": [
                   551
                 ]
@@ -8392,7 +8392,7 @@
               {
                 "localized_name": "op",
                 "name": "op",
-                "type": "SAMPLEFLUX_OP",
+                "type": "RECORDSTREAM_OP",
                 "links": []
               }
             ],
@@ -8422,10 +8422,10 @@
             "inputs": [
               {
                 "color_off": "#7d8590",
-                "label": "sample (IQ)",
-                "localized_name": "sample",
-                "name": "sample",
-                "type": "SAMPLEFLUX_SAMPLE",
+                "label": "record (IQ)",
+                "localized_name": "record",
+                "name": "record",
+                "type": "RECORDSTREAM_RECORD",
                 "link": 554
               }
             ],
@@ -8439,9 +8439,9 @@
                 ]
               },
               {
-                "label": "sample (spectrogram)",
-                "name": "sample",
-                "type": "SAMPLEFLUX_SAMPLE",
+                "label": "record (spectrogram)",
+                "name": "record",
+                "type": "RECORDSTREAM_RECORD",
                 "links": [
                   552,
                   557,
@@ -8449,15 +8449,15 @@
                 ]
               },
               {
-                "label": "image_sample",
-                "name": "sample_1",
-                "type": "SAMPLEFLUX_SAMPLE",
+                "label": "image_record",
+                "name": "record_1",
+                "type": "RECORDSTREAM_RECORD",
                 "links": [
                   563
                 ]
               },
               {
-                "label": "sample (IQ)",
+                "label": "record (IQ)",
                 "name": "",
                 "type": "*",
                 "links": [
@@ -8483,7 +8483,7 @@
             "origin_slot": 1,
             "target_id": 353,
             "target_slot": 0,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           },
           {
             "id": 553,
@@ -8491,7 +8491,7 @@
             "origin_slot": 3,
             "target_id": 354,
             "target_slot": 0,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           },
           {
             "id": 551,
@@ -8499,7 +8499,7 @@
             "origin_slot": 0,
             "target_id": 351,
             "target_slot": 0,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           },
           {
             "id": 554,
@@ -8507,7 +8507,7 @@
             "origin_slot": 0,
             "target_id": 350,
             "target_slot": 0,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           },
           {
             "id": 560,
@@ -8523,7 +8523,7 @@
             "origin_slot": 1,
             "target_id": -20,
             "target_slot": 1,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           },
           {
             "id": 562,
@@ -8539,7 +8539,7 @@
             "origin_slot": 2,
             "target_id": -20,
             "target_slot": 3,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           },
           {
             "id": 564,
@@ -8625,14 +8625,14 @@
         "inputs": [
           {
             "id": "4e800e82-45bf-4a43-b8bb-5b51a2551b66",
-            "name": "sample",
-            "type": "SAMPLEFLUX_SAMPLE",
+            "name": "record",
+            "type": "RECORDSTREAM_RECORD",
             "linkIds": [
               536,
               539
             ],
-            "localized_name": "sample",
-            "label": "sample (IQ)",
+            "localized_name": "record",
+            "label": "record (IQ)",
             "shape": 7,
             "color_off": "#7d8590",
             "pos": [
@@ -8657,12 +8657,12 @@
           },
           {
             "id": "24cc0538-746d-4617-b33a-e40d1a07dae4",
-            "name": "sample",
-            "type": "SAMPLEFLUX_SAMPLE",
+            "name": "record",
+            "type": "RECORDSTREAM_RECORD",
             "linkIds": [
               203
             ],
-            "label": "sample (spectrogram)",
+            "label": "record (spectrogram)",
             "pos": [
               1659.3274322752509,
               -876.8278910327209
@@ -8670,12 +8670,12 @@
           },
           {
             "id": "52e128d3-2783-48cc-b5ff-643dd4c6354e",
-            "name": "sample_1",
-            "type": "SAMPLEFLUX_SAMPLE",
+            "name": "record_1",
+            "type": "RECORDSTREAM_RECORD",
             "linkIds": [
               204
             ],
-            "label": "image_sample",
+            "label": "image_record",
             "pos": [
               1659.3274322752509,
               -856.8278910327209
@@ -8688,7 +8688,7 @@
             "linkIds": [
               537
             ],
-            "label": "sample (IQ)",
+            "label": "record (IQ)",
             "pos": [
               1659.3274322752509,
               -836.8278910327209
@@ -8714,11 +8714,11 @@
             "inputs": [
               {
                 "color_off": "#7d8590",
-                "label": "sample (optional)",
-                "localized_name": "sample",
-                "name": "sample",
+                "label": "record (optional)",
+                "localized_name": "record",
+                "name": "record",
                 "shape": 7,
-                "type": "SAMPLEFLUX_SAMPLE",
+                "type": "RECORDSTREAM_RECORD",
                 "link": 194
               },
               {
@@ -8751,9 +8751,9 @@
             ],
             "outputs": [
               {
-                "localized_name": "sample",
-                "name": "sample",
-                "type": "SAMPLEFLUX_SAMPLE",
+                "localized_name": "record",
+                "name": "record",
+                "type": "RECORDSTREAM_RECORD",
                 "links": [
                   195,
                   196,
@@ -8763,7 +8763,7 @@
               {
                 "localized_name": "op",
                 "name": "op",
-                "type": "SAMPLEFLUX_OP",
+                "type": "RECORDSTREAM_OP",
                 "links": []
               }
             ],
@@ -8778,7 +8778,7 @@
           },
           {
             "id": 356,
-            "type": "Taidal_ExtractSample",
+            "type": "Taidal_ExtractRecord",
             "pos": [
               1331.557982608633,
               -1197.792348762874
@@ -8792,9 +8792,9 @@
             "mode": 0,
             "inputs": [
               {
-                "localized_name": "sample",
-                "name": "sample",
-                "type": "SAMPLEFLUX_SAMPLE",
+                "localized_name": "record",
+                "name": "record",
+                "type": "RECORDSTREAM_RECORD",
                 "link": 195
               },
               {
@@ -8861,12 +8861,12 @@
               {
                 "localized_name": "array",
                 "name": "array",
-                "type": "SAMPLEFLUX_ARRAY",
+                "type": "RECORDSTREAM_ARRAY",
                 "links": null
               }
             ],
             "properties": {
-              "Node name for S&R": "Taidal_ExtractSample"
+              "Node name for S&R": "Taidal_ExtractRecord"
             },
             "widgets_values": [
               "input",
@@ -8891,11 +8891,11 @@
             "inputs": [
               {
                 "color_off": "#7d8590",
-                "label": "sample (optional)",
-                "localized_name": "sample",
-                "name": "sample",
+                "label": "record (optional)",
+                "localized_name": "record",
+                "name": "record",
                 "shape": 7,
-                "type": "SAMPLEFLUX_SAMPLE",
+                "type": "RECORDSTREAM_RECORD",
                 "link": 539
               },
               {
@@ -8973,9 +8973,9 @@
             ],
             "outputs": [
               {
-                "localized_name": "sample",
-                "name": "sample",
-                "type": "SAMPLEFLUX_SAMPLE",
+                "localized_name": "record",
+                "name": "record",
+                "type": "RECORDSTREAM_RECORD",
                 "links": [
                   194
                 ]
@@ -8983,7 +8983,7 @@
               {
                 "localized_name": "op",
                 "name": "op",
-                "type": "SAMPLEFLUX_OP",
+                "type": "RECORDSTREAM_OP",
                 "links": []
               }
             ],
@@ -9046,7 +9046,7 @@
           },
           {
             "id": 359,
-            "type": "Taidal_sampleflux_op_image_ConvertToImageOp",
+            "type": "Taidal_recordstream_op_image_ConvertToImageOp",
             "pos": [
               1197.002670186914,
               -873.8600565711636
@@ -9061,11 +9061,11 @@
             "inputs": [
               {
                 "color_off": "#7d8590",
-                "label": "sample (optional)",
-                "localized_name": "sample",
-                "name": "sample",
+                "label": "record (optional)",
+                "localized_name": "record",
+                "name": "record",
                 "shape": 7,
-                "type": "SAMPLEFLUX_SAMPLE",
+                "type": "RECORDSTREAM_RECORD",
                 "link": 196
               },
               {
@@ -9116,9 +9116,9 @@
             ],
             "outputs": [
               {
-                "localized_name": "sample",
-                "name": "sample",
-                "type": "SAMPLEFLUX_SAMPLE",
+                "localized_name": "record",
+                "name": "record",
+                "type": "RECORDSTREAM_RECORD",
                 "links": [
                   204
                 ]
@@ -9126,12 +9126,12 @@
               {
                 "localized_name": "op",
                 "name": "op",
-                "type": "SAMPLEFLUX_OP",
+                "type": "RECORDSTREAM_OP",
                 "links": []
               }
             ],
             "properties": {
-              "Node name for S&R": "Taidal_sampleflux_op_image_ConvertToImageOp"
+              "Node name for S&R": "Taidal_recordstream_op_image_ConvertToImageOp"
             },
             "widgets_values": [
               "viridis",
@@ -9150,7 +9150,7 @@
             "origin_slot": 0,
             "target_id": 355,
             "target_slot": 0,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           },
           {
             "id": 195,
@@ -9158,7 +9158,7 @@
             "origin_slot": 0,
             "target_id": 356,
             "target_slot": 0,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           },
           {
             "id": 196,
@@ -9166,7 +9166,7 @@
             "origin_slot": 0,
             "target_id": 359,
             "target_slot": 0,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           },
           {
             "id": 199,
@@ -9182,7 +9182,7 @@
             "origin_slot": 0,
             "target_id": -20,
             "target_slot": 1,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           },
           {
             "id": 204,
@@ -9190,7 +9190,7 @@
             "origin_slot": 0,
             "target_id": -20,
             "target_slot": 2,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           },
           {
             "id": 536,
@@ -9214,7 +9214,7 @@
             "origin_slot": 0,
             "target_id": 357,
             "target_slot": 0,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           }
         ],
         "extra": {}
@@ -9252,13 +9252,13 @@
         "inputs": [
           {
             "id": "ea47f0e6-dcfa-404c-9ba7-d756a923c199",
-            "name": "sample",
-            "type": "SAMPLEFLUX_SAMPLE",
+            "name": "record",
+            "type": "RECORDSTREAM_RECORD",
             "linkIds": [
               554
             ],
-            "localized_name": "sample",
-            "label": "sample (IQ)",
+            "localized_name": "record",
+            "label": "record (IQ)",
             "color_off": "#7d8590",
             "pos": [
               -1844.7476045279723,
@@ -9269,12 +9269,12 @@
         "outputs": [
           {
             "id": "034e5523-0583-426e-b69a-935cfeb3b84e",
-            "name": "sample",
-            "type": "SAMPLEFLUX_SAMPLE",
+            "name": "record",
+            "type": "RECORDSTREAM_RECORD",
             "linkIds": [
               560
             ],
-            "label": "sample (IQ)",
+            "label": "record (IQ)",
             "pos": [
               -542.5336348964233,
               -1238.576304935089
@@ -9287,7 +9287,7 @@
             "linkIds": [
               561
             ],
-            "label": "sample (spectrogram)",
+            "label": "record (spectrogram)",
             "pos": [
               -542.5336348964233,
               -1218.576304935089
@@ -9308,12 +9308,12 @@
           },
           {
             "id": "788a8c96-9996-4f24-98ee-4a04376c01f8",
-            "name": "sample_1",
-            "type": "SAMPLEFLUX_SAMPLE",
+            "name": "record_1",
+            "type": "RECORDSTREAM_RECORD",
             "linkIds": [
               563
             ],
-            "label": "sample (image)",
+            "label": "record (image)",
             "pos": [
               -542.5336348964233,
               -1178.576304935089
@@ -9350,7 +9350,7 @@
         "nodes": [
           {
             "id": 369,
-            "type": "Taidal_ExtractSample",
+            "type": "Taidal_ExtractRecord",
             "pos": [
               -924.4277065459264,
               -1140.1153920550964
@@ -9364,9 +9364,9 @@
             "mode": 0,
             "inputs": [
               {
-                "localized_name": "sample",
-                "name": "sample",
-                "type": "SAMPLEFLUX_SAMPLE",
+                "localized_name": "record",
+                "name": "record",
+                "type": "RECORDSTREAM_RECORD",
                 "link": 551
               },
               {
@@ -9433,12 +9433,12 @@
               {
                 "localized_name": "array",
                 "name": "array",
-                "type": "SAMPLEFLUX_ARRAY",
+                "type": "RECORDSTREAM_ARRAY",
                 "links": []
               }
             ],
             "properties": {
-              "Node name for S&R": "Taidal_ExtractSample"
+              "Node name for S&R": "Taidal_ExtractRecord"
             },
             "widgets_values": [
               "input",
@@ -9550,11 +9550,11 @@
             "inputs": [
               {
                 "color_off": "#7d8590",
-                "label": "sample (optional)",
-                "localized_name": "sample",
-                "name": "sample",
+                "label": "record (optional)",
+                "localized_name": "record",
+                "name": "record",
                 "shape": 7,
-                "type": "SAMPLEFLUX_SAMPLE",
+                "type": "RECORDSTREAM_RECORD",
                 "link": 553
               },
               {
@@ -9587,9 +9587,9 @@
             ],
             "outputs": [
               {
-                "localized_name": "sample",
-                "name": "sample",
-                "type": "SAMPLEFLUX_SAMPLE",
+                "localized_name": "record",
+                "name": "record",
+                "type": "RECORDSTREAM_RECORD",
                 "links": [
                   551
                 ]
@@ -9597,7 +9597,7 @@
               {
                 "localized_name": "op",
                 "name": "op",
-                "type": "SAMPLEFLUX_OP",
+                "type": "RECORDSTREAM_OP",
                 "links": []
               }
             ],
@@ -9627,10 +9627,10 @@
             "inputs": [
               {
                 "color_off": "#7d8590",
-                "label": "sample (IQ)",
-                "localized_name": "sample",
-                "name": "sample",
-                "type": "SAMPLEFLUX_SAMPLE",
+                "label": "record (IQ)",
+                "localized_name": "record",
+                "name": "record",
+                "type": "RECORDSTREAM_RECORD",
                 "link": 554
               }
             ],
@@ -9644,9 +9644,9 @@
                 ]
               },
               {
-                "label": "sample (spectrogram)",
-                "name": "sample",
-                "type": "SAMPLEFLUX_SAMPLE",
+                "label": "record (spectrogram)",
+                "name": "record",
+                "type": "RECORDSTREAM_RECORD",
                 "links": [
                   552,
                   557,
@@ -9654,15 +9654,15 @@
                 ]
               },
               {
-                "label": "image_sample",
-                "name": "sample_1",
-                "type": "SAMPLEFLUX_SAMPLE",
+                "label": "image_record",
+                "name": "record_1",
+                "type": "RECORDSTREAM_RECORD",
                 "links": [
                   563
                 ]
               },
               {
-                "label": "sample (IQ)",
+                "label": "record (IQ)",
                 "name": "",
                 "type": "*",
                 "links": [
@@ -9696,11 +9696,11 @@
             "inputs": [
               {
                 "color_off": "#7d8590",
-                "label": "sample (optional)",
-                "localized_name": "sample",
-                "name": "sample",
+                "label": "record (optional)",
+                "localized_name": "record",
+                "name": "record",
                 "shape": 7,
-                "type": "SAMPLEFLUX_SAMPLE",
+                "type": "RECORDSTREAM_RECORD",
                 "link": 552
               },
               {
@@ -9733,15 +9733,15 @@
             ],
             "outputs": [
               {
-                "localized_name": "sample",
-                "name": "sample",
-                "type": "SAMPLEFLUX_SAMPLE",
+                "localized_name": "record",
+                "name": "record",
+                "type": "RECORDSTREAM_RECORD",
                 "links": []
               },
               {
                 "localized_name": "op",
                 "name": "op",
-                "type": "SAMPLEFLUX_OP",
+                "type": "RECORDSTREAM_OP",
                 "links": []
               },
               {
@@ -9814,7 +9814,7 @@
             "origin_slot": 1,
             "target_id": 371,
             "target_slot": 0,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           },
           {
             "id": 553,
@@ -9822,7 +9822,7 @@
             "origin_slot": 3,
             "target_id": 372,
             "target_slot": 0,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           },
           {
             "id": 551,
@@ -9830,7 +9830,7 @@
             "origin_slot": 0,
             "target_id": 369,
             "target_slot": 0,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           },
           {
             "id": 554,
@@ -9838,7 +9838,7 @@
             "origin_slot": 0,
             "target_id": 368,
             "target_slot": 0,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           },
           {
             "id": 560,
@@ -9854,7 +9854,7 @@
             "origin_slot": 1,
             "target_id": -20,
             "target_slot": 1,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           },
           {
             "id": 562,
@@ -9870,7 +9870,7 @@
             "origin_slot": 2,
             "target_id": -20,
             "target_slot": 3,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           },
           {
             "id": 564,
@@ -9956,14 +9956,14 @@
         "inputs": [
           {
             "id": "4e800e82-45bf-4a43-b8bb-5b51a2551b66",
-            "name": "sample",
-            "type": "SAMPLEFLUX_SAMPLE",
+            "name": "record",
+            "type": "RECORDSTREAM_RECORD",
             "linkIds": [
               536,
               539
             ],
-            "localized_name": "sample",
-            "label": "sample (IQ)",
+            "localized_name": "record",
+            "label": "record (IQ)",
             "shape": 7,
             "color_off": "#7d8590",
             "pos": [
@@ -9988,12 +9988,12 @@
           },
           {
             "id": "24cc0538-746d-4617-b33a-e40d1a07dae4",
-            "name": "sample",
-            "type": "SAMPLEFLUX_SAMPLE",
+            "name": "record",
+            "type": "RECORDSTREAM_RECORD",
             "linkIds": [
               203
             ],
-            "label": "sample (spectrogram)",
+            "label": "record (spectrogram)",
             "pos": [
               1659.3274322752509,
               -876.8278910327209
@@ -10001,12 +10001,12 @@
           },
           {
             "id": "52e128d3-2783-48cc-b5ff-643dd4c6354e",
-            "name": "sample_1",
-            "type": "SAMPLEFLUX_SAMPLE",
+            "name": "record_1",
+            "type": "RECORDSTREAM_RECORD",
             "linkIds": [
               204
             ],
-            "label": "image_sample",
+            "label": "image_record",
             "pos": [
               1659.3274322752509,
               -856.8278910327209
@@ -10019,7 +10019,7 @@
             "linkIds": [
               537
             ],
-            "label": "sample (IQ)",
+            "label": "record (IQ)",
             "pos": [
               1659.3274322752509,
               -836.8278910327209
@@ -10045,11 +10045,11 @@
             "inputs": [
               {
                 "color_off": "#7d8590",
-                "label": "sample (optional)",
-                "localized_name": "sample",
-                "name": "sample",
+                "label": "record (optional)",
+                "localized_name": "record",
+                "name": "record",
                 "shape": 7,
-                "type": "SAMPLEFLUX_SAMPLE",
+                "type": "RECORDSTREAM_RECORD",
                 "link": 194
               },
               {
@@ -10082,9 +10082,9 @@
             ],
             "outputs": [
               {
-                "localized_name": "sample",
-                "name": "sample",
-                "type": "SAMPLEFLUX_SAMPLE",
+                "localized_name": "record",
+                "name": "record",
+                "type": "RECORDSTREAM_RECORD",
                 "links": [
                   195,
                   196,
@@ -10094,7 +10094,7 @@
               {
                 "localized_name": "op",
                 "name": "op",
-                "type": "SAMPLEFLUX_OP",
+                "type": "RECORDSTREAM_OP",
                 "links": []
               }
             ],
@@ -10109,7 +10109,7 @@
           },
           {
             "id": 374,
-            "type": "Taidal_ExtractSample",
+            "type": "Taidal_ExtractRecord",
             "pos": [
               1331.557982608633,
               -1197.792348762874
@@ -10123,9 +10123,9 @@
             "mode": 0,
             "inputs": [
               {
-                "localized_name": "sample",
-                "name": "sample",
-                "type": "SAMPLEFLUX_SAMPLE",
+                "localized_name": "record",
+                "name": "record",
+                "type": "RECORDSTREAM_RECORD",
                 "link": 195
               },
               {
@@ -10192,12 +10192,12 @@
               {
                 "localized_name": "array",
                 "name": "array",
-                "type": "SAMPLEFLUX_ARRAY",
+                "type": "RECORDSTREAM_ARRAY",
                 "links": null
               }
             ],
             "properties": {
-              "Node name for S&R": "Taidal_ExtractSample"
+              "Node name for S&R": "Taidal_ExtractRecord"
             },
             "widgets_values": [
               "input",
@@ -10222,11 +10222,11 @@
             "inputs": [
               {
                 "color_off": "#7d8590",
-                "label": "sample (optional)",
-                "localized_name": "sample",
-                "name": "sample",
+                "label": "record (optional)",
+                "localized_name": "record",
+                "name": "record",
                 "shape": 7,
-                "type": "SAMPLEFLUX_SAMPLE",
+                "type": "RECORDSTREAM_RECORD",
                 "link": 539
               },
               {
@@ -10304,9 +10304,9 @@
             ],
             "outputs": [
               {
-                "localized_name": "sample",
-                "name": "sample",
-                "type": "SAMPLEFLUX_SAMPLE",
+                "localized_name": "record",
+                "name": "record",
+                "type": "RECORDSTREAM_RECORD",
                 "links": [
                   194
                 ]
@@ -10314,7 +10314,7 @@
               {
                 "localized_name": "op",
                 "name": "op",
-                "type": "SAMPLEFLUX_OP",
+                "type": "RECORDSTREAM_OP",
                 "links": []
               }
             ],
@@ -10377,7 +10377,7 @@
           },
           {
             "id": 377,
-            "type": "Taidal_sampleflux_op_image_ConvertToImageOp",
+            "type": "Taidal_recordstream_op_image_ConvertToImageOp",
             "pos": [
               1197.002670186914,
               -873.8600565711636
@@ -10392,11 +10392,11 @@
             "inputs": [
               {
                 "color_off": "#7d8590",
-                "label": "sample (optional)",
-                "localized_name": "sample",
-                "name": "sample",
+                "label": "record (optional)",
+                "localized_name": "record",
+                "name": "record",
                 "shape": 7,
-                "type": "SAMPLEFLUX_SAMPLE",
+                "type": "RECORDSTREAM_RECORD",
                 "link": 196
               },
               {
@@ -10447,9 +10447,9 @@
             ],
             "outputs": [
               {
-                "localized_name": "sample",
-                "name": "sample",
-                "type": "SAMPLEFLUX_SAMPLE",
+                "localized_name": "record",
+                "name": "record",
+                "type": "RECORDSTREAM_RECORD",
                 "links": [
                   204
                 ]
@@ -10457,12 +10457,12 @@
               {
                 "localized_name": "op",
                 "name": "op",
-                "type": "SAMPLEFLUX_OP",
+                "type": "RECORDSTREAM_OP",
                 "links": []
               }
             ],
             "properties": {
-              "Node name for S&R": "Taidal_sampleflux_op_image_ConvertToImageOp"
+              "Node name for S&R": "Taidal_recordstream_op_image_ConvertToImageOp"
             },
             "widgets_values": [
               "viridis",
@@ -10481,7 +10481,7 @@
             "origin_slot": 0,
             "target_id": 373,
             "target_slot": 0,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           },
           {
             "id": 195,
@@ -10489,7 +10489,7 @@
             "origin_slot": 0,
             "target_id": 374,
             "target_slot": 0,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           },
           {
             "id": 196,
@@ -10497,7 +10497,7 @@
             "origin_slot": 0,
             "target_id": 377,
             "target_slot": 0,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           },
           {
             "id": 199,
@@ -10513,7 +10513,7 @@
             "origin_slot": 0,
             "target_id": -20,
             "target_slot": 1,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           },
           {
             "id": 204,
@@ -10521,7 +10521,7 @@
             "origin_slot": 0,
             "target_id": -20,
             "target_slot": 2,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           },
           {
             "id": 536,
@@ -10545,7 +10545,7 @@
             "origin_slot": 0,
             "target_id": 375,
             "target_slot": 0,
-            "type": "SAMPLEFLUX_SAMPLE"
+            "type": "RECORDSTREAM_RECORD"
           }
         ],
         "extra": {}
