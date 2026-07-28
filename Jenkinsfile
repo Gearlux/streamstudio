@@ -33,10 +33,11 @@ pipeline {
                 // Internal Gearlux dependencies — installed FIRST with --no-deps
                 // so .[dev] below finds them pre-satisfied instead of hitting PyPI
                 // (Gearlux distribution names are intentionally unpublished on PyPI).
-                sh "${VENV_BIN}/uv pip install --no-deps git+https://github.com/Gearlux/loggair.git@main"
-                sh "${VENV_BIN}/uv pip install --no-deps git+https://github.com/Gearlux/confluid.git@main"
-                sh "${VENV_BIN}/uv pip install --no-deps git+https://github.com/Gearlux/recordstream.git@main"
                 sh "${VENV_BIN}/uv pip install --no-deps git+https://github.com/Gearlux/liquifai.git@main"
+                sh "${VENV_BIN}/uv pip install --no-deps git+https://github.com/Gearlux/recordstream.git@main"
+                sh "${VENV_BIN}/uv pip install --no-deps git+https://github.com/Gearlux/torpaido.git@main"
+                sh "${VENV_BIN}/uv pip install --no-deps git+https://github.com/Gearlux/marainer.git@main"
+                sh "${VENV_BIN}/uv pip install --no-deps git+https://github.com/Gearlux/annotaide.git@main"
                 sh "${VENV_BIN}/uv pip install --no-deps git+https://github.com/Gearlux/waivefront.git@main"
                 sh "${VENV_BIN}/uv pip install -e .[dev]"
                 // Notebook-only extras (matplotlib, jupyter kernels, etc.) live
@@ -240,6 +241,15 @@ with open('isort-checkstyle.xml', 'w') as f:
                 echo 'Running project examples...'
                 sh '''
                     for f in examples/*.py; do
+                        if [ -f "$f" ]; then
+                            echo "Verifying $f..."
+                            ${VENV_BIN}/python3 "$f"
+                        fi
+                    done
+                    # Directory examples opt in by shipping a run.py entry point;
+                    # network-dependent / install-only example apps ship no run.py
+                    # and are skipped by construction.
+                    for f in examples/*/run.py; do
                         if [ -f "$f" ]; then
                             echo "Verifying $f..."
                             ${VENV_BIN}/python3 "$f"

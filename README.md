@@ -504,7 +504,7 @@ Registration is a **positive allowlist**: a class becomes a node only if its `@c
 
 A module that fails to import or scan is skipped at `debug` level, so one package's missing optional dependency never empties the palette.
 
-> **Entry points live in installed metadata.** Discovery reads `importlib.metadata`, so editable installs *freeze* the entry-point table at install time. After adding or changing a `[project.entry-points."confluid.configurables"]` declaration in any workspace package, reinstall that editable (e.g. `aisland setup`) or its nodes silently vanish from the palette. Do **not** use `--reinstall` / `--force-reinstall` — that re-resolves the internal deps (confluid, loggair, …) from PyPI, where they don't exist.
+> **Entry points live in installed metadata.** Discovery reads `importlib.metadata`, so editable installs *freeze* the entry-point table at install time. After adding or changing a `[project.entry-points."confluid.configurables"]` declaration in any workspace package, reinstall that editable (e.g. `aisland setup`) or its nodes silently vanish from the palette. Do **not** use `--reinstall` / `--force-reinstall` — that re-resolves the internal deps from the index instead of your checkouts. An unpublished dep (liquifai, recordstream, …) isn't there and the command fails; a published one (loggair, confluid) is, so your editable install is silently swapped for a release wheel — the worse outcome, because nothing errors. To consume a project from PyPI deliberately, use `aisland source set <project> pypi`.
 
 ## Type mapping
 
