@@ -452,7 +452,7 @@ model: !class:sonair.timm_classifier.TimmModel
   num_classes: !ref:num_classes
 optimizer: !lazy:torch.optim.AdamW
   lr: 0.0001
-runnable: !class:sonair.classifier.LightningClassifier
+runnable: !class:sonair.lightning_classifier.LightningClassifier
   task: fit
   model: !ref:model
   optimizer: !ref:optimizer
