@@ -2272,7 +2272,7 @@ def _output_socket_type(prop_name: str, anno: Any) -> str:
     * a dataset-named output rides ``RECORDSTREAM_SOURCE``;
     * a scalar output a typed widget string (via :func:`_map_type` — ``INT`` / ``FLOAT`` / ``STRING`` / ``BOOLEAN``);
     * a **container** output (``Dict`` / ``List`` / ``Set`` / ``Tuple`` — e.g. ``computed_metrics`` a
-      ``Dict[str, float]``, ``label_names`` a ``List[str]``) rides a plain ``STRING`` socket (the runnable
+      ``Dict[str, float]``, ``class_names`` a ``List[str]``) rides a plain ``STRING`` socket (the runnable
       node JSON-encodes the value), so it wires straight into ComfyUI's native *Show Text* node. This branch
       is BEFORE the role inference on purpose: it stops ``computed_metrics`` from mis-mapping to a bogus
       ``RECORDSTREAM_OBJECT:metric`` via the ``"metric"`` substring in :func:`_infer_member_role`;
@@ -2297,7 +2297,7 @@ def _output_socket_type(prop_name: str, anno: Any) -> str:
 def _coerce_output_value(value: Any, socket_type: str) -> Any:
     """Coerce a runnable's LIVE ``@output`` value to its output socket (:func:`_build_runnable_node`).
 
-    A ``STRING`` socket (a container ``@output`` like ``computed_metrics`` / ``label_names``, or a ``str``
+    A ``STRING`` socket (a container ``@output`` like ``computed_metrics`` / ``class_names``, or a ``str``
     scalar) carries a string: containers are JSON-encoded (``default=str`` so a stray non-JSON leaf like a
     numpy scalar still serialises), ``None`` → ``""``, anything else → ``str()``. Object / source / numeric
     sockets pass the value through unchanged (the live model / stream / number).
@@ -2531,7 +2531,7 @@ def _build_runnable_node(cls: Callable, name: str, category: str) -> Type:
     OUTPUTS: slot 0 is the (post-run) runnable on a ``RECORDSTREAM_RUNNABLE`` wire; then EVERY declared
     ``@output`` property (:func:`confluid.output_specs`) becomes a wireable socket via
     :func:`_output_socket_type` — ``trained_model`` rides ``RECORDSTREAM_OBJECT:model`` into a downstream
-    evaluator's ``model`` slot, and container outputs (``computed_metrics`` / ``label_names``) ride a
+    evaluator's ``model`` slot, and container outputs (``computed_metrics`` / ``class_names``) ride a
     ``STRING`` (JSON) socket you wire into ComfyUI's native *Show Text*. Because the node runs first,
     these carry real values (not ``None``).
     """
