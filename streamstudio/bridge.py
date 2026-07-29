@@ -373,7 +373,7 @@ _HF_METADATA_PARAM = "metadata_features"
 #                   output on a ROLE-qualified ``RECORDSTREAM_OBJECT:sink`` wire, see ``_is_sink_class`` /
 #                   ``_role_for_class``) that docks into a ``DatasetProcessor`` runnable node's
 #                   ``sink`` slot — the same model/loss/logger → trainer relationship. The prediction
-#                   sinks (``DetectionPredictionsSink`` / ``ClassificationPredictionsSink``,
+#                   sinks (``DetectionPredictionsSink`` (waivefront) / ``ClassificationPredictionsSink`` (recordstream),
 #                   ``write(prediction, metadata)``) are a DIFFERENT contract and stay UNcategorised.
 # Everything else is excluded by construction:
 #   * the raw-callable op wrappers ``FilterOp`` / ``WrappedOp`` — bare ``@configurable``, so
