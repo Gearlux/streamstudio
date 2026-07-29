@@ -966,7 +966,7 @@ def run_runnable(runnable: Any, unique_id: Optional[str] = None) -> str:
       (``execution.py``) for cheap, grad-free node runs — fatal for gradient-based TRAINING (model
       params, forward activations, and the loss become inference tensors with no autograd graph, so
       ``loss.backward()`` dies with *"element 0 … does not require grad"*). A runnable that declares
-      itself a ``marainer.TorchRunner`` (duck-typed ``__torch_runner__``) gets normal autograd restored
+      itself a ``recordstream.TorchRunner`` (duck-typed ``__needs_autograd__``) gets normal autograd restored
       for the duration of ``run()``; inference-only runnables (evaluators / ``DatasetProcessor``) run
       under inference mode (which the worker re-enters explicitly — grad mode is THREAD-LOCAL so the
       worker does not inherit the calling thread's context).
@@ -989,7 +989,7 @@ def run_runnable(runnable: Any, unique_id: Optional[str] = None) -> str:
         )
     logger.info(f"Running {type(runnable).__name__}…")
 
-    torch_runner = bool(getattr(runnable, "__torch_runner__", False))
+    needs_autograd = bool(getattr(runnable, "__needs_autograd__", False))
     # torch's grad/inference mode is THREAD-LOCAL, so the worker thread does NOT inherit the
     # torch.inference_mode() ComfyUI wraps graph execution in — capture it here and re-establish
     # the correct context inside the worker.
@@ -1018,7 +1018,7 @@ def run_runnable(runnable: Any, unique_id: Optional[str] = None) -> str:
 
     def _target() -> None:
         try:
-            if torch_runner:
+            if needs_autograd:
                 with torch.inference_mode(False), torch.enable_grad():
                     run()
             elif was_inference:
