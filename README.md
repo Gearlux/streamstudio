@@ -447,7 +447,7 @@ Every node becomes a **top-level key** named by the socket it feeds (path-prefix
 
 ```yaml
 num_classes: 37
-model: !class:sonair.timm_classifier.TimmModel
+model: !class:sonair.timm_model.TimmModel
   model_name: efficientvit_b0
   num_classes: !ref:num_classes
 optimizer: !lazy:torch.optim.AdamW
