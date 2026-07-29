@@ -2822,7 +2822,7 @@ def register_module_nodes(
     1. ``scan_module(module_path)`` — module-local callables (functions + locally-defined classes).
     2. ``@configurable`` classes listed in the module's ``__all__`` — its deliberate public exports,
        regardless of ``__module__``. This surfaces a package's re-exported runnables / models /
-       datasets (``sonair`` re-exports ``LightningClassifier`` from ``sonair.classifier``)
+       datasets (``sonair`` re-exports ``LightningClassifier`` from ``sonair.lightning_classifier``)
        AND registered third-party members (``marainer.lightning.configurables``'s ``torch`` optimizers /
        ``DataLoader`` / ``pl.Trainer``). Gated on ``__all__`` so a module's imported-for-use
        configurables (not re-exported) don't leak into the palette.
