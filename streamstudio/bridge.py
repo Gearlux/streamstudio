@@ -2525,7 +2525,7 @@ def _build_runnable_node(cls: Callable, name: str, category: str) -> Type:
     The node **RUNS on execute** (it is the terminal ``OUTPUT_NODE`` — there is no separate Run node):
     ``execute`` constructs the runnable (ctor params to ``__init__``, body slots via post-construction
     ``setattr`` of the wired members), calls :func:`streamstudio.nodes.run_runnable` (autograd-restore for
-    ``__torch_runner__`` trainers, ComfyUI-interrupt handling, live stdout streaming to the node's log
+    ``__needs_autograd__`` (TorchRunner) trainers, ComfyUI-interrupt handling, live stdout streaming to the node's log
     widget), then reads each declared ``@output`` (now LIVE, post-run) and emits it on a typed socket.
 
     OUTPUTS: slot 0 is the (post-run) runnable on a ``RECORDSTREAM_RUNNABLE`` wire; then EVERY declared
@@ -2637,8 +2637,8 @@ def _build_runnable_node(cls: Callable, name: str, category: str) -> Type:
             return {"ui": {"text": [note]}, "result": (obj, *([None] * len(out_sockets)))}
 
         # RUN it (this node is the OUTPUT_NODE — there is no separate Run node). run_runnable restores
-        # autograd for TorchRunner trainers, honours ComfyUI's interrupt, and live-streams stdout to the
-        # node's log widget; it returns the captured text.
+        # autograd for __needs_autograd__ (TorchRunner) trainers, honours ComfyUI's interrupt, and
+        # live-streams stdout to the node's log widget; it returns the captured text.
         text = run_runnable(obj, unique_id)
         # Read each declared @output (now LIVE, post-run) and coerce to its socket type — a STRING socket
         # carries the JSON-encoded value (wire into Show Text); object/source/scalar sockets pass through.
