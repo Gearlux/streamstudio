@@ -274,32 +274,9 @@ def test_graph_export_normalizes_collapsed_widget_input_slots() -> None:
             ), f"#{chain['id']}: {name} link target_slot {src[4]} != slot {slot} (not normalised)"
 
 
-def test_ops_yaml_roundtrip_reconnects_the_config_nodes() -> None:
-    # The "Export Taidal Ops → Confluid YAML" of this graph hoists the ImpairmentsTx/RxConfig as
-    # constants and references them from the ImpairmentsChain via dotted !ref:. Importing that YAML back
-    # must RECONNECT the config nodes to ImpairmentsChain.tx_disabled / .rx_disabled — was: imported back
-    # disconnected, because the reconstructed node had an incomplete input-slot list so the wired-widget
-    # link landed at the wrong slot index (`_complete_widget_input_slots` fix). Materialising the !class:
-    # markers needs the real classes, so this skips without the [waivefront] extra discovered.
-    import streamstudio
-    from streamstudio.graphio import yaml_to_workflow
-
-    mappings = streamstudio.NODE_CLASS_MAPPINGS
-    if "Taidal_waivefront_op_signal_ImpairmentsChain" not in mappings:
-        pytest.skip("requires the [waivefront] extra discovered (ImpairmentsChain not registered)")
-
-    ops_yaml = _FIXTURE.parent / "impairments_ops.yaml"
-    wf = yaml_to_workflow(str(ops_yaml), mappings)  # auto-dispatches to the ops-doc importer
-    nodes = {n["id"]: n for n in wf["nodes"]}
-    links = {lk[0]: lk for lk in wf["links"]}
-    chains = [n for n in wf["nodes"] if "ImpairmentsChain" in str(n["type"])]
-    assert chains, "no ImpairmentsChain reconstructed from the ops.yaml"
-    for chain in chains:
-        for name in ("tx_disabled", "rx_disabled"):
-            slot = next((i for i, inp in enumerate(chain["inputs"]) if inp["name"] == name), None)
-            assert slot is not None, f"#{chain['id']} {name} input slot missing"
-            link_id = chain["inputs"][slot].get("link")
-            assert link_id is not None, f"#{chain['id']} {name} is not connected"
-            src = links[link_id]
-            assert "Config" in str(nodes[src[1]]["type"]), f"#{chain['id']} {name} not fed by a Config node"
-            assert src[4] == slot, f"#{chain['id']} {name} link target_slot {src[4]} != input slot {slot}"
+# The ops-yaml round-trip test was DELETED with its fixture (2026-07-30): `impairments_ops.yaml`
+# was a context-ops export (Save/Use/Mix over per-record cells) — a format that no longer exists
+# now that the canvas compiles to a `flow:` graph. It was already two formats stale (it carried
+# `StashInputOp`/`Mix`, both deleted in the 2026-07-18 consolidation) and skipped in every
+# environment without the [waivefront] extra. Re-create it from a live canvas export if the
+# document-import path needs a real-graph regression bed again.

@@ -44,11 +44,6 @@ from loggair import get_logger
 from recordstream import Pipeline, Stream
 from recordstream.discovery import resolve_callable
 from recordstream.ops.configure import ConfigureOp
-from recordstream.ops.context import Apply as CtxApply
-from recordstream.ops.context import Capture as CtxCapture
-from recordstream.ops.context import MergeFields as CtxMerge
-from recordstream.ops.context import Save as CtxSave
-from recordstream.ops.context import Use as CtxUse
 from recordstream.ops.formula import FormulaOp
 
 from streamstudio.bridge import (
@@ -62,7 +57,6 @@ from streamstudio.bridge import (
     _op_list_params,
 )
 from streamstudio.export import (
-    _CELL_PREFIX,
     _EXPORT_SKIP_PROPERTY,
     _EXPORT_SKIP_VALUE,
     _EXPORT_TARGET_VALUE,
@@ -704,20 +698,35 @@ def _is_flow_document(doc: Any) -> bool:
     return isinstance(doc, dict) and isinstance(doc.get("flow"), dict)
 
 
-def _lower_flow_document(doc: Dict[str, Any]) -> Dict[str, Any]:
-    """Lower a ``{…constants…, flow: {...}, outputs: …}`` document into the ops-doc form.
+def _flow_document_to_ops_replay(doc: Dict[str, Any]) -> Dict[str, Any]:
+    """Reshape a ``{…constants…, flow: {...}, outputs: …}`` document for the node replay.
 
-    Uses ``recordstream.flow`` with UNBUILT step markers (``parse_flow(build=False)`` — a
-    hoisted constant's dotted ``!ref:`` must not resolve during a structural import), so
-    the replay sees live context ops around marker real-ops, exactly like a fresh export.
+    A flow document is already the graph, so this is a re-KEYING, not a lowering: each step
+    becomes an ``ops:`` entry carrying its op plus the wiring the replay needs
+    (``__step__`` / ``__from__`` / ``__merge_from__``). Steps are parsed UNBUILT
+    (``parse_flow(build=False)``) so a hoisted constant's dotted ``!ref:`` never resolves
+    during a structural import.
     """
     from recordstream.flow import parse_flow as _parse_flow
-    from recordstream.flow import to_ops as _to_ops
 
     steps, outputs = _parse_flow(doc["flow"], str(doc.get("outputs", "") or ""), build=False)
-    lowered: Dict[str, Any] = {k: v for k, v in doc.items() if k not in ("flow", "outputs")}
-    lowered["ops"] = _to_ops(steps, outputs)
-    return lowered
+    replay: Dict[str, Any] = {k: v for k, v in doc.items() if k not in ("flow", "outputs")}
+    branchy = [s.name for s in steps if s.from_ is not None or s.merge_from]
+    if branchy and any(s.merge_from for s in steps) or _forks(steps):
+        raise UnsupportedTopologyError(
+            "Importing a BRANCHY flow document back onto the canvas is not supported yet "
+            f"(steps {branchy} fork or merge). The importer replays a sequence of ops; the "
+            "step graph needs a node-per-step walk instead. Tracked in streamstudio TASKS.md. "
+            "A linear flow document imports normally."
+        )
+    replay["ops"] = [step.op for step in steps if step.op is not None]
+    return replay
+
+
+def _forks(steps: Any) -> bool:
+    """True when two steps read the same producer — a fan-out the sequential replay can't place."""
+    read = [s.from_ for s in steps if s.from_ is not None]
+    return len(read) != len(set(read))
 
 
 def ops_yaml_to_workflow(
@@ -767,7 +776,7 @@ def ops_yaml_to_workflow(
     if _is_flow_document(raw):
         # The lowered list holds LIVE context ops around marker real-ops (to_ops builds the
         # Save/Use/Mix), so it deliberately bypasses the all-markers ops-doc check below.
-        raw = _lower_flow_document(cast(Dict[str, Any], raw))
+        raw = _flow_document_to_ops_replay(cast(Dict[str, Any], raw))
     elif not isinstance(raw, dict) or not _is_ops_document(raw):  # pragma: no cover - caller detected the shape
         raise UnsupportedTopologyError(
             "ops_yaml_to_workflow expects an ops-export document (a top-level 'ops:' list) "
@@ -789,7 +798,6 @@ def ops_yaml_to_workflow(
     #    lineage (reset only by a real op) is what lets the importer rebuild a Mix even when
     #    input==target (both restored to one node K while the metadata came from a side branch).
     live: Dict[str, Optional[int]] = {"input": None, "target": None, "metadata": None}  # node id per lineage
-    cells: Dict[str, Optional[int]] = {}  # context-ops export: __taidal_cell_* -> the node it snapshots
     stashed_nodes: set = set()  # every node ever auto-stashed (a saved FORK, reused later — see below)
     op_node_ids: List[int] = []  # real op nodes, in schedule order (last = deepest sink = final output)
 
@@ -798,34 +806,6 @@ def ops_yaml_to_workflow(
         if spec is None:
             continue
         cls, _is_lazy, kwargs = spec
-
-        # The context-ops export (2026-07): whole-record Save/Use/Mix over namespaced
-        # ``__taidal_cell_*`` cells. Save records the live node into a cell (no node
-        # placed); Use restarts the stream from a cell; a Mix marker rebuilds the erased
-        # ``Mix Records`` canvas node wired from its three argument cells. A USER-named
-        # cell (no namespace prefix) falls through and stays a real node.
-        cell_name = kwargs.get("name")
-        if cls is CtxSave and isinstance(cell_name, str) and cell_name.startswith(_CELL_PREFIX):
-            cells[cell_name] = live["input"]
-            if live["input"] is not None:
-                stashed_nodes.add(live["input"])
-            continue
-        if cls is CtxUse and isinstance(cell_name, str) and cell_name.startswith(_CELL_PREFIX):
-            restored = cells.get(cell_name)
-            live["input"] = live["target"] = live["metadata"] = restored
-            continue
-        if cls is CtxMerge and any(
-            str(kwargs.get(slot, "")).startswith(_CELL_PREFIX)
-            for slot in ("input_from", "target_from", "metadata_from")
-        ):
-            mix_id = builder.spawn(_MIX_CLASS_TYPE)
-            for arg, slot in zip(_MIX_ARGS, ("input_from", "target_from", "metadata_from")):
-                slot_cell = kwargs.get(slot)
-                src = cells.get(str(slot_cell)) if slot_cell else live["input"]
-                if src is not None:
-                    builder.connect(src, 0, mix_id, arg, RECORD_TYPE)
-            live["input"] = live["target"] = live["metadata"] = mix_id
-            continue
 
         # A real op node (incl. a user Stash*Op with a non-namespaced key).
         res = builder.emit(marker)
@@ -1856,12 +1836,10 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
                     f"workflow_to_yaml: could not compile the value chain for {nid}.{param} "
                     f"({type(e).__name__}: {e}); the param keeps its default."
                 )
-        for param, cap in output_captures.get(nid, []):
-            marker = _marker(
-                Instance if eager else Class,
-                CtxApply,
-                {"op": marker, "param": param, "source": cap.stash_key},
-            )
+        for param, _cap in output_captures.get(nid, []):
+            # An @output -> param wire is `bind:` grammar in a flow document; a flat ops list
+            # has no way to carry it now that the per-record cell plane is gone.
+            dropped_wires.append((f"{nid}", param, "@output capture", "export as a flow: document"))
         return marker
 
     # Recover a Fluid spec per node + which output slot each consumer wired (for object lazy/instance).
@@ -2026,31 +2004,27 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
                 src_type = pnodes[src_id].class_type if src_id in pnodes else "unknown"
                 dropped_wires.append((f"{chain_key}[{cls.__name__}]", base, src_id, src_type))
         instance = _wrap_configured(nid, _marker(Instance, cls, kwargs), eager=True)
-        # If this chained op's @output is captured downstream, wrap it so its value lands in a cell.
-        produced = captures_by_producer.get(nid)
-        if produced:
-            instance = _marker(Instance, CtxCapture, {"op": instance, "captures": dict(produced)})
         return cast(Instance, instance)
 
     def _fold_chain(nid: str, chain_key: str) -> List[Any]:
-        """Linearize a chain into inline op Instances; fan-out becomes Save/Use context cells.
+        """Linearize a STRAIGHT chain into inline op Instances.
 
-        Branches are ISOLATED (each restarts from the fork's cell, the ops-export shape) — the
-        last branch reads with ``drop=True`` so the per-record Context ends empty.
+        A `Stream`'s ``ops`` list is a sequence, so only a straight run folds into one. A
+        fork used to become ``Save``/``Use`` context cells; those ops were deleted with the
+        lowering pass (2026-07-30), so a forking chain simply stops folding here and its
+        branches stay standalone entries — the whole-graph YAML keeps every op, and a user
+        who wants the branch wiring in one document exports the canvas as a `flow:` document.
         """
         instance = _chain_op_instance(nid, chain_key)
         children = sorted(op_succs.get(nid, []), key=_id_sort_key)
-        if not children:
-            return [instance]
         if len(children) == 1:
             return [instance, *_fold_chain(children[0], chain_key)]
-        cell = f"{_CELL_PREFIX}{nid}"
-        ops: List[Any] = [instance, _marker(Instance, CtxSave, {"name": cell})]
-        for i, child in enumerate(children):
-            if i > 0:
-                ops.append(_marker(Instance, CtxUse, {"name": cell, "drop": i == len(children) - 1}))
-            ops.extend(_fold_chain(child, chain_key))
-        return ops
+        if len(children) > 1:
+            logger.debug(
+                f"graphio: node {nid} fans out to {children} — the pipeline fold stops here "
+                "(an ops list cannot express a fork; export as a flow: document for the wiring)."
+            )
+        return [instance]
 
     chain_entries: List[Tuple[str, Any]] = []
     used_keys = set(names.values())

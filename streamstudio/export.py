@@ -64,7 +64,7 @@ into one Mix) — a sequential op-list carries exactly one stream; use ``JointSt
 
 import inspect
 import re
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from pathlib import Path
 from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple, Union, cast
 
@@ -74,7 +74,6 @@ from loggair import get_logger
 from recordstream import Pipeline
 from recordstream.discovery import resolve_callable
 from recordstream.ops.configure import ConfigureOp
-from recordstream.ops.context import Apply, Capture, MergeFields, Save, Use
 from recordstream.ops.formula import FormulaOp
 
 from streamstudio.bridge import _SINGLE_OP_PARAMS, _coerce_kwargs, _op_list_params, _single_op_params
@@ -117,14 +116,16 @@ _PRIMITIVE_VALUE_NODES = {
 # Legacy metadata-key prefix of the RETIRED stash/unstash lowering — kept ONLY so graphio's
 # importer still recognises documents exported before the context-ops compiler (2026-07).
 
-# Per-record Context cells used by the inserted Save/Use/Mix context ops (the graph data
+# Namespace for compiler-internal names. Retained for the graph-export/import paths that
+# still recognise ids the compiler assigned (the per-record cell plane itself is gone).
+# (was: per-record Context cells used by the inserted Save/Use/Mix context ops — the graph data
 # plane — record.metadata is never used for wiring). Namespaced so they can't collide with
 # user-named cells; each auto-cell is freed by its LAST reader (compiled drop flags).
 _CELL_PREFIX = "__taidal_cell_"
 
 # Op nodes expose their declared @output properties as output sockets at slot >= 2 (slot 0 =
 # ``record``, slot 1 = ``op`` — see bridge._build_op_node). A wire from such a slot into a LATER
-# op's PARAM is an op-@output capture: the producer is wrapped in the context op ``Capture``
+# op's PARAM is an op-@output capture: in a flow document it becomes ``bind: {param: "step.attr"}``
 # (records the ACTUAL @output value into a Context cell) and the consumer in ``Apply`` (reads
 # the cell into the param per record). The cell may be read by several consumers, so it is
 # never dropped — it dies with the per-record Context.
@@ -227,7 +228,7 @@ class _OutputCapture(NamedTuple):
     ``producer_id`` is the op node whose ``@output`` is captured (a record-ancestor of the consumer),
     ``output_name`` the ``@output`` property (``RETURN_NAMES[slot]``), and ``stash_key`` the namespaced
     Context cell the captured value lands in (historically a metadata stash key — the field name
-    survives). The producer is wrapped in the context op ``Capture`` and the consumer in ``Apply``.
+    survives). In the flow form the consumer step carries ``bind: {param: "<producer step>.<attr>"}``.
     """
 
     producer_id: str
@@ -347,7 +348,7 @@ class _FoldContext:
         self.notes = notes
         self.configure_specs = configure_specs or {}
         # op-@output → param captures (consumer id -> [(param, capture)]). The consumer is wrapped in
-        # Apply (reads the cell); the producer is wrapped in the context op Capture — `captures_by_producer`
+        # `bind:` grammar in the flow form — `captures_by_producer`
         # is the reverse map (producer id -> {output_name: cell}) so a producer feeding several
         # consumers captures each @output exactly once.
         self.output_captures = output_captures or {}
@@ -856,6 +857,7 @@ def _op_to_instance(
     node_mappings: Dict[str, Any],
     dropped_notes: Optional[List[str]] = None,
     fold: Optional[_FoldContext] = None,
+    bind_captures: bool = False,
 ) -> Instance:
     """Build a Confluid ``Instance`` marker (``!class:X()`` on dump) for one op node.
 
@@ -946,20 +948,18 @@ def _op_to_instance(
             instance = cast(
                 Instance, _marker(Instance, ConfigureOp, {"ops": compute, "target": instance, "param": param})
             )
-    # op-@output → param (consumer side): inject the producer's CAPTURED value (read from its
-    # per-record Context cell) into this op's param — the cell is NOT dropped (it may feed
-    # several consumers; it dies with the per-record Context).
-    for param, cap in capture_specs:
-        instance = cast(
-            Instance,
-            _marker(Instance, Apply, {"op": instance, "param": param, "source": cap.stash_key}),
-        )
-    # op-@output → param (producer side): if THIS op's @output is captured downstream, wrap it so its
-    # ACTUAL value lands in a Context cell after it runs (outermost — it applies the configured op
-    # above and reads the @output off the innermost wrapped op via Capture's .target/.op walk).
-    produced = fold.captures_by_producer.get(str(node_id)) if fold is not None else None
-    if produced:
-        instance = cast(Instance, _marker(Instance, Capture, {"op": instance, "captures": dict(produced)}))
+    if capture_specs and not bind_captures:
+        # An op-@output -> param wire is `bind: {param: "step.attr"}` in a flow document. The
+        # flat form used to thread it through a per-record Context cell (Capture on the
+        # producer, Apply on the consumer); those ops were deleted with the lowering pass, so
+        # a flat `ops:` document cannot carry the wire — note it and keep the constructor
+        # default, the same convention every other unfoldable wire follows.
+        if dropped_notes is not None:
+            params = ", ".join(param for param, _cap in capture_specs)
+            dropped_notes.append(
+                f"node {node_id} ({class_type}): @output-driven param(s) {params} dropped — an "
+                "ops: list cannot carry an @output wire; export as a flow: document to keep it"
+            )
     return instance
 
 
@@ -1191,33 +1191,101 @@ def _compile_component(
     node_mappings: Dict[str, Any],
     fold: _FoldContext,
 ) -> List[Any]:
-    """Flatten one component of the op DAG into a sequential context-ops list.
+    """Emit one component of the op DAG as a flat ``ops:`` list — LINEAR components only.
 
-    Deterministic DFS from the sinks (deepest sink LAST, so the final record is the
-    longest path's output); a Mix node visits its predecessors in argument order. The
-    flowing record is tracked as ONE whole-record lineage: a fork's post-op record is
-    snapshotted into a per-record Context cell (``Save``), a later branch restarts from
-    it (``Use``), and a ``Mix Records`` merge reads its three argument cells with ONE
-    :class:`recordstream.ops.context.Mix` (see the module docstring). A liveness post-pass
-    frees each auto-cell at its last reader (``drop`` flags).
+    A sequence is the linear spelling of a graph, so a straight canvas chain still exports as
+    the plain op list it has always been. A BRANCHY component has no flat spelling: the
+    per-record context ops that used to manufacture one (``Save``/``Use``/``MergeFields`` over
+    cells) were deleted in 2026-07-30 along with the lowering pass, because they encoded
+    dataflow as imperative cell mutation — destroying exactly the structure the canvas drew and
+    every downstream consumer wants back. Such a component raises, pointing at the flow export
+    (:func:`_compile_component_flow`), which expresses the same wires as step grammar.
     """
-    member_set = set(members)
+    fan_out = sorted(
+        {pred for nid in members for _arg, pred in preds[nid]}
+        & {pred for pred, count in Counter(pred for nid in members for _arg, pred in preds[nid]).items() if count >= 2},
+        key=_id_sort_key,
+    )
+    fan_in = sorted((nid for nid in members if universe[nid] == "mix"), key=_id_sort_key)
+    if fan_out or fan_in:
+        detail = []
+        if fan_out:
+            detail.append(f"fan-out at node(s) {fan_out}")
+        if fan_in:
+            detail.append(f"fan-in at Mix node(s) {fan_in}")
+        raise UnsupportedTopologyError(
+            f"This op component is branchy ({'; '.join(detail)}), which a flat `ops:` list cannot "
+            "express — an op list is a straight chain. Export it as a `flow:` document instead "
+            "(canvas: 'Export Taidal Ops → Flow YAML'; CLI: `streamstudio export --flow`), where "
+            "the branch wiring is step grammar (`from:` / `merge_from:` / `bind:`)."
+        )
+
+    # Linear: one chain from the single sink back through its predecessors.
+    consumer_count: Dict[str, int] = {}
+    for nid in members:
+        for _arg, pred in preds[nid]:
+            consumer_count[pred] = consumer_count.get(pred, 0) + 1
+    ops_out: List[Any] = []
+    emitted: Set[str] = set()
+
+    def _emit(nid: str) -> None:
+        if nid == _ROOT or nid in emitted:
+            return
+        emitted.add(nid)
+        for _arg, pred in preds[nid]:
+            _emit(pred)
+        ops_out.append(_op_to_instance(nid, prompt[nid], node_mappings, dropped_notes=fold.notes, fold=fold))
+
+    for sink in sorted((nid for nid in members if consumer_count.get(nid, 0) == 0), key=_id_sort_key):
+        _emit(sink)
+
+    leftover = set(members) - emitted
+    if leftover:  # pragma: no cover - defensive: every DAG node reaches some sink
+        raise UnsupportedTopologyError(f"Op nodes {sorted(leftover, key=_id_sort_key)} are unreachable from any sink.")
+    return ops_out
+
+
+def _flow_step_name(nid: str) -> str:
+    """The step name for a canvas node id — the readable identity a flow document is FOR.
+
+    Subgraph-path ids join with ``:`` (``378:368:371``), which a flow step name may not
+    carry (``.``/``:`` are reserved), so the separator becomes ``_``.
+    """
+    return "source" if nid == _ROOT else f"node_{str(nid).replace(':', '_')}"
+
+
+def _compile_component_flow(
+    members: List[str],
+    universe: Dict[str, str],
+    preds: Dict[str, List[Tuple[str, str]]],
+    prompt: Dict[str, Any],
+    node_mappings: Dict[str, Any],
+    fold: _FoldContext,
+) -> Tuple["OrderedDict[str, Any]", str]:
+    """Compile one component of the op DAG into a ``flow:`` mapping of NAMED STEPS.
+
+    The graph-native twin of :func:`_compile_component`, and the reason the canvas no longer
+    round-trips through a linearized form: the canvas IS a graph, so each op node becomes one
+    step whose ``from:``/``merge_from:``/``bind:`` keys ARE the wires the user drew. Nothing
+    is snapshotted into a per-record cell and nothing is lifted back afterwards.
+
+    The mapping to step grammar, wire for wire:
+
+    * a node's record predecessor  -> ``from:`` (the virtual ROOT is an identity ``source: {}``
+      step, so a branch restarting from the source names it like any other step)
+    * a ``Mix Records`` fan-in     -> ``from:`` arg-1 + ``merge_from: [arg-2, arg-3]`` (union in
+      listed order, last-write-wins — arg-3 last reproduces the canvas
+      ``{**m1, **m2, **m3}`` priority the flat form got from reading arg-3 as ``metadata_from``)
+    * an op-``@output`` -> param wire -> ``bind: {param: "<producer step>.<output>"}``
+
+    Emission order is the same deterministic DFS from the sinks (deepest sink LAST), which is
+    what makes every ``from:`` reference an EARLIER step — the flow grammar's hard rule.
+    """
     consumer_count: Dict[str, int] = {}
     for nid in members:
         for _arg, pred in preds[nid]:
             consumer_count[pred] = consumer_count.get(pred, 0) + 1
 
-    # Nodes whose post-op record must live in a Context cell: every fork (≥2 consumers,
-    # the virtual ROOT included) and every Mix argument (all three slots read cells —
-    # input_from/target_from/metadata_from; reading arg-3 as metadata_from reproduces
-    # the canvas Mix's ``{**m1, **m2, **m3}`` arg-3-wins merge priority).
-    needs_save: Set[str] = {nid for nid, count in consumer_count.items() if count >= 2}
-    for nid in members:
-        if universe[nid] == "mix":
-            (_, x), (_, y), (_, z) = preds[nid]
-            needs_save.update((x, y, z))
-
-    # Longest-path depth orders the sinks: side branches first, the deepest tail last.
     depth: Dict[str, int] = {}
 
     def _depth(nid: str) -> int:
@@ -1230,99 +1298,49 @@ def _compile_component(
     sinks = [nid for nid in members if consumer_count.get(nid, 0) == 0]
     sinks.sort(key=lambda nid: (_depth(nid), _id_sort_key(nid)))
 
-    ops_out: List[Any] = []
-    live = _ROOT  # the node whose full record is currently on the linear stream
+    flow_map: "OrderedDict[str, Any]" = OrderedDict()
     emitted: Set[str] = set()
-
-    def _cell(nid: str) -> str:
-        return f"{_CELL_PREFIX}{'root' if nid == _ROOT else nid}"
-
-    if _ROOT in needs_save:
-        ops_out.append(_marker(Instance, Save, {"name": _cell(_ROOT)}))
+    # The source needs a referable name whenever a step reads it — a first step may omit
+    # ``from:`` (it reads the source implicitly), but a LATER branch restarting from the
+    # source must name it, and one identity step is simpler than two spellings.
+    if any(pred == _ROOT for nid in members for _arg, pred in preds[nid]):
+        flow_map[_flow_step_name(_ROOT)] = {}
 
     def _emit(nid: str) -> None:
-        nonlocal live
         if nid == _ROOT or nid in emitted:
             return
         emitted.add(nid)  # acyclicity established by _check_component
         for _arg, pred in preds[nid]:
             _emit(pred)
+
+        entry: Dict[str, Any] = {}
         if universe[nid] == "mix":
             (_, x), (_, y), (_, z) = preds[nid]
-            # NOTE: deferred Mix->MergeFields compiler port. This still emits the legacy 3-cell
-            # ``input_from``/``target_from``/``metadata_from`` cell kwargs; the field-union
-            # ``MergeFields(sources, keys, drop)`` semantics port is not yet done (see graphio.py).
-            ops_out.append(
-                _marker(
-                    Instance,
-                    MergeFields,
-                    {"input_from": _cell(x), "target_from": _cell(y), "metadata_from": _cell(z)},
-                )
-            )
+            entry["from"] = _flow_step_name(x)
+            entry["merge_from"] = [_flow_step_name(y), _flow_step_name(z)]
         else:
-            pred = preds[nid][0][1]
-            if live != pred:
-                ops_out.append(_marker(Instance, Use, {"name": _cell(pred)}))
-            ops_out.append(_op_to_instance(nid, prompt[nid], node_mappings, dropped_notes=fold.notes, fold=fold))
-        live = nid
-        if nid in needs_save:
-            ops_out.append(_marker(Instance, Save, {"name": _cell(nid)}))
+            entry["op"] = _op_to_instance(
+                nid, prompt[nid], node_mappings, dropped_notes=fold.notes, fold=fold, bind_captures=True
+            )
+            entry["from"] = _flow_step_name(preds[nid][0][1])
+
+        binds = {
+            param: f"{_flow_step_name(cap.producer_id)}.{cap.output_name}"
+            for param, cap in fold.output_captures.get(str(nid), [])
+        }
+        if binds:
+            entry["bind"] = binds
+        flow_map[_flow_step_name(nid)] = entry
 
     for sink in sinks:
         _emit(sink)
 
-    leftover = member_set - emitted
+    leftover = set(members) - emitted
     if leftover:  # pragma: no cover - defensive: every DAG node reaches some sink
         raise UnsupportedTopologyError(f"Op nodes {sorted(leftover, key=_id_sort_key)} are unreachable from any sink.")
 
-    # Liveness post-pass: the LAST reader of each auto-cell frees it (Use -> drop=True,
-    # Mix -> the cell joins its ``drop`` list), so a well-formed graph leaves the
-    # per-record Context empty. User-named cells (no ``__taidal_cell_`` prefix) and the
-    # multi-consumer capture cells are never managed here.
-    reads: Dict[str, List[int]] = {}
-    for i, op in enumerate(ops_out):
-        if not isinstance(op, Instance):
-            continue
-        if op.target is Use:
-            reads.setdefault(str(op.kwargs.get("name")), []).append(i)
-        elif op.target is MergeFields:
-            for slot in ("input_from", "target_from", "metadata_from"):
-                cell = op.kwargs.get(slot)
-                if cell:
-                    reads.setdefault(str(cell), []).append(i)
-    for cell, sites in reads.items():
-        if not cell.startswith(_CELL_PREFIX):
-            continue
-        i = sites[-1]
-        last = ops_out[i]
-        if last.target is Use:
-            ops_out[i] = _marker(Instance, Use, {**last.kwargs, "drop": True})
-        else:
-            drops = [c for c in (last.kwargs.get("drop") or [])]
-            if cell not in drops:
-                drops.append(cell)
-            ops_out[i] = _marker(Instance, MergeFields, {**last.kwargs, "drop": drops})
-
-    # A Save whose cell is never read (defensive — a conservatively-forked node whose
-    # extra consumers all rode the stream) would leak; drop such Saves outright.
-    ops_out = [
-        op
-        for op in ops_out
-        if not (
-            isinstance(op, Instance)
-            and op.target is Save
-            and str(op.kwargs.get("name", "")).startswith(_CELL_PREFIX)
-            and str(op.kwargs.get("name")) not in reads
-        )
-    ]
-
-    inserted = sum(1 for op in ops_out if isinstance(op, Instance) and op.target in (Save, Use, MergeFields))
-    if inserted:
-        fold.notes.append(
-            f"branching canvas wiring compiled to a sequential op-list — {inserted} context ops "
-            "(Save/Use/Mix over per-record Context cells, freed by their last reader) inserted"
-        )
-    return ops_out
+    outputs = next(reversed(flow_map)) if flow_map else ""
+    return flow_map, outputs
 
 
 # --------------------------------------------------------------------------- public compile API
@@ -1335,7 +1353,8 @@ def compile_op_chains(
     chain_constants: Optional[List[Dict[str, Any]]] = None,
     skip_ids: Optional[Any] = None,
     target_ids: Optional[Any] = None,
-) -> List[List[Any]]:
+    _emit_component: Optional[Any] = None,
+) -> List[Any]:
     """Compile a ComfyUI prompt graph — ONE sequential op-list per connected op component.
 
     The op DAG (generated op nodes + ``Mix Records`` adapters) is split into
@@ -1437,19 +1456,21 @@ def compile_op_chains(
     sg_excluded = _subgraph_cone_excluded(prompt, node_mappings, exempt=set(resolved_targets))
     schedule_excluded = vc_excluded | sg_excluded
 
-    def _compile(restrict: Optional[Set[str]], extra_notes: List[str]) -> List[List[Any]]:
+    emit = _emit_component or _compile_component
+
+    def _compile(restrict: Optional[Set[str]], extra_notes: List[str]) -> List[Any]:
         universe, preds, boundary_feeds = _build_graph(prompt, node_mappings, schedule_excluded, restrict)
         if not universe:
             logger.debug("compile_op_chains: no op nodes in graph — returning no chains.")
             return []
-        compiled: List[List[Any]] = []
+        compiled: List[Any] = []
         for members in _components(universe, preds):
             _check_component(members, preds, boundary_feeds)
             notes: List[str] = [*base_notes, *extra_notes]
             fold = _FoldContext(
                 prompt, node_mappings, notes, configure_specs, excluded=vc_excluded, output_captures=output_captures
             )
-            compiled.append(_compile_component(members, universe, preds, prompt, node_mappings, fold))
+            compiled.append(emit(members, universe, preds, prompt, node_mappings, fold))
             if chain_notes is not None:
                 chain_notes.append(notes)
             if chain_constants is not None:
@@ -1459,11 +1480,40 @@ def compile_op_chains(
     if not target_cones:
         return _compile(restrict=None, extra_notes=[])
 
-    chains: List[List[Any]] = []
+    chains: List[Any] = []
     for target, cone in target_cones.items():
         note = f"compiled for export target: node {target} ({prompt[target].get('class_type', '?')})"
         chains.extend(_compile(restrict=cone, extra_notes=[note]))
     return chains
+
+
+def compile_flow_documents(
+    prompt: Dict[str, Any],
+    node_mappings: Dict[str, Any],
+    chain_notes: Optional[List[List[str]]] = None,
+    chain_constants: Optional[List[Dict[str, Any]]] = None,
+    skip_ids: Optional[Any] = None,
+    target_ids: Optional[Any] = None,
+) -> List[Tuple["OrderedDict[str, Any]", str]]:
+    """Compile a prompt graph — ONE ``(flow_mapping, outputs)`` pair per connected component.
+
+    The graph-native sibling of :func:`compile_op_chains`, sharing its ENTIRE front half
+    (export-skip / export-target marks, value-chain and ``@output``-capture collection,
+    constant hoisting, component splitting) and differing only in what each component is
+    emitted AS — named steps rather than a linearized op list. Same arguments, same errors.
+    """
+    return cast(
+        List[Tuple["OrderedDict[str, Any]", str]],
+        compile_op_chains(
+            prompt,
+            node_mappings,
+            chain_notes=chain_notes,
+            chain_constants=chain_constants,
+            skip_ids=skip_ids,
+            target_ids=target_ids,
+            _emit_component=_compile_component_flow,
+        ),
+    )
 
 
 def compile_ops(
@@ -1589,20 +1639,21 @@ def export_flow_yamls(
     skip_ids: Optional[Any] = None,
     target_ids: Optional[Any] = None,
 ) -> List[str]:
-    """Compile a prompt graph and serialize EACH op component as a readable ``flow:`` document.
+    """Compile a prompt graph and serialize EACH op component as a ``flow:`` document.
 
-    The named-step twin of :func:`export_ops_yamls`: the compiled flat context-ops list is
-    LIFTED via :func:`recordstream.flow.from_ops` (marker-aware — hoisted-constant dotted
-    ``!ref:``\\ s stay intact) into ``{…constants…, flow: {step: …}, outputs: …}``. The
-    consumer side is ``FlowGraph.from_yaml(path)`` (native engine) or
-    ``Stream.from_flow_yaml(path)`` (lowered back to the serial form) — execution parity is
-    the recordstream flow⇄ops contract. A purely linear component emits a linear flow.
+    The canvas IS a graph, so this compiles it AS one — :func:`compile_flow_documents` emits
+    named steps directly into ``{…constants…, flow: {step: …}, outputs: …}``. It does NOT
+    linearize and lift back (the shape until 2026-07-30: compile to context ops, then
+    reconstruct the graph with ``from_ops`` purely for readability — a round trip through a
+    form that destroyed exactly the structure being rebuilt). Step names are the canvas node
+    ids (``node_<id>``), so a step in the document points at the node that produced it.
+
+    The consumer is ``FlowGraph.from_yaml(path)`` — or any engine entry point, since a flow
+    document and an ``ops:`` list are two spellings of one step graph.
     """
-    from recordstream.flow import from_ops as _flow_from_ops
-
     notes_per_chain: List[List[str]] = []
     constants_per_chain: List[Dict[str, Any]] = []
-    chains = compile_op_chains(
+    flows = compile_flow_documents(
         prompt,
         node_mappings,
         chain_notes=notes_per_chain,
@@ -1610,49 +1661,15 @@ def export_flow_yamls(
         skip_ids=skip_ids,
         target_ids=target_ids,
     )
-    if not chains:
+    if not flows:
         return [dump({"flow": {}})]
     docs: List[str] = []
-    for chain, notes, constants in zip(chains, notes_per_chain, constants_per_chain):
-        flow_map, outputs = _flow_from_ops(chain)
-        flow_map, outputs = _prettify_flow_names(flow_map, outputs)
+    for (flow_map, outputs), notes, constants in zip(flows, notes_per_chain, constants_per_chain):
         document: Dict[str, Any] = dict(constants)
-        document["flow"] = flow_map
+        document["flow"] = dict(flow_map)
         document["outputs"] = outputs
         docs.append(_comment_block(notes) + dump(document))
     return docs
-
-
-def _prettify_flow_names(flow_map: Dict[str, Any], outputs: str) -> Tuple[Dict[str, Any], str]:
-    """Rename compiler-internal ``__taidal_cell_<id>`` step names to readable ``node_<id>`` forms.
-
-    The lift carries the exporter's namespaced cell names as step names; a flow document is
-    the READABLE form, so strip the namespace (subgraph ``:`` path separators become ``_``).
-    Every reference (``from``/``target_from``/``metadata_from``/``bind``) is rewritten too.
-    """
-    rename = {
-        name: "node_" + name[len(_CELL_PREFIX) :].replace(":", "_")
-        for name in flow_map
-        if name.startswith(_CELL_PREFIX)
-    }
-    if not rename:
-        return flow_map, outputs
-
-    def _ref(value: str) -> str:
-        head, dot, attr = str(value).partition(".")
-        return rename.get(head, head) + (dot + attr if dot else "")
-
-    renamed: Dict[str, Any] = {}
-    for name, entry in flow_map.items():
-        if isinstance(entry, dict):
-            entry = dict(entry)
-            for key in ("from", "target_from", "metadata_from"):
-                if key in entry:
-                    entry[key] = _ref(entry[key])
-            if isinstance(entry.get("bind"), dict):
-                entry["bind"] = {param: _ref(ref) for param, ref in entry["bind"].items()}
-        renamed[rename.get(name, name)] = entry
-    return renamed, rename.get(outputs, outputs)
 
 
 def chain_output_paths(base: Union[str, Path], count: int) -> List[Path]:
