@@ -130,19 +130,65 @@ _SOCKET_TYPES = {
 }
 
 
-def _object_socket(category: Optional[str]) -> str:
-    """The object-member socket type for a class's ``@configurable`` category.
+def _object_socket(role: Optional[str], framework: Optional[str] = None) -> str:
+    """The object-member socket type for a role, optionally CLAIMING an engine.
 
-    Object members (model / loss / metric) ride a CATEGORY-QUALIFIED socket —
-    ``RECORDSTREAM_OBJECT:classification_model`` — so ComfyUI's string-equality
-    connection rule enforces compatibility (a ``classification_model`` node docks
-    only into a ``classification_model`` slot, never a loss/segmentation slot).
-    Category-less members (the role-less ``lazy`` infra members optimizer/loader/
+    Object members (model / loss / metric / sink) ride a ROLE-QUALIFIED socket —
+    ``RECORDSTREAM_OBJECT:model`` — so ComfyUI's string-equality connection rule
+    enforces kind compatibility (a model node docks only into a model slot, never a
+    loss slot). Role-less members (the ``lazy`` infra members optimizer/loader/
     lightning, and task-agnostic loggers) keep the bare ``RECORDSTREAM_OBJECT`` type.
     The ``Retag`` adapter node (``nodes.py``) is the deliberate escape hatch that
-    re-types an object to a chosen category.
+    re-types an object to a chosen role.
+
+    A ``framework`` adds the engine as a THIRD segment — but as a comma UNION that
+    also carries the bare role::
+
+        RECORDSTREAM_OBJECT:model:torch,RECORDSTREAM_OBJECT:model
+
+    Both halves of ComfyUI treat a comma type as "compatible if the sets INTERSECT"
+    (``comfy_execution.validation.validate_node_input``; litegraph's
+    ``isValidConnection`` splits on ``,`` too), so the union is what keeps a tagged
+    producer wireable into an UNTAGGED slot and vice versa — exclusion requires two
+    claims, per confluid's framework axis. The union does NOT do the excluding: the
+    engine mismatch is decided by :func:`_validate_node_inputs` on the backend and
+    ``web/framework.js`` on the canvas, both of which READ the claim from this string.
     """
-    return f"{OBJECT_TYPE}:{category}" if category else OBJECT_TYPE
+    if role and framework:
+        return f"{OBJECT_TYPE}:{role}:{framework},{OBJECT_TYPE}:{role}"
+    return f"{OBJECT_TYPE}:{role}" if role else OBJECT_TYPE
+
+
+def _socket_frameworks(socket_type: Any) -> Set[str]:
+    """The engines a socket type CLAIMS — the third segment of each union member.
+
+    An empty set means "makes no claim" (a bare or role-only socket, a non-object
+    socket, or the ``*`` wildcard), which is what makes the rule asymmetric: a
+    claimless side never excludes anything.
+    """
+    if not isinstance(socket_type, str):
+        return set()
+    claims = set()
+    for member in socket_type.split(","):
+        parts = member.strip().split(":")
+        if len(parts) >= 3 and parts[0] == OBJECT_TYPE and parts[2]:
+            claims.add(parts[2])
+    return claims
+
+
+def _frameworks_compatible(received: Any, expected: Any) -> bool:
+    """Whether a wire from ``received`` may land on an ``expected`` slot.
+
+    The rule confluid's framework axis defines and navigaitor already applies:
+    **exclusion requires two claims**. An untagged producer keeps connecting to a
+    tagged slot, and a tagged producer keeps connecting to an untagged slot — only
+    two DIFFERENT declared engines are refused, because those genuinely cannot run
+    together (a ``torch.nn`` loss in a Keras trainer fails far from its cause).
+    """
+    produced, wanted = _socket_frameworks(received), _socket_frameworks(expected)
+    if not produced or not wanted:
+        return True
+    return bool(produced & wanted)
 
 
 def _base_socket_type(socket_type: Any) -> Any:
@@ -198,7 +244,11 @@ _MEMBER_ROLES = {"model", "loss", "metric", "logger"}
 # ``DatasetProcessor.sink`` slot — never a model/loss slot, and vice versa.
 _STRICT_SLOT_ROLES = {
     "model": "model",
+    # BOTH spellings: the Lightning classifier names it `loss_fn`, the Keras one `loss`. Without
+    # the second, the Keras trainer's slot rendered BARE while every registered Keras loss node
+    # output `…:loss` — so no Keras loss could be wired into it at all.
     "loss_fn": "loss",
+    "loss": "loss",
     "metrics": "metric",
     "train_metrics": "metric",
     "val_metrics": "metric",
@@ -255,15 +305,52 @@ def _role_for_class(cls: Any) -> Optional[str]:
     return None
 
 
+# Type → FRAMEWORK inference, the fallback for a class carrying no explicit
+# ``@configurable(framework=…)`` tag. Matched on the FULL ``module.qualname`` of each MRO base —
+# unlike :data:`_TYPE_ROLE_BY_BASE`, which scans bare qualnames and would therefore match a Keras
+# ``Metric`` against torch's. Mirrors navigaitor's ``configs.generate._TYPE_FRAMEWORK_BY_BASE``
+# (streamstudio must NOT import navigaitor — the convention is small and replicated).
+_TYPE_FRAMEWORK_BY_BASE = (
+    ("torch.nn.modules.module.Module", "torch"),
+    ("torchmetrics.metric.Metric", "torch"),
+    ("keras.src.", "keras"),
+    ("flax.nnx.", "jax"),
+    ("tensorflow.python.", "tensorflow"),
+)
+
+
+def _framework_of(cls: Any) -> Optional[str]:
+    """The engine whose API ``cls`` belongs to — explicit tag first, MRO second.
+
+    ``__confluid_framework__`` always wins, for the same reason ``role`` does: a
+    ``register()``-ed builder FUNCTION has no MRO to read at all. Returns ``None`` when
+    nothing claims an engine, which is what keeps an untagged class connecting everywhere.
+    """
+    declared = getattr(cls, "__confluid_framework__", None)
+    if declared:
+        return str(declared)
+    try:
+        bases = [f"{b.__module__}.{b.__qualname__}" for b in inspect.getmro(cls)]
+    except (AttributeError, TypeError):  # pragma: no cover - defensive: non-class callables
+        return None
+    for needle, inferred in _TYPE_FRAMEWORK_BY_BASE:
+        if any(needle in base for base in bases):
+            return inferred
+    return None
+
+
 def _object_socket_for_class(cls: Any) -> str:
     """The object-output socket type for a class: ROLE-qualified for a strict role, else generic.
 
     ``RECORDSTREAM_OBJECT:model`` for a model / loss / metric (task-agnostic — see
     :data:`_QUALIFIED_OBJECT_ROLES`), bare ``RECORDSTREAM_OBJECT`` for everything else (logger / infra /
     untagged). Mirrors the runnable-SLOT side so an object node docks into the matching slot.
+
+    When the class claims an ENGINE the socket carries it too (see :func:`_object_socket`), so a
+    consumer can tell a torch loss from a Keras one.
     """
     role = _role_for_class(cls)
-    return _object_socket(role) if role in _QUALIFIED_OBJECT_ROLES else OBJECT_TYPE
+    return _object_socket(role, _framework_of(cls)) if role in _QUALIFIED_OBJECT_ROLES else OBJECT_TYPE
 
 
 def _infer_member_role(name: str) -> Optional[str]:
@@ -1703,8 +1790,36 @@ def _collect_sources(kwargs: Dict[str, Any]) -> List[Any]:
     return [v for _, v in sorted(indexed)]
 
 
-def _validate_inputs_with_nullable_numerics(cls: Any, input_types: Dict[str, Any]) -> Any:
-    """ComfyUI ``VALIDATE_INPUTS`` for generated nodes that expose a connectable nullable-numeric param.
+def _fallback_compatible(received: Any, expected: Any, strict: bool = False) -> bool:
+    """ComfyUI's ``validate_node_input`` rule, for when ComfyUI itself is not importable.
+
+    It MUST include the comma-UNION case: a socket type may list several alternatives and is
+    compatible when the two sets INTERSECT (litegraph's ``isValidConnection`` splits on ``,``
+    the same way). Object sockets carry exactly such a union — ``…:loss:torch,…:loss`` — so a
+    naive equality fallback would refuse every framework-tagged wire OUTSIDE ComfyUI, making
+    the test suite disagree with production about the one thing it is meant to pin.
+    """
+    if received == expected or "*" in (str(received), str(expected)):
+        return True
+    got = {t.strip() for t in str(received).split(",")}
+    want = {t.strip() for t in str(expected).split(",")}
+    return want.issuperset(got) if strict else bool(got & want)
+
+
+def _validate_node_inputs(cls: Any, input_types: Dict[str, Any]) -> Any:
+    """ComfyUI ``VALIDATE_INPUTS`` for generated nodes — the ONE validator, two rules.
+
+    ComfyUI allows a node exactly one ``VALIDATE_INPUTS``, and declaring an ``input_types``
+    parameter makes it SKIP its built-in type check entirely and defer to us — so both rules that
+    need to override the built-in matcher live here:
+
+    1. **a numeric wire into a nullable-numeric param** (the original reason this exists — see below);
+    2. **the framework rule**: a wire whose producer claims an engine is refused by a slot claiming
+       a DIFFERENT one (:func:`_frameworks_compatible`). The socket strings are comma UNIONS that
+       deliberately INTERSECT (so the canvas draws tagged↔untagged wires), which means ComfyUI's own
+       matcher says yes to a torch loss in a Keras slot — this is where that is caught. The canvas
+       half is ``web/framework.js``, which refuses the same wire as it is dragged; this is the
+       authoritative backstop for a graph loaded from disk or built by other means.
 
     A nullable numeric (``Optional[int/float]=None``) renders as a blank STRING widget (so blank can mean
     None / metadata-fallback) tagged ``NULLABLE_NUMERIC``, and ``web/nullable_numeric_socket.js`` retypes
@@ -1719,9 +1834,7 @@ def _validate_inputs_with_nullable_numerics(cls: Any, input_types: Dict[str, Any
     try:  # ComfyUI's real matcher (only importable inside ComfyUI) — keeps our rules identical to its.
         from comfy_execution.validation import validate_node_input as _compatible
     except Exception:  # pragma: no cover - streamstudio's own tests run without ComfyUI installed
-
-        def _compatible(received: Any, expected: Any, strict: bool = False) -> bool:
-            return received == expected or "*" in (str(received), str(expected))
+        _compatible = _fallback_compatible
 
     declared = {**cls.INPUT_TYPES().get("required", {}), **cls.INPUT_TYPES().get("optional", {})}
     for name, received in (input_types or {}).items():
@@ -1732,6 +1845,13 @@ def _validate_inputs_with_nullable_numerics(cls: Any, input_types: Dict[str, Any
             continue  # the sanctioned numeric-wire-into-nullable-param coercion
         if not isinstance(expected, str):
             continue  # a combo options-list (or unknown) — ComfyUI handles those; don't reject here
+        if not _frameworks_compatible(received, expected):
+            produced = ", ".join(sorted(_socket_frameworks(received)))
+            wanted = ", ".join(sorted(_socket_frameworks(expected)))
+            return (
+                f"{name}: a {produced} object cannot be wired into a {wanted} slot — "
+                f"they are different engines. Use a {wanted} object, or the Retag node to override."
+            )
         if _compatible(received, expected):
             continue
         return f"{name}: received type {received!r} is not compatible with the declared {expected!r}"
@@ -1745,6 +1865,23 @@ def _has_nullable_numeric_input(*input_dicts: Optional[Dict[str, Any]]) -> bool:
             if isinstance(entry, (list, tuple)) and len(entry) > 1 and isinstance(entry[1], dict):
                 if entry[1].get("taidal_widget") == "NULLABLE_NUMERIC":
                     return True
+    return False
+
+
+def _needs_input_validation(*input_dicts: Optional[Dict[str, Any]]) -> bool:
+    """True if this node needs the custom ``VALIDATE_INPUTS`` at all.
+
+    Either rule can require it: a connectable nullable-numeric widget, or ANY object socket —
+    an object slot is where a cross-engine wire can land, and the union socket strings pass
+    ComfyUI's own matcher, so the framework rule has to be applied by us.
+    """
+    if _has_nullable_numeric_input(*input_dicts):
+        return True
+    for inputs in input_dicts:
+        for entry in (inputs or {}).values():
+            socket = entry[0] if isinstance(entry, (list, tuple)) and entry else entry
+            if isinstance(socket, str) and _base_socket_type(socket) == OBJECT_TYPE:
+                return True
     return False
 
 
@@ -1836,12 +1973,12 @@ def _node_class(
     }
     if output_node:
         attrs["OUTPUT_NODE"] = True
-    if _has_nullable_numeric_input(inputs, optional_inputs):
+    if _needs_input_validation(inputs, optional_inputs):
         # A connectable nullable-numeric param is a blank STRING widget retyped to FLOAT/INT on the
         # canvas; this lets ComfyUI accept the numeric wire at Queue (it skips its built-in type check
         # for nodes whose VALIDATE_INPUTS takes `input_types`). Without it the wire draws but Queue
         # fails with "Return type mismatch" (the backend still sees STRING).
-        attrs["VALIDATE_INPUTS"] = classmethod(_validate_inputs_with_nullable_numerics)
+        attrs["VALIDATE_INPUTS"] = classmethod(_validate_node_inputs)
     if return_names is not None:
         attrs["RETURN_NAMES"] = return_names
     if is_random:
@@ -1952,7 +2089,7 @@ def _build_op_node(cls: Callable, name: str, category: str) -> Type:
 
     # Collect any @output properties declared on this op class.
     out_specs = list(output_specs(cast(type, cls)))
-    out_sockets = [_output_socket_type(s["name"], _output_return_anno(cls, s["name"])) for s in out_specs]
+    out_sockets = [_output_socket_type(s["name"], _output_return_anno(cls, s["name"]), cls) for s in out_specs]
 
     def execute(self: Any, record: Any = None, **kwargs: Any) -> Tuple[Any, ...]:
         if op_list_params:
@@ -2021,7 +2158,7 @@ def _build_model_node(cls: Callable, name: str, category: str) -> Type:
     output wires straight in. ``execute`` ``setattr``s each wired model post-construction (the confluid
     paradigm) — mirroring how :func:`_build_op_node` injects single-op ``RECORDSTREAM_OP`` values.
     """
-    model_socket = _object_socket("model")
+    model_socket = _object_socket("model", _framework_of(cls))
     model_in_params = _model_params(cls)  # ctor params that take a WIRED model (RECORDSTREAM_OBJECT:model)
     # Config widgets EXCLUDING the wired model params (they ride RECORDSTREAM_OBJECT:model input sockets).
     required, nullable_opts, _split_map = _build_config_inputs(
@@ -2031,7 +2168,7 @@ def _build_model_node(cls: Callable, name: str, category: str) -> Type:
     for pname in model_in_params:
         optional[pname] = (model_socket,)  # a wired model input (a Loader node's model output docks here)
     out_specs = list(output_specs(cast(type, cls)))
-    out_sockets = [_output_socket_type(s["name"], _output_return_anno(cls, s["name"])) for s in out_specs]
+    out_sockets = [_output_socket_type(s["name"], _output_return_anno(cls, s["name"]), cls) for s in out_specs]
 
     def execute(self: Any, record: Any = None, **kwargs: Any) -> Tuple[Any, ...]:
         # Post-construction injection (the confluid paradigm) of each wired RECORDSTREAM_OBJECT:model value.
@@ -2088,7 +2225,7 @@ def _build_value_node(cls: Callable, name: str, category: str) -> Type:
     optional: Dict[str, Any] = dict(nullable_opts)
 
     out_specs = list(output_specs(cast(type, cls)))
-    out_sockets = [_output_socket_type(s["name"], _output_return_anno(cls, s["name"])) for s in out_specs]
+    out_sockets = [_output_socket_type(s["name"], _output_return_anno(cls, s["name"]), cls) for s in out_specs]
 
     def execute(self: Any, **kwargs: Any) -> Tuple[Any, ...]:
         obj = cls(**_coerce_kwargs(cls, kwargs))
@@ -2263,7 +2400,7 @@ def _output_return_anno(cls: Any, prop_name: str) -> Any:
         return Any
 
 
-def _output_socket_type(prop_name: str, anno: Any) -> str:
+def _output_socket_type(prop_name: str, anno: Any, owner: Any = None) -> str:
     """ComfyUI socket type for a runnable's declared ``@output`` (every output becomes a wireable socket).
 
     Since a runnable node RUNS on execute (:func:`_build_runnable_node`), its ``@output`` sockets carry
@@ -2291,7 +2428,10 @@ def _output_socket_type(prop_name: str, anno: Any) -> str:
     if get_origin(anno) in (dict, list, set, tuple):
         return "STRING"  # container -> JSON STRING socket (wire into a native Show Text node)
     role = _infer_member_role(prop_name)
-    return _object_socket(role) if role in _QUALIFIED_OBJECT_ROLES else OBJECT_TYPE
+    # The engine claim comes from the DECLARING class: a Keras trainer's `trained_model` is a
+    # Keras model, so it must not dock into a torch evaluator's model slot.
+    framework = _framework_of(owner) if owner is not None else None
+    return _object_socket(role, framework) if role in _QUALIFIED_OBJECT_ROLES else OBJECT_TYPE
 
 
 def _coerce_output_value(value: Any, socket_type: str) -> Any:
@@ -2562,6 +2702,9 @@ def _build_runnable_node(cls: Callable, name: str, category: str) -> Type:
     # AGNOSTIC; task survives only as palette/navigaitor guidance). Role-less slots (optimizer /
     # loader / lightning / logger) stay generic ``RECORDSTREAM_OBJECT``. See :data:`_STRICT_SLOT_ROLES`
     # / :func:`_object_socket`. Mirrors the object-NODE output side (:func:`_object_socket_for_class`).
+    # ...and it additionally CLAIMS this runnable's engine, so a Keras trainer's loss slot refuses a
+    # torch loss (and keeps accepting an untagged one — exclusion needs two claims).
+    runnable_framework = _framework_of(cls)
     socket_members: Dict[str, str] = {}  # member name -> SOURCE_TYPE | OBJECT_TYPE[:role] | RUNNABLE_TYPE
     runnable_list_members: List[str] = []  # member name -> a dynamic <name>_N RECORDSTREAM_RUNNABLE family
     for fname, finfo in fields.items():
@@ -2576,7 +2719,7 @@ def _build_runnable_node(cls: Callable, name: str, category: str) -> Type:
             continue  # scalar -> widget (handled by _build_config_inputs below)
         else:
             role = _STRICT_SLOT_ROLES.get(fname)
-            socket_members[fname] = _object_socket(role) if role else OBJECT_TYPE
+            socket_members[fname] = _object_socket(role, runnable_framework) if role else OBJECT_TYPE
 
     # Scalars stay widgets; skip the socket members + runnable-list members (the dynamic <name>_N
     # families are seeded below, never a widget) — any non-ctor body slot _build_config_inputs
@@ -2599,7 +2742,7 @@ def _build_runnable_node(cls: Callable, name: str, category: str) -> Type:
     # EVERY declared @output -> a typed output socket (mapped by _output_socket_type; containers ride a
     # STRING/JSON socket). The node runs before reading them, so they carry live values.
     out_specs = list(output_specs(runnable_cls))
-    out_sockets = [_output_socket_type(s["name"], _output_return_anno(cls, s["name"])) for s in out_specs]
+    out_sockets = [_output_socket_type(s["name"], _output_return_anno(cls, s["name"]), cls) for s in out_specs]
     extra_types = tuple(out_sockets)
     extra_names = tuple(s["name"] for s in out_specs)
 

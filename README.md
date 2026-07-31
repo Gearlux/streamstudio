@@ -56,6 +56,8 @@ Taidal nodes then appear in ComfyUI's *Add Node* menu grouped by what they ARE, 
 
 Object sockets (model / loss / metric) are **role-qualified and task-agnostic**: a classification model and a segmentation model both carry `RECORDSTREAM_OBJECT:model`, so a model docks into *any* trainer's `model` slot — the role still stops you wiring a loss into a model slot. The **Retag** node re-stamps an object's role to force a connection when you need it.
 
+They are also **engine-aware**. A class that declares which framework's API it belongs to gets that engine on its socket, and a cross-engine wire is refused as you drag it — a `torch.nn` loss will not dock into a Keras trainer, because it cannot run there. The guard is deliberately one-sided: it fires only when *both* ends declare an engine, so an object from a library that says nothing about frameworks still connects anywhere it did before. Retag remains the override.
+
 A model node can come from a **builder function**, not just a class. Many libraries ship their models as factory functions — torchvision's detectors are `fasterrcnn_resnet50_fpn(...)`, `ssdlite320_mobilenet_v3_large(...)`, etc. These are registered (`raidar.configurables`, with `role="model"`), so each appears under `Taidal/Model/Detection` as an object node whose widgets (`num_classes`, `weights_backbone`, …) are read straight from the function's signature. Wire its **`class`** output into a detection **Trainer**'s `model` slot — because the node is lazy, the trainer injects the dataset-derived `num_classes` at run time, so you can leave that widget blank.
 
 ### Custom nodes: ComfyUI-Manager + extras
