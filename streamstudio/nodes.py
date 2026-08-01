@@ -1273,11 +1273,18 @@ def compile_subgraph_ops(prompt: Any, unique_id: Any, node_mappings: Optional[Di
     The engine behind :class:`SubgraphOpExtractNode`. Given ComfyUI's hidden ``PROMPT`` (the
     flat API graph — native subgraph instances are already expanded into their inner nodes by
     the frontend, so the inner op DAG is present) and the terminator's own ``UNIQUE_ID``, it
-    runs the ops-export DAG→sequential compiler (:func:`streamstudio.export.export_ops_yaml`) in
-    **target mode** over the terminator's record-ancestor cone — exactly the ops that compute
-    the record wired into the terminator, fan-out/``Mix`` fan-in flattened with context
-    Save/Use — and materializes the resulting op-list into live callables (the same
-    ``confluid.load`` → ``materialize`` path :meth:`recordstream.core.stream.Stream.from_ops_yaml` uses).
+    runs the canvas compiler (:func:`streamstudio.export.export_flow_yamls`) in **target mode**
+    over the terminator's record-ancestor cone — exactly the ops that compute the record wired
+    into the terminator — and materializes the resulting steps into live callables.
+
+    The document is loaded WHOLE (``confluid.load``) before the steps are built, so a hoisted
+    ``constant=True`` node's dotted ``!ref:`` resolves against the same document, then
+    :func:`recordstream.flow.parse_flow` builds each step's op.
+
+    **A ``Pipeline`` is a LINEAR op list**, so a BRANCHY cone cannot become one — a fork or a
+    ``Mix`` fan-in raises :class:`~streamstudio.export.UnsupportedTopologyError` naming the flow
+    export instead. That is the same boundary the engine draws (``FlowGraph.to_stream`` raises
+    on a branchy graph); a straight chain is the only shape an op LIST can express.
 
     Self-contained by design: no widget snapshot and no compile route are needed because the
     flat prompt already carries the whole inner DAG. Returns ``[]`` for an unwired terminator
@@ -1292,8 +1299,9 @@ def compile_subgraph_ops(prompt: Any, unique_id: Any, node_mappings: Optional[Di
     if not prompt or unique_id is None:
         return []
     import confluid
+    from recordstream.flow import parse_flow
 
-    from streamstudio.export import export_ops_yaml
+    from streamstudio.export import export_flow_yamls
 
     mappings: Dict[str, Any]
     if node_mappings is not None:
@@ -1304,10 +1312,36 @@ def compile_subgraph_ops(prompt: Any, unique_id: Any, node_mappings: Optional[Di
         mappings = NODE_CLASS_MAPPINGS
     # Target mode: the cone of the terminator is precisely the inner pipeline (the terminator
     # itself is a non-op boundary, so it is never scheduled — only its ancestors compile).
-    yaml_doc = export_ops_yaml(prompt, mappings, target_ids=[str(unique_id)])
-    loaded = confluid.load(yaml_doc)
-    raw_ops = loaded.get("ops", []) if isinstance(loaded, dict) else []
-    return list(confluid.materialize(raw_ops))
+    docs = export_flow_yamls(prompt, mappings, target_ids=[str(unique_id)])
+    if not docs:
+        return []
+    loaded = confluid.load(docs[0])
+    flow_map = loaded.get("flow") or {} if isinstance(loaded, dict) else {}
+    if not flow_map:
+        return []
+    steps, _outputs = parse_flow(flow_map, str(loaded.get("outputs", "") or ""))
+    _require_linear_cone(steps)
+    return [step.op for step in steps if step.op is not None]
+
+
+def _require_linear_cone(steps: List[Any]) -> None:
+    """Raise unless ``steps`` is a straight chain — the only shape a ``Pipeline`` can hold.
+
+    The compiler names every step explicitly (``from: node_<id>``), so "linear" here is
+    "each step reads the one before it", not ``recordstream.flow.is_linear``'s stricter
+    "no step names its input at all".
+    """
+    from streamstudio.export import UnsupportedTopologyError
+
+    names = [s.name for s in steps]
+    for i, step in enumerate(steps):
+        branchy = bool(step.merge_from) or (step.from_ is not None and i > 0 and step.from_ != names[i - 1])
+        if branchy or (i == 0 and step.merge_from):
+            raise UnsupportedTopologyError(
+                f"The op cone feeding this 'Extract as Op' terminator is branchy (at step {step.name!r}), "
+                "and a Pipeline holds a straight op LIST — it cannot express a fork or a Mix fan-in. "
+                "Export the canvas as a `flow:` document and run it with FlowGraph instead."
+            )
 
 
 class SubgraphOpExtractNode:

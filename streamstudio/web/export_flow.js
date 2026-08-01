@@ -1,19 +1,18 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-console.log("ComfyStream: Loaded Taidal.ExportOps extension");
+console.log("ComfyStream: Loaded Taidal.ExportFlow extension");
 
-// Canvas-side companion to the /taidal/export_ops + /taidal/export_ops_graph backend routes + the
-// `streamstudio export` CLI. The commands export the current graph's OPS (the op-kind nodes + the Mix
-// fan-in, dropping the source + Walk/Extract/viewer adapters), differing only in the OUTPUT format:
-//   * → Confluid YAML — COMPILE the op DAG to sequential Confluid op-list YAML(s) (auto Save/Use/Mix
-//     context ops + constant hoisting); ONE file per disconnected chain (ops_1.yaml … ops_N.yaml).
-//     Reattach to any source via Stream.from_ops_yaml / confluid.materialize(confluid.load(p)["ops"]).
-//   * → Flow YAML     — the READABLE named-step `flow:` document (same compile, lifted via
-//     recordstream.flow.from_ops; the CLI twin is `streamstudio export --flow`). Consume with
-//     FlowGraph.from_yaml (native engine) or Stream.from_flow_yaml (lowered to the serial form) —
-//     the two forms convert both ways with execution parity. Downloaded as flow.yaml.
-//   * → Graph         — extract the RAW op DAG *as drawn* into ONE ComfyUI workflow.json (no
+// Canvas-side companion to the /taidal/export_flow + /taidal/export_ops_graph backend routes and
+// the `streamstudio export` CLI. Both commands export the current graph's OPS (the op-kind nodes +
+// the Mix fan-in, dropping the source + Walk/Extract/viewer adapters), differing in OUTPUT format:
+//   * → Flow YAML — COMPILE the op DAG to Confluid `flow:` document(s): named steps whose
+//     `from:` / `merge_from:` / `bind:` keys ARE the wires you drew, plus constant hoisting. ONE
+//     file per disconnected component (flow_1.yaml … flow_N.yaml). Consume with
+//     FlowGraph.from_yaml(path). This is the ONLY interchange format — the flat serial `ops:`
+//     export was removed 2026-08-01 (it could not express a fork, and the context ops that used to
+//     manufacture one were deleted from recordstream with the lowering pass).
+//   * → Graph     — extract the RAW op DAG *as drawn* into ONE ComfyUI workflow.json (no
 //     compilation — positions/widgets/wiring preserved), for saving or sharing the op subgraph.
 //     Downloaded as ops_graph.json.
 
@@ -29,7 +28,7 @@ function downloadBlob(text, filename, mime) {
     URL.revokeObjectURL(url);
 }
 
-async function exportOps(asFlow) {
+async function exportFlow() {
     // graphToPrompt() returns { workflow, output }: `output` is the API-format prompt the backend
     // compiler consumes (same shape as ComfyUI "Save (API Format)"); `workflow` is the full UI
     // graph — node properties + subgraph definitions included. The export-skip / export-target
@@ -39,20 +38,20 @@ async function exportOps(asFlow) {
     // subgraph is now honoured (the old JS collector only saw top-level nodes).
     const { output, workflow } = await app.graphToPrompt();
     try {
-        const res = await api.fetchApi("/taidal/export_ops", {
+        const res = await api.fetchApi("/taidal/export_flow", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ prompt: output, workflow, flow: !!asFlow }),
+            body: JSON.stringify({ prompt: output, workflow }),
         });
         const data = await res.json();
         if (!res.ok) {
             // 400 → UnsupportedTopologyError (actionable: fan-in, cycle, link-driven widget…).
-            alert("Export ops failed:\n\n" + (data.error || res.statusText));
+            alert("Export flow failed:\n\n" + (data.error || res.statusText));
             return;
         }
-        // One doc per independent op chain (`yamls`; `yaml` is the older single-doc field).
+        // One doc per independent op component (`yamls`; `yaml` is the older single-doc field).
         const docs = data.yamls || [data.yaml];
-        const stem = asFlow ? "flow" : "ops";
+        const stem = "flow";
         if (docs.length === 1) {
             downloadBlob(docs[0], `${stem}.yaml`, "text/yaml");
         } else {
@@ -97,17 +96,12 @@ async function exportOpsGraph(flatten) {
 }
 
 app.registerExtension({
-    name: "Taidal.ExportOps",
+    name: "Taidal.ExportFlow",
     commands: [
-        {
-            id: "taidal.exportOps",
-            label: "Export Taidal Ops → Confluid YAML",
-            function: () => exportOps(false),
-        },
         {
             id: "taidal.exportFlow",
             label: "Export Taidal Ops → Flow YAML",
-            function: () => exportOps(true),
+            function: () => exportFlow(),
         },
         {
             id: "taidal.exportOpsGraphSubgraphs",
@@ -125,7 +119,6 @@ app.registerExtension({
         {
             path: ["Taidal"],
             commands: [
-                "taidal.exportOps",
                 "taidal.exportFlow",
                 "taidal.exportOpsGraphSubgraphs",
                 "taidal.exportOpsGraphFlat",

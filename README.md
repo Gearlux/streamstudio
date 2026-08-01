@@ -262,7 +262,7 @@ Threshold    ──op──→ (target)      ▲
 Walk ────────────────────record────┘
 ```
 
-Per record, the compute chain runs on a **side branch** (its transformations are discarded — the original record continues), the `source`-keyed entry of that branch's final record becomes the value, `target.low_level` is set to it, and `target` is applied to the original record — replacing the *Extract → Math → widget-wire* pattern with something the ops-export can serialize.
+Per record, the compute chain runs on a **side branch** (its transformations are discarded — the original record continues), the `source`-keyed entry of that branch's final record becomes the value, `target.low_level` is set to it, and `target` is applied to the original record — replacing the *Extract → Math → widget-wire* pattern with something the flow export can serialize.
 
 > **Known gap.** The exporters currently emit `ConfigureOp(ops=…, target=…, param=…)` without the `source=` record key the op now requires, so an exported value chain raises `ConfigureOp: 'source' … is required` when the YAML is run. Set `source` by hand on the exported document until the emitters are ported (tracked in the workspace `TASKS.md`); building and running the node **on the canvas** is unaffected.
 
@@ -295,55 +295,74 @@ Inside a **ComfyUI native subgraph**, build the inner pipeline starting from the
 - **an Op** — wire that output into any op slot (`Parallel`/`Pipeline`/`Enable` `op_N`, `ConfigureOp.target`/`RandomApply.op`, or another op-list); the subgraph *is* the transformation, reusable across the canvas;
 - **a graph** — run a record through the subgraph's record boundary inline (the normal native-subgraph use).
 
-The DAG→sequential translation (fan-out → auto `Save`/`Use` context cells, `Mix` → fan-in) is the same compiler used by the ops-export below, so a subgraph-Op exports faithfully: a consumer fed by it embeds a nested `!class:…Pipeline` whose `transforms:` is the flattened inner pipeline. **Extract as Op** also works on the flat canvas (no subgraph required) — it always compiles its own upstream cone.
+The DAG→sequential translation (fan-out → auto `Save`/`Use` context cells, `Mix` → fan-in) is the same compiler used by the flow export below, so a subgraph-Op exports faithfully: a consumer fed by it embeds a nested `!class:…Pipeline` whose `transforms:` is the flattened inner pipeline. **Extract as Op** also works on the flat canvas (no subgraph required) — it always compiles its own upstream cone.
 
 > **How it works (no extra wiring).** The node is self-contained: at run time it reads ComfyUI's hidden `PROMPT` (the flat graph — native subgraphs are already expanded by the frontend, so the inner op DAG is present) plus its own `UNIQUE_ID`, and compiles its record-ancestor cone via `streamstudio.export`. No snapshot widget, no extra route. An unwired terminator is the identity (`Pipeline([])`).
 >
 > **Why the `record` input is lazy.** Because the node compiles from the static `PROMPT` and never reads the runtime record, its `record` input is a **lazy** ComfyUI input — running the graph (e.g. Queueing a `DatasetProcessor` fed by the Stream) does **not** execute the op chain feeding it. That matters: when you use a subgraph purely as an Op, the op chain has **no source on the canvas** (the source feeds the `Stream` directly, and the ops arrive via the compiled `Pipeline`), so forcing it to run would push a `None` record through the head op and crash a downstream viewer or value-chain `Extract from Record`. The lazy input avoids that entirely. Running a record *through* the subgraph's boundary (using it as a graph, not an Op) is unaffected.
 >
-> **Both exporters compile it.** The *ops-export* (next section) embeds a subgraph-Op as a nested `Pipeline` in its consumer. The **whole-graph** export (*Export Graph → Taidal YAML*) now compiles it too: when the terminator feeds a `Stream`'s op list, its cone is compiled (same DAG→sequential compiler, same constant-hoisting) and **spliced inline** into the Stream's `ops:` — a sequential op-list makes a nested chain equivalent to its ops spliced, and inline ops survive `recordstream run`'s deep-flow where a nested deferred chain marker would not. An **unwired** terminator (used as a graph, or floating) has nothing to compile and is skipped-with-comment as before.
+> **Both exporters compile it.** The *flow export* (next section) embeds a subgraph-Op as a nested `Pipeline` in its consumer. The **whole-graph** export (*Export Graph → Taidal YAML*) now compiles it too: when the terminator feeds a `Stream`'s op list, its cone is compiled (same DAG→sequential compiler, same constant-hoisting) and **spliced inline** into the Stream's `ops:` — a sequential op-list makes a nested chain equivalent to its ops spliced, and inline ops survive `recordstream run`'s deep-flow where a nested deferred chain marker would not. An **unwired** terminator (used as a graph, or floating) has nothing to compile and is skipped-with-comment as before.
 
-## Exporting ops to a Stream
+## Exporting the canvas to a `flow:` document
 
-The **op** half of a canvas graph (everything between the source and the viewer) can be exported back to a Confluid YAML op-list and reattached to *any* source in code — the inverse of how the canvas builds a pipeline. The source and the Walk/Extract adapter nodes are dropped; the op **DAG** (including fan-out and the *Mix Records* fan-in adapter) is compiled into **one flat, sequential op-list per connected component** — see *DAG → sequential* below.
+The **op** half of a canvas graph (everything between the source and the viewer) exports to a
+Confluid **`flow:` document** and reattaches to *any* source in code — the inverse of how the
+canvas builds a pipeline. The source and the Walk/Extract adapter nodes are dropped; the op
+**DAG** (including fan-out and the *Mix Records* fan-in adapter) compiles into **one flow
+document per connected component**, where the wires you drew ARE the step grammar.
 
-Two equivalent entry points (both call the same compiler, `streamstudio.export.export_ops_yamls`):
+> **`flow:` is the only interchange format (2026-08-01).** The flat serial `ops:` export was
+> removed: it could not express a fork, and the per-record context ops that used to manufacture
+> a flat spelling for a branchy graph were deleted from recordstream with the lowering pass. The
+> canvas IS a graph, so it now compiles AS one.
 
-- **On the canvas:** the **Taidal → "Export Taidal Ops → Confluid YAML"** menu command (`web/export_ops.js`) POSTs the current graph to the `/taidal/export_ops` route and downloads `ops.yaml` — or, when the canvas holds several disconnected op chains, **one file per chain** (`ops_1.yaml` … `ops_N.yaml`; the browser may ask once to allow multiple downloads).
+Two equivalent entry points (both call the same compiler, `streamstudio.export.export_flow_yamls`):
+
+- **On the canvas:** the **Taidal → "Export Taidal Ops → Flow YAML"** menu command
+  (`web/export_flow.js`) POSTs the current graph to the `/taidal/export_flow` route and downloads
+  `flow.yaml` — or, when the canvas holds several disconnected op components, **one file per
+  component** (`flow_1.yaml` … `flow_N.yaml`; the browser may ask once to allow multiple downloads).
 - **Offline CLI:** export a saved **API-format** graph (ComfyUI dev-mode *Save (API Format)*):
 
   ```bash
-  streamstudio export graph.json -o ops.yaml      # omit -o to write YAML to stdout
+  streamstudio export graph.json -o flow.yaml     # omit -o to write YAML to stdout
   ```
 
-  This works without a running ComfyUI — importing `streamstudio` populates the node registry via entry-point discovery. With several disconnected chains, `-o ops.yaml` writes `ops_1.yaml` … `ops_N.yaml` (one file per chain); without `-o` the chains stream to stdout as `---`-separated YAML documents.
+  This works without a running ComfyUI — importing `streamstudio` populates the node registry via
+  entry-point discovery. With several disconnected components, `-o flow.yaml` writes
+  `flow_1.yaml` … `flow_N.yaml`; without `-o` they stream to stdout as `---`-separated documents.
 
-The result is a `{ops: [...]}` document of `!class:…()` markers, e.g.:
+The result is a `{flow: {...}, outputs: …}` document of named steps, e.g.:
 
 ```yaml
-ops:
-- !class:recordstream.ops.torch.ToTensor()
-  normalize: true
-- !class:recordstream.ops.numpy.Threshold()
-  low_level: 0.5
-  low_op: '>='
-  output: mask
+flow:
+  node_1: !class:recordstream.ops.torch.ToTensor()
+    normalize: true
+  node_2: !class:recordstream.ops.numpy.Threshold()
+    low_level: 0.5
+    low_op: '>='
+    output: mask
+outputs: node_2
 ```
+
+Step names are the canvas node ids, so a step in the document points at the node that produced
+it. A fork becomes `from:` (the step naming an earlier step as its input), a *Mix Records* fan-in
+becomes `merge_from:`, and an op-`@output` wired into a later op's param becomes `bind:`.
 
 Reattach it to your own source:
 
 ```python
-from recordstream import Stream
+from recordstream import FlowGraph
 from recordstream.sources import HuggingFaceSource
 
-stream = Stream.from_ops_yaml("ops.yaml", source=HuggingFaceSource(path="ylecun/mnist"))
-# or, equivalently, the manual form:
-#   import confluid
-#   ops = confluid.materialize(confluid.load("ops.yaml")["ops"])
-#   stream = Stream(source=my_source, ops=ops)
+graph = FlowGraph.from_yaml("flow.yaml")
+graph.source = HuggingFaceSource(path="ylecun/mnist")
+for record in graph:
+    ...
 ```
 
-> `Stream.from_ops_yaml` **materializes** the markers before attaching them: `confluid.load` leaves `!class:` markers nested under a mapping key deferred, and `Stream` refuses to iterate deferred markers by design — so a plain `load(...)["ops"]` is not enough. Use the helper (or `confluid.materialize`).
+A **linear** flow document also converts to a `Stream` (`graph.to_stream()`) if you want the
+dataset surface; a branchy one raises, because a `Stream`'s op list cannot express a fork.
 
 ### DAG → sequential
 
@@ -385,33 +404,37 @@ ops:
 
 Three ways to keep canvas plumbing out of the YAML:
 
-- **The export-skip mark — "runs on canvas, excluded from export".** Right-click any node → **"Taidal: exclude from export"** (`web/export_skip.js`). The node dims AND gets a red **NOT EXPORTED** badge on its title bar (drawn from the property every frame, so it survives reloads and color edits); the mark is `properties["taidal_export"] = "skip"` — persisted in the saved workflow. On export, the marked node and **everything data-downstream of it** (record wires, Mix arguments) are left out, with a note in the document's comment block. The closure is **forward-only**: it prunes the nodes *behind* the mark, never the ones before it — marking the node right after a Mix exports the full pipeline up to and including the Mix. To drop an entire side branch (a preview spectrogram and the ops feeding it), mark the branch's **head**. Config value nodes feeding *only* excluded nodes through widget wires don't linger: the ops-export folds constants consumer-driven (no surviving consumer → no hoist), and the whole-graph export prunes such non-record feeders explicitly. This is the tool for visualization helpers (`RenderSignalPlot`, preview branches, `RenderOverlays` tails): they keep executing on the canvas, but the exported pipeline stops where the marks start. Marking a **subgraph instance** excludes the whole instance, and a mark placed on a node **inside** a subgraph is honoured too — the marks are read in Python from the posted workflow (`export.collect_export_marks`), which sees nodes inside subgraph definitions (the browser collector used to miss them). Toggle again ("Taidal: include in export") to restore.
-- **The export-target mark — "export exactly what computes THIS".** Right-click → **"Taidal: set as export target"** (teal **EXPORT TARGET** badge; mutually exclusive with the skip mark per node). When any target is set, the selection inverts from opt-out to opt-in: the ops-export emits **one document per target**, each containing exactly the ops in that target's data **ancestor cone** (the target is the final op) — side branches and viewer helpers simply aren't scheduled, no per-helper skip marks needed. On the impairments graph, targeting the *Mix Records* node exports the production pipeline and drops all three preview branches in one move. The whole-graph export restricts its op surface to the union of the target cones (`outside the export-target cone` in the comment block). CLI twin: `streamstudio export graph.json --target 60` (repeatable). Skip and target compose naturally: the forward-only skip closure trims nodes *after* its mark, the cone selects the nodes computing the target — marking the node after a target as skip still exports the full cone. A skip mark placed directly **on** a node inside a target's cone contradicts the target (it's needed to compute it) and errors — clear one of the two marks. A target placed on a node **inside a subgraph** works the same: the mark is read from the posted workflow and resolved to the expanded prompt node (`371` → `378:368:371`), so you can target a node within a *Spectral Analysis* / *Spectrogram* subgraph and export exactly its ancestor cone.
+- **The export-skip mark — "runs on canvas, excluded from export".** Right-click any node → **"Taidal: exclude from export"** (`web/export_skip.js`). The node dims AND gets a red **NOT EXPORTED** badge on its title bar (drawn from the property every frame, so it survives reloads and color edits); the mark is `properties["taidal_export"] = "skip"` — persisted in the saved workflow. On export, the marked node and **everything data-downstream of it** (record wires, Mix arguments) are left out, with a note in the document's comment block. The closure is **forward-only**: it prunes the nodes *behind* the mark, never the ones before it — marking the node right after a Mix exports the full pipeline up to and including the Mix. To drop an entire side branch (a preview spectrogram and the ops feeding it), mark the branch's **head**. Config value nodes feeding *only* excluded nodes through widget wires don't linger: the flow export folds constants consumer-driven (no surviving consumer → no hoist), and the whole-graph export prunes such non-record feeders explicitly. This is the tool for visualization helpers (`RenderSignalPlot`, preview branches, `RenderOverlays` tails): they keep executing on the canvas, but the exported pipeline stops where the marks start. Marking a **subgraph instance** excludes the whole instance, and a mark placed on a node **inside** a subgraph is honoured too — the marks are read in Python from the posted workflow (`export.collect_export_marks`), which sees nodes inside subgraph definitions (the browser collector used to miss them). Toggle again ("Taidal: include in export") to restore.
+- **The export-target mark — "export exactly what computes THIS".** Right-click → **"Taidal: set as export target"** (teal **EXPORT TARGET** badge; mutually exclusive with the skip mark per node). When any target is set, the selection inverts from opt-out to opt-in: the flow export emits **one document per target**, each containing exactly the ops in that target's data **ancestor cone** (the target is the final op) — side branches and viewer helpers simply aren't scheduled, no per-helper skip marks needed. On the impairments graph, targeting the *Mix Records* node exports the production pipeline and drops all three preview branches in one move. The whole-graph export restricts its op surface to the union of the target cones (`outside the export-target cone` in the comment block). CLI twin: `streamstudio export graph.json --target 60` (repeatable). Skip and target compose naturally: the forward-only skip closure trims nodes *after* its mark, the cone selects the nodes computing the target — marking the node after a target as skip still exports the full cone. A skip mark placed directly **on** a node inside a target's cone contradicts the target (it's needed to compute it) and errors — clear one of the two marks. A target placed on a node **inside a subgraph** works the same: the mark is read from the posted workflow and resolved to the expanded prompt node (`371` → `378:368:371`), so you can target a node within a *Spectral Analysis* / *Spectrogram* subgraph and export exactly its ancestor cone.
 - **ComfyUI mute (Ctrl+M) / bypass (Ctrl+B)** — the native modes already work: the frontend drops muted nodes and reroutes bypassed ones *before* the API prompt reaches the exporter, so a muted branch never exports. Unlike the mark, these also stop the node from running on the canvas.
 - **Offline CLI**: an API-format file carries no node properties, so name the ids explicitly — `streamstudio export graph.json --skip 87 --skip 61` / `--target 60` (both repeatable). Each id is matched against the expanded prompt path by **segment**, so a subgraph-instance id excludes its whole subtree and a subgraph-**inner** id like `--target 371` resolves to its expanded node (`378:368:371`). (The canvas button collects marks automatically — Python reads them from the workflow.)
 
-The whole-graph export (**Export Graph → Taidal YAML**) honors the same mark: marked nodes (and their record-descendants) land in the skipped-nodes comment block instead of the config. Nodes marked *inside* a subgraph definition are honored there too; marking a subgraph *instance* is currently ops-export only.
+The whole-graph export (**Export Graph → Taidal YAML**) honors the same mark: marked nodes (and their record-descendants) land in the skipped-nodes comment block instead of the config. Nodes marked *inside* a subgraph definition are honored there too; marking a subgraph *instance* is currently flow-export only.
 
-**Still unsupported** (`UnsupportedTopologyError`, HTTP 400 from the route): cycles, an unresolvable op node, the *Compose Record* adapter (its "metadata from C only" semantics needs a metadata stash/restore — follow-up), and a component merging **distinct record streams** (two different sources fanning into one Mix — a sequential op-list carries exactly one stream; use `JointStream` by hand). The strict single-component API forms `compile_ops` / `export_ops_yaml` additionally reject a multi-component graph — use `compile_op_chains` / `export_ops_yamls` for the per-component behaviour.
+**Still unsupported** (`UnsupportedTopologyError`, HTTP 400 from the route): cycles, an unresolvable op node, the *Compose Record* adapter (its "metadata from C only" semantics needs a metadata stash/restore — follow-up), and a component merging **distinct record streams** (two different sources fanning into one Mix — one document carries exactly one stream; use `JointStream` by hand).
 
 **Approximations** (documented, deliberate): a metadata-only Mix (input==target==metadata) is discarded on export and not recovered on import.
 
-### Importing an `ops.yaml` back to the canvas
+### Importing a `flow.yaml` back to the canvas
 
-The same `ops.yaml` round-trips back to a connected graph — the **inverse** of the DAG→sequential compiler. Use **Taidal → "Import Taidal YAML → Graph"** on the canvas, or the offline CLI:
+A flow document round-trips back to a connected graph — the **inverse** of the canvas compiler.
+Use **Taidal → "Import Taidal YAML → Graph"** on the canvas, or the offline CLI:
 
 ```bash
-streamstudio import ops.yaml -o workflow.json     # then drag workflow.json onto the canvas
+streamstudio import flow.yaml -o workflow.json    # then drag workflow.json onto the canvas
 ```
 
-`streamstudio import` auto-detects an ops-export document (a top-level `ops:` list) and rebuilds the op graph:
+`streamstudio import` auto-detects a flow-export document (a top-level `flow:` step mapping) and
+rebuilds the op graph: each step becomes a node wired from the step before it, a hoisted
+`constant=True` value node is placed and its dotted `!ref:` consumers re-wired, and dead-end taps
+are tinted.
 
-- **The sequential op-list is replayed into real wiring.** Each op's `record` input is reconnected to the live predecessor; an op restored to an earlier node becomes a **fan-out** of it. A **`Mix Records`** fan-in is *rebuilt* (the export erased it) by tracking the `input` / `target` / `metadata` lineages separately: when a one-shot side branch leaves different metadata on the bus and the input/target are restored to a fork — the impairments pattern where a cropping op's input/target merge with the region-detection branch's `predicted_regions` — a `Mix(input←fork, target←fork, metadata←branch tail)` is reconstructed. (A branch that was itself stashed for a *later* Mix is a plain fan-out restart and does **not** spawn a spurious Mix.)
-- **Auto-inserted context ops are absorbed** — a `Save`/`Use`/`MergeFields` over namespaced `__taidal_cell_*` cells is consumed into fan-out / Mix wiring, never placed as a node. A **user**-named `Save`/`Use` (no namespace prefix) — like any `Stash*Op` — is a real pipeline op and is **kept**.
-- **Hoisted `constant=True` value nodes** (e.g. `ImpairmentsTxConfig`) are placed and their dotted `!ref:<name>.<output>` consumers are re-wired from the value node's output.
-- **Dead-end taps are coloured** — a record-chain op whose own record output feeds nothing, excluding the pipeline's final output. With Mix-rebuild a re-joining branch feeds a Mix (so it isn't a dead-end); colouring is the residual for a genuinely unconsumed branch.
-
-The source is intentionally left unattached (the ops-doc contract — wire your own `Source → Walk` into the head op). **Lossy point carried over from the export** (documented): a metadata-only `Mix` (input==target==metadata, no divergence) the exporter already discarded is not recovered. `--as group` wraps the result in one box; `--as subgraph` degrades to `graph` for an ops-doc (no natural boundary inputs). Backed by `streamstudio.graphio.ops_yaml_to_workflow`.
+The source is intentionally left unattached (the export contract — wire your own `Source → Walk`
+into the head op). **A BRANCHY flow document does not import yet**: the replay walks a sequence,
+while a forking/merging step graph needs a node-per-step walk (tracked in `TASKS.md`) — a linear
+document imports normally. `--as group` wraps the result in one box; `--as subgraph` degrades to
+`graph` (a flow doc has no natural boundary inputs). Backed by
+`streamstudio.graphio.flow_yaml_to_workflow`.
 
 ## Importing & exporting whole pipelines (Taidal YAML ↔ canvas)
 
@@ -427,13 +450,13 @@ The converter lives in `streamstudio.graphio` (`yaml_to_workflow` / `workflow_to
 | **Import Taidal YAML → New Graph** | Pick a `.yaml`; load it as its **own workflow** (a fresh tab) instead of merging. |
 | **Import Graph JSON → Current Graph** | Pick a ComfyUI `workflow.json` (e.g. an "Export Ops → Graph" file) and **merge it into the active graph** — the merge variant ComfyUI's native open lacks. |
 | **Export Graph → Taidal YAML** | Serialize the whole active graph and download the hoisted-`!ref:` YAML. |
-| **Export Taidal Ops → Confluid YAML** | Compile the op DAG to a sequential Confluid op-list YAML (one file per disconnected chain). |
+| **Export Taidal Ops → Flow YAML** | Compile the op DAG to a Confluid `flow:` document (one file per disconnected component). |
 | **Export Taidal Ops → Graph (subgraphs intact)** | Extract the op DAG as a raw ComfyUI `workflow.json` **as drawn**, keeping your subgraph instances as black boxes (so the pipeline stays connected). Downloads `ops_graph.json`. |
 | **Export Taidal Ops → Graph (flattened)** | Same, but **inline every subgraph** so the inner ops surface, and reconnect the pipeline through the dropped adapters. Downloads `ops_graph_flat.json`. |
 
 **Where the import lands:** **Current Graph** **paste-merges into the active graph** — the imported nodes are added to what you are building (at the canvas mouse position, selected, in one undo step, leaving your own clipboard untouched) rather than replacing it / opening a separate tab, using the same litegraph clipboard/paste path as ComfyUI's node-template insertion. So you can import several configs side by side, and it also works while you are editing inside a subgraph. **New Graph** loads the config standalone (its own workflow / a fresh tab — Current Graph also falls back to this on a ComfyUI build without `pasteFromClipboard`). (The `subgraph` / `group` packaging modes are still available from the `streamstudio import --as subgraph|group` CLI; after a Current-Graph import you can also use ComfyUI's native grouping / *Convert to Subgraph*.) Backed by the `/taidal/import_yaml` and `/taidal/export_workflow` routes (`web/import_yaml.js`, `web/export_workflow.js`).
 
-**Exporting the ops — YAML vs. graph.** All three operate on the op-kind nodes + the *Mix Records* fan-in (dropping the source + Walk/Extract/viewer adapters) and **honor the same `export-skip` / `export-target` marks** you set for the YAML export (right-click a node → *Set as export target* / *Skip export*). **→ Confluid YAML** *compiles* the DAG into a sequential op-list (auto Stash/Unstash, Mix folding, constant hoisting) you reattach to any source. The two **→ Graph** commands *extract* the raw DAG into a `workflow.json` (positions, widgets, wiring preserved, nothing compiled). Because a real pipeline routes the record *through* subgraph instances and past viewer/analysis side-taps, the graph export: (1) **honors a target mark** — restricting the output to that target's data ancestor cone, so the dead-end analysis branches you didn't target are dropped (mark the node you care about, exactly as for the YAML export); (2) **keeps the config/value nodes** (`ImpairmentsTxConfig` etc.) that feed the kept ops; and (3) treats **subgraphs** two ways — **subgraphs intact** keeps the instances as black boxes (with their nested definitions), while **flattened** inlines every subgraph so the inner ops surface and reconnects through the dropped pass-throughs (Reroute/Extract/boundaries). Both produce a connected graph. Backed by the `/taidal/export_ops` and `/taidal/export_ops_graph` (`flatten` flag) routes (`web/export_ops.js`). *Note:* flattened mode keeps the inlined nodes' own positions, which can overlap — auto-arrange on load.
+**Exporting the ops — YAML vs. graph.** All three operate on the op-kind nodes + the *Mix Records* fan-in (dropping the source + Walk/Extract/viewer adapters) and **honor the same `export-skip` / `export-target` marks** you set for the YAML export (right-click a node → *Set as export target* / *Skip export*). **→ Flow YAML** *compiles* the DAG into a `flow:` document (named steps, `from:`/`merge_from:`/`bind:` wiring, constant hoisting) you reattach to any source. The two **→ Graph** commands *extract* the raw DAG into a `workflow.json` (positions, widgets, wiring preserved, nothing compiled). Because a real pipeline routes the record *through* subgraph instances and past viewer/analysis side-taps, the graph export: (1) **honors a target mark** — restricting the output to that target's data ancestor cone, so the dead-end analysis branches you didn't target are dropped (mark the node you care about, exactly as for the YAML export); (2) **keeps the config/value nodes** (`ImpairmentsTxConfig` etc.) that feed the kept ops; and (3) treats **subgraphs** two ways — **subgraphs intact** keeps the instances as black boxes (with their nested definitions), while **flattened** inlines every subgraph so the inner ops surface and reconnects through the dropped pass-throughs (Reroute/Extract/boundaries). Both produce a connected graph. Backed by the `/taidal/export_flow` and `/taidal/export_ops_graph` (`flatten` flag) routes (`web/export_flow.js`). *Note:* flattened mode keeps the inlined nodes' own positions, which can overlap — auto-arrange on load.
 
 ### Offline CLI
 
@@ -467,7 +490,7 @@ runnable: !class:sonair.lightning_classifier.LightningClassifier
 ### v1 scope & limitations
 
 - **Export skips what YAML can't express — it never fails on it.** A canvas usually contains nodes with no Confluid form: native ComfyUI nodes (*Preview Image*, *Show Text*), the canvas-only Taidal adapters (*Walk Dataset*, *Extract from Record*, *Retag*, …), and occasionally a node whose config can't be serialized. **Export Graph → Taidal YAML** leaves those out and lists each one (with the reason) in a leading `#` comment block of the downloaded YAML — the document below stays a normal, loadable config of the remaining Taidal nodes. A wire from a skipped node into an exported config member is dropped (the member falls back to its default) and noted in the same block — **except** a wire from a native **primitive** node (`PrimitiveInt`/`PrimitiveFloat`/…), which inlines as its literal `value` widget. The canvas **wiring is preserved**: each run of record-chained ops folds into a `pipeline: !class:recordstream.core.stream.Stream` entry — `source: !ref:<source>` (traced through the *Walk Dataset* adapter back to the source node) plus the ordered `ops:` list, with fan-out compiled to `Save`/`Use` context cells — so the exported YAML reconstructs the same data flow (`confluid.materialize(confluid.load("config.yaml"))["pipeline"]` is an iterable `Stream`). A chain broken by a skipped node continues as its own `pipeline_N` entry.
-- **Value chains compile here too.** The ``op-chain → Extract(input) → Math → widget`` pattern wraps the consumer in a `ConfigureOp` (chain ops + `FormulaOp`) exactly like the ops-export — inside pipeline folds and on standalone op-value entries; the consumed Extract/Math adapters are no longer listed as "left out".
+- **Value chains compile here too.** The ``op-chain → Extract(input) → Math → widget`` pattern wraps the consumer in a `ConfigureOp` (chain ops + `FormulaOp`) exactly like the flow export — inside pipeline folds and on standalone op-value entries; the consumed Extract/Math adapters are no longer listed as "left out".
 - **Value nodes export by their class name with DOTTED output refs.** A wire from a value-producer node's output slot (e.g. `ImpairmentsTxConfig.disabled` feeding `ImpairmentsChain.tx_disabled`) emits `!ref:<entry>.<output>` — the `@output` *property value*, not the config instance a plain `!ref:` would inject. On **import**, confluid's resolver instantiates such dotted refs (a documented `resolve()` caveat), so the consumer widget receives the *evaluated* value and the config lands as a standalone value node carrying its settings — re-wire the two on the canvas to re-establish the live link.
 - A config member with **no StreamStudio node** (a class not tagged op/source/engine/member — e.g. a torchmetrics `MetricCollection`) is **dropped from the canvas with a warning** on import; the runnable falls back to its default. To surface such a class, tag/register it (loggers and the lazy torch / Lightning object members are registered in `marainer.lightning.configurables`).
 - Object **nodes** grow dynamic `logger_N` / `callbacks_N` sockets for list-valued object params (see *Attaching loggers / callbacks* above), and the whole-graph graphio round-trip respects them: **import** wires a `List`-valued member's items into `logger_0`, `logger_1`, … and **export** collapses those sockets back into one `logger:` list (the importer/exporter read the node's own `<name>_0` seed to decide).
@@ -502,7 +525,7 @@ StreamStudio never hand-defines a node. At ComfyUI startup, `_discover_and_regis
 2. For each module, `recordstream.discovery.scan_module` finds the compatible callables.
 3. `register_module_nodes` / `create_comfy_node` (`streamstudio/bridge.py`) classify each callable (Source / Op / Generic — see *Building a pipeline*) and wrap it in a ComfyUI node class, keyed by `_node_key` as `Taidal_<package>_<category>[_<group>]_<callable>` (globally unique, so a same-named class in two modules — e.g. numpy's vs torch's `Threshold` — doesn't clobber its twin) and filed under a `Taidal/<Package>/<Category>[/<group>]` palette path (built by `_node_category`: top-level package via `_PACKAGE_DISPLAY_NAMES` for canonical casing, then the `@configurable` category, then the optional `group` tag). The displayed name stays the verbatim class name.
 
-Registration is a **positive allowlist**: a class becomes a node only if its `@configurable` category is one of `_NODE_CATEGORIES` (currently `{op, model, source, engine, sink, value}`). So the palette is exactly the deliberately-tagged ops, sources, engines, and sinks. The generic recordstream **engines** (`Stream` / `JointStream`, `category="engine"`) and the source-view `DatasetSplit` (`category="source"`) **are** buildable on the canvas: their source-typed constructor params render as wired sockets — a single `source` → a `RECORDSTREAM_SOURCE` input, a source-list (`streams`) → dynamic `source_N` inputs, an op-list (`ops`) → dynamic `op_N` `RECORDSTREAM_OP` inputs — so a Source/Op node (which already outputs *itself* as `RECORDSTREAM_SOURCE` / `RECORDSTREAM_OP`) wires straight into them. The RecordStream storage **sinks** (`category="sink"` — `HDF5Sink` / `ZarrGroupSink` / `ZarrBatchSink` / `DirectorySink` / `JsonSink` / `JsonPerWindowSink` / `LabelStudioImportSink` / `YoloSink`) become **object-member producer** nodes (two outputs, `instance` + `class`, on a role-qualified `RECORDSTREAM_OBJECT:sink` wire) that dock into a `DatasetProcessor` runnable node's `sink` slot — wire `Source → Stream → DatasetProcessor(stream, sink)` and queue it to write the dataset, or export the graph to a `recordstream run` YAML. Excluded *by construction*: the **raw-callable op wrappers** (`FilterOp` / `WrappedOp`) — UNcategorised (bare `@configurable`), since they take a raw Python callable nothing a widget or socket supplies (so they stay out even with `engine` allowed); **task datasets** (`*_dataset`, e.g. `classification_dataset`) — a trainer-config concept navigaitor cares about, but a canvas only needs a `source` to yield records; uncategorised module-level helper functions; and an **UNtagged sink** (a raw `Storage` subclass without `category="sink"`, including the `write(prediction, metadata)` **prediction** sinks `DetectionPredictionsSink` / `ClassificationPredictionsSink`, which aren't record sinks). You can build a dataset by wiring `Source → Op → …` *or* by feeding a `Source`/`Op` into a `Stream` / `DatasetSplit` engine node. (To surface another role, add its category to `_NODE_CATEGORIES` in `bridge.py` and tag the classes. Note: ops-export compiles the op DAG — fan-out, *Mix Records* fan-in, `op_N` op-values — but engine-node graphs (`Stream`/`JointStream` built on the canvas) and sink/`DatasetProcessor` nodes aren't exportable through it; use the whole-graph export for those.)
+Registration is a **positive allowlist**: a class becomes a node only if its `@configurable` category is one of `_NODE_CATEGORIES` (currently `{op, model, source, engine, sink, value}`). So the palette is exactly the deliberately-tagged ops, sources, engines, and sinks. The generic recordstream **engines** (`Stream` / `JointStream`, `category="engine"`) and the source-view `DatasetSplit` (`category="source"`) **are** buildable on the canvas: their source-typed constructor params render as wired sockets — a single `source` → a `RECORDSTREAM_SOURCE` input, a source-list (`streams`) → dynamic `source_N` inputs, an op-list (`ops`) → dynamic `op_N` `RECORDSTREAM_OP` inputs — so a Source/Op node (which already outputs *itself* as `RECORDSTREAM_SOURCE` / `RECORDSTREAM_OP`) wires straight into them. The RecordStream storage **sinks** (`category="sink"` — `HDF5Sink` / `ZarrGroupSink` / `ZarrBatchSink` / `DirectorySink` / `JsonSink` / `JsonPerWindowSink` / `LabelStudioImportSink` / `YoloSink`) become **object-member producer** nodes (two outputs, `instance` + `class`, on a role-qualified `RECORDSTREAM_OBJECT:sink` wire) that dock into a `DatasetProcessor` runnable node's `sink` slot — wire `Source → Stream → DatasetProcessor(stream, sink)` and queue it to write the dataset, or export the graph to a `recordstream run` YAML. Excluded *by construction*: the **raw-callable op wrappers** (`FilterOp` / `WrappedOp`) — UNcategorised (bare `@configurable`), since they take a raw Python callable nothing a widget or socket supplies (so they stay out even with `engine` allowed); **task datasets** (`*_dataset`, e.g. `classification_dataset`) — a trainer-config concept navigaitor cares about, but a canvas only needs a `source` to yield records; uncategorised module-level helper functions; and an **UNtagged sink** (a raw `Storage` subclass without `category="sink"`, including the `write(prediction, metadata)` **prediction** sinks `DetectionPredictionsSink` / `ClassificationPredictionsSink`, which aren't record sinks). You can build a dataset by wiring `Source → Op → …` *or* by feeding a `Source`/`Op` into a `Stream` / `DatasetSplit` engine node. (To surface another role, add its category to `_NODE_CATEGORIES` in `bridge.py` and tag the classes. Note: the flow export compiles the op DAG — fan-out, *Mix Records* fan-in, `op_N` op-values — but engine-node graphs (`Stream`/`JointStream` built on the canvas) and sink/`DatasetProcessor` nodes aren't exportable through it; use the whole-graph export for those.)
 
 A module that fails to import or scan is skipped at `debug` level, so one package's missing optional dependency never empties the palette.
 

@@ -242,9 +242,9 @@ class UnsupportedTopologyError(ValueError):
     Raised for cycles, an op node whose wrapped callable can't be resolved, a component
     merging several DISTINCT record streams (two different sources fanning into one
     ``Mix Records`` — a sequential op-list carries one stream), and, from the strict
-    single-chain forms (:func:`compile_ops` / :func:`export_ops_yaml`) only, multiple
-    disconnected op components (the per-component forms :func:`compile_op_chains` /
-    :func:`export_ops_yamls` accept those). A direct :func:`_op_to_instance` call with no
+    single-component internal flattener (:func:`_linear_chain_ops`) only, multiple
+    disconnected op components (the per-component form :func:`compile_flow_documents` /
+    :func:`export_flow_yamls` accepts those). A direct :func:`_op_to_instance` call with no
     note accumulator also raises on any link-driven widget input.
     """
 
@@ -584,7 +584,7 @@ def collect_export_marks(workflow: Any) -> Tuple[List[str], List[str]]:
     top-level nodes AND every subgraph DEFINITION's inner nodes: a mark placed inside a subgraph
     lives on a definition node, which the prompt expands to ``"<instance>:<inner>"`` and the segment
     match in :func:`_marked_ids` / the target resolver maps back. Returns ``(skip_ids, target_ids)``
-    as string node ids — pass straight to :func:`export_ops_yamls` / :func:`compile_op_chains`.
+    as string node ids — pass straight to :func:`export_flow_yamls` / :func:`compile_flow_documents`.
 
     Collecting the marks HERE (Python) rather than in the browser is the single, subgraph-aware
     source of truth — mirroring how the whole-graph export already reads the same property from the
@@ -985,7 +985,7 @@ def _subgraph_op_instance(
     ops: List[Any] = []
     for members in _components(universe, preds):
         _check_component(members, preds, boundary_feeds)
-        ops.extend(_compile_component(members, universe, preds, prompt, node_mappings, fold))
+        ops.extend(_linear_chain_ops(members, universe, preds, prompt, node_mappings, fold))
     return cast(Instance, _marker(Instance, Pipeline, {"transforms": ops}))
 
 
@@ -1020,13 +1020,13 @@ def _subgraph_cone_excluded(
     case). A terminator whose ``op`` output is unwired excludes nothing (its inner ops, if any,
     schedule as an ordinary pipeline — the "use the subgraph as a graph" path).
 
-    ``exempt`` lists terminator ids whose cone is itself the COMPILE TARGET (``compile_op_chains``
+    ``exempt`` lists terminator ids whose cone is itself the COMPILE TARGET (``_compile_components``
     passes the resolved export-target ids). Such a terminator must NOT be excluded: when
-    ``SubgraphOpExtractNode`` compiles its own cone via ``export_ops_yaml(target_ids=[tid])``, the
+    ``SubgraphOpExtractNode`` compiles its own cone via ``export_flow_yamls(target_ids=[tid])``, the
     same prompt also has that terminator's ``op`` output consumed (by the Stream it feeds), so
     WITHOUT this exemption the terminator would exclude its OWN cone — leaving only the few ops
     whose record is reused by an off-cone viewer branch, which then fragment into several
-    components and trip the strict single-component ``export_ops_yaml`` ("Found N independent op
+    components and trip the single-component ``_linear_chain_ops`` flattener ("Found N independent op
     components"). Exempting the target is the cone-compile analogue of ``_subgraph_op_instance``,
     which already skips this exclusion entirely ("these cone ops are exactly what we compile").
     """
@@ -1183,7 +1183,7 @@ def _check_component(
         raise UnsupportedTopologyError(f"Op nodes {unprocessed} form a cycle; op-graphs must be acyclic.")
 
 
-def _compile_component(
+def _linear_chain_ops(
     members: List[str],
     universe: Dict[str, str],
     preds: Dict[str, List[Tuple[str, str]]],
@@ -1191,15 +1191,15 @@ def _compile_component(
     node_mappings: Dict[str, Any],
     fold: _FoldContext,
 ) -> List[Any]:
-    """Emit one component of the op DAG as a flat ``ops:`` list — LINEAR components only.
+    """Flatten a LINEAR component into an ordered op list — for a ``Pipeline``, NOT an export.
 
-    A sequence is the linear spelling of a graph, so a straight canvas chain still exports as
-    the plain op list it has always been. A BRANCHY component has no flat spelling: the
-    per-record context ops that used to manufacture one (``Save``/``Use``/``MergeFields`` over
-    cells) were deleted in 2026-07-30 along with the lowering pass, because they encoded
-    dataflow as imperative cell mutation — destroying exactly the structure the canvas drew and
-    every downstream consumer wants back. Such a component raises, pointing at the flow export
-    (:func:`_compile_component_flow`), which expresses the same wires as step grammar.
+    This is deliberately not an export format: the flat ``ops:`` document was removed
+    2026-08-01 and ``flow:`` is the only interchange shape. What survives is the fact that a
+    ``recordstream.Pipeline`` HOLDS a straight op list, so the "subgraph as an Op" terminator
+    (which compiles its cone into one ``Pipeline``) needs the cone flattened.
+
+    A BRANCHY component has no such spelling — the per-record context ops that used to
+    manufacture one were deleted with the lowering pass — so it raises, naming the flow export.
     """
     fan_out = sorted(
         {pred for nid in members for _arg, pred in preds[nid]}
@@ -1214,13 +1214,12 @@ def _compile_component(
         if fan_in:
             detail.append(f"fan-in at Mix node(s) {fan_in}")
         raise UnsupportedTopologyError(
-            f"This op component is branchy ({'; '.join(detail)}), which a flat `ops:` list cannot "
-            "express — an op list is a straight chain. Export it as a `flow:` document instead "
-            "(canvas: 'Export Taidal Ops → Flow YAML'; CLI: `streamstudio export --flow`), where "
+            f"This op component is branchy ({'; '.join(detail)}), and a Pipeline holds a straight "
+            "op LIST — it cannot express a fork or a Mix fan-in. Export the canvas as a `flow:` "
+            "document (canvas: 'Export Taidal Ops → Flow YAML'; CLI: `streamstudio export`), where "
             "the branch wiring is step grammar (`from:` / `merge_from:` / `bind:`)."
         )
 
-    # Linear: one chain from the single sink back through its predecessors.
     consumer_count: Dict[str, int] = {}
     for nid in members:
         for _arg, pred in preds[nid]:
@@ -1346,21 +1345,21 @@ def _compile_component_flow(
 # --------------------------------------------------------------------------- public compile API
 
 
-def compile_op_chains(
+def _compile_components(
     prompt: Dict[str, Any],
     node_mappings: Dict[str, Any],
     chain_notes: Optional[List[List[str]]] = None,
     chain_constants: Optional[List[Dict[str, Any]]] = None,
     skip_ids: Optional[Any] = None,
     target_ids: Optional[Any] = None,
-    _emit_component: Optional[Any] = None,
 ) -> List[Any]:
-    """Compile a ComfyUI prompt graph — ONE sequential op-list per connected op component.
+    """Compile a ComfyUI prompt graph — ONE ``flow:`` document per connected op component.
 
-    The op DAG (generated op nodes + ``Mix Records`` adapters) is split into
-    weakly-connected components; each compiles to a flat op-list (fan-out/Mix fan-in
-    sequentialized with stash/unstash ops — see the module docstring). Components are
-    returned in deterministic smallest-node-id order.
+    The shared front half of the canvas compiler: export-skip / export-target marks,
+    value-chain and ``@output``-capture collection, constant hoisting, and component
+    splitting. Each weakly-connected component is emitted as named steps by
+    :func:`_compile_component_flow`; components are returned in deterministic
+    smallest-node-id order.
 
     A widget input driven by a link is folded where possible (primitive inline,
     ``constant=True`` value node hoisted + dotted ``!ref:``, ``op_N`` producers embedded);
@@ -1456,12 +1455,10 @@ def compile_op_chains(
     sg_excluded = _subgraph_cone_excluded(prompt, node_mappings, exempt=set(resolved_targets))
     schedule_excluded = vc_excluded | sg_excluded
 
-    emit = _emit_component or _compile_component
-
     def _compile(restrict: Optional[Set[str]], extra_notes: List[str]) -> List[Any]:
         universe, preds, boundary_feeds = _build_graph(prompt, node_mappings, schedule_excluded, restrict)
         if not universe:
-            logger.debug("compile_op_chains: no op nodes in graph — returning no chains.")
+            logger.debug("compile_flow_documents: no op nodes in graph — returning no documents.")
             return []
         compiled: List[Any] = []
         for members in _components(universe, preds):
@@ -1470,7 +1467,7 @@ def compile_op_chains(
             fold = _FoldContext(
                 prompt, node_mappings, notes, configure_specs, excluded=vc_excluded, output_captures=output_captures
             )
-            compiled.append(emit(members, universe, preds, prompt, node_mappings, fold))
+            compiled.append(_compile_component_flow(members, universe, preds, prompt, node_mappings, fold))
             if chain_notes is not None:
                 chain_notes.append(notes)
             if chain_constants is not None:
@@ -1497,140 +1494,31 @@ def compile_flow_documents(
 ) -> List[Tuple["OrderedDict[str, Any]", str]]:
     """Compile a prompt graph — ONE ``(flow_mapping, outputs)`` pair per connected component.
 
-    The graph-native sibling of :func:`compile_op_chains`, sharing its ENTIRE front half
-    (export-skip / export-target marks, value-chain and ``@output``-capture collection,
-    constant hoisting, component splitting) and differing only in what each component is
-    emitted AS — named steps rather than a linearized op list. Same arguments, same errors.
+    The canvas IS a graph, so this compiles it AS one: :func:`_compile_component_flow` emits
+    the wires the user drew as step grammar (``from:`` / ``merge_from:`` / ``bind:``). This is
+    the ONLY canvas compiler — the flat ``ops:`` emitter was deleted 2026-08-01 (see the module
+    docstring), so there is no second form to keep in parity.
     """
     return cast(
         List[Tuple["OrderedDict[str, Any]", str]],
-        compile_op_chains(
+        _compile_components(
             prompt,
             node_mappings,
             chain_notes=chain_notes,
             chain_constants=chain_constants,
             skip_ids=skip_ids,
             target_ids=target_ids,
-            _emit_component=_compile_component_flow,
         ),
     )
-
-
-def compile_ops(
-    prompt: Dict[str, Any],
-    node_mappings: Dict[str, Any],
-    skip_ids: Optional[Any] = None,
-    target_ids: Optional[Any] = None,
-) -> List[Any]:
-    """Compile a prompt graph into a SINGLE sequential op-list.
-
-    The strict single-component variant of :func:`compile_op_chains` — kept for consumers
-    that want the one-pipeline guarantee. Args/returns as there (hoisted constants are
-    dropped — use ``compile_op_chains(chain_constants=...)`` or the YAML exporters when
-    the result must resolve dotted ``!ref:``\\ s), except:
-
-    Returns:
-        The single component's op-list; empty when the graph has no op nodes.
-
-    Raises:
-        UnsupportedTopologyError: everything :func:`compile_op_chains` raises, PLUS a graph
-            holding more than one independent op component.
-    """
-    chains = compile_op_chains(prompt, node_mappings, skip_ids=skip_ids, target_ids=target_ids)
-    if len(chains) > 1:
-        raise UnsupportedTopologyError(
-            f"Found {len(chains)} independent op components; compile_ops/export_ops_yaml need a "
-            "single connected component — use compile_op_chains/export_ops_yamls to compile each "
-            "component individually."
-        )
-    return chains[0] if chains else []
 
 
 def _comment_block(notes: List[str]) -> str:
     """The leading ``#`` comment block for one document (empty when there are no notes)."""
     if not notes:
         return ""
-    lines = ["# NOTE: ops-export compilation notes:"]
+    lines = ["# NOTE: flow-export compilation notes:"]
     lines += [f"#   - {note}" for note in notes]
     return "\n".join(lines) + "\n"
-
-
-def _document(constants: Dict[str, Any], ops: List[Any]) -> Dict[str, Any]:
-    """The dumpable document mapping: hoisted constants first, then the ``ops:`` list."""
-    payload: Dict[str, Any] = dict(constants)
-    payload["ops"] = ops
-    return payload
-
-
-def export_ops_yaml(
-    prompt: Dict[str, Any],
-    node_mappings: Dict[str, Any],
-    skip_ids: Optional[Any] = None,
-    target_ids: Optional[Any] = None,
-) -> str:
-    """Compile a prompt graph and serialize its ops to a Confluid YAML document.
-
-    The result is a mapping holding the hoisted ``constant=True`` entries (if any)
-    followed by the ``ops:`` key with the ``!class:...()`` op-list, so the consumer side
-    is ``confluid.load(path)["ops"]`` → ``Stream(source=..., ops=...)`` (dotted ``!ref:``\\ s
-    resolve against the same document). Strict: a graph with several independent op
-    components raises — use :func:`export_ops_yamls` to get one document per component.
-    """
-    notes_per_chain: List[List[str]] = []
-    constants_per_chain: List[Dict[str, Any]] = []
-    chains = compile_op_chains(
-        prompt,
-        node_mappings,
-        chain_notes=notes_per_chain,
-        chain_constants=constants_per_chain,
-        skip_ids=skip_ids,
-        target_ids=target_ids,
-    )
-    if len(chains) > 1:
-        raise UnsupportedTopologyError(
-            f"Found {len(chains)} independent op components; compile_ops/export_ops_yaml need a "
-            "single connected component — use compile_op_chains/export_ops_yamls to compile each "
-            "component individually."
-        )
-    if not chains:
-        return dump({"ops": []})
-    return _comment_block(notes_per_chain[0]) + dump(_document(constants_per_chain[0], chains[0]))
-
-
-def export_ops_yamls(
-    prompt: Dict[str, Any],
-    node_mappings: Dict[str, Any],
-    skip_ids: Optional[Any] = None,
-    target_ids: Optional[Any] = None,
-) -> List[str]:
-    """Compile a prompt graph and serialize EACH op component to its own YAML document.
-
-    Every document is complete and individually loadable — the hoisted ``constant=True``
-    entries (if any) followed by ``ops:`` — the same consumer contract as
-    :func:`export_ops_yaml` (``confluid.load(path)["ops"]``), one per component, in
-    deterministic smallest-node-id order. A graph with no op nodes yields a single empty
-    ``ops: []`` document (callers always have something to write/download).
-
-    A component whose compilation dropped wired widget values, hoisted nothing for an
-    untagged value node, or inserted stash/unstash ops carries a leading ``#`` comment
-    block naming each case; comments are invisible to the loader.
-    """
-    notes_per_chain: List[List[str]] = []
-    constants_per_chain: List[Dict[str, Any]] = []
-    chains = compile_op_chains(
-        prompt,
-        node_mappings,
-        chain_notes=notes_per_chain,
-        chain_constants=constants_per_chain,
-        skip_ids=skip_ids,
-        target_ids=target_ids,
-    )
-    if not chains:
-        return [dump({"ops": []})]
-    docs: List[str] = []
-    for chain, notes, constants in zip(chains, notes_per_chain, constants_per_chain):
-        docs.append(_comment_block(notes) + dump(_document(constants, chain)))
-    return docs
 
 
 def export_flow_yamls(
@@ -1675,8 +1563,8 @@ def export_flow_yamls(
 def chain_output_paths(base: Union[str, Path], count: int) -> List[Path]:
     """Output file paths for ``count`` component documents derived from one user-given ``base``.
 
-    One component keeps the base path verbatim (``ops.yaml``); several get a 1-based stem
-    suffix (``ops_1.yaml`` … ``ops_N.yaml``). Shared by the ``/taidal/export_ops`` route and
+    One component keeps the base path verbatim (``flow.yaml``); several get a 1-based stem
+    suffix (``flow_1.yaml`` … ``flow_N.yaml``). Shared by the ``/taidal/export_flow`` route and
     the ``streamstudio export`` CLI so the file-naming policy can't fork.
     """
     base = Path(base)
@@ -1689,9 +1577,6 @@ __all__ = [
     "UnsupportedTopologyError",
     "chain_output_paths",
     "collect_export_marks",
-    "compile_op_chains",
-    "compile_ops",
+    "compile_flow_documents",
     "export_flow_yamls",
-    "export_ops_yaml",
-    "export_ops_yamls",
 ]

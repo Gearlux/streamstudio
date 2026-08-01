@@ -34,7 +34,7 @@ import math
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union, cast
 
-from confluid import Class, Fluid, Instance, LazyClass, Reference
+from confluid import Class, Instance, LazyClass, Reference
 from confluid import dump as _confluid_dump
 from confluid import get_configurable_attrs
 from confluid import load as _confluid_load
@@ -644,20 +644,20 @@ def yaml_to_workflow(
         A ComfyUI UI-format workflow dict (``nodes`` / ``links`` / ``groups`` / ``version`` …),
         ready to write to a ``.json`` and open on the canvas.
     """
-    # An OPS document (the ops-export shape ``{…constants…, ops: [op markers]}``) is a SEQUENTIAL
-    # op-list, not a graph of node-valued top-level keys — its ``ops:`` list would be silently
-    # dropped by the whole-graph walk below (a list is not a node value). Detect it on a raw
-    # marker parse (``flow=False`` keeps ``!ref`` links intact) and dispatch to the dedicated
-    # importer. Restricted to path/text inputs (where the ops docs actually arrive — the CLI passes
-    # a path, the route raw YAML) so the probe never mutates a caller-owned dict; any parse failure
-    # or non-ops shape falls through to the whole-graph path unchanged.
+    # A FLOW document (the export shape ``{…constants…, flow: {step: op}, outputs: …}``) is a step
+    # GRAPH, not a mapping of node-valued top-level keys — its ``flow:`` mapping would be walked as
+    # if each step name were a config key by the whole-graph path below. Detect it on a raw marker
+    # parse (``flow=False`` keeps ``!ref`` links intact) and dispatch to the dedicated importer.
+    # Restricted to path/text inputs (where flow docs actually arrive — the CLI passes a path, the
+    # route raw YAML) so the probe never mutates a caller-owned dict; any parse failure or non-flow
+    # shape falls through to the whole-graph path unchanged.
     if isinstance(doc, (str, Path)):
         try:
             raw = _confluid_load(doc, flow=False)
         except Exception:  # pragma: no cover - defensive: the whole-graph path re-parses and reports
             raw = None
-        if _is_ops_document(raw) or _is_flow_document(raw):
-            return ops_yaml_to_workflow(raw, node_mappings, as_=as_, name=name)
+        if _is_flow_document(raw):
+            return flow_yaml_to_workflow(raw, node_mappings, as_=as_, name=name)
 
     # instantiate=True → live-but-inert objects (load parses the file/string THEN materialises with
     # the expensive solidify suppressed); else → the un-instantiated broadcast-resolved marker graph.
@@ -676,21 +676,8 @@ def yaml_to_workflow(
 
 
 # =======================================================================================
-# Import: ops.yaml (the sequential ops-export document) → workflow.json
+# Import: flow.yaml (the exported step-graph document) → workflow.json
 # =======================================================================================
-
-
-def _is_ops_document(doc: Any) -> bool:
-    """True if ``doc`` is a parsed ops-export document: a dict with a top-level ``ops`` LIST.
-
-    The ops-export emits ``{…hoisted constants…, ops: [!class:Op() …]}``; the whole-graph export
-    hoists every node to its OWN top-level key and never carries a top-level ``ops`` list, so this
-    is an unambiguous discriminator. A non-empty ``ops`` must hold Fluid markers (op instances).
-    """
-    if not isinstance(doc, dict) or not isinstance(doc.get("ops"), list):
-        return False
-    ops = doc["ops"]
-    return all(isinstance(item, Fluid) for item in ops) if ops else True
 
 
 def _is_flow_document(doc: Any) -> bool:
@@ -698,12 +685,11 @@ def _is_flow_document(doc: Any) -> bool:
     return isinstance(doc, dict) and isinstance(doc.get("flow"), dict)
 
 
-def _flow_document_to_ops_replay(doc: Dict[str, Any]) -> Dict[str, Any]:
+def _flow_document_to_replay(doc: Dict[str, Any]) -> Dict[str, Any]:
     """Reshape a ``{…constants…, flow: {...}, outputs: …}`` document for the node replay.
 
-    A flow document is already the graph, so this is a re-KEYING, not a lowering: each step
-    becomes an ``ops:`` entry carrying its op plus the wiring the replay needs
-    (``__step__`` / ``__from__`` / ``__merge_from__``). Steps are parsed UNBUILT
+    A flow document is already the graph, so this is a re-KEYING, not a lowering: the steps
+    become an ordered ``__steps__`` list of ops the replay walks. Steps are parsed UNBUILT
     (``parse_flow(build=False)``) so a hoisted constant's dotted ``!ref:`` never resolves
     during a structural import.
     """
@@ -719,7 +705,7 @@ def _flow_document_to_ops_replay(doc: Dict[str, Any]) -> Dict[str, Any]:
             "step graph needs a node-per-step walk instead. Tracked in streamstudio TASKS.md. "
             "A linear flow document imports normally."
         )
-    replay["ops"] = [step.op for step in steps if step.op is not None]
+    replay["__steps__"] = [step.op for step in steps if step.op is not None]
     return replay
 
 
@@ -729,107 +715,74 @@ def _forks(steps: Any) -> bool:
     return len(read) != len(set(read))
 
 
-def ops_yaml_to_workflow(
+def flow_yaml_to_workflow(
     doc: Union[str, Path, Dict[str, Any]],
     node_mappings: Dict[str, Any],
     *,
     as_: str = "graph",
     name: str = "Imported",
 ) -> Dict[str, Any]:
-    """Convert a StreamStudio **ops-export** YAML (``{…constants…, ops: [...]}``) into a workflow.json.
+    """Convert a StreamStudio **flow-export** YAML into a workflow.json.
 
-    The inverse of :func:`streamstudio.export.export_ops_yamls`: the sequential op-list is replayed
-    into a connected canvas graph. The AUTO-INSERTED context ops (``Save``/``Use``/``Mix`` over
-    namespaced ``__taidal_cell_*`` cells, which the exporter adds to linearize a branchy DAG) are
-    CONSUMED — not placed as nodes — and the fan-out / Mix fan-in they encode is reconstructed as
-    real wiring:
+    The inverse of :func:`streamstudio.export.export_flow_yamls`: the document's steps are
+    replayed into a connected canvas graph.
 
-    * each op's ``record`` input is wired from the currently-live node; a ``Use`` that restores
-      an earlier node's cell makes a later op FORK from it (fan-out);
-    * a **Mix Records** fan-in is REBUILT (the export erased the node) from a ``Mix`` marker's
-      three argument cells, and ALSO when the three tracked lineages diverge at a real op
-      (input≠target, or the input==target case with a one-shot metadata branch — a branch whose
-      tail was itself SAVED is a plain fan-out restart, NOT a merge, so no spurious Mix);
+    * each step becomes a node, wired from the step before it;
     * a hoisted ``constant=True`` value node (e.g. ``ImpairmentsTxConfig``) is placed and its dotted
       ``!ref:<name>.<output>`` consumers are wired from its output;
-    * a USER-named ``Save``/``Use`` (no ``__taidal_cell_`` namespace) stays an ordinary node — only
-      the auto-inserted, namespaced cells are absorbed (the same rule for any real stash op);
     * a **dead-end tap** — a record-chain op whose own record output feeds nothing, excluding the
-      pipeline's final output — is given a distinct colour. (With Mix-rebuild, re-joining branches feed
-      a Mix and so are not dead-ends; colouring is the residual for a genuinely unconsumed branch.)
+      pipeline's final output — is given a distinct colour.
 
-    The source is intentionally left unattached (the ops-doc contract — the user reattaches their own
-    source). Lossy, documented point carried over from the export: a metadata-only Mix the exporter
-    discarded (input==target==metadata, no divergence) is not recovered.
+    The source is intentionally left unattached (the export contract — the user reattaches their
+    own source).
+
+    **A BRANCHY document does not import yet** — :func:`_flow_document_to_replay` raises, because
+    the replay walks a SEQUENCE while a forking/merging step graph needs a node-per-step walk
+    (tracked in ``TASKS.md``). A linear flow document imports normally.
 
     Args:
-        doc: An ops-doc as a YAML path / string, or an already-parsed raw-marker dict.
+        doc: A flow-doc as a YAML path / string, or an already-parsed raw-marker dict.
         node_mappings: StreamStudio's ``NODE_CLASS_MAPPINGS``.
         as_: ``"graph"`` (default) lays the nodes out; ``"group"`` additionally wraps them in one
-            visual box. ``"subgraph"`` has no natural ops-doc boundary and degrades to ``"graph"``.
+            visual box. ``"subgraph"`` has no natural flow-doc boundary and degrades to ``"graph"``.
         name: Title for the group box.
 
     Returns:
         A ComfyUI UI-format workflow dict, JSON-safe (non-finite widget values nulled).
     """
-    raw = doc if (_is_ops_document(doc) or _is_flow_document(doc)) else _confluid_load(doc, flow=False)
-    if _is_flow_document(raw):
-        # The lowered list holds LIVE context ops around marker real-ops (to_ops builds the
-        # Save/Use/Mix), so it deliberately bypasses the all-markers ops-doc check below.
-        raw = _flow_document_to_ops_replay(cast(Dict[str, Any], raw))
-    elif not isinstance(raw, dict) or not _is_ops_document(raw):  # pragma: no cover - caller detected the shape
+    raw = doc if _is_flow_document(doc) else _confluid_load(doc, flow=False)
+    if not _is_flow_document(raw):  # pragma: no cover - caller detected the shape
         raise UnsupportedTopologyError(
-            "ops_yaml_to_workflow expects an ops-export document (a top-level 'ops:' list) "
-            "or a flow-export document (a 'flow:' step mapping)."
+            "flow_yaml_to_workflow expects a flow-export document (a top-level 'flow:' step mapping)."
         )
+    raw = _flow_document_to_replay(cast(Dict[str, Any], raw))
     builder = _WorkflowBuilder(node_mappings)
 
     # 1. Hoisted constants → value nodes (document key -> node id), for dotted-!ref wiring below.
     const_nodes: Dict[str, int] = {}
     for key, marker in raw.items():
-        if key == "ops" or not _is_node_value(marker):
+        if key == "__steps__" or not _is_node_value(marker):
             continue
         res = builder.emit(marker)
         if res is not None:
             const_nodes[key] = res[0]
 
-    # 2. Replay the op-list, tracking THREE live lineages — the node currently feeding the record's
-    #    `input`, `target`, AND `metadata` — plus the cell snapshots. Tracking metadata as its own
-    #    lineage (reset only by a real op) is what lets the importer rebuild a Mix even when
-    #    input==target (both restored to one node K while the metadata came from a side branch).
-    live: Dict[str, Optional[int]] = {"input": None, "target": None, "metadata": None}  # node id per lineage
-    stashed_nodes: set = set()  # every node ever auto-stashed (a saved FORK, reused later — see below)
+    # 2. Replay the steps as a chain: each node is wired from the one before it. A branchy
+    #    document never reaches here (``_flow_document_to_replay`` raises), so there is no
+    #    fan-out to restore and no fan-in node to rebuild.
+    previous: Optional[int] = None
     op_node_ids: List[int] = []  # real op nodes, in schedule order (last = deepest sink = final output)
 
-    for marker in raw["ops"]:
-        spec = _target_and_kwargs(marker)
-        if spec is None:
+    for marker in raw["__steps__"]:
+        if _target_and_kwargs(marker) is None:
             continue
-        cls, _is_lazy, kwargs = spec
-
-        # A real op node (incl. a user Stash*Op with a non-namespaced key).
         res = builder.emit(marker)
         if res is None:
             continue
         nid = res[0]
-        i, t, m = live["input"], live["target"], live["metadata"]
-        if i == t == m or (i == t and m in stashed_nodes):
-            # Plain chain, OR a fan-out branch RESTART: input/target converged to a fork node and the
-            # lingering metadata branch is itself a SAVED fork (a tap reused by a later Mix, not a
-            # one-shot contributor) — so this is just a new branch off the fork, NOT a merge. (The
-            # bus-carried metadata is an export artifact here; the original graph had no Mix.)
-            if i is not None:
-                builder.connect(i, 0, nid, _RECORD_INPUT, RECORD_TYPE)
-        else:
-            # A genuine Mix Records fan-in (the export erased the node): input/target restored to the
-            # stashed node(s), metadata from a ONE-SHOT branch the bus carried (e.g. CropSignalLengthOp's
-            # input/target merged with the region-detection branch's `predicted_regions`).
-            mix_id = builder.spawn(_MIX_CLASS_TYPE)
-            for arg, lineage in zip(_MIX_ARGS, (i, t, m)):
-                if lineage is not None:
-                    builder.connect(lineage, 0, mix_id, arg, RECORD_TYPE)
-            builder.connect(mix_id, 0, nid, _RECORD_INPUT, RECORD_TYPE)
-        live["input"] = live["target"] = live["metadata"] = nid
+        if previous is not None:
+            builder.connect(previous, 0, nid, _RECORD_INPUT, RECORD_TYPE)
+        previous = nid
         op_node_ids.append(nid)
 
     # 3. Wire dotted-!ref free inputs (constant.output -> consumer param) to the constant nodes.
@@ -848,7 +801,7 @@ def ops_yaml_to_workflow(
     _complete_widget_input_slots(workflow, node_mappings)
     if as_ == "group":
         return _wrap_in_group(workflow, name)
-    # "subgraph" degrades to "graph" — an ops-doc has no natural !ref-boundary inputs to promote.
+    # "subgraph" degrades to "graph" — a flow-doc has no natural !ref-boundary inputs to promote.
     return workflow
 
 
@@ -1146,7 +1099,7 @@ def extract_ops_workflow(
 ) -> Dict[str, Any]:
     """Extract the op-DAG of a UI ``workflow.json`` as a standalone, CONNECTED ``workflow.json``.
 
-    The GRAPH counterpart of :func:`streamstudio.export.export_ops_yamls` — emitted as the RAW DAG
+    The GRAPH counterpart of :func:`streamstudio.export.export_flow_yamls` — emitted as the RAW DAG
     *as drawn* (positions / widgets / wiring preserved, NO Stash/Unstash/Mix/constant compilation),
     but obeying the SAME `export-skip` / `export-target` marks (`properties["taidal_export"]`) the
     YAML ops-export uses (read via the shared :func:`streamstudio.export.collect_export_marks`): a
@@ -2311,4 +2264,4 @@ def _scalar_of(value: Any) -> Any:
     return value
 
 
-__all__ = ["yaml_to_workflow", "ops_yaml_to_workflow", "workflow_to_yaml", "extract_ops_workflow"]
+__all__ = ["yaml_to_workflow", "flow_yaml_to_workflow", "workflow_to_yaml", "extract_ops_workflow"]
