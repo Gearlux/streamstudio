@@ -6,7 +6,7 @@ wired on the ComfyUI canvas — instead of every socket collapsing to ``STRING``
 * **Source** — a class whose ``__getitem__`` / ``__iter__`` yields record records (plain
   dicts of typed items — :data:`recordstream.items.Record`; e.g. ``HuggingFaceSource``). The
   node exposes the constructor config as widgets and outputs a ``RECORDSTREAM_SOURCE`` (a
-  :class:`recordstream.core.Stream` wrapping the constructed source). The engines / view-sources
+  :class:`recordstream.core.stream.Stream` wrapping the constructed source). The engines / view-sources
   (``DatasetSplit`` / ``Stream`` / ``JointStream``) are the same shape, but their source-typed
   constructor params ride WIRED sockets instead of widgets — a single ``source`` →
   ``RECORDSTREAM_SOURCE`` input, a source-list (``streams``) → dynamic ``source_N`` inputs, an op-list
@@ -407,7 +407,7 @@ _RUNNABLE_LIST_PARAMS = {"steps"}
 # Constructor params that name a HuggingFace dataset *identifier* (a hub repo id
 # like ``mnist`` / ``kitofrank/RFUAV``, or optionally a local imagefolder path) —
 # NOT a filesystem directory. Recognised only on HuggingFace dataset sources (see
-# ``_is_hf_dataset_id_param``); ``recordstream.sources.HuggingFaceSource`` calls it
+# ``_is_hf_dataset_id_param``); ``recordstream.sources.huggingface.HuggingFaceSource`` calls it
 # ``path`` (the upstream ``datasets.load_dataset`` arg name) while sonair's
 # ``HuggingFaceClassificationDataset`` calls it ``repo_id``.
 _HF_DATASET_ID_PARAMS = {"path", "repo_id"}

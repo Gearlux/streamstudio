@@ -1,6 +1,6 @@
 """Compile a StreamStudio canvas graph's **ops** into a Confluid YAML op-list.
 
-A StreamStudio canvas is a :class:`recordstream.core.Stream` turned inside-out — the source
+A StreamStudio canvas is a :class:`recordstream.core.stream.Stream` turned inside-out — the source
 is a ``-> RECORDSTREAM_SOURCE`` node, each transform a ``RECORDSTREAM_RECORD -> RECORDSTREAM_RECORD``
 op node, and the lazy ``__iter__`` is replaced by the Walk/Extract adapters. This module
 reverses the *ops half*: given a ComfyUI **prompt / API-format** graph it compiles the op

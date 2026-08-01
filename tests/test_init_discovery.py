@@ -487,7 +487,7 @@ def test_import_yaml_route_returns_workflow() -> None:
         assert handler is not None
         streamstudio.NODE_CLASS_MAPPINGS["src"] = create_comfy_node(HuggingFaceSource, "src")
         streamstudio.NODE_CLASS_MAPPINGS["rescale"] = create_comfy_node(RescaleOp, "rescale")
-        yaml = "raw: !class:recordstream.sources.HuggingFaceSource()\n  path: mnist\n"
+        yaml = "raw: !class:recordstream.sources.huggingface.HuggingFaceSource()\n  path: mnist\n"
         asyncio.run(handler(_json_request({"yaml": yaml, "as": "graph"})))
     data, _kwargs = web.calls[-1]
     assert "workflow" in data
