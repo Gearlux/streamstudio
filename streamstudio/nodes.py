@@ -1277,7 +1277,7 @@ def compile_subgraph_ops(prompt: Any, unique_id: Any, node_mappings: Optional[Di
     **target mode** over the terminator's record-ancestor cone — exactly the ops that compute
     the record wired into the terminator, fan-out/``Mix`` fan-in flattened with context
     Save/Use — and materializes the resulting op-list into live callables (the same
-    ``confluid.load`` → ``materialize`` path :meth:`recordstream.core.Stream.from_ops_yaml` uses).
+    ``confluid.load`` → ``materialize`` path :meth:`recordstream.core.stream.Stream.from_ops_yaml` uses).
 
     Self-contained by design: no widget snapshot and no compile route are needed because the
     flat prompt already carries the whole inner DAG. Returns ``[]`` for an unwired terminator
