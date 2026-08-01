@@ -16,7 +16,7 @@ console.log("ComfyStream: Loaded Taidal.ExportSkip extension");
 //
 // Badges are drawn from the property itself every frame (onDrawForeground), so they
 // survive reloads, collapses, and color edits. This extension is UI-only: the marks live in
-// node.properties.taidal_export, web/export_ops.js posts the WHOLE workflow, and the backend
+// node.properties.taidal_export, web/export_flow.js posts the WHOLE workflow, and the backend
 // reads them in Python (export.collect_export_marks) — subgraph-aware, so a mark placed inside a
 // subgraph is honoured (the old per-top-level-node JS collector could not see it). The offline
 // CLI twins are `streamstudio export --skip <id>` / `--target <id>` (subgraph-inner ids resolve by

@@ -10,16 +10,17 @@ entry-point discovery, so the converters work WITHOUT a running ComfyUI):
   ``--no-declared-nodes`` skips the tier), the ``STREAMSTUDIO_CUSTOM_NODES`` env var
   (comma-separated git URLs), and the repeatable ``--custom-node <git-url>`` flag —
   idempotently: a repo already present under ``custom_nodes/`` is left alone.
-* ``export``: compile a saved ComfyUI **API-format** graph's OPS into Confluid YAML op-list(s)
-  (``streamstudio export graph.json -o ops.yaml``) — the offline twin of the canvas Export-Ops
-  button. Shares :func:`streamstudio.export.export_ops_yamls`; a graph with several disconnected
-  op chains writes one file per chain (``ops_1.yaml`` …) / a ``---``-separated stream on stdout.
+* ``export``: compile a saved ComfyUI **API-format** graph into Confluid ``flow:`` document(s)
+  (``streamstudio export graph.json -o flow.yaml``) — the offline twin of the canvas Export-Flow
+  button. Shares :func:`streamstudio.export.export_flow_yamls`; a graph with several disconnected
+  op components writes one file per component (``flow_1.yaml`` …) / a ``---``-separated stream
+  on stdout.
 * ``import``: convert a Confluid YAML config into a ComfyUI ``workflow.json``
   (``streamstudio import config.yaml -o workflow.json [--as graph|group|subgraph]``) — the offline
   twin of the canvas "Import Taidal YAML" menu command. Uses :func:`streamstudio.graphio.yaml_to_workflow`,
-  which AUTO-DETECTS an ops-export document (a ``{…constants…, ops: [...]}`` file from ``export`` /
-  the canvas Export-Ops button) and rebuilds the connected op graph — the auto-inserted
-  ``__taidal_stash_*`` ops are removed (fan-out / Mix fan-in reconstructed) and dead-end taps coloured.
+  which AUTO-DETECTS a flow-export document (a ``{…constants…, flow: {...}, outputs: …}`` file from
+  ``export`` / the canvas Export-Flow button) and rebuilds the connected op graph, colouring
+  dead-end taps. A BRANCHY flow document does not import back yet (tracked in TASKS.md).
 * ``export-workflow``: convert a WHOLE ``workflow.json`` (UI or API form) into a hoisted-``!ref:``
   YAML (``streamstudio export-workflow workflow.json -o config.yaml``) — the twin of the canvas
   "Export Graph → Taidal YAML". Uses :func:`streamstudio.graphio.workflow_to_yaml`.
@@ -227,7 +228,7 @@ def _export(args: argparse.Namespace) -> None:
     # Import here (not at module top): pulling in streamstudio runs entry-point node discovery,
     # which is unnecessary weight for the common ``run`` path.
     import streamstudio
-    from streamstudio.export import chain_output_paths, export_flow_yamls, export_ops_yamls
+    from streamstudio.export import chain_output_paths, export_flow_yamls
 
     graph_path: Path = args.graph
     if not graph_path.exists():
@@ -245,7 +246,7 @@ def _export(args: argparse.Namespace) -> None:
     # ``--skip`` mirrors the canvas export-skip mark; an API-format file carries no node
     # properties, so the marked ids must be named explicitly here (getattr: tolerate
     # programmatic Namespace callers that predate the flag).
-    exporter = export_flow_yamls if getattr(args, "flow", False) else export_ops_yamls
+    exporter = export_flow_yamls
     yaml_docs = exporter(
         prompt,
         streamstudio.NODE_CLASS_MAPPINGS,
@@ -254,16 +255,16 @@ def _export(args: argparse.Namespace) -> None:
     )
 
     if len(yaml_docs) > 1:
-        logger.info(f"Graph contains {len(yaml_docs)} independent op chains — exporting each individually.")
+        logger.info(f"Graph contains {len(yaml_docs)} independent op components — exporting each individually.")
     if args.output:
-        # One file per chain: ``-o ops.yaml`` stays ``ops.yaml`` for a single chain,
-        # ``ops_1.yaml`` … ``ops_N.yaml`` for several.
+        # One file per component: ``-o flow.yaml`` stays ``flow.yaml`` for a single one,
+        # ``flow_1.yaml`` … ``flow_N.yaml`` for several.
         for chain_path, yaml_doc in zip(chain_output_paths(args.output, len(yaml_docs)), yaml_docs):
             chain_path.write_text(yaml_doc)
-            logger.info(f"Wrote ops YAML to {chain_path}")
+            logger.info(f"Wrote flow YAML to {chain_path}")
     else:
-        # Several chains on stdout → a ``---``-separated YAML document stream (each document is
-        # individually a complete ``{ops: [...]}`` config; split before feeding confluid.load).
+        # Several components on stdout → a ``---``-separated YAML document stream (each document
+        # is individually a complete ``{flow: {...}}`` config; split before feeding confluid.load).
         sys.stdout.write("---\n".join(yaml_docs))
 
 
@@ -382,7 +383,7 @@ def main() -> None:
     sub.add_parser("run", help="Launch ComfyUI with Taidal nodes (default).")
 
     export_parser = sub.add_parser(
-        "export", help="Compile a saved graph's ops to Confluid YAML op-list(s) — one per independent chain."
+        "export", help="Compile a saved graph to Confluid `flow:` document(s) — one per independent component."
     )
     export_parser.add_argument("graph", type=Path, help="ComfyUI API-format graph JSON.")
     export_parser.add_argument(
@@ -391,17 +392,8 @@ def main() -> None:
         type=Path,
         default=None,
         help=(
-            "Write the YAML here (default: stdout). With several disconnected op chains, one "
-            "file per chain is written (ops.yaml -> ops_1.yaml ... ops_N.yaml)."
-        ),
-    )
-    export_parser.add_argument(
-        "--flow",
-        action="store_true",
-        help=(
-            "Emit the readable named-step `flow:` document instead of the flat serial `ops:` list "
-            "(consume with FlowGraph.from_yaml / Stream.from_flow_yaml; the two forms convert both "
-            "ways with execution parity — recordstream.flow)."
+            "Write the YAML here (default: stdout). With several disconnected op components, one "
+            "file per component is written (flow.yaml -> flow_1.yaml ... flow_N.yaml)."
         ),
     )
     export_parser.add_argument(
@@ -435,7 +427,7 @@ def main() -> None:
         ),
     )
     import_parser.add_argument(
-        "config", type=Path, help="Confluid YAML config (whole-graph OR ops-export doc) to import."
+        "config", type=Path, help="Confluid YAML config (whole-graph OR flow-export doc) to import."
     )
     import_parser.add_argument(
         "-o", "--output", type=Path, default=None, help="Write the workflow JSON here (default: stdout)."

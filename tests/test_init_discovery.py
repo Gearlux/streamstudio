@@ -287,10 +287,10 @@ class _FakeRoutes:
     def __iter__(self) -> Iterator[SimpleNamespace]:
         # When ``existing`` is True, report ALL taidal routes as already registered so the
         # skip branch of every registration block is exercised (there are several POST/GET
-        # routes now — choose_directory, export_ops, hf_datasets).
+        # routes now — choose_directory, export_flow, hf_datasets).
         if self._existing:
             yield SimpleNamespace(path="/taidal/choose_directory", method="POST")
-            yield SimpleNamespace(path="/taidal/export_ops", method="POST")
+            yield SimpleNamespace(path="/taidal/export_flow", method="POST")
             yield SimpleNamespace(path="/taidal/export_ops_graph", method="POST")
             yield SimpleNamespace(path="/taidal/import_yaml", method="POST")
             yield SimpleNamespace(path="/taidal/export_workflow", method="POST")
@@ -410,42 +410,43 @@ def _json_request(body: Any) -> SimpleNamespace:
     return SimpleNamespace(json=_json)
 
 
-def test_export_ops_route_returns_yaml() -> None:
-    # The /taidal/export_ops POST handler compiles the posted graph's ops into a Confluid
+def test_export_flow_route_returns_yaml() -> None:
+    # The /taidal/export_flow POST handler compiles the posted graph into a Confluid
     # YAML op-list using the live NODE_CLASS_MAPPINGS.
     from recordstream.ops.torch import ToTensor as RescaleOp
 
     from streamstudio.bridge import create_comfy_node
 
     with _fake_comfy() as (routes, web):
-        handler = routes.post_handlers.get("/taidal/export_ops")
+        handler = routes.post_handlers.get("/taidal/export_flow")
         assert handler is not None
         streamstudio.NODE_CLASS_MAPPINGS["Taidal_RescaleOp"] = create_comfy_node(RescaleOp, "Taidal_RescaleOp")
         prompt = {"1": {"class_type": "Taidal_RescaleOp", "inputs": {"in_min": 0.0, "in_max": 255.0}}}
         asyncio.run(handler(_json_request({"prompt": prompt})))
     data, _kwargs = web.calls[-1]
-    assert "ops:" in data["yaml"]
+    assert "flow:" in data["yaml"]
     assert "ToTensor" in data["yaml"]
     # A single chain → exactly one doc; `yaml` mirrors it for older clients of the route.
     assert data["yamls"] == [data["yaml"]]
 
 
-def test_export_ops_route_flow_flag_returns_flow_document() -> None:
-    # ``flow: true`` in the POST body switches the route to the readable named-step
-    # flow: document (the canvas twin of the CLI's ``--flow``).
+def test_export_flow_route_ignores_a_legacy_flow_flag() -> None:
+    # `flow:` is the ONLY export format now (2026-08-01), so an older client still sending
+    # `{"flow": false}` — which used to select the deleted serial `ops:` list — must STILL get
+    # a flow document rather than silently falling back to something else.
     from recordstream.ops.torch import ToTensor as RescaleOp
 
     from streamstudio.bridge import create_comfy_node
 
     with _fake_comfy() as (routes, web):
-        handler = routes.post_handlers.get("/taidal/export_ops")
+        handler = routes.post_handlers.get("/taidal/export_flow")
         assert handler is not None
         streamstudio.NODE_CLASS_MAPPINGS["Taidal_RescaleOp"] = create_comfy_node(RescaleOp, "Taidal_RescaleOp")
         prompt = {"1": {"class_type": "Taidal_RescaleOp", "inputs": {"in_min": 0.0, "in_max": 255.0}}}
-        asyncio.run(handler(_json_request({"prompt": prompt, "flow": True})))
+        asyncio.run(handler(_json_request({"prompt": prompt, "flow": False})))
     data, _kwargs = web.calls[-1]
     assert "flow:" in data["yaml"] and "outputs:" in data["yaml"]
-    assert "ops:" not in data["yaml"]  # the flow form, not the serial list
+    assert "\nops:" not in data["yaml"]  # the flat serial list is gone entirely
     assert "ToTensor" in data["yaml"]
 
 
@@ -512,7 +513,7 @@ def test_export_workflow_route_returns_yaml() -> None:
     assert "HuggingFaceSource" in data["yaml"]
 
 
-def test_export_ops_route_multi_chain_returns_one_doc_per_chain(tmp_path: Path) -> None:
+def test_export_flow_route_multi_chain_returns_one_doc_per_chain(tmp_path: Path) -> None:
     # Two disconnected chains no longer 400: the route compiles EACH chain into its own YAML
     # doc and (with `path`) writes one stem-suffixed file per chain.
     from recordstream.ops.torch import ToTensor as RescaleOp
@@ -520,7 +521,7 @@ def test_export_ops_route_multi_chain_returns_one_doc_per_chain(tmp_path: Path) 
     from streamstudio.bridge import create_comfy_node
 
     with _fake_comfy() as (routes, web):
-        handler = routes.post_handlers["/taidal/export_ops"]
+        handler = routes.post_handlers["/taidal/export_flow"]
         streamstudio.NODE_CLASS_MAPPINGS["Taidal_RescaleOp"] = create_comfy_node(RescaleOp, "Taidal_RescaleOp")
         prompt = {
             "2": {"class_type": "Taidal_RescaleOp", "inputs": {"record": ["x", 0], "in_min": 0.0, "in_max": 255.0}},
@@ -536,7 +537,7 @@ def test_export_ops_route_multi_chain_returns_one_doc_per_chain(tmp_path: Path) 
         assert Path(written).read_text() == doc
 
 
-def test_export_ops_route_400_on_bad_topology() -> None:
+def test_export_flow_route_400_on_bad_topology() -> None:
     # A structurally-unexportable graph (a record-wire CYCLE) -> UnsupportedTopologyError -> 400.
     # (A widget driven by a link is no longer an error — it's omitted with a note.)
     from recordstream.ops.torch import ToTensor as RescaleOp
@@ -544,7 +545,7 @@ def test_export_ops_route_400_on_bad_topology() -> None:
     from streamstudio.bridge import create_comfy_node
 
     with _fake_comfy() as (routes, web):
-        handler = routes.post_handlers["/taidal/export_ops"]
+        handler = routes.post_handlers["/taidal/export_flow"]
         streamstudio.NODE_CLASS_MAPPINGS["Taidal_RescaleOp"] = create_comfy_node(RescaleOp, "Taidal_RescaleOp")
         prompt = {
             "2": {"class_type": "Taidal_RescaleOp", "inputs": {"record": ["3", 0], "in_min": 0.0, "in_max": 255.0}},

@@ -584,7 +584,7 @@ def test_export_single_chain_writes_output_verbatim(tmp_path: Path, logger_mock:
     _register_rescale_node()
     graph = tmp_path / "graph.json"
     graph.write_text(json.dumps({"2": _rescale_prompt_node(["x", 0], 255.0)}))
-    out = tmp_path / "ops.yaml"
+    out = tmp_path / "flow.yaml"
 
     cli._export(argparse.Namespace(graph=graph, output=out))
 
@@ -602,17 +602,17 @@ def test_export_skip_flag_excludes_marked_node(tmp_path: Path, logger_mock: Magi
     _register_rescale_node()
     graph = tmp_path / "graph.json"
     graph.write_text(json.dumps({"2": _rescale_prompt_node(["x", 0], 255.0)}))
-    out = tmp_path / "ops.yaml"
+    out = tmp_path / "flow.yaml"
 
     cli._export(argparse.Namespace(graph=graph, output=out, skip=["2"]))
 
     text = out.read_text()
-    assert "ToTensor" not in text  # the marked op is gone — only the empty ops doc remains
-    assert "ops: []" in text
+    assert "ToTensor" not in text  # the marked op is gone — only the empty flow doc remains
+    assert "flow: {}" in text
 
 
 def test_export_multi_chain_writes_one_file_per_chain(tmp_path: Path, logger_mock: MagicMock) -> None:
-    # Two disconnected op chains -> no error; ops.yaml fans out to ops_1.yaml + ops_2.yaml.
+    # Two disconnected op components -> no error; flow.yaml fans out to flow_1.yaml + flow_2.yaml.
     import argparse
     import json
 
@@ -620,14 +620,14 @@ def test_export_multi_chain_writes_one_file_per_chain(tmp_path: Path, logger_moc
     graph = tmp_path / "graph.json"
     graph.write_text(json.dumps({"2": _rescale_prompt_node(["x", 0], 255.0), "3": _rescale_prompt_node(["y", 0], 1.0)}))
 
-    cli._export(argparse.Namespace(graph=graph, output=tmp_path / "ops.yaml"))
+    cli._export(argparse.Namespace(graph=graph, output=tmp_path / "flow.yaml"))
 
-    assert not (tmp_path / "ops.yaml").exists()
-    docs = [(tmp_path / name).read_text() for name in ("ops_1.yaml", "ops_2.yaml")]
-    assert all("ops:" in d and "ToTensor" in d for d in docs)
+    assert not (tmp_path / "flow.yaml").exists()
+    docs = [(tmp_path / name).read_text() for name in ("flow_1.yaml", "flow_2.yaml")]
+    assert all("flow:" in d and "ToTensor" in d for d in docs)
     assert "in_max: 255.0" in docs[0] and "in_max: 1.0" in docs[1]
     infos = [str(c.args[0]) for c in logger_mock.info.call_args_list]
-    assert any("2 independent op chains" in i for i in infos)
+    assert any("2 independent op components" in i for i in infos)
 
 
 def test_export_multi_chain_stdout_is_document_stream(
@@ -644,5 +644,5 @@ def test_export_multi_chain_stdout_is_document_stream(
     cli._export(argparse.Namespace(graph=graph, output=None))
 
     out = capsys.readouterr().out
-    assert out.count("ops:") == 2
+    assert out.count("flow:") == 2
     assert "\n---\n" in "\n" + out  # one separator between the two documents

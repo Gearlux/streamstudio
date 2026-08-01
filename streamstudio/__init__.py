@@ -24,13 +24,7 @@ from streamstudio.bridge import (
     only_taidal_nodes,
     register_module_nodes,
 )
-from streamstudio.export import (
-    UnsupportedTopologyError,
-    chain_output_paths,
-    collect_export_marks,
-    export_flow_yamls,
-    export_ops_yamls,
-)
+from streamstudio.export import UnsupportedTopologyError, chain_output_paths, collect_export_marks, export_flow_yamls
 from streamstudio.nodes import NODE_CLASS_MAPPINGS as _STATIC_NODE_CLASS_MAPPINGS
 from streamstudio.nodes import NODE_DISPLAY_NAME_MAPPINGS as _STATIC_NODE_DISPLAY_NAME_MAPPINGS
 
@@ -376,23 +370,23 @@ try:
             name = query.get("name") or None
             return web.json_response({"splits": list_hf_dataset_splits(path, name=name)})
 
-    # Compile the current canvas's ops into Confluid YAML op-lists (drops the source +
-    # Walk/Extract adapters) so they can be reattached to any source via
-    # ``Stream.from_ops_yaml`` / ``confluid.materialize(confluid.load(path)["ops"])``.
-    # A graph with several disconnected op chains yields ONE document per chain.
-    # Backs web/export_ops.js: the button POSTs ``{prompt: graphToPrompt(), path?: ...}``.
+    # Compile the current canvas into Confluid ``flow:`` documents (drops the source +
+    # Walk/Extract adapters) so the graph can be reattached to any source via
+    # ``FlowGraph.from_yaml(path)``. A graph with several disconnected op components yields
+    # ONE document per component.
+    # Backs web/export_flow.js: the button POSTs ``{prompt: graphToPrompt(), path?: ...}``.
     export_route_exists = any(
-        r.path == "/taidal/export_ops" and r.method == "POST" for r in server.PromptServer.instance.routes
+        r.path == "/taidal/export_flow" and r.method == "POST" for r in server.PromptServer.instance.routes
     )
     if not export_route_exists:
 
-        @server.PromptServer.instance.routes.post("/taidal/export_ops")
-        async def export_ops_handler(request: Any) -> Any:
+        @server.PromptServer.instance.routes.post("/taidal/export_flow")
+        async def export_flow_handler(request: Any) -> Any:
             try:
                 body = await request.json()
                 prompt = body.get("prompt", body)  # accept a bare prompt or {prompt: ...}
                 # Export marks (properties["taidal_export"] == "skip"/"target") are read in PYTHON
-                # from the full UI ``workflow`` web/export_ops.js posts alongside the prompt — the
+                # from the full UI ``workflow`` web/export_flow.js posts alongside the prompt — the
                 # prompt strips node properties, and only the workflow carries the subgraph
                 # definitions, so a mark placed INSIDE a subgraph is collected here (subgraph-aware,
                 # one source of truth) and resolved to the expanded prompt ids by the compiler.
@@ -404,12 +398,7 @@ try:
                     wf_skip, wf_target = collect_export_marks(workflow)
                     skip_ids += wf_skip
                     target_ids += wf_target
-                # ``flow: true`` emits the readable named-step flow: document instead of the
-                # flat serial ops: list (the same switch as the CLI's ``--flow``; both forms
-                # convert both ways with execution parity — recordstream.flow).
-                use_flow = bool(body.get("flow")) if isinstance(body, dict) else False
-                exporter = export_flow_yamls if use_flow else export_ops_yamls
-                yaml_docs = exporter(
+                yaml_docs = export_flow_yamls(
                     prompt, NODE_CLASS_MAPPINGS, skip_ids=skip_ids or None, target_ids=target_ids or None
                 )
                 # ``yaml`` (first doc) kept alongside ``yamls`` for older clients of the route.
@@ -430,9 +419,9 @@ try:
                 return web.json_response({"error": str(e)}, status=500)
 
     # Extract JUST the op-DAG nodes from the current canvas as a standalone workflow.json — the
-    # GRAPH counterpart of /taidal/export_ops (which compiles them to Confluid YAML). Same node set
+    # GRAPH counterpart of /taidal/export_flow (which compiles them to Confluid YAML). Same node set
     # (op-kind nodes + the Mix fan-in), but the RAW DAG as drawn (no Stash/Unstash/Mix compilation);
-    # the source / Walk / Extract / viewer / value nodes are dropped. Backs web/export_ops.js's
+    # the source / Walk / Extract / viewer / value nodes are dropped. Backs web/export_flow.js's
     # "Export Taidal Ops → Graph" command, which POSTs ``{workflow: graphToPrompt().workflow}`` and
     # downloads the returned graph. An optional ``path`` writes it server-side (a future CLI twin).
     export_ops_graph_route_exists = any(
