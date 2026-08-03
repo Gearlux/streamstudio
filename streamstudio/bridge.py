@@ -221,7 +221,7 @@ _DATASET_MEMBER_PARAMS = {"train_set", "val_set", "test_set", "dataset", "stream
 # fed into the ``pytorch_lightning.Trainer`` ``logger`` slot). Datasets are SOURCE nodes (role
 # ``"dataset"`` is routed to ``_build_source_node``), not object nodes. The role-less runtime members
 # (``torch.optim.*`` / ``DataLoader`` / ``pytorch_lightning.Trainer``, registered in
-# ``marainer.lightning.configurables``) are detected instead by the confluid **``lazy`` mark**
+# ``matrainer.lightning.configurables``) are detected instead by the confluid **``lazy`` mark**
 # (``__confluid_lazy__``) — deliberately NOT a category, so they don't leak into navigaitor's
 # form-spec slot pickers (which resolve a picker FROM the slot's default-target category and would
 # then offer the raw ``params``-taking optimizer). Loggers carry ``role="logger"`` (NOT ``lazy``) so
@@ -2966,7 +2966,7 @@ def register_module_nodes(
     2. ``@configurable`` classes listed in the module's ``__all__`` — its deliberate public exports,
        regardless of ``__module__``. This surfaces a package's re-exported runnables / models /
        datasets (``sonair`` re-exports ``LightningClassifier`` from ``sonair.lightning_classifier``)
-       AND registered third-party members (``marainer.lightning.configurables``'s ``torch`` optimizers /
+       AND registered third-party members (``matrainer.lightning.configurables``'s ``torch`` optimizers /
        ``DataLoader`` / ``pl.Trainer``). Gated on ``__all__`` so a module's imported-for-use
        configurables (not re-exported) don't leak into the palette.
 

@@ -42,7 +42,7 @@ jobs:
         uv pip install --system --no-deps git+https://github.com/Gearlux/liquifai.git@main
         uv pip install --system --no-deps git+https://github.com/Gearlux/recordstream.git@main
         uv pip install --system --no-deps git+https://github.com/Gearlux/torpaido.git@main
-        uv pip install --system --no-deps git+https://github.com/Gearlux/marainer.git@main
+        uv pip install --system --no-deps git+https://github.com/Gearlux/matrainer.git@main
         uv pip install --system --no-deps git+https://github.com/Gearlux/annotaide.git@main
         uv pip install --system --no-deps git+https://github.com/Gearlux/waivefront.git@main
         uv pip install --system -e ".[dev]"
@@ -85,7 +85,7 @@ jobs:
         uv pip install --system --no-deps git+https://github.com/Gearlux/liquifai.git@main
         uv pip install --system --no-deps git+https://github.com/Gearlux/recordstream.git@main
         uv pip install --system --no-deps git+https://github.com/Gearlux/torpaido.git@main
-        uv pip install --system --no-deps git+https://github.com/Gearlux/marainer.git@main
+        uv pip install --system --no-deps git+https://github.com/Gearlux/matrainer.git@main
         uv pip install --system --no-deps git+https://github.com/Gearlux/annotaide.git@main
         uv pip install --system --no-deps git+https://github.com/Gearlux/waivefront.git@main
         uv pip install --system -e ".[dev]"
@@ -133,7 +133,7 @@ jobs:
         uv pip install --system --no-deps git+https://github.com/Gearlux/liquifai.git@main
         uv pip install --system --no-deps git+https://github.com/Gearlux/recordstream.git@main
         uv pip install --system --no-deps git+https://github.com/Gearlux/torpaido.git@main
-        uv pip install --system --no-deps git+https://github.com/Gearlux/marainer.git@main
+        uv pip install --system --no-deps git+https://github.com/Gearlux/matrainer.git@main
         uv pip install --system --no-deps git+https://github.com/Gearlux/annotaide.git@main
         uv pip install --system --no-deps git+https://github.com/Gearlux/waivefront.git@main
         uv pip install --system -e ".[dev]"
@@ -185,7 +185,7 @@ jobs:
         uv pip install --system --no-deps git+https://github.com/Gearlux/liquifai.git@main
         uv pip install --system --no-deps git+https://github.com/Gearlux/recordstream.git@main
         uv pip install --system --no-deps git+https://github.com/Gearlux/torpaido.git@main
-        uv pip install --system --no-deps git+https://github.com/Gearlux/marainer.git@main
+        uv pip install --system --no-deps git+https://github.com/Gearlux/matrainer.git@main
         uv pip install --system --no-deps git+https://github.com/Gearlux/annotaide.git@main
         uv pip install --system --no-deps git+https://github.com/Gearlux/waivefront.git@main
         uv pip install --system -e ".[dev]"
