@@ -1607,9 +1607,11 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
     ``TAIDAL_CALLABLE_PATH``), and any Taidal node whose spec fails to build (logged at
     ``warning``; the rest of the graph still exports). The canvas WIRING is preserved:
     record-chained ops fold into ``pipeline: !class:Stream`` entries (``source: !ref:<source>``
-    traced through a Walk-style adapter + an ordered ``ops:`` list, fan-out as a nested
-    a container) instead of unconnected standalone entries; a dropped wire into a real config
-    member is noted in the comment block.
+    traced through a Walk-style adapter, plus an ordered ``ops:`` list). What does NOT fold stays
+    a standalone entry, so the YAML keeps every op either way: an op with no record wiring, an op
+    consumed as a ``RECORDSTREAM_OP`` value, and a fan-out chain. The last is deliberate rather
+    than unfinished — a branchy graph has no flat spelling, and ``export_flow_yamls`` is the
+    export that carries it. A dropped wire into a real config member is noted in the comment block.
     """
     pnodes = _normalize_workflow(graph, node_mappings)
     if not pnodes:
@@ -1847,7 +1849,9 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
 
     # Fold record-chained ops into Stream pipeline entries so the canvas WIRING survives in the
     # YAML: each chain becomes `pipeline: !class:Stream` with `source: !ref:<source>` (traced
-    # through a skipped adapter like Walk) and an ordered `ops:` list, fan-out via Save/Use cells.
+    # through a skipped adapter like Walk) and an ordered `ops:` list. Fan-out is NOT folded: the
+    # `Save`/`Use` cell plane it once used was deleted with the context ops, and a branchy graph
+    # belongs in the flow export instead.
     chain_specs, chain_heads, op_succs = _collect_op_chains(pnodes, specs, node_mappings, output_captures)
 
     names = _assign_ref_names(pnodes, specs, node_mappings)
