@@ -220,7 +220,7 @@ class RecordExtractorNode:
     **Array / Tensor Histogram** viewer, …). ComfyUI types sockets statically, so
     rather than retype one socket per run we surface every plausible type; which one
     is meaningful is *derived from the entry's item class* (``Image`` / ``Mask`` /
-    ``Regions`` / ``Label`` / …, else the live value's Python type):
+    ``Boxes`` / ``Label`` / …, else the live value's Python type):
 
     * ``IMAGE`` — the field rendered via ``waivefront.visualizers.value_to_image``
       (PIL / tensor / 2-D map → ``[1, H, W, 3]`` float in ``[0, 1]``). A non-visual
@@ -318,7 +318,7 @@ class RecordExtractorNode:
     @staticmethod
     def _field_spec(record: Any, key: Optional[str], value: Any) -> Any:
         """A short descriptor of the selected entry — its item class name (``Image`` / ``Mask`` /
-        ``Regions`` / ``Label`` / ``NDArrayItem``), else the raw value's Python type name.
+        ``Boxes`` / ``Label`` / ``NDArrayItem``), else the raw value's Python type name.
 
         A record's values are typed items (each carries its own type), so the descriptor comes
         straight off the entry's class."""
@@ -592,7 +592,7 @@ class ExtractMetadataNode:
         value = meta.get(key)
         if value is None:
             # Metadata may also ride as an ATTRIBUTE on a typed item value (an Image's layout,
-            # a Regions' canvas) — scan the record's items for one so named.
+            # a Boxes' canvas) — scan the record's items for one so named.
             for item in meta.values():
                 attr = getattr(item, key, None)
                 if attr is not None:
