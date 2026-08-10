@@ -38,6 +38,7 @@ from confluid import Class, Instance, LazyClass, Reference
 from confluid import dump as _confluid_dump
 from confluid import get_configurable_attrs
 from confluid import load as _confluid_load
+from confluid import marks
 from confluid import resolve as _confluid_resolve
 from confluid.registry import resolve_class
 from loggair import get_logger
@@ -165,7 +166,7 @@ def _target_and_kwargs(obj: Any) -> Optional[Tuple[Callable[..., Any], bool, Dic
     # A live @configurable instance (instantiate=True path). Read config values from the
     # instance __dict__ ONLY (never getattr — that would execute @property getters, some of
     # which raise, e.g. an unattached LightningModule.trainer).
-    if not isinstance(obj, type) and getattr(type(obj), "__confluid_configurable__", False):
+    if not isinstance(obj, type) and marks(type(obj)).configurable:
         cls = type(obj)
         data = vars(obj)
         names = [n for n in get_configurable_attrs(obj) if n in data]
@@ -1527,7 +1528,7 @@ def _build_fluid(pnode: "_PNode", node_mappings: Dict[str, Any]) -> Tuple[type, 
             coerced[ref_field] = Reference(value)
     # Lazy when the class is confluid-lazy-marked (optimizer / loader / lightning / logger) OR a
     # consumer wired its object node's `lazy` output (slot 1) — a deferred runtime-injection slot.
-    is_lazy = bool(getattr(cls, "__confluid_lazy__", False))
+    is_lazy = marks(cls).lazy
     return cls, is_lazy, coerced
 
 
@@ -2171,7 +2172,7 @@ def _assign_ref_names(
         cls = specs[nid][0]
         # A runnable root is named by its confluid role (trainer / evaluator) — the config
         # bind key, so the exported YAML is directly runnable (`recordstream run …`).
-        role = getattr(cls, "__confluid_role__", None)
+        role = marks(cls).role
         if nid not in fed_as and role in ("trainer", "evaluator"):
             base = role
         else:

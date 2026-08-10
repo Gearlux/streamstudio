@@ -61,7 +61,7 @@ from typing import (
 
 import datasets
 from annotated_types import Ge, Gt, Interval, Le, Lt
-from confluid import mandatory_param_names, output_specs, parse_param_docs
+from confluid import mandatory_param_names, marks, output_specs, parse_param_docs
 from loggair import get_logger
 from recordstream import Record as _Record
 from recordstream.discovery import get_callable_path, resolve_callable, scan_module
@@ -290,9 +290,10 @@ def _role_for_class(cls: Any) -> Optional[str]:
     object output sockets as ``RECORDSTREAM_OBJECT:sink`` — matching the ``DatasetProcessor.sink`` slot.
     Checked first: it is the deliberate sink marker (see :data:`_NODE_CATEGORIES` / :func:`_is_sink_class`).
     """
-    if getattr(cls, "__confluid_category__", None) == "sink":
+    cls_marks = marks(cls)
+    if cls_marks.category == "sink":
         return "sink"
-    role = getattr(cls, "__confluid_role__", None)
+    role = cls_marks.role
     if role:
         return str(role)
     try:
@@ -326,7 +327,7 @@ def _framework_of(cls: Any) -> Optional[str]:
     ``register()``-ed builder FUNCTION has no MRO to read at all. Returns ``None`` when
     nothing claims an engine, which is what keeps an untagged class connecting everywhere.
     """
-    declared = getattr(cls, "__confluid_framework__", None)
+    declared = marks(cls).framework
     if declared:
         return str(declared)
     try:
@@ -1495,7 +1496,7 @@ def _op_call_signature(obj: Any) -> Optional[inspect.Signature]:
     older ``category="op"`` + ``constant=True`` value producer with a no-arg ``__call__``)
     returns ``None`` so it still falls through to the value-node dispatch, as before.
     """
-    if not inspect.isclass(obj) or getattr(obj, "__confluid_category__", None) != "op":
+    if not inspect.isclass(obj) or marks(obj).category != "op":
         return None
     call = getattr(obj, "__call__", None)  # MRO-resolved — an inherited __call__ counts
     if call is None:
@@ -1581,7 +1582,7 @@ def _is_dataset_member_class(obj: Any) -> bool:
     Task datasets are normally NOT canvas nodes, but a runnable's ``train_set`` / ``dataset`` slot
     needs a Source producer — so when a runnable is buildable we also surface these as Source nodes.
     """
-    return inspect.isclass(obj) and getattr(obj, "__confluid_role__", None) == "dataset"
+    return inspect.isclass(obj) and marks(obj).role == "dataset"
 
 
 def _is_object_member_class(obj: Any) -> bool:
@@ -1600,7 +1601,8 @@ def _is_object_member_class(obj: Any) -> bool:
     """
     if not callable(obj):
         return False
-    return getattr(obj, "__confluid_role__", None) in _MEMBER_ROLES or bool(getattr(obj, "__confluid_lazy__", False))
+    obj_marks = marks(obj)
+    return obj_marks.role in _MEMBER_ROLES or obj_marks.lazy
 
 
 def _is_sink_class(obj: Any) -> bool:
@@ -1615,7 +1617,7 @@ def _is_sink_class(obj: Any) -> bool:
     :func:`_role_for_class`), docking into a ``DatasetProcessor`` runnable node's ``sink`` slot. The
     prediction sinks (``write(prediction, metadata)``) are deliberately UNtagged and excluded.
     """
-    return inspect.isclass(obj) and getattr(obj, "__confluid_category__", None) == "sink"
+    return inspect.isclass(obj) and marks(obj).category == "sink"
 
 
 def _safe_callable_path(func: Callable) -> Optional[str]:
@@ -2007,8 +2009,10 @@ def _build_source_node(cls: Callable, name: str, category: str) -> Type:
     src_list_param = _source_list_param(cls)
     op_list_param = _op_list_param(cls)
     wired = {p for p in (src_param, src_list_param, op_list_param) if p is not None}
-    _strict = getattr(cls, "__confluid_strict_typing__", False)
-    required, nullable_opts, _split_map = _build_config_inputs(cls, skip=wired or None, strict_typing=_strict)
+    cls_marks = marks(cls)
+    required, nullable_opts, _split_map = _build_config_inputs(
+        cls, skip=wired or None, strict_typing=cls_marks.strict_typing
+    )
 
     optional: Dict[str, Any] = {**nullable_opts}
     if src_param is not None:
@@ -2052,7 +2056,7 @@ def _build_source_node(cls: Callable, name: str, category: str) -> Type:
         optional_inputs=optional or None,
         kind="source",
         callable_path=_safe_callable_path(cls),
-        is_random=getattr(cls, "__confluid_random__", False),
+        is_random=cls_marks.random,
         split_map=_split_map or None,
     )
 
@@ -2077,9 +2081,11 @@ def _build_op_node(cls: Callable, name: str, category: str) -> Type:
     single_op_params = _single_op_params(cls)  # [param, …] — each ONE op VALUE
     list_prefixes = sorted(set(op_list_params.values()))
     # Config widgets EXCLUDING the op-typed params (they ride RECORDSTREAM_OP sockets, not widgets).
-    _strict = getattr(cls, "__confluid_strict_typing__", False)
+    cls_marks = marks(cls)
     _socketed = set(op_list_params) | set(single_op_params)
-    required, nullable_opts, _split_map = _build_config_inputs(cls, skip=_socketed or None, strict_typing=_strict)
+    required, nullable_opts, _split_map = _build_config_inputs(
+        cls, skip=_socketed or None, strict_typing=cls_marks.strict_typing
+    )
     optional: Dict[str, Any] = {"record": (RECORD_TYPE,), **nullable_opts}
     for prefix in list_prefixes:
         optional[f"{prefix}_0"] = (OP_TYPE,)  # seed; web/op_list.js grows <prefix>_1, _2, … per family
@@ -2136,7 +2142,7 @@ def _build_op_node(cls: Callable, name: str, category: str) -> Type:
         optional_inputs=optional,
         kind="op",
         callable_path=_safe_callable_path(cls),
-        is_random=getattr(cls, "__confluid_random__", False),
+        is_random=cls_marks.random,
         split_map=_split_map or None,
     )
 
@@ -2160,9 +2166,10 @@ def _build_model_node(cls: Callable, name: str, category: str) -> Type:
     """
     model_socket = _object_socket("model", _framework_of(cls))
     model_in_params = _model_params(cls)  # ctor params that take a WIRED model (RECORDSTREAM_OBJECT:model)
+    cls_marks = marks(cls)
     # Config widgets EXCLUDING the wired model params (they ride RECORDSTREAM_OBJECT:model input sockets).
     required, nullable_opts, _split_map = _build_config_inputs(
-        cls, skip=set(model_in_params) or None, strict_typing=getattr(cls, "__confluid_strict_typing__", False)
+        cls, skip=set(model_in_params) or None, strict_typing=cls_marks.strict_typing
     )
     optional: Dict[str, Any] = {"record": (RECORD_TYPE,), **nullable_opts}
     for pname in model_in_params:
@@ -2204,7 +2211,7 @@ def _build_model_node(cls: Callable, name: str, category: str) -> Type:
         optional_inputs=optional,
         kind="model",
         callable_path=_safe_callable_path(cls),
-        is_random=getattr(cls, "__confluid_random__", False),
+        is_random=cls_marks.random,
         split_map=_split_map or None,
     )
 
@@ -2220,8 +2227,8 @@ def _build_value_node(cls: Callable, name: str, category: str) -> Type:
     the declared ``@output``s. Canonical users: the ImpairmentsChain ``ImpairmentsTxConfig`` /
     ``ImpairmentsRxConfig`` config utilities.
     """
-    _strict = getattr(cls, "__confluid_strict_typing__", False)
-    required, nullable_opts, _split_map = _build_config_inputs(cls, strict_typing=_strict)
+    cls_marks = marks(cls)
+    required, nullable_opts, _split_map = _build_config_inputs(cls, strict_typing=cls_marks.strict_typing)
     optional: Dict[str, Any] = dict(nullable_opts)
 
     out_specs = list(output_specs(cast(type, cls)))
@@ -2250,8 +2257,8 @@ def _build_value_node(cls: Callable, name: str, category: str) -> Type:
         optional_inputs=optional or None,
         kind="value",
         callable_path=_safe_callable_path(cls),
-        is_random=getattr(cls, "__confluid_random__", False),
-        is_constant=getattr(cls, "__confluid_constant__", False),
+        is_random=cls_marks.random,
+        is_constant=cls_marks.constant,
         split_map=_split_map or None,
     )
 
@@ -2476,7 +2483,7 @@ def _build_object_node(cls: Callable, name: str, category: str) -> Type:
     usable. ComfyUI tolerates a ``None`` socket value; downstream nodes that require the instance fail
     legibly on use.
     """
-    is_lazy = bool(getattr(cls, "__confluid_lazy__", False))
+    is_lazy = marks(cls).lazy
     # A lazy member's REQUIRED (no-default) ctor params are the runtime-injected slot the runnable
     # fills at ``run()`` (``torch.optim.*.params`` / ``DataLoader.dataset``) — never a widget. Skip
     # them so the object node only exposes the configurable knobs (lr / batch_size / …).
@@ -2834,7 +2841,7 @@ def create_comfy_node(
     # A MODEL node (``category="model"``) also has a record-taking ``__call__`` — it is
     # dispatched BEFORE the op check by its own category tag (a model RUNS inference and
     # additionally exposes its model object; see :func:`_build_model_node`).
-    if getattr(func, "__confluid_category__", None) == "model":
+    if marks(func).category == "model":
         return _build_model_node(func, name, category)
     if _op_call_signature(func) is not None:
         return _build_op_node(func, name, category)
@@ -2999,11 +3006,12 @@ def register_module_nodes(
         # A re-exported configurable may be a class OR a registered builder FUNCTION
         # (``raidar.configurables`` registers torchvision's ``fasterrcnn_*`` builders) — admit any
         # callable carrying the configurable marker; the admission filter below classifies it.
-        if callable(member) and getattr(member, "__confluid_configurable__", False):
+        if callable(member) and marks(member).configurable:
             candidates[name] = member
 
     for name, target_func in candidates.items():
-        confluid_category = getattr(target_func, "__confluid_category__", None)
+        target_marks = marks(target_func)
+        confluid_category = target_marks.category
         # Admit a class if it is a deliberately-tagged op/source/engine, OR it implements the run
         # interface (a buildable runnable node), OR it is a runnable MEMBER class (a task dataset →
         # Source node, or a model/loss/metric/optimizer/loader/lightning → OBJECT node) whose node
@@ -3018,16 +3026,12 @@ def register_module_nodes(
             logger.debug(f"ComfyStream: Skipping {module_path}.{name} (not an op/source/engine/runnable/member)")
             continue
 
-        group = getattr(target_func, "__confluid_group__", None)
+        group = target_marks.group
         # Runnables / members may be category-less (a runnable's category is e.g.
         # ``classification_trainer``; a ``lazy`` optimizer has no category) — fall back to the
         # discovery role, then a literal kind (``runnable`` vs ``object``), so the unique key +
         # palette path stay well-formed.
-        key_category = (
-            confluid_category
-            or getattr(target_func, "__confluid_role__", None)
-            or ("runnable" if _is_runnable(target_func) else "object")
-        )
+        key_category = confluid_category or target_marks.role or ("runnable" if _is_runnable(target_func) else "object")
         node_name = _node_key(module_path, key_category, group, name)
         # Palette folder reuses ROLE/TASK (or category) — never the package; the package rides the
         # node LABEL as a ``[PKG]`` tag instead (see _node_category / _package_tag).
@@ -3038,8 +3042,8 @@ def register_module_nodes(
                 key_category,
                 group,
                 root,
-                role=getattr(target_func, "__confluid_role__", None),
-                task=getattr(target_func, "__confluid_task__", None),
+                role=target_marks.role,
+                task=target_marks.task,
             ),
         )
         target_mappings[node_name] = node_class

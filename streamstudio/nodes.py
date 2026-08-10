@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
 
 import numpy as np
 import torch
+from confluid import marks
 from loggair import get_logger
 
 from streamstudio.bridge import ARRAY_TYPE, OP_TYPE, RECORD_TYPE, SOURCE_TYPE, VALUE_TYPE, node_root
@@ -1421,7 +1422,7 @@ def _to_yaml_str(obj: Any) -> str:
     ``!class:`` / ``!ref:`` tags).  Everything else falls through to
     ``yaml.safe_dump``; non-serializable objects fall back to ``repr()``.
     """
-    if getattr(type(obj), "__confluid_configurable__", False):
+    if marks(type(obj)).configurable:
         try:
             from confluid import dump
 
@@ -1988,5 +1989,5 @@ NODE_CLASS_MAPPINGS: Dict[str, Type] = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS: Dict[str, str] = {
-    k: getattr(cls, "__confluid_display_name__", cls.__name__) for k, cls in NODE_CLASS_MAPPINGS.items()
+    k: marks(cls).display_name or cls.__name__ for k, cls in NODE_CLASS_MAPPINGS.items()
 }
