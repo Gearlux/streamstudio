@@ -386,7 +386,7 @@ _SINGLE_OP_PARAMS = {"op", "target"}
 # wired ``RECORDSTREAM_SOURCE`` input socket instead of a STRING widget, so a Source/engine node's output
 # feeds them. ``DatasetSplit(source=…)`` and ``Stream(source=…)`` use ``source``. Detected by exact
 # name (the same name-convention as ``_OP_LIST_PARAMS``); safe because no concrete leaf source
-# (``HuggingFaceSource``/``RFUAVSource``/``RegionsJsonSource``) has a param literally named ``source``.
+# (``HuggingFaceSource``/``RFUAVSource``/``SigMFSource``) has a param literally named ``source``.
 _SOURCE_PARAM = "source"
 
 # Constructor params that hold a LIST OF SOURCES — rendered as dynamic ``RECORDSTREAM_SOURCE`` multi-inputs
