@@ -1517,8 +1517,10 @@ def _value_call_signature(obj: Any) -> Optional[inspect.Signature]:
 
     A no-arg ``__call__(self)`` marks a VALUE-PRODUCER node — a configurable class that produces values
     purely from its constructor config (surfaced as ``@output`` sockets), with NO record/data input. The
-    canonical users are the ImpairmentsChain config utilities (``ImpairmentsTxConfig`` /
-    ``ImpairmentsRxConfig``). Distinct from :func:`_op_call_signature` (a ``category="op"`` class whose
+    shape was introduced for a set of per-transform config utilities that have since been REMOVED
+    upstream; no class in the workspace currently carries ``constant=True``, so the mechanism's
+    coverage is the committed workflow fixture (``tests/test_impairments_export.py``), whose node
+    kinds are baked in deliberately. Distinct from :func:`_op_call_signature` (a ``category="op"`` class whose
     ``__call__`` takes the record) and :func:`_is_runnable` (a no-arg ``run`` method, not ``__call__``);
     checked LAST in the dispatch so a source/op/object/runnable always wins.
     """
@@ -2224,8 +2226,8 @@ def _build_value_node(cls: Callable, name: str, category: str) -> Type:
     it (``obj()`` — honouring the producer contract), and surfaces each declared ``@output`` property as
     a typed output socket (containers → JSON ``STRING``, via the same machinery as op/runnable nodes).
     Unlike an op node there are NO ``record`` input or ``record``/``op`` outputs — the only outputs are
-    the declared ``@output``s. Canonical users: the ImpairmentsChain ``ImpairmentsTxConfig`` /
-    ``ImpairmentsRxConfig`` config utilities.
+    the declared ``@output``s. No workspace class currently carries ``constant=True`` — the original
+    per-transform config utilities were removed upstream; see :func:`_value_call_signature`.
     """
     cls_marks = marks(cls)
     required, nullable_opts, _split_map = _build_config_inputs(cls, strict_typing=cls_marks.strict_typing)

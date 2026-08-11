@@ -39,7 +39,9 @@ DAG into ONE SEQUENTIAL Confluid ``!class:...()`` op-list per weakly-connected c
 * a Taidal VALUE node marked ``@configurable(constant=True)`` is HOISTED as a top-level
   deferred ``!class:`` document entry carrying its widget settings verbatim, and the
   consumer kwarg becomes a dotted ``!ref:<name>.<output>`` (confluid attribute access).
-  Canonical case: ``ImpairmentsTxConfig.disabled`` feeding ``ImpairmentsChain.tx_disabled``;
+  Shape: a config node's ``disabled`` output feeding a downstream op's ``tx_disabled`` param.
+  (The concrete classes this was built for were removed upstream; nothing in the workspace
+  carries ``constant=True`` today, so the coverage is the committed workflow fixture.);
 * anything else is omitted with a note (the op keeps its constructor default) — a
   per-record runtime value should ride **metadata** instead (expression-capable params
   like ``ThresholdOp.low_level`` accept ``"{meta_key}"`` resolved from the record's

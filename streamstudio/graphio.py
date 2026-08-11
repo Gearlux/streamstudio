@@ -729,7 +729,7 @@ def flow_yaml_to_workflow(
     replayed into a connected canvas graph.
 
     * each step becomes a node, wired from the step before it;
-    * a hoisted ``constant=True`` value node (e.g. ``ImpairmentsTxConfig``) is placed and its dotted
+    * a hoisted ``constant=True`` value node is placed and its dotted
       ``!ref:<name>.<output>`` consumers are wired from its output;
     * a **dead-end tap** — a record-chain op whose own record output feeds nothing, excluding the
       pipeline's final output — is given a distinct colour.
@@ -1107,7 +1107,7 @@ def extract_ops_workflow(
     **target** mark restricts the export to the union of the targets' data ancestor cones (so the
     dead-end viewer/analysis side-branches the user did NOT target are dropped); a **skip** mark
     removes the marked nodes + their downstream. With NO marks the whole op graph is kept. The
-    config/value nodes (`@configurable(constant=True)` producers like `ImpairmentsTxConfig`) are
+    config/value nodes (`@configurable(constant=True)` producers) are
     KEPT — they are ancestors of the ops they configure, so they ride along in the cone.
 
     Two modes, because a real pipeline routes the record THROUGH ComfyUI subgraph instances (which
