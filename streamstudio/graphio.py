@@ -7,7 +7,7 @@ that ties them together — between a Confluid YAML document and a ComfyUI ``wor
 
 * :func:`yaml_to_workflow` — YAML → ``workflow.json``. Broadcast-resolves the config to a
   Fluid marker graph with :func:`confluid.resolve` (no instantiation — every node is a
-  uniform ``Class`` / ``Instance`` / ``Lazy`` marker carrying ``.target`` + ``.kwargs``;
+  uniform ``Target`` / ``Target`` / ``Partial`` marker carrying ``.target`` + ``.kwargs``;
   ``!ref:`` targets are shared by identity, so a fan-out is one node with several
   out-links). Pass ``instantiate=True`` to instead walk live-but-inert objects from
   ``confluid.materialize(..., solidify=False)`` — same walk, via :func:`_target_and_kwargs`.
@@ -34,7 +34,7 @@ import math
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union, cast
 
-from confluid import Class, Instance, LazyClass, Reference
+from confluid import PartialClass, Reference, Target
 from confluid import dump as _confluid_dump
 from confluid import get_configurable_attrs
 from confluid import load as _confluid_load
@@ -157,12 +157,12 @@ def _target_and_kwargs(obj: Any) -> Optional[Tuple[Callable[..., Any], bool, Dic
     from :func:`confluid.resolve` (default) OR the live-but-inert graph from
     ``confluid.materialize(..., solidify=False)`` (``instantiate=True``).
     """
-    if isinstance(obj, (Class, Instance)):  # LazyClass is a Class subclass
+    if isinstance(obj, (Target, Target)):  # PartialClass is a Target subclass
         target = obj.target
         cls = target if isinstance(target, type) else resolve_class(target)
         if cls is None:
             return None
-        return cls, isinstance(obj, LazyClass), dict(obj.kwargs)
+        return cls, isinstance(obj, PartialClass), dict(obj.kwargs)
     # A live @configurable instance (instantiate=True path). Read config values from the
     # instance __dict__ ONLY (never getattr — that would execute @property getters, some of
     # which raise, e.g. an unattached LightningModule.trainer).
@@ -342,7 +342,7 @@ def _output_slot(node_cls: type, is_lazy: bool) -> int:
     """Which output slot of ``node_cls`` a consumer wires from, given the marker's lazy-ness.
 
     source → 0 (the ``source`` output); op → 1 (the ``op`` value, slot 0 is the applied record);
-    object → 1 (``lazy``) when the marker is a ``Lazy``, else 0 (``instance``); runnable → 0.
+    object → 1 (``lazy``) when the marker is a ``Partial``, else 0 (``instance``); runnable → 0.
     """
     kind = getattr(node_cls, "TAIDAL_NODE_KIND", None)
     if kind == "op":
@@ -1526,7 +1526,7 @@ def _build_fluid(pnode: "_PNode", node_mappings: Dict[str, Any]) -> Tuple[type, 
         value = coerced.get(ref_field)
         if isinstance(value, str) and value:
             coerced[ref_field] = Reference(value)
-    # Lazy when the class is confluid-lazy-marked (optimizer / loader / lightning / logger) OR a
+    # Partial when the class is confluid-lazy-marked (optimizer / loader / lightning / logger) OR a
     # consumer wired its object node's `lazy` output (slot 1) — a deferred runtime-injection slot.
     is_lazy = marks(cls).lazy
     return cls, is_lazy, coerced
@@ -1782,10 +1782,10 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
                 compute: List[Any] = []
                 for mid in chain.op_ids:
                     mcls, _mlazy, mkwargs = _build_fluid(pnodes[mid], node_mappings)
-                    compute.append(_marker(Instance, mcls, mkwargs))
-                compute += [_marker(Instance, FormulaOp, {"formula": f, "var": v}) for f, v in chain.formulas]
+                    compute.append(_marker(Target, mcls, mkwargs))
+                compute += [_marker(Target, FormulaOp, {"formula": f, "var": v}) for f, v in chain.formulas]
                 marker = _marker(
-                    Instance if eager else Class, ConfigureOp, {"ops": compute, "target": marker, "param": param}
+                    Target if eager else Target, ConfigureOp, {"ops": compute, "target": marker, "param": param}
                 )
             except Exception as e:  # pragma: no cover - defensive: chain members are plain ops
                 logger.warning(
@@ -1927,7 +1927,7 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
                     if sequential and src in subgraph_op_instances:
                         # A sequential op-list (Stream ``ops`` / Pipeline ``transforms``) makes a
                         # nested ``Pipeline`` equivalent to its transforms SPLICED inline — and
-                        # inline Instance ops materialize cleanly via ``DatasetProcessor.run()``'s
+                        # inline Target ops materialize cleanly via ``DatasetProcessor.run()``'s
                         # per-op ``flow()``, whereas a nested deferred ``Pipeline`` marker left in
                         # ``stream.ops`` does NOT (the Stream rejects it when it iterates ``ops``).
                         # Fan-out containers (Parallel) keep the single embedded chain.
@@ -1937,10 +1937,10 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
                 kwargs[base] = value_list
         # _marker: kwargs set post-construction — a param literally named `target` (ConfigureOp)
         # collides with the Fluid ctor's own first parameter.
-        fluids[nid] = _wrap_configured(nid, _marker(LazyClass if is_lazy else Class, cls, kwargs), eager=False)
+        fluids[nid] = _wrap_configured(nid, _marker(PartialClass if is_lazy else Target, cls, kwargs), eager=False)
 
-    def _chain_op_instance(nid: str, chain_key: str) -> Instance:
-        """An inline ``!class:Op()`` Instance for a chained op, with non-record wires resolved."""
+    def _chain_op_instance(nid: str, chain_key: str) -> Target:
+        """An inline ``!class:Op()`` Target for a chained op, with non-record wires resolved."""
         cls, _lazy, kwargs = chain_specs[nid]
         kwargs = dict(kwargs)
         configured = {param for param, _chain in configure_specs.get(nid, [])}
@@ -1961,8 +1961,8 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
                     continue
                 src_type = pnodes[src_id].class_type if src_id in pnodes else "unknown"
                 dropped_wires.append((f"{chain_key}[{cls.__name__}]", base, src_id, src_type))
-        instance = _wrap_configured(nid, _marker(Instance, cls, kwargs), eager=True)
-        return cast(Instance, instance)
+        instance = _wrap_configured(nid, _marker(Target, cls, kwargs), eager=True)
+        return cast(Target, instance)
 
     def _fold_chain(nid: str, chain_key: str) -> List[Any]:
         """Linearize a STRAIGHT chain into inline op Instances.
@@ -1998,7 +1998,7 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
         if source_nid is not None:
             referenced.add(source_nid)
             stream_kwargs["source"] = Reference(names[source_nid])
-        chain_entries.append((key, Class(Stream, **stream_kwargs)))
+        chain_entries.append((key, Target(Stream, **stream_kwargs)))
 
     document = _hoist_document(fluids, names, referenced, specs)
     # `constant=True` configs hoisted while compiling the Subgraph-Op Pipeline(s) — emit them
@@ -2242,7 +2242,7 @@ def _strip_index(name: str) -> str:
 
 
 def _strip_index_for(cls: Any, name: str) -> str:
-    """Class-aware :func:`_strip_index`: collapse a dynamic op-list socket into the CONSUMING class's
+    """Target-aware :func:`_strip_index`: collapse a dynamic op-list socket into the CONSUMING class's
     REAL list param.
 
     Resolves the socket-family prefix through the same authority the bridge uses for op-list
