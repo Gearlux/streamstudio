@@ -507,7 +507,7 @@ def test_export_workflow_route_returns_yaml() -> None:
         assert handler is not None
         nm = {"src": create_comfy_node(HuggingFaceSource, "src")}
         streamstudio.NODE_CLASS_MAPPINGS["src"] = nm["src"]
-        workflow = yaml_to_workflow({"raw": __import__("confluid").Instance(HuggingFaceSource, path="mnist")}, nm)
+        workflow = yaml_to_workflow({"raw": __import__("confluid").Target(HuggingFaceSource, path="mnist")}, nm)
         asyncio.run(handler(_json_request({"workflow": workflow})))
     data, _kwargs = web.calls[-1]
     assert "HuggingFaceSource" in data["yaml"]
