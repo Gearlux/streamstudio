@@ -71,7 +71,7 @@ from pathlib import Path
 from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple, Union, cast
 
 from confluid import dump
-from confluid.fluid import Class, Instance, Reference
+from confluid.fluid import Reference, Target
 from loggair import get_logger
 from recordstream import Pipeline
 from recordstream.discovery import resolve_callable
@@ -304,7 +304,7 @@ def _snake(class_name: str) -> str:
 def _marker(fluid_cls: Any, target: Any, kwargs: Dict[str, Any]) -> Any:
     """Build a Confluid Fluid marker with kwargs set AFTER construction.
 
-    ``Instance(cls, **kwargs)`` collides when an op has a constructor param literally named
+    ``Target(cls, **kwargs)`` collides when an op has a constructor param literally named
     ``target`` (e.g. ``ConfigureOp.target``) — the marker ctor's own first parameter. The
     marker stores ``self.kwargs = kwargs`` verbatim, so a post-construction update is
     exactly equivalent and collision-proof.
@@ -329,7 +329,7 @@ class _FoldContext:
     """Per-document accumulator for the widget-wire folding pass.
 
     Holds the prompt + node mappings the resolvers need, the document's omission
-    ``notes``, the HOISTED constant entries (``name -> Class marker``, insertion
+    ``notes``, the HOISTED constant entries (``name -> Target marker``, insertion
     ordered — they dump above ``ops:``), and the pre-traced per-consumer VALUE CHAINS
     (``consumer id -> [(param, _ValueChain)]`` — compiled to ``ConfigureOp`` wraps).
     One context per exported document, so a constant wired into two ops in the same
@@ -711,7 +711,7 @@ def _resolve_widget_link(target: Any, key: str, link: Any, fold: _FoldContext) -
 
     if class_type == _VALUE_NODE_CLASS_TYPE:
         # The Value node's STRING literal → the real Python object, inlined as the consumer's kwarg
-        # (a list of boxes, a dict). Lazy import keeps export.py ↔ nodes.py acyclic.
+        # (a list of boxes, a dict). Partial import keeps export.py ↔ nodes.py acyclic.
         from streamstudio.nodes import parse_value_literal
 
         value = upstream.get("inputs", {}).get("value")
@@ -800,9 +800,9 @@ def _hoist_constant(node_id: str, node: Dict[str, Any], fold: _FoldContext) -> s
         coerced = _coerce_kwargs(target, literal_inputs)
         coerced.update(ref_inputs)
         name = fold.claim_name(_snake(getattr(target, "__name__", class_type)))
-        # A deferred ``Class`` marker (``!class:Foo`` — NO parens): the dotted ``!ref:`` reader
+        # A deferred ``Target`` marker (``!class:Foo`` — NO parens): the dotted ``!ref:`` reader
         # instantiates it to read the @output property; nothing eager happens at dump time.
-        fold.constants[name] = _marker(Class, cast(type, target), coerced)
+        fold.constants[name] = _marker(Target, cast(type, target), coerced)
         fold._hoisted[node_id] = name
         logger.debug(f"_hoist_constant: node {node_id} ({class_type}) hoisted as {name!r}.")
         return name
@@ -820,7 +820,7 @@ def _embed_op_values(
 
     ``op_links`` carries ``(param, index, link)`` — the consuming node may have SEVERAL op-list families
     (a helios ``HeliosIfOp`` → ``true_transforms`` + ``false_transforms``), so links are grouped by param
-    and ordered by socket index within each. Each wired producer embeds as a nested ``!class:`` Instance
+    and ordered by socket index within each. Each wired producer embeds as a nested ``!class:`` Target
     (its wired widgets fold through the same pass), or — for a Subgraph-Op terminator — its compiled cone
     as a nested ``Pipeline``, mirroring
     the live node (``bridge._build_op_node``). A family with no valid producer is omitted.
@@ -860,13 +860,13 @@ def _op_to_instance(
     dropped_notes: Optional[List[str]] = None,
     fold: Optional[_FoldContext] = None,
     bind_captures: bool = False,
-) -> Instance:
-    """Build a Confluid ``Instance`` marker (``!class:X()`` on dump) for one op node.
+) -> Target:
+    """Build a Confluid ``Target`` marker (``!class:X()`` on dump) for one op node.
 
     Recovers the wrapped class from ``TAIDAL_CALLABLE_PATH``, takes the literal (non-link)
     widget inputs — minus the ``record`` wire — and runs them through the SAME coercion the
     live node uses (``bridge._coerce_kwargs``), so blank/optional/List widgets serialize the
-    way they'd construct. Explicit kwargs on the ``Instance`` make the dump robust regardless
+    way they'd construct. Explicit kwargs on the ``Target`` make the dump robust regardless
     of whether the op stores each arg as a same-named attribute.
 
     A widget input driven by a LINK first goes through the folding pass (``fold`` given):
@@ -936,7 +936,7 @@ def _op_to_instance(
         coerced.update(_embed_op_values(class_type, node_id, op_links, fold))
     # ``target`` is the op's @configurable CLASS; pass the type (not the string path) so the
     # dumper emits the dotted ``!class:module.Qualname()`` form that ``confluid.load`` resolves.
-    instance = cast(Instance, _marker(Instance, cast(type, target), coerced))
+    instance = cast(Target, _marker(Target, cast(type, target), coerced))
     if cfg_specs and fold is not None:
         for param, chain in cfg_specs:
             # The value chain re-runs on the op's incoming record inside a ConfigureOp: the
@@ -946,10 +946,8 @@ def _op_to_instance(
                 _op_to_instance(mid, fold.prompt[mid], node_mappings, dropped_notes=dropped_notes, fold=fold)
                 for mid in chain.op_ids
             ]
-            compute += [_marker(Instance, FormulaOp, {"formula": f, "var": v}) for f, v in chain.formulas]
-            instance = cast(
-                Instance, _marker(Instance, ConfigureOp, {"ops": compute, "target": instance, "param": param})
-            )
+            compute += [_marker(Target, FormulaOp, {"formula": f, "var": v}) for f, v in chain.formulas]
+            instance = cast(Target, _marker(Target, ConfigureOp, {"ops": compute, "target": instance, "param": param}))
     if capture_specs and not bind_captures:
         # An op-@output -> param wire is `bind: {param: "step.attr"}` in a flow document. The
         # flat form used to thread it through a per-record Context cell (Capture on the
@@ -970,8 +968,8 @@ def _op_to_instance(
 
 def _subgraph_op_instance(
     terminator_id: str, prompt: Dict[str, Any], node_mappings: Dict[str, Any], fold: _FoldContext
-) -> Instance:
-    """Compile a Subgraph-Op terminator's ancestor cone into a ``Pipeline`` Instance.
+) -> Target:
+    """Compile a Subgraph-Op terminator's ancestor cone into a ``Pipeline`` Target.
 
     The cone (the ops computing the record wired into the terminator) is flattened with the
     SAME DAG→sequential machinery the top level uses — fan-out and ``Mix`` fan-in become
@@ -988,7 +986,7 @@ def _subgraph_op_instance(
     for members in _components(universe, preds):
         _check_component(members, preds, boundary_feeds)
         ops.extend(_linear_chain_ops(members, universe, preds, prompt, node_mappings, fold))
-    return cast(Instance, _marker(Instance, Pipeline, {"transforms": ops}))
+    return cast(Target, _marker(Target, Pipeline, {"transforms": ops}))
 
 
 def _op_value_consumed(node_id: str, prompt: Dict[str, Any], node_mappings: Dict[str, Any]) -> bool:
@@ -1373,7 +1371,7 @@ def _compile_components(
             carrying ``TAIDAL_NODE_KIND`` / ``TAIDAL_CALLABLE_PATH`` / ``TAIDAL_CONSTANT``).
         chain_notes: Optional accumulator; one ``List[str]`` of notes is appended PER
             returned component (parallel lists), for the exporter's comment block.
-        chain_constants: Optional accumulator; one ``{name: Class}`` dict of HOISTED
+        chain_constants: Optional accumulator; one ``{name: Target}`` dict of HOISTED
             constant entries is appended PER component — the YAML exporters emit them as
             top-level keys above ``ops:`` (a bare compile drops them, so pass this when
             the result will be dumped).
@@ -1393,7 +1391,7 @@ def _compile_components(
 
     Returns:
         One list per component, each suitable for ``Stream(ops=...)`` after a dump/load
-        round-trip — op ``Instance`` markers plus any inserted ``Stash*``/``Unstash*``
+        round-trip — op ``Target`` markers plus any inserted ``Stash*``/``Unstash*``
         instances. Empty when the graph has no op nodes.
 
     Raises:

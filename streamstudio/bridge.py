@@ -82,7 +82,7 @@ OP_TYPE = "RECORDSTREAM_OP"
 # output by a runnable node and consumed by the ``Run`` node which calls ``.run()``.
 RUNNABLE_TYPE = "RECORDSTREAM_RUNNABLE"
 # A built configurable MEMBER object (model / loss / optimizer / loader / lightning / metrics) — or a
-# deferred ``LazyClass`` of one (when the member class is tagged ``lazy``) — ridden as a wire so an
+# deferred ``PartialClass`` of one (when the member class is tagged ``lazy``) — ridden as a wire so an
 # object node feeds a runnable's member slot. Distinct from SOURCE (datasets ride RECORDSTREAM_SOURCE).
 OBJECT_TYPE = "RECORDSTREAM_OBJECT"
 # A raw numpy array / torch tensor ridden as a wire — the value behind a record entry, carried OUT of
@@ -2471,11 +2471,11 @@ def _build_object_node(cls: Callable, name: str, category: str) -> Type:
 
     * ``instance`` — the **flowed, live** object, built right here from the widget values. Useful for
       standalone / inspection wiring where every required value is already set on the node.
-    * ``class`` — the configured-but-deferred class (a :class:`confluid.LazyClass`). Wire THIS into a
+    * ``class`` — the configured-but-deferred class (a :class:`confluid.PartialClass`). Wire THIS into a
       runnable when a value is only known at ``run()`` (``torch.optim.*.params`` / ``DataLoader.dataset``,
       or a model's dataset-derived ``num_classes``): the runnable flows it with the runtime kwarg. (The
       output is named ``class`` — the user-facing "the configured class, not yet built" — while the value
-      it carries is a confluid ``LazyClass``; graphio's whole-graph export keys eager/lazy off the WIRED
+      it carries is a confluid ``PartialClass``; graphio's whole-graph export keys eager/lazy off the WIRED
       output slot, not this label, so a member wired from here serialises as a deferred ``!lazy:``.)
 
     When the live ``instance`` cannot be built — a genuinely deferred member whose required ctor param
@@ -2539,7 +2539,7 @@ def _build_object_node(cls: Callable, name: str, category: str) -> Type:
     deferred_required = bool(skip)
 
     def execute(self: Any, **kwargs: Any) -> Tuple[Any, ...]:
-        from confluid import Fluid, LazyClass, flow
+        from confluid import Fluid, PartialClass, flow
 
         def _resolve(v: Any) -> Any:
             # A wired object is passed through as-is — flow()-ed first if it's still a Fluid, so wiring
@@ -2563,7 +2563,7 @@ def _build_object_node(cls: Callable, name: str, category: str) -> Type:
             else:
                 widget_kwargs[k] = v
         coerced = {**_coerce_kwargs(cls, widget_kwargs), **object_kwargs}
-        lazy = LazyClass(cast(Type[Any], cls), **coerced)
+        lazy = PartialClass(cast(Type[Any], cls), **coerced)
         instance: Any = None
         if deferred_required:
             logger.debug(
@@ -2572,9 +2572,9 @@ def _build_object_node(cls: Callable, name: str, category: str) -> Type:
             )
         else:
             try:
-                # flow() builds the instance from a fresh LazyClass (and solidifies it) so the pristine
+                # flow() builds the instance from a fresh PartialClass (and solidifies it) so the pristine
                 # ``lazy`` output is never consumed/mutated by the build attempt.
-                instance = flow(LazyClass(cast(Type[Any], cls), **coerced))
+                instance = flow(PartialClass(cast(Type[Any], cls), **coerced))
             except Exception as exc:  # noqa: BLE001 - surface ANY build failure as an actionable warning
                 logger.warning(
                     f"{name}: could not build a live instance ({type(exc).__name__}: {exc}); "

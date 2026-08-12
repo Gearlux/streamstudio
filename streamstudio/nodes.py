@@ -801,7 +801,7 @@ class ConfusionMatrixViewerNode:
 def _processing_interrupted() -> bool:
     """Whether the user pressed ComfyUI's interrupt button.
 
-    Lazy + guarded: ``comfy`` only exists when running INSIDE ComfyUI, not in
+    Partial + guarded: ``comfy`` only exists when running INSIDE ComfyUI, not in
     streamstudio's own test/dev environment — so absent comfy ⇒ no interrupt
     source ⇒ ``False`` (the run proceeds to completion exactly as before). Kept
     as a tiny standalone function so the interrupt path is trivially
@@ -914,7 +914,7 @@ def _strip_ansi(text: str) -> str:
 def _send_run_output(unique_id: Optional[str], text: str) -> None:
     """Push a live snapshot of the run's captured output to the node's widget (``web/run_output.js``).
 
-    Lazy + guarded like :func:`_processing_interrupted`: ComfyUI's ``server`` module only exists
+    Partial + guarded like :func:`_processing_interrupted`: ComfyUI's ``server`` module only exists
     INSIDE a running ComfyUI, so an absent ``server`` (streamstudio's own test/dev env) or a missing
     ``unique_id`` ⇒ a silent no-op — the run still completes and the final ``{"ui": {"text": [...]}}``
     return populates the widget. Uses ComfyUI's websocket push (``PromptServer.instance.send_sync``)
@@ -934,7 +934,7 @@ def _send_run_output(unique_id: Optional[str], text: str) -> None:
 def _make_progress_bar(unique_id: Optional[str]) -> Any:
     """ComfyUI's native per-node ``ProgressBar`` for ``unique_id`` (the green node overlay), or ``None``.
 
-    Lazy + guarded like :func:`_send_run_output`: ``comfy.utils`` only exists INSIDE a running ComfyUI,
+    Partial + guarded like :func:`_send_run_output`: ``comfy.utils`` only exists INSIDE a running ComfyUI,
     and a missing ``unique_id`` (streamstudio's own test/dev env) ⇒ ``None`` so the runner proceeds with
     no native bar (the streamed text widget still works). The ``node_id`` is passed EXPLICITLY because
     the runnable's ``run()`` executes on a WORKER thread (:func:`run_runnable`) that does NOT inherit
@@ -1031,7 +1031,7 @@ def run_runnable(runnable: Any, unique_id: Optional[str] = None) -> str:
             holder["exc"] = exc
 
     # copy_context().run so the worker inherits contextvars — confluid's engine
-    # state (an active materialization context for late !ref:/Lazy flows) rides
+    # state (an active materialization context for late !ref:/Partial flows) rides
     # a ContextVar that a raw Thread target would silently drop.
     worker_ctx = contextvars.copy_context()
     worker = threading.Thread(
@@ -1180,7 +1180,7 @@ class RetagObjectNode:
             logger.debug(f"Retag: could not set {attr} on {type(obj).__name__}: {exc}")
 
     def retag(self, object: Any, target_role: str = _RETAG_KEEP, target_task: str = _RETAG_KEEP) -> Tuple[Any, ...]:
-        # ``object`` is a live member instance OR a confluid ``LazyClass`` marker — both accept a
+        # ``object`` is a live member instance OR a confluid ``PartialClass`` marker — both accept a
         # per-instance attribute that shadows the class-level ``@configurable`` tag for downstream
         # consumers. ``role`` drives the wire type (the actual docking); ``task`` is guidance only.
         # The wire-level retype (what lets it dock elsewhere) is done by retag.js off ``target_role``.
@@ -1372,7 +1372,7 @@ class SubgraphOpExtractNode:
     never force ComfyUI to execute the upstream op cone. That matters because the cone is an
     op-only ``record -> record`` transform with NO source on the canvas (the source feeds the
     Stream at runtime, not the op chain) — eager evaluation would run the head op on ``None`` and
-    crash a downstream viewer / value-chain ``Extract from Record``. Lazy gating
+    crash a downstream viewer / value-chain ``Extract from Record``. Partial gating
     (``comfy_execution/graph.py``: a lazy link is not added as a dependency unless requested)
     leaves the whole upstream unexecuted while the ``PROMPT`` still carries the full DAG to
     compile. Using the subgraph as a *graph* (running a record through its boundary) is
