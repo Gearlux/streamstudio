@@ -2656,7 +2656,7 @@ def _build_runnable_node(cls: Callable, name: str, category: str) -> Type:
     """Build a runnable (trainer / evaluator / processor) node: members as wired INPUT sockets.
 
     Every configurable member is enumerated from ``to_pydantic(cls)`` (which surfaces both ctor params
-    AND ``__init__``-body slots, and skips ``@ignore_config`` members). Each member is rendered as:
+    AND ``__init__``-body slots, and skips read-only properties). Each member is rendered as:
 
     * a ``RECORDSTREAM_SOURCE`` socket — dataset/source members (:data:`_DATASET_MEMBER_PARAMS` + the
       ``source`` param), fed by Source/dataset nodes;
