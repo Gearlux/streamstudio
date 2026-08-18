@@ -6,18 +6,18 @@ that ties them together — between a Confluid YAML document and a ComfyUI ``wor
 (the UI/litegraph form you save and load on the canvas), in BOTH directions:
 
 * :func:`yaml_to_workflow` — YAML → ``workflow.json``. Broadcast-resolves the config to a
-  Fluid marker graph with :func:`confluid.resolve` (no instantiation — every node is a
+  Fluid marker graph with ``confluid.load(until="settled")`` (no instantiation — every node is a
   uniform ``Target`` / ``Target`` / ``Partial`` marker carrying ``.target`` + ``.kwargs``;
   ``!ref:`` targets are shared by identity, so a fan-out is one node with several
   out-links). Pass ``instantiate=True`` to instead walk live-but-inert objects from
-  ``confluid.materialize(..., solidify=False)`` — same walk, via :func:`_target_and_kwargs`.
+  ``confluid.load(..., solidify=False)`` — same walk, via :func:`_target_and_kwargs`.
 * :func:`workflow_to_yaml` — ``workflow.json`` (or the prompt/API form) → YAML. Builds
   Fluid markers per node (recovering the class from each node's ``TAIDAL_CALLABLE_PATH``),
   **hoists** every node to a top-level key wired by ``!ref:`` (matching the navigaitor
   output shape, e.g. ``waivefront/config/train_efficientvit_b0.yaml``), and serialises
   with the canonical :func:`confluid.dump`.
 
-The **Fluid graph is the shared IR**: confluid owns YAML↔Fluid (``resolve``/``dump``);
+The **Fluid graph is the shared IR**: confluid owns YAML↔Fluid (``load(until="settled")``/``dump``);
 this module owns Fluid↔``workflow.json``. Neither direction depends on ComfyUI being
 importable — it only reads ``NODE_CLASS_MAPPINGS`` (the generated node classes).
 
@@ -39,7 +39,6 @@ from confluid import dump as _confluid_dump
 from confluid import get_configurable_attrs
 from confluid import load as _confluid_load
 from confluid import marks
-from confluid import resolve as _confluid_resolve
 from confluid.registry import resolve_class
 from loggair import get_logger
 from recordstream import Pipeline, Stream
@@ -154,8 +153,8 @@ def _target_and_kwargs(obj: Any) -> Optional[Tuple[Callable[..., Any], bool, Dic
 
     Returns ``None`` for anything that is not a node (scalars, ``None``, plain lists/dicts).
     This is the single abstraction that lets the import walk consume EITHER the marker graph
-    from :func:`confluid.resolve` (default) OR the live-but-inert graph from
-    ``confluid.materialize(..., solidify=False)`` (``instantiate=True``).
+    from ``confluid.load(until="settled")`` (default) OR the live-but-inert graph from
+    ``confluid.load(..., solidify=False)`` (``instantiate=True``).
     """
     if isinstance(obj, (Target, Target)):  # PartialClass is a Target subclass
         target = obj.target
@@ -633,7 +632,7 @@ def yaml_to_workflow(
         doc: A YAML path / string / already-parsed dict (anything ``confluid.load`` accepts).
         node_mappings: StreamStudio's ``NODE_CLASS_MAPPINGS``.
         instantiate: ``False`` (default) walks the un-instantiated marker graph from
-            ``confluid.resolve``; ``True`` walks live-but-inert objects from
+            ``confluid.load(until="settled")``; ``True`` walks live-but-inert objects from
             ``confluid.load(..., solidify=False)`` (no model backbones / dataset loads).
         as_: ``"graph"`` (default) lays the nodes on the canvas; ``"group"`` additionally wraps
             them in one visual ``groups[]`` box titled ``name``; ``"subgraph"`` packages them as a
@@ -648,13 +647,13 @@ def yaml_to_workflow(
     # A FLOW document (the export shape ``{…constants…, flow: {step: op}, outputs: …}``) is a step
     # GRAPH, not a mapping of node-valued top-level keys — its ``flow:`` mapping would be walked as
     # if each step name were a config key by the whole-graph path below. Detect it on a raw marker
-    # parse (``flow=False`` keeps ``!ref`` links intact) and dispatch to the dedicated importer.
+    # parse (``until="document"`` keeps ``!ref`` links intact) and dispatch to the dedicated importer.
     # Restricted to path/text inputs (where flow docs actually arrive — the CLI passes a path, the
     # route raw YAML) so the probe never mutates a caller-owned dict; any parse failure or non-flow
     # shape falls through to the whole-graph path unchanged.
     if isinstance(doc, (str, Path)):
         try:
-            raw = _confluid_load(doc, flow=False)
+            raw = _confluid_load(doc, until="document")
         except Exception:  # pragma: no cover - defensive: the whole-graph path re-parses and reports
             raw = None
         if _is_flow_document(raw):
@@ -662,7 +661,7 @@ def yaml_to_workflow(
 
     # instantiate=True → live-but-inert objects (load parses the file/string THEN materialises with
     # the expensive solidify suppressed); else → the un-instantiated broadcast-resolved marker graph.
-    graph = _confluid_load(doc, solidify=False) if instantiate else _confluid_resolve(doc)
+    graph = _confluid_load(doc, solidify=False) if instantiate else _confluid_load(doc, until="settled")
     builder = _WorkflowBuilder(node_mappings)
     entries = list(graph.values()) if isinstance(graph, dict) else [graph]
     for value in entries:
@@ -751,7 +750,7 @@ def flow_yaml_to_workflow(
     Returns:
         A ComfyUI UI-format workflow dict, JSON-safe (non-finite widget values nulled).
     """
-    raw = doc if _is_flow_document(doc) else _confluid_load(doc, flow=False)
+    raw = doc if _is_flow_document(doc) else _confluid_load(doc, until="document")
     if not _is_flow_document(raw):  # pragma: no cover - caller detected the shape
         raise UnsupportedTopologyError(
             "flow_yaml_to_workflow expects a flow-export document (a top-level 'flow:' step mapping)."
