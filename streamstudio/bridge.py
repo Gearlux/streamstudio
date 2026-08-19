@@ -222,7 +222,7 @@ _DATASET_MEMBER_PARAMS = {"train_set", "val_set", "test_set", "dataset", "stream
 # ``"dataset"`` is routed to ``_build_source_node``), not object nodes. The role-less runtime members
 # (``torch.optim.*`` / ``DataLoader`` / ``pytorch_lightning.Trainer``, registered in
 # ``matrainer.lightning.configurables``) are detected instead by the confluid **``lazy`` mark**
-# (``__confluid_lazy__``) — deliberately NOT a category, so they don't leak into navigaitor's
+# (``marks(cls).lazy``) — deliberately NOT a category, so they don't leak into navigaitor's
 # form-spec slot pickers (which resolve a picker FROM the slot's default-target category and would
 # then offer the raw ``params``-taking optimizer). Loggers carry ``role="logger"`` (NOT ``lazy``) so
 # they build EAGERLY — a logger's required ``save_dir`` must stay a configurable widget, not be
@@ -1591,7 +1591,7 @@ def _is_object_member_class(obj: Any) -> bool:
     """True if ``obj`` is a runnable MEMBER that should become a ``RECORDSTREAM_OBJECT`` node.
 
     A task-scoped model / loss / metric (``__confluid_role__`` in :data:`_MEMBER_ROLES`), OR a target
-    tagged confluid ``lazy`` (``__confluid_lazy__`` — the role-less registered runtime members:
+    tagged confluid ``lazy`` (``marks(obj).lazy`` — the role-less registered runtime members:
     ``torch.optim.*`` / ``DataLoader`` / ``pytorch_lightning.Trainer``). The ``lazy`` mark — not a
     category — is the signal for the role-less runtime members so they stay out of navigaitor's
     category-driven form-spec pickers.

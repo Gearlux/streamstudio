@@ -1837,7 +1837,7 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
 
     # The WIRED OUTPUT SLOT is authoritative for an object node's eager/lazy-ness: a consumer that
     # pulled the `lazy` output (slot 1) → !lazy:; the `instance` output (slot 0) → !class: (eager).
-    # (An unconsumed object node keeps the class's own __confluid_lazy__ default from _build_fluid.)
+    # (An unconsumed object node keeps the class's own `lazy` mark as its default from _build_fluid.)
     for pnode in pnodes.values():
         for _name, (src_id, src_slot) in pnode.links.items():
             if src_id not in specs:
