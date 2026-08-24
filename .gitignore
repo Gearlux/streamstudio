@@ -22,7 +22,7 @@ flake8.txt
 mypy.txt
 coverage-sources.zip
 coverage-*/
-test-report.xml
+*test-report.xml
 
 # Lightning training logs
 lightning_logs/
