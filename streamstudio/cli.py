@@ -151,20 +151,29 @@ def _run(args: argparse.Namespace) -> None:
             ],
             check=True,
         )
-        logger.info("Installing ComfyUI dependencies into current environment...")
-        subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "pip",
-                "install",
-                "-r",
-                str(comfy_dir / "requirements.txt"),
-            ],
-            check=True,
-        )
     else:
         logger.info(f"Using existing ComfyUI installation at {comfy_dir}")
+    # 1b. Sync ComfyUI's requirements on EVERY run, not only after a clone: an existing checkout
+    # drifts (ComfyUI-Manager updates it in place; a newer main.py then imports a module the venv
+    # never received — `comfy_aimdo`, measured 2026-08-22 — and dies at startup). pip is a no-op
+    # when everything is already satisfied, so this costs seconds, not a reinstall.
+    if getattr(args, "install", True):
+        logger.info(f"Syncing ComfyUI requirements into {sys.executable}...")
+        try:
+            subprocess.run(
+                [sys.executable, "-m", "pip", "install", "-r", str(comfy_dir / "requirements.txt")],
+                check=True,
+            )
+        except KeyboardInterrupt:  # Ctrl-C while pip resolves: stop as quietly as a Ctrl-C during the launch
+            logger.info("StreamStudio stopped.")
+            return
+        except subprocess.CalledProcessError as exc:
+            # A failed sync (offline, a resolver conflict) must not block an install that already
+            # works — same continue-on-failure rule as the custom-node tier; only the CLONE is fatal.
+            logger.warning(
+                f"ComfyUI requirements sync failed ({exc}); launching anyway — "
+                f"run `pip install -r {comfy_dir / 'requirements.txt'}` manually if startup fails."
+            )
 
     # 2. Install declared + requested custom nodes (idempotent — an existing checkout is skipped).
     # Tiers: entry-point-declared (incl. streamstudio's own bundled ComfyUI-Manager) -> env -> flags.
@@ -346,6 +355,16 @@ def main() -> None:
             "Palette config file (YAML). Its 'keep_nodes:' list names extra default/custom nodes to "
             "KEEP when hiding the palette (PreviewImage / PreviewAny are always kept). "
             "Defaults to ~/.streamstudio/config.yaml when omitted."
+        ),
+    )
+    parser.add_argument(
+        "--install",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Sync ComfyUI's requirements.txt into this environment on every launch (default; a "
+            "no-op when satisfied). --no-install skips it — for an air-gapped run, or when the "
+            "environment is managed elsewhere."
         ),
     )
     parser.add_argument(
