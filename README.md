@@ -426,7 +426,29 @@ The whole-graph export (**Export Graph → Taidal YAML**) honors the same mark: 
 
 **Approximations** (documented, deliberate): a metadata-only Mix (input==target==metadata) is discarded on export and not recovered on import.
 
-### Importing a `flow.yaml` back to the canvas
+### Opening with a given canvas (URL params)
+
+A tool that launches the editor can decide what the canvas shows, instead of whatever the
+previous session left behind:
+
+```
+http://127.0.0.1:8188/?taidal_graph=/abs/path/to/pipeline.yaml   # that config, as the canvas
+http://127.0.0.1:8188/?taidal_new=1                              # an empty canvas
+```
+
+`taidal_graph` names a **server-side** Confluid YAML; the `Taidal.OpenGraph` frontend
+extension posts it to `/taidal/import_yaml` (which accepts `{path: …}` beside the usual
+`{yaml: …}`) and loads the converted workflow. The param is applied once and stripped from
+the URL, so reloading the editor afterwards keeps what you build there.
+
+A third param, `taidal_return=<origin>`, tells the editor where its work should go back
+to: **Taidal → Send Graph → Viewer** converts the active graph (same converter as the
+YAML export) and POSTs it to `<origin>/api/pipeline` server-side via
+`/taidal/send_to_viewer` — no export-file → drop round trip, and no CORS since the canvas
+never talks to the viewer directly. Opened by hand (no param), the command asks for the
+viewer address once per session.
+
+## Importing a `flow.yaml` back to the canvas
 
 A flow document round-trips back to a connected graph — the **inverse** of the canvas compiler.
 Use **Taidal → "Import Taidal YAML → Graph"** on the canvas, or the offline CLI:
