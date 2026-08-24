@@ -495,6 +495,60 @@ def test_import_yaml_route_returns_workflow() -> None:
     assert any(n["type"] == "src" for n in data["workflow"]["nodes"])
 
 
+def test_import_yaml_route_accepts_a_server_side_path(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    # {path: …} reads the config server-side — how a launching viewer reopens the graph it
+    # was last handed (web/open_graph.js) without being able to read local files itself.
+    from recordstream.sources import HuggingFaceSource
+
+    from streamstudio.bridge import create_comfy_node
+
+    with _fake_comfy() as (routes, web):
+        handler = routes.post_handlers.get("/taidal/import_yaml")
+        assert handler is not None
+        streamstudio.NODE_CLASS_MAPPINGS["src"] = create_comfy_node(HuggingFaceSource, "src")
+        config = tmp_path / "pipeline.yaml"
+        config.write_text("raw: !class:recordstream.sources.huggingface.HuggingFaceSource()\n  path: mnist\n")
+        asyncio.run(handler(_json_request({"path": str(config)})))
+        data, _kwargs = web.calls[-1]
+        assert any(n["type"] == "src" for n in data["workflow"]["nodes"])
+        asyncio.run(handler(_json_request({"path": str(tmp_path / "gone.yaml")})))
+        data, kwargs = web.calls[-1]
+        assert kwargs.get("status") == 400 and "no such file" in data["error"]
+
+
+def test_send_to_viewer_route_converts_and_posts(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # The /taidal/send_to_viewer handler converts the posted workflow to YAML and POSTs it
+    # to the launching viewer's /api/pipeline — server-side, so the canvas needs no CORS.
+    from recordstream.sources import HuggingFaceSource
+
+    from streamstudio.bridge import create_comfy_node
+    from streamstudio.graphio import yaml_to_workflow
+
+    outbound = []
+
+    def fake_post(url, payload):  # type: ignore[no-untyped-def]
+        outbound.append((url, payload))
+        return {"message": "pipeline sent: 40 recording(s)"}
+
+    with _fake_comfy() as (routes, web):
+        # AFTER entering: _fake_comfy reloads the module, which would rebind a patch made before.
+        monkeypatch.setattr(streamstudio, "_post_json", fake_post)
+        handler = routes.post_handlers.get("/taidal/send_to_viewer")
+        assert handler is not None
+        nm = {"src": create_comfy_node(HuggingFaceSource, "src")}
+        streamstudio.NODE_CLASS_MAPPINGS["src"] = nm["src"]
+        workflow = yaml_to_workflow({"raw": __import__("confluid").Target(HuggingFaceSource, path="mnist")}, nm)
+        asyncio.run(handler(_json_request({"workflow": workflow, "url": "http://127.0.0.1:8787/", "name": "demo"})))
+        data, _kwargs = web.calls[-1]
+        assert data == {"sent": {"message": "pipeline sent: 40 recording(s)"}}
+        ((url, payload),) = outbound
+        assert url == "http://127.0.0.1:8787/api/pipeline" and payload["name"] == "demo"
+        assert "HuggingFaceSource" in payload["yaml"] and "mnist" in payload["yaml"]
+        asyncio.run(handler(_json_request({"workflow": workflow})))
+        data, kwargs = web.calls[-1]
+        assert kwargs.get("status") == 400 and "url" in data["error"]
+
+
 def test_export_workflow_route_returns_yaml() -> None:
     # The /taidal/export_workflow POST handler converts a whole workflow.json into hoisted YAML.
     from recordstream.sources import HuggingFaceSource

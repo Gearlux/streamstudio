@@ -1,8 +1,12 @@
 """ComfyUI Entry Point for Taidal/Waivefront nodes."""
 
+import asyncio
 import importlib.metadata
 import json
 import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import loggair
@@ -245,6 +249,29 @@ NODE_DISPLAY_NAME_MAPPINGS.update(_STATIC_NODE_DISPLAY_NAME_MAPPINGS)
 
 WEB_DIRECTORY = "./web"
 
+
+def _post_json(url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """POST JSON to another local tool and return its JSON reply.
+
+    A non-2xx reply raises with the reply's own ``error`` message when it carries one —
+    the viewer names its refusal (an unopenable document) better than an HTTP code does.
+    """
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as response:
+            return json.loads(response.read().decode("utf-8"))  # type: ignore[no-any-return]
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace")
+        try:
+            detail = json.loads(detail).get("error", detail)
+        except ValueError:
+            pass
+        raise RuntimeError(f"{url} answered {exc.code}: {detail}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"{url} is not reachable: {exc.reason}") from exc
+
+
 # Add backend route for the directory chooser if running inside ComfyUI
 try:
     import subprocess
@@ -464,15 +491,45 @@ try:
             try:
                 body = await request.json()
                 yaml_text = body.get("yaml", "")
+                name = body.get("name", "Imported")
+                if not yaml_text and body.get("path"):
+                    # A server-side config path instead of inline text — how a launching
+                    # viewer reopens the graph it was last handed (web/open_graph.js).
+                    config = Path(str(body["path"]))
+                    if not config.is_file():
+                        return web.json_response({"error": f"no such file: {config}"}, status=400)
+                    yaml_text = config.read_text()
+                    if name == "Imported":
+                        name = config.stem
                 workflow = yaml_to_workflow(
                     yaml_text,
                     NODE_CLASS_MAPPINGS,
                     as_=body.get("as", "graph"),
-                    name=body.get("name", "Imported"),
+                    name=name,
                 )
                 return web.json_response({"workflow": workflow})
             except Exception as e:
                 return web.json_response({"error": str(e)}, status=400)
+
+        @server.PromptServer.instance.routes.post("/taidal/send_to_viewer")
+        async def send_to_viewer_handler(request: Any) -> Any:
+            # The canvas's "send to viewer" command: convert the WHOLE graph to Confluid
+            # YAML (same converter as the export route) and POST it to the viewer that
+            # launched this editor — server-side, so no CORS is involved. Backs
+            # web/send_to_viewer.js. Body: {workflow: {...}, url: "http://…", name?}.
+            try:
+                body = await request.json()
+                url = str(body.get("url") or "").strip()
+                if not url:
+                    return web.json_response({"error": "a viewer 'url' is required"}, status=400)
+                yaml_text = workflow_to_yaml(body.get("workflow", {}), NODE_CLASS_MAPPINGS)
+                payload = {"name": str(body.get("name") or "pipeline"), "yaml": yaml_text}
+                reply = await asyncio.to_thread(_post_json, url.rstrip("/") + "/api/pipeline", payload)
+                return web.json_response({"sent": reply})
+            except UnsupportedTopologyError as e:
+                return web.json_response({"error": str(e)}, status=400)
+            except Exception as e:
+                return web.json_response({"error": str(e)}, status=502)
 
         # Convert a WHOLE workflow.json (UI form) → a hoisted-!ref: Confluid YAML. Backs
         # web/export_workflow.js ("Export Graph → Taidal YAML"). Body: ``{workflow: {...}}``.
