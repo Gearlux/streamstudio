@@ -15,6 +15,7 @@ import runpy
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -115,8 +116,8 @@ def test_main_uses_existing_and_updates_stale_symlink(
     with patch("subprocess.run") as run_mock:
         cli.main()
 
-    # comfy + manager already exist -> no clone/pip, only the launch call
-    assert run_mock.call_count == 1
+    # comfy + manager already exist -> no clone; the requirements sync + the launch
+    assert run_mock.call_count == 2  # the requirements sync + the launch
     assert run_mock.call_args.args[0] == [sys.executable, "main.py"]
     assert run_mock.call_args.kwargs["cwd"] == comfy
     # the stale symlink was repointed at this package
@@ -168,7 +169,7 @@ def test_main_handles_keyboard_interrupt(
 ) -> None:
     comfy = tmp_path / "ComfyUI"
     comfy.mkdir()
-    _preinstall_manager(comfy)  # exists -> only the launch subprocess.run call fires
+    _preinstall_manager(comfy)  # exists -> the requirements sync fires first (and is interrupted)
     monkeypatch.setattr(sys, "argv", ["streamstudio", "--comfy-dir", str(comfy)])
 
     with patch("subprocess.run", side_effect=KeyboardInterrupt):
@@ -295,8 +296,10 @@ def test_main_installs_comfyui_manager_by_default(
     clones = [c.args[0] for c in run_mock.call_args_list if c.args[0][:2] == ["git", "clone"]]
     target = comfy / "custom_nodes" / "ComfyUI-Manager"
     assert clones == [["git", "clone", cli.COMFYUI_MANAGER_URL, str(target)]]
-    # The mocked clone creates no files -> no requirements.txt -> no pip call fires for it.
-    assert all("pip" not in c.args[0] for c in run_mock.call_args_list)
+    # The mocked clone creates no files -> no requirements.txt -> no pip call fires for the NODE;
+    # the one pip call is ComfyUI's own every-run requirements sync.
+    pip_calls = [c.args[0] for c in run_mock.call_args_list if "pip" in c.args[0]]
+    assert [c[-1] for c in pip_calls] == [str(comfy / "requirements.txt")]
 
 
 def test_main_no_manager_skips_manager_install(
@@ -310,7 +313,7 @@ def test_main_no_manager_skips_manager_install(
         cli.main()
 
     # No custom-node clone at all -> the launch is the only subprocess call.
-    assert run_mock.call_count == 1
+    assert run_mock.call_count == 2  # the requirements sync + the launch
     assert run_mock.call_args.args[0] == [sys.executable, "main.py"]
 
 
@@ -326,7 +329,7 @@ def test_main_skips_already_installed_custom_node(
         cli.main()
 
     # Just the launch — an existing checkout is never re-cloned (update via ComfyUI-Manager).
-    assert run_mock.call_count == 1
+    assert run_mock.call_count == 2  # the requirements sync + the launch
     assert run_mock.call_args.args[0] == [sys.executable, "main.py"]
 
 
@@ -374,7 +377,11 @@ def test_custom_node_requirements_installed_after_clone(
 
     requirements = comfy / "custom_nodes" / "ComfyUI-Manager" / "requirements.txt"
     pip_calls = [c.args[0] for c in run_mock.call_args_list if "pip" in c.args[0]]
-    assert pip_calls == [[sys.executable, "-m", "pip", "install", "-r", str(requirements)]]
+    # ComfyUI's own requirements sync first, then the cloned node's requirements.
+    assert pip_calls == [
+        [sys.executable, "-m", "pip", "install", "-r", str(comfy / "requirements.txt")],
+        [sys.executable, "-m", "pip", "install", "-r", str(requirements)],
+    ]
 
 
 def test_custom_node_clone_failure_warns_and_launch_continues(
@@ -646,3 +653,62 @@ def test_export_multi_chain_stdout_is_document_stream(
     out = capsys.readouterr().out
     assert out.count("flow:") == 2
     assert "\n---\n" in "\n" + out  # one separator between the two documents
+
+
+# ---------------------------------------------------------------------------
+# Requirements are synced on EVERY run, not only after a clone (an existing checkout drifts:
+# ComfyUI-Manager updates it in place, main.py then imports a module the venv never got).
+# ---------------------------------------------------------------------------
+
+
+def _pip_install_calls(run_mock: MagicMock, comfy: Path) -> list:
+    wanted = [sys.executable, "-m", "pip", "install", "-r", str(comfy / "requirements.txt")]
+    return [c for c in run_mock.call_args_list if list(c.args[0]) == wanted]
+
+
+def test_main_syncs_requirements_for_an_existing_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, logger_mock: MagicMock
+) -> None:
+    comfy = tmp_path / "ComfyUI"
+    comfy.mkdir()
+    (comfy / "requirements.txt").write_text("comfy_aimdo\n")
+    _preinstall_manager(comfy)
+    monkeypatch.setattr(sys, "argv", ["streamstudio", "--comfy-dir", str(comfy)])
+    with patch("subprocess.run") as run_mock:
+        cli.main()
+    (install,) = _pip_install_calls(run_mock, comfy)
+    launch = run_mock.call_args_list[-1]
+    assert install.kwargs.get("check") is True
+    assert list(launch.args[0]) == [sys.executable, "main.py"]  # the sync happens BEFORE the launch
+    assert run_mock.call_args_list.index(install) < run_mock.call_args_list.index(launch)
+
+
+def test_main_no_install_skips_the_sync(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, logger_mock: MagicMock
+) -> None:
+    comfy = tmp_path / "ComfyUI"
+    comfy.mkdir()
+    (comfy / "requirements.txt").write_text("comfy_aimdo\n")
+    _preinstall_manager(comfy)
+    monkeypatch.setattr(sys, "argv", ["streamstudio", "--comfy-dir", str(comfy), "--no-install"])
+    with patch("subprocess.run") as run_mock:
+        cli.main()
+    assert _pip_install_calls(run_mock, comfy) == []
+    assert list(run_mock.call_args_list[-1].args[0]) == [sys.executable, "main.py"]
+
+
+def test_main_installs_exactly_once_after_a_clone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, logger_mock: MagicMock
+) -> None:
+    comfy = tmp_path / "ComfyUI"
+    monkeypatch.setattr(sys, "argv", ["streamstudio", "--comfy-dir", str(comfy)])
+
+    def fake_run(args: Any, **kwargs: Any) -> MagicMock:
+        if list(args)[:2] == ["git", "clone"]:
+            comfy.mkdir(parents=True, exist_ok=True)
+            (comfy / "requirements.txt").write_text("torch\n")
+        return MagicMock()
+
+    with patch("subprocess.run", side_effect=fake_run) as run_mock:
+        cli.main()
+    assert len(_pip_install_calls(run_mock, comfy)) == 1  # the clone's install IS the sync — not twice

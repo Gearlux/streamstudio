@@ -41,7 +41,7 @@ streamstudio
 
 On first run this:
 
-1. Clones ComfyUI into `~/.streamstudio/ComfyUI` and installs its `requirements.txt` into the active environment.
+1. Clones ComfyUI into `~/.streamstudio/ComfyUI` when it is missing, and on EVERY launch syncs its `requirements.txt` into the active environment (pip is a no-op when satisfied — a checkout that ComfyUI-Manager updated in place otherwise imports a module the environment never got; `--no-install` skips the sync).
 2. Installs the [ComfyUI-Manager](https://github.com/Comfy-Org/ComfyUI-Manager) custom node, plus any custom nodes declared by installed packages or requested by you — see [Custom nodes](#custom-nodes-comfyui-manager--extras) below.
 3. Symlinks the installed `streamstudio` package into `ComfyUI/custom_nodes/streamstudio`.
 4. Launches ComfyUI (`python main.py`) under the **same interpreter**, so ComfyUI's node discovery reads the entry-point metadata from your active `.venv`.
