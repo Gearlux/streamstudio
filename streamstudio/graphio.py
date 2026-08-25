@@ -1094,6 +1094,27 @@ def _keep_universe(all_ids: Any, fwd: Dict[Any, set], rev: Dict[Any, set], targe
     return universe
 
 
+def ui_workflow_to_prompt(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> Dict[str, Any]:
+    """A UI ``workflow.json`` -> the prompt/API-format graph the flow compiler consumes.
+
+    The editor's frontend makes this conversion itself (``graphToPrompt``) before POSTing to
+    ``/taidal/export_flow`` — but a graph FILE a consuming workspace owns (what the save
+    mirror writes) is the UI form, and no frontend is around when it is converted headless.
+    Subgraphs are inlined first and Reroutes collapsed (the frontend's own collapse,
+    reproduced), so the result is what ``graphToPrompt`` would have produced:
+    ``{node_id: {class_type, inputs}}`` with widget values by name and every wire as a
+    ``[source_id, slot]`` pair. It lives HERE because graphio owns all workflow.json
+    knowledge — ``export.py`` stays prompt-form only.
+    """
+    graph = _inline_subgraphs(graph)
+    prompt: Dict[str, Any] = {}
+    for node_id, pnode in _normalize_ui_workflow(graph, node_mappings).items():
+        inputs: Dict[str, Any] = dict(pnode.widgets)
+        inputs.update({name: [src, slot] for name, (src, slot) in pnode.links.items()})
+        prompt[node_id] = {"class_type": pnode.class_type, "inputs": inputs}
+    return _collapse_reroutes(prompt)
+
+
 def extract_ops_workflow(
     workflow: Dict[str, Any], node_mappings: Dict[str, Any], *, flatten: bool = False
 ) -> Dict[str, Any]:
@@ -2156,7 +2177,7 @@ def _assign_ref_names(
                 or (consumer_op_cls is not None and base in _op_list_params(consumer_op_cls))
             ):
                 # A node feeding a LIST param (ops / branches / transforms / streams / sources, OR a
-                # stamped helios op-list like ``true_transforms``) must NOT be NAMED after it: confluid
+                # stamped op-list like ``true_transforms``) must NOT be NAMED after it: confluid
                 # broadcasts a top-level key back INTO any class param of the same name, so a top-level
                 # ``ops:`` (one op) would clobber the Stream's explicitly-wired ``ops:`` list — the whole
                 # op chain replaced by a single op (``'ConvertToImageOp' object is not iterable`` at
@@ -2246,7 +2267,7 @@ def _strip_index_for(cls: Any, name: str) -> str:
 
     Resolves the socket-family prefix through the same authority the bridge uses for op-list
     params (``bridge._op_list_params`` — a reverse prefix→param lookup): a ``Pipeline`` node's
-    ``op_N`` collapses into ``transforms``, a ``Stream``'s into ``ops``, a stamped helios family
+    ``op_N`` collapses into ``transforms``, a ``Stream``'s into ``ops``, a stamped op-list family
     (``true_transforms_N``) into its own param. Falls back to the fixed name map
     (:func:`_strip_index`) when ``cls`` is unknown (a non-Taidal node) or the prefix is not one
     of its op-list families (``source_N`` → ``streams``, object lists, plain sockets).
@@ -2268,4 +2289,10 @@ def _scalar_of(value: Any) -> Any:
     return value
 
 
-__all__ = ["yaml_to_workflow", "flow_yaml_to_workflow", "workflow_to_yaml", "extract_ops_workflow"]
+__all__ = [
+    "yaml_to_workflow",
+    "flow_yaml_to_workflow",
+    "workflow_to_yaml",
+    "extract_ops_workflow",
+    "ui_workflow_to_prompt",
+]

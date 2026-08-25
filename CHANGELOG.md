@@ -28,6 +28,16 @@ StreamStudio-specific ops to maintain.
 - Workflow combinators nest: a runnable wired into a combinator slot is built rather than
   run, so only the selected branch executes.
 
+### Plugins
+- A `streamstudio.plugins` entry point lets an installed package contribute editor surface
+  without this package knowing it: the named module's `ROUTES` (an aiohttp `RouteTableDef`)
+  merges onto the editor's route table, and its `WEB_DIRECTORY` of frontend JS is served at
+  `/extensions/<dist>/…`. One broken plugin is isolated with a warning; the editor keeps
+  running.
+- A producer package tags a param's widget kind by stamping `__taidal_widget_params__` on
+  the class — the bridge renders the tagged free-text STRING and the producer's own web
+  extension supplies the picker. No widget special-cases live in the bridge.
+
 ### Import and export
 - The canvas compiles to a Confluid `flow:` document — one per weakly-connected component —
   runnable head-less with `recordstream run`.

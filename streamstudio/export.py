@@ -152,8 +152,8 @@ _EXPORT_TARGET_VALUE = "target"
 _ROOT = "__taidal_root__"
 
 # Dynamic ``RECORDSTREAM_OP`` value sockets a higher-order op node grows (``web/op_list.js``). The recordstream
-# higher-order ops use the ``op_N`` family; a waivefront-helios composite can carry SEVERAL families
-# under its own helios param names (``true_transforms_N`` …) — recognised class-aware via
+# higher-order ops use the ``op_N`` family; a bridged composite from a companion package can carry SEVERAL
+# families under its own stamped param names (``true_transforms_N`` …) — recognised class-aware via
 # :func:`_op_list_socket_param` rather than this fixed pattern (kept as the unstamped fallback).
 _OP_SOCKET_RE = re.compile(r"^op_(\d+)$")
 
@@ -163,7 +163,7 @@ def _op_class_of(node_cls: Any) -> Any:
 
     The op class is the authority on which constructor params accept op VALUES — ``bridge._single_op_params``
     / ``_op_list_params`` introspect IT (single-op params + the dynamic op-list families, incl. the
-    stamped helios slots ``compute`` / ``true_transforms``). ``None`` when the path is missing/unresolvable
+    stamped slots ``compute`` / ``true_transforms``). ``None`` when the path is missing/unresolvable
     (a non-op / native node), so the callers fall back to the recordstream ``op_N`` / ``op`` / ``target`` names.
     """
     path = getattr(node_cls, "TAIDAL_CALLABLE_PATH", None)
@@ -179,7 +179,7 @@ def _op_list_socket_param(op_cls: Any, key: str) -> Optional[str]:
     """The op-LIST constructor param whose dynamic ``<prefix>_N`` socket family ``key`` belongs to, else None.
 
     Routes each wired op-list socket to the right kwarg even when a node has SEVERAL families
-    (``HeliosIfOp`` → ``true_transforms_N`` + ``false_transforms_N``); the recordstream ``op_N`` family maps
+    (a bridged If composite → ``true_transforms_N`` + ``false_transforms_N``); the recordstream ``op_N`` family maps
     to its single op-list param. ``None`` ``op_cls`` (unstamped/native) recognises nothing here.
     """
     if op_cls is not None:
@@ -191,7 +191,7 @@ def _op_list_socket_param(op_cls: Any, key: str) -> Optional[str]:
 
 def _is_op_value_key(op_cls: Any, key: str) -> bool:
     """True if ``key`` is an op-VALUE input socket on ``op_cls`` — a single-op param (``ConfigureOp.target``
-    / a stamped helios ``compute``) or an indexed op-list socket (``op_0`` / ``true_transforms_0``).
+    / a stamped ``compute``) or an indexed op-list socket (``op_0`` / ``true_transforms_0``).
 
     These wires embed through the op-value path (nested ``!class:`` / list kwarg), NOT the widget/value-chain
     pre-passes — so the pre-passes SKIP them. Falls back to the recordstream name conventions when ``op_cls`` is
@@ -819,7 +819,7 @@ def _embed_op_values(
     """Compile each op-list socket family's links into its constructor kwarg → ``{param: value}``.
 
     ``op_links`` carries ``(param, index, link)`` — the consuming node may have SEVERAL op-list families
-    (a helios ``HeliosIfOp`` → ``true_transforms`` + ``false_transforms``), so links are grouped by param
+    (a bridged If composite → ``true_transforms`` + ``false_transforms``), so links are grouped by param
     and ordered by socket index within each. Each wired producer embeds as a nested ``!class:`` Target
     (its wired widgets fold through the same pass), or — for a Subgraph-Op terminator — its compiled cone
     as a nested ``Pipeline``, mirroring
@@ -941,7 +941,7 @@ def _op_to_instance(
         for param, chain in cfg_specs:
             # The value chain re-runs on the op's incoming record inside a ConfigureOp: the
             # chain ops compute, the Math steps apply as FormulaOps, and the result is set
-            # as the wrapped op's ``param`` (the helios Configure pattern, serialized).
+            # as the wrapped op's ``param`` (the Configure pattern, serialized).
             compute: List[Any] = [
                 _op_to_instance(mid, fold.prompt[mid], node_mappings, dropped_notes=dropped_notes, fold=fold)
                 for mid in chain.op_ids
@@ -991,7 +991,7 @@ def _subgraph_op_instance(
 
 def _op_value_consumed(node_id: str, prompt: Dict[str, Any], node_mappings: Dict[str, Any]) -> bool:
     """True if some node consumes ``node_id``'s output via an op-value slot (``op_N`` / ``op`` / ``target``,
-    or a stamped helios slot like ``compute`` / ``true_transforms_0``)."""
+    or a stamped slot like ``compute`` / ``true_transforms_0``)."""
     for cnode in prompt.values():
         op_cls = _op_class_of(node_mappings.get(str(cnode.get("class_type", ""))))
         for key, value in cnode.get("inputs", {}).items():

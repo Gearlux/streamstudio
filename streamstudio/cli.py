@@ -237,7 +237,7 @@ def _export(args: argparse.Namespace) -> None:
     # Import here (not at module top): pulling in streamstudio runs entry-point node discovery,
     # which is unnecessary weight for the common ``run`` path.
     import streamstudio
-    from streamstudio.export import chain_output_paths, export_flow_yamls
+    from streamstudio.export import chain_output_paths, collect_export_marks, export_flow_yamls
 
     graph_path: Path = args.graph
     if not graph_path.exists():
@@ -246,21 +246,33 @@ def _export(args: argparse.Namespace) -> None:
     data = json.loads(graph_path.read_text())
     # Accept a bare prompt dict, or {"prompt": {...}} (the wrapper the route also tolerates).
     prompt = data.get("prompt", data) if isinstance(data, dict) else data
-    if not isinstance(prompt, dict) or any(not isinstance(v, dict) or "class_type" not in v for v in prompt.values()):
-        raise SystemExit(
-            f"{graph_path} is not a ComfyUI API-format graph (expected {{node_id: {{class_type, inputs}}}}). "
-            "Export it from ComfyUI via the dev-mode 'Save (API Format)' button."
-        )
-
     # ``--skip`` mirrors the canvas export-skip mark; an API-format file carries no node
     # properties, so the marked ids must be named explicitly here (getattr: tolerate
     # programmatic Namespace callers that predate the flag).
-    exporter = export_flow_yamls
-    yaml_docs = exporter(
+    skip_ids = list(getattr(args, "skip", None) or [])
+    target_ids = list(getattr(args, "target", None) or [])
+    if isinstance(prompt, dict) and isinstance(prompt.get("nodes"), list):
+        # AUTO-DETECTED by payload shape (only the UI form carries a top-level ``nodes`` list):
+        # a UI-form workflow.json — the editor's native save, e.g. a workspace-owned graph file
+        # its save mirror wrote. Convert it to the prompt form; a UI file DOES carry node
+        # properties, so its canvas export marks are honored alongside the explicit flags.
+        from streamstudio.graphio import ui_workflow_to_prompt
+
+        wf_skip, wf_target = collect_export_marks(prompt)
+        skip_ids += wf_skip
+        target_ids += wf_target
+        prompt = ui_workflow_to_prompt(prompt, streamstudio.NODE_CLASS_MAPPINGS)
+    if not isinstance(prompt, dict) or any(not isinstance(v, dict) or "class_type" not in v for v in prompt.values()):
+        raise SystemExit(
+            f"{graph_path} is not a ComfyUI graph (expected the API form {{node_id: {{class_type, inputs}}}} "
+            "or a native workflow.json save with a top-level 'nodes' list)."
+        )
+
+    yaml_docs = export_flow_yamls(
         prompt,
         streamstudio.NODE_CLASS_MAPPINGS,
-        skip_ids=getattr(args, "skip", None),
-        target_ids=getattr(args, "target", None),
+        skip_ids=skip_ids or None,
+        target_ids=target_ids or None,
     )
 
     if len(yaml_docs) > 1:
@@ -402,9 +414,17 @@ def main() -> None:
     sub.add_parser("run", help="Launch ComfyUI with Taidal nodes (default).")
 
     export_parser = sub.add_parser(
-        "export", help="Compile a saved graph to Confluid `flow:` document(s) — one per independent component."
+        "export",
+        help=(
+            "Compile a saved graph (API form or native workflow.json, auto-detected) to Confluid "
+            "`flow:` document(s) — one per independent component."
+        ),
     )
-    export_parser.add_argument("graph", type=Path, help="ComfyUI API-format graph JSON.")
+    export_parser.add_argument(
+        "graph",
+        type=Path,
+        help="ComfyUI graph JSON — API form OR a native workflow.json save (auto-detected by shape).",
+    )
     export_parser.add_argument(
         "-o",
         "--output",

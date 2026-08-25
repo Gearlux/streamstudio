@@ -10,8 +10,8 @@ console.log("ComfyStream: Loaded Taidal.OpListInputs extension");
 // so the slot bookkeeping here is purely UX — the backend is robust to gaps or a missing extension.
 //
 // GENERALISED to ANY `<prefix>_N` OP family on the node (mirroring web/object_list.js): the recordstream
-// higher-order ops use the `op_N` family (prefix "op"), while a waivefront-helios composite that takes
-// SEVERAL op lists (HeliosIfOp → `true_transforms_N` + `false_transforms_N`) gets one family per
+// higher-order ops use the `op_N` family (prefix "op"), while a bridged composite that takes
+// SEVERAL op lists (an If composite → `true_transforms_N` + `false_transforms_N`) gets one family per
 // op-list param, each grown independently.
 
 const OP_TYPE = "RECORDSTREAM_OP";

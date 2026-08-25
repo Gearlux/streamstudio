@@ -55,25 +55,6 @@ def list_cached_hf_datasets() -> list:
         return []
 
 
-def list_melody_datasets(server: str = "PROD") -> list:
-    """Return the names of datasets available on the Melody/MAF platform (sorted).
-
-    Backs the ``/taidal/melody_datasets`` route + the Melody dataset-id picker
-    (``web/melody_dataset_chooser.js``). Delegates to helios's
-    ``keysight.ai.helios.data.melody_dataset.list_melody_datasets`` (which needs
-    ``maf_client`` + credentials in the environment). Degrades to an empty list on
-    ANY failure (helios absent, no credentials, platform unreachable) — the picker
-    is a convenience over the free-text field, so it must never break the editor.
-    """
-    try:
-        from keysight.ai.helios.data.melody_dataset import list_melody_datasets as _list
-
-        return list(_list(server=server))
-    except Exception as e:
-        logger.debug(f"list_melody_datasets: returning [] ({type(e).__name__}: {e})")
-        return []
-
-
 def list_hf_dataset_features(path: str, name: Optional[str] = None, split: Optional[str] = None) -> List[str]:
     """Return the feature/column names of a HuggingFace dataset (e.g. ``["image", "label"]``).
 
@@ -209,10 +190,10 @@ def _discover_and_register_nodes() -> None:
         seen.add(mod_path)
         # The palette path per node is ``Taidal/<Package>/<Category>[/<group>]`` — built inside
         # register_module_nodes from the module's top-level package + each class's confluid
-        # category/group (see bridge._node_category). ep.dist.name is the distribution name
-        # (e.g. "waivefront-helios") — passed as dist_name so the [PKG] label tag is derived
-        # from the dist, not the top-level Python package (which would collapse companion
-        # namespace packages like waivefront-helios back to [WAIVEFRONT]).
+        # category/group (see bridge._node_category). ep.dist.name is the distribution name —
+        # passed as dist_name so the [PKG] label tag is derived from the dist, not the top-level
+        # Python package (which would collapse a companion namespace distribution back into its
+        # parent package's tag).
         try:
             ep_dist = getattr(ep, "dist", None)
             dist_name = ep_dist.name if ep_dist is not None else None
@@ -231,10 +212,144 @@ def _discover_and_register_nodes() -> None:
     )
 
 
-_discover_and_register_nodes()
+def _register_plugin_routes(mod: Any, dist_name: str) -> int:
+    """Merge a plugin module's ``ROUTES`` onto ComfyUI's route table; return the number added.
 
-# Re-apply no-color after discovery: some scanned packages (e.g. waivefront-helios / keysight.ai)
-# call logger.remove() + logger.add(colorize=True) at import time, undoing the force_no_color()
+    ``ROUTES`` is an aiohttp ``web.RouteTableDef`` (or any iterable of ``RouteDef``-shaped
+    entries). aiohttp has no public table-append, so each entry is RE-registered via the
+    ``routes.route(method, path, **kwargs)(handler)`` decorator form. Per-(method, path) dedup
+    keeps the FIRST registration (this module runs under two identities — see
+    :func:`_discover_and_register_nodes` — and two plugins may collide): a duplicate is skipped at
+    debug. A table entry without method/path/handler (e.g. a ``StaticDef``) is skipped with a
+    warning — static assets belong in the plugin's ``WEB_DIRECTORY``, not ``ROUTES``. Outside
+    ComfyUI (no ``server`` module) this is a silent no-op.
+    """
+    routes = getattr(mod, "ROUTES", None)
+    if not routes:
+        return 0
+    try:
+        import server  # type: ignore[import-not-found]
+    except ImportError:
+        return 0  # not inside ComfyUI — the routes have nowhere to land
+    table = server.PromptServer.instance.routes
+    added = 0
+    for rd in routes:
+        method = getattr(rd, "method", None)
+        path = getattr(rd, "path", None)
+        handler = getattr(rd, "handler", None)
+        if method is None or path is None or handler is None:
+            logger.warning(
+                f"StreamStudio plugin {dist_name}: skipped a non-route ROUTES entry ({rd!r}) — "
+                "static assets belong in WEB_DIRECTORY, not ROUTES."
+            )
+            continue
+        if any(getattr(r, "path", None) == path and getattr(r, "method", None) == method for r in table):
+            logger.debug(
+                f"StreamStudio plugin {dist_name}: route {method} {path} already registered; keeping the first."
+            )
+            continue
+        table.route(method, path, **dict(getattr(rd, "kwargs", {}) or {}))(handler)
+        added += 1
+    return added
+
+
+def _register_plugin_web_directory(mod: Any, dist_name: str) -> bool:
+    """Register a plugin module's ``WEB_DIRECTORY`` with ComfyUI; return True when registered.
+
+    ``WEB_DIRECTORY`` is a directory name relative to the plugin module's own directory (ComfyUI's
+    own custom-node convention). It is inserted into ComfyUI's ``nodes.EXTENSION_WEB_DIRS`` under
+    the plugin's DISTRIBUTION name, so its ``*.js`` files are listed by ``GET /extensions`` and
+    served at ``/extensions/<dist>/…`` — the same URL depth as any custom node's extension, so
+    relative imports of ComfyUI's ``scripts/*.js`` keep resolving. Timing is safe by construction:
+    this module imports while ComfyUI loads custom nodes, BEFORE the server adds its static routes
+    from that dict. Outside ComfyUI (no ``nodes`` module) this is a silent no-op.
+    """
+    web_dir_name = getattr(mod, "WEB_DIRECTORY", None)
+    if not web_dir_name:
+        return False
+    try:
+        import nodes  # type: ignore[import-not-found]
+    except ImportError:
+        return False  # not inside ComfyUI — nothing serves web assets here
+    ext_dirs = getattr(nodes, "EXTENSION_WEB_DIRS", None)
+    if ext_dirs is None:
+        return False
+    mod_file = getattr(mod, "__file__", None)
+    if mod_file is None:
+        logger.warning(
+            f"StreamStudio plugin {dist_name}: WEB_DIRECTORY declared but the module has no __file__; skipped."
+        )
+        return False
+    web_dir = (Path(mod_file).parent / str(web_dir_name)).resolve()
+    if not web_dir.is_dir():
+        logger.warning(f"StreamStudio plugin {dist_name}: WEB_DIRECTORY {web_dir} does not exist; skipped.")
+        return False
+    if dist_name in ext_dirs:
+        logger.debug(f"StreamStudio plugin {dist_name}: web dir already registered; keeping the first.")
+        return False
+    ext_dirs[dist_name] = str(web_dir)
+    return True
+
+
+def _discover_and_register_plugins() -> None:
+    """Discover ``streamstudio.plugins`` entry points and mount each plugin — once per process.
+
+    A plugin is an installed package that contributes editor-side surface WITHOUT streamstudio
+    knowing it: its entry point names a MODULE (a bare module path, like ``confluid.configurables``)
+    whose module-level attributes form the contract —
+
+    - ``ROUTES``: an aiohttp ``web.RouteTableDef`` of extra ``/taidal/*``-style routes, merged by
+      :func:`_register_plugin_routes`;
+    - ``WEB_DIRECTORY``: a directory of frontend ``*.js`` extensions, served by ComfyUI via
+      :func:`_register_plugin_web_directory`.
+
+    (A plugin's NODES ride the separate ``confluid.configurables`` group, and a per-param widget
+    kind rides the ``__taidal_widget_params__`` class stamp — neither needs this group.)
+
+    Unlike the node scan (debug-level skips — most confluid modules legitimately aren't node
+    modules), a ``streamstudio.plugins`` entry is an EXPLICIT opt-in, so a failing plugin is
+    isolated at WARNING with the reason — actionable, and one broken plugin never blocks the
+    editor or the other plugins. Registrations are side effects on ComfyUI's process-global
+    router/dict, so the second module identity (see :func:`_discover_and_register_nodes`) has
+    nothing to redo: a ``sys`` sentinel makes the scan one-shot.
+    """
+    if getattr(sys, "_streamstudio_discovered_plugins", None) is not None:
+        return
+    try:
+        eps = importlib.metadata.entry_points(group="streamstudio.plugins")
+    except Exception as e:
+        logger.error(f"Failed to load streamstudio.plugins entry points: {e}")
+        return
+
+    seen: set = set()
+    loaded: List[str] = []
+    for ep in eps:
+        mod_path = ep.value
+        if mod_path in seen:  # belt-and-suspenders: skip a duplicate entry point
+            continue
+        seen.add(mod_path)
+        ep_dist = getattr(ep, "dist", None)
+        dist_name = (ep_dist.name if ep_dist is not None else None) or ep.name
+        try:
+            mod = importlib.import_module(mod_path)
+            n_routes = _register_plugin_routes(mod, dist_name)
+            web_registered = _register_plugin_web_directory(mod, dist_name)
+        except Exception as e:
+            logger.warning(f"StreamStudio plugin {dist_name} ({mod_path}) failed to load: {type(e).__name__}: {e}")
+            continue
+        loaded.append(dist_name)
+        logger.debug(
+            f"StreamStudio plugin {dist_name}: {n_routes} route(s), "
+            f"web dir {'registered' if web_registered else 'not registered'}."
+        )
+    setattr(sys, "_streamstudio_discovered_plugins", tuple(loaded))
+
+
+_discover_and_register_nodes()
+_discover_and_register_plugins()
+
+# Re-apply no-color after discovery: some scanned packages configure their own colorized handlers
+# (logger.remove() + logger.add(colorize=True)) at import time, undoing the force_no_color()
 # above.  NO_COLOR=1 is already set; this call only triggers the reconfigure() branch that strips
 # any stray handlers and re-adds loggair's sinks with colorize=False.
 loggair.force_no_color()
@@ -315,32 +430,6 @@ try:
         async def hf_datasets_handler(request: Any) -> Any:
             return web.json_response({"datasets": list_cached_hf_datasets()})
 
-    # List the datasets available on the Melody/MAF platform so the Melody dataset-id picker
-    # (web/melody_dataset_chooser.js) can offer them instead of free-text. Optional `server` query
-    # param (PROD/DEV/STAGING); needs maf_client + credentials in the environment, [] otherwise.
-    melody_route_exists = any(
-        r.path == "/taidal/melody_datasets" and r.method == "GET" for r in server.PromptServer.instance.routes
-    )
-    if not melody_route_exists:
-
-        @server.PromptServer.instance.routes.get("/taidal/melody_datasets")
-        async def melody_datasets_handler(request: Any) -> Any:
-            # ``list_melody_datasets`` contacts the MAF platform and can BLOCK (network /
-            # device-auth) when it is unreachable — so run it in a thread with a timeout to keep
-            # ComfyUI's event loop responsive, degrading to [] (the picker is a convenience).
-            import asyncio
-
-            srv = request.query.get("server") or "PROD"
-            loop = asyncio.get_event_loop()
-            try:
-                datasets = await asyncio.wait_for(
-                    loop.run_in_executor(None, lambda: list_melody_datasets(server=srv)), timeout=20.0
-                )
-            except Exception as e:  # noqa: BLE001 — timeout/connection error → empty picker
-                logger.debug(f"melody_datasets route: returning [] ({type(e).__name__}: {e})")
-                datasets = []
-            return web.json_response({"datasets": datasets})
-
     # List the feature/column names of the dataset named in a node's HF dataset-id field so the
     # feature picker (web/hf_feature_chooser.js) can offer them for input_feature / target_feature
     # instead of free-text. Query params: path (required), name (HF subset), split.
@@ -387,6 +476,21 @@ try:
             try:
                 body = await request.json()
                 prompt = body.get("prompt", body)  # accept a bare prompt or {prompt: ...}
+                workflow = body.get("workflow") if isinstance(body, dict) else None
+                # AUTO-DETECT by payload shape: a UI-form workflow (a dict carrying a top-level
+                # ``nodes`` list — the editor's native save, e.g. a consuming workspace's owned
+                # graph file) may arrive as {"workflow": ...} with no prompt, or as the bare
+                # body. The flow compiler consumes prompt form only, so it is converted first
+                # (graphio owns the workflow.json knowledge).
+                if isinstance(prompt, dict) and isinstance(prompt.get("nodes"), list):
+                    workflow = workflow if workflow is not None else prompt
+                    prompt = None
+                elif prompt is body and workflow is not None:
+                    prompt = None  # {"workflow": ...} alone — nothing prompt-shaped was posted
+                if prompt is None and workflow is not None:
+                    from streamstudio.graphio import ui_workflow_to_prompt
+
+                    prompt = ui_workflow_to_prompt(workflow, NODE_CLASS_MAPPINGS)
                 # Export marks (properties["taidal_export"] == "skip"/"target") are read in PYTHON
                 # from the full UI ``workflow`` web/export_flow.js posts alongside the prompt — the
                 # prompt strips node properties, and only the workflow carries the subgraph
@@ -395,7 +499,6 @@ try:
                 # Explicit skip_ids/target_ids (older clients / programmatic callers) still merge in.
                 skip_ids = list(body.get("skip_ids") or []) if isinstance(body, dict) else []
                 target_ids = list(body.get("target_ids") or []) if isinstance(body, dict) else []
-                workflow = body.get("workflow") if isinstance(body, dict) else None
                 if workflow is not None:
                     wf_skip, wf_target = collect_export_marks(workflow)
                     skip_ids += wf_skip

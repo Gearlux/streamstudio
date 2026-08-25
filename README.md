@@ -556,6 +556,55 @@ What is specific to StreamStudio:
 A missing or wrong tag makes the node vanish from the palette with no error — fix it upstream in the
 class's home package, never here.
 
+## Plugins
+
+A package can contribute more than nodes: custom **routes** on the editor's backend and its own
+**frontend JS** (a picker, a viewer) — without StreamStudio knowing the package exists. Declare a
+`streamstudio.plugins` entry point naming a module:
+
+```toml
+# the plugin package's pyproject.toml
+[project.entry-points."streamstudio.plugins"]
+my-plugin = "my_plugin.studio"
+```
+
+At editor start-up StreamStudio imports that module and reads two optional module-level attributes:
+
+```python
+# my_plugin/studio/__init__.py
+WEB_DIRECTORY = "web"                  # a directory of frontend *.js, relative to this module
+
+try:
+    from aiohttp import web           # the editor's own dependency; guard it so the module
+except ImportError:                   # still imports in a venv without it
+    ROUTES = None
+else:
+    ROUTES = web.RouteTableDef()
+
+    @ROUTES.get("/taidal/my_datasets")
+    async def my_datasets(request):
+        return web.json_response({"datasets": []})
+```
+
+- **`ROUTES`** — an aiohttp `RouteTableDef`; each route is merged onto the editor's route table
+  (first registration wins per method + path). Keep handlers non-blocking: run anything slow in an
+  executor with a timeout, and degrade to an empty result rather than erroring the editor.
+- **`WEB_DIRECTORY`** — served at `/extensions/<your-dist-name>/…`, the same URL depth as any
+  ComfyUI extension, so relative imports of `../../scripts/app.js` keep working. Ship the JS files
+  via `[tool.setuptools.package-data]` — the directory has no `__init__.py`, so nothing else puts
+  them in your wheel.
+
+To attach a **custom picker to one of your node's fields**, stamp the class instead of patching the
+bridge: `__taidal_widget_params__ = {"<param>": "<TAG>"}` renders that constructor param as a
+free-text STRING carrying `taidal_widget="<TAG>"`, and your own `WEB_DIRECTORY` JS matches the tag
+(`config[1].taidal_widget === "<TAG>"`) and adds the picker. The tag string is opaque to
+StreamStudio — its meaning, its route, and its JS all live in your package.
+
+A broken plugin is skipped with a warning naming it; the editor and the other plugins keep working.
+Like node discovery, the group is read from installed metadata — reinstall your editable after
+adding the entry point. (This is separate from `streamstudio.custom_nodes`, which seeds *git
+repositories* of third-party ComfyUI node packs at launch.)
+
 ## How nodes are generated
 
 StreamStudio never hand-defines a node. At ComfyUI startup, `_discover_and_register_nodes()` (`streamstudio/__init__.py`):

@@ -6,7 +6,7 @@
   "nodes": [
     {
       "id": 1,
-      "type": "Taidal_waivefront_source_HeliosFileSource",
+      "type": "Taidal_waivefront_source_HDF5WindowSource",
       "pos": [
         -1473.0915425865605,
         -768.2058028345272
@@ -40,10 +40,10 @@
         }
       ],
       "properties": {
-        "Node name for S&R": "Taidal_waivefront_source_HeliosFileSource"
+        "Node name for S&R": "Taidal_waivefront_source_HDF5WindowSource"
       },
       "widgets_values": [
-        "/home/user/data/Helios_training_data_records/1.0/5GNR/",
+        "/home/user/data/training_data_records/1.0/5GNR/",
         "browse"
       ]
     },
