@@ -54,6 +54,10 @@ requires-python = ">=3.12"
 
 [project.optional-dependencies]
 dev = [
+    # Release tooling: `python -m build` produces the sdist + wheel, `twine check`
+    # validates the metadata PyPI will re-validate on upload.
+    "build>=1.0.0",
+    "twine>=5.0.0",
     "black>=24.0.0,<25.0.0",
     "isort>=5.13.0,<6.0.0",
     "flake8>=6.0.0,<8.0.0",
