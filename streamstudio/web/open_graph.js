@@ -3,46 +3,18 @@ import { api } from "../../scripts/api.js";
 
 console.log("ComfyStream: Loaded Taidal.OpenGraph extension");
 
-// StreamStudio: a DETERMINISTIC canvas when the editor is opened by another tool.
+// StreamStudio: a workspace's SOURCE GRAPH, edited here, owned as a file.
 //
-// A launching viewer appends ONE of two URL params so what appears on the canvas is what the
-// user asked for — never whatever the previous editor session left behind:
-//   * ?taidal_graph=<server-side config path> — load that Confluid YAML as the canvas, converted
-//     by the /taidal/import_yaml backend route ({path: …} body; same route the import menu uses).
-//   * ?taidal_new=1                           — start from an empty canvas.
-// The params are stripped from the URL once applied, so a manual reload (F5) keeps whatever the
-// user has built since — the directive fires once per open, not once per reload.
-//
-// TIMING (every clause below was measured, not guessed): extension setup() runs while the app
-// is still booting — loading then aborts with "getCanvas: canvas is null" (the canvas store is
-// fed when the GraphCanvas component mounts) and the session restore finishing later replaces
-// what we loaded. setup() must not await the boot either: the app awaits every setup(), so that
-// deadlocks the splash. And the restore does not reliably pass through app.loadGraphData, so
-// wrapping it is no signal (and an async wrapper alone flips the restore's own mount race).
-// What is left is the observable state: wait until the app is interactive and the graph has
-// stopped changing (the restore landed, or was never coming), then load — and verify the load
-// stuck, retrying while it does not.
-
-const BLANK_GRAPH = {
-    last_node_id: 0,
-    last_link_id: 0,
-    nodes: [],
-    links: [],
-    groups: [],
-    config: {},
-    extra: {},
-    version: 0.4,
-};
-
-function freshBlankGraph() {
-    const dg = window.comfyAPI && window.comfyAPI.defaultGraph;
-    const src = (dg && dg.blankGraph) || BLANK_GRAPH;
-    try {
-        return JSON.parse(JSON.stringify(src));
-    } catch (e) {
-        return { ...BLANK_GRAPH };
-    }
-}
+// A launching viewer appends ?taidal_graph=<server-side path> naming the graph it works
+// from. A .json path is the workspace's source-graph FILE (its native workflow form):
+//   * on open, the file is put on the canvas (via /taidal/read_graph) — when it does not
+//     exist yet, the editor keeps its own last session and the first save creates it;
+//   * every native workflow SAVE (Ctrl-S / Save / Save As — the /userdata/workflows/…
+//     POST) is MIRRORED into that file via /taidal/write_graph. The file, not a network
+//     push, is how the canvas reaches the viewer: the viewer stats it on focus.
+// A .yaml path is a Confluid config, converted by /taidal/import_yaml as before.
+// Params are stripped once applied, so a reload (F5) keeps what the user builds; the
+// mirror target survives in sessionStorage for the tab's lifetime.
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -75,8 +47,8 @@ async function appSettled() {
     }
 }
 
-// Load and make sure it STUCK (a late restore can still replace the canvas once); retries
-// fire only while the canvas does not hold our content, so a settled canvas is never touched.
+// Load and make sure it STUCK (a late session restore can still replace the canvas once);
+// retries fire only while the canvas does not hold our content.
 async function loadUntilItSticks(workflow) {
     const want = (workflow.nodes || []).map((n) => n.type).sort().join(",");
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -84,47 +56,95 @@ async function loadUntilItSticks(workflow) {
         await sleep(800);
         if (fingerprint() === want) return true;
     }
-    return fingerprint() === want;
+    return false;
+}
+
+async function fetchWorkflow(graphPath) {
+    if (graphPath.endsWith(".json")) {
+        const res = await api.fetchApi("/taidal/read_graph?path=" + encodeURIComponent(graphPath));
+        if (res.status === 404) return null; // not created yet: the first save will create it
+        const data = await res.json();
+        if (!res.ok || data.error) throw new Error(data.error || res.statusText);
+        return data.workflow;
+    }
+    const res = await api.fetchApi("/taidal/import_yaml", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: graphPath, as: "graph" }),
+    });
+    const data = await res.json();
+    if (!res.ok || data.error) throw new Error(data.error || res.statusText);
+    return data.workflow;
 }
 
 async function applyOpenParams() {
     const url = new URL(window.location.href);
     const graphPath = url.searchParams.get("taidal_graph");
-    const wantNew = url.searchParams.get("taidal_new");
-    const returnTo = url.searchParams.get("taidal_return");
-    if (returnTo) sessionStorage.setItem("taidal.viewer", returnTo); // where "send to viewer" posts
-    if (!graphPath && !wantNew && !returnTo) return;
+    if (!graphPath) return;
+    if (graphPath.endsWith(".json")) sessionStorage.setItem("taidal.sourceFile", graphPath); // the mirror target
     url.searchParams.delete("taidal_graph");
-    url.searchParams.delete("taidal_new");
-    url.searchParams.delete("taidal_return");
     window.history.replaceState({}, "", url.pathname + url.search + url.hash);
-    if (!graphPath && !wantNew) return;
     await appSettled();
-    if (graphPath) {
-        try {
-            const res = await api.fetchApi("/taidal/import_yaml", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ path: graphPath, as: "graph" }),
-            });
-            const data = await res.json();
-            if (!res.ok || data.error) throw new Error(data.error || res.statusText);
-            await loadUntilItSticks(data.workflow);
-            console.log("Taidal.OpenGraph: loaded", graphPath);
+    try {
+        const workflow = await fetchWorkflow(graphPath);
+        if (workflow === null) {
+            console.log("Taidal.OpenGraph:", graphPath, "does not exist yet — the first save creates it");
             return;
-        } catch (err) {
-            console.error("Taidal.OpenGraph: could not open", graphPath, err);
-            alert("Open graph failed for " + graphPath + ":\n\n" + err + "\n\nStarting from an empty canvas.");
         }
+        const want = (workflow.nodes || []).map((n) => n.type).sort().join(",");
+        if (fingerprint() === want) {
+            console.log("Taidal.OpenGraph: the canvas already shows", graphPath);
+            return; // never stack a duplicate workflow tab for the graph already on screen
+        }
+        await loadUntilItSticks(workflow);
+        console.log("Taidal.OpenGraph: loaded", graphPath);
+    } catch (err) {
+        console.error("Taidal.OpenGraph: could not open", graphPath, err);
+        alert("Open graph failed for " + graphPath + ":\n\n" + err + "\n\nThe canvas is left as it was.");
     }
-    await loadUntilItSticks(freshBlankGraph());
-    console.log("Taidal.OpenGraph: opened an empty canvas");
+}
+
+// The SAVE MIRROR: a synchronous pass-through wrap of api.fetchApi (an async wrap defers
+// by a microtask and flips frontend races — measured on loadGraphData). A successful
+// workflow save is re-posted verbatim to the workspace's source-graph file.
+if (!api.__taidalSaveMirror) {
+    const original = api.fetchApi.bind(api);
+    api.fetchApi = function (route, options) {
+        const result = original(route, options);
+        try {
+            const target = sessionStorage.getItem("taidal.sourceFile");
+            const isSave =
+                target &&
+                options &&
+                options.method === "POST" &&
+                typeof route === "string" &&
+                decodeURIComponent(route).includes("/userdata/workflows/");
+            if (isSave) {
+                const body = JSON.parse(options.body);
+                Promise.resolve(result)
+                    .then((res) => {
+                        if (!res.ok) return;
+                        return original("/taidal/write_graph", {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ path: target, workflow: body }),
+                        }).then(() => console.log("Taidal.OpenGraph: mirrored the save to", target));
+                    })
+                    .catch((err) => console.warn("Taidal.OpenGraph: save mirror failed —", err));
+            }
+        } catch (e) {
+            /* the mirror must never break a save */
+        }
+        return result;
+    };
+    api.__taidalSaveMirror = true;
 }
 
 app.registerExtension({
     name: "Taidal.OpenGraph",
     setup() {
-        // DETACHED on purpose — see TIMING above: the app awaits every setup().
+        // DETACHED on purpose: the app awaits every extension's setup() before its own
+        // initial load — awaiting the boot here would deadlock the splash (measured).
         applyOpenParams().catch((err) => console.error("Taidal.OpenGraph:", err));
     },
 });
