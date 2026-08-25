@@ -19,6 +19,7 @@ build; none is a checklist item:
 
 import ast
 import re
+import subprocess
 import tomllib
 from fnmatch import fnmatch
 from importlib.metadata import packages_distributions
@@ -244,3 +245,31 @@ def test_the_changelog_is_shipped_in_the_sdist() -> None:
     missing = [name for name in ("CHANGELOG.md",) if name not in included]
 
     assert not missing, f"MANIFEST.in does not include: {missing}"
+
+
+def test_no_vendor_traces_in_the_repository() -> None:
+    """The whole repository is vendor-clean — the 0.1.0a release gate, kept as a pin.
+
+    The platform-dataset integration (route, picker JS, widget gate) moved out through the
+    plugin seam (2026-08-25), and every remaining comment/docstring/fixture mention was
+    reworded generically. This test keeps it that way: a vendor token reappearing in any
+    git-TRACKED file — shipped source, tests, fixtures, docs — fails here instead of
+    shipping. Only tracked files are scanned (machine-local generated files like a pyright
+    config legitimately name sibling checkouts). Vendor integrations belong in a plugin
+    package, never in this one.
+    """
+    # The tokens are spelled SPLIT so this very file — which ships in the sdist — is itself
+    # clean under the exact grep this test encodes (`grep -ri <token> <artifact>` finds nothing).
+    tokens = re.compile("|".join(("hel" "ios", "mel" "ody", "key" "sight")), re.IGNORECASE)
+    tracked = subprocess.run(
+        ["git", "ls-files"], cwd=_REPO, capture_output=True, text=True, check=True
+    ).stdout.splitlines()
+    offenders = []
+    for name in tracked:
+        path = _REPO / name
+        if not path.is_file():
+            continue
+        for lineno, line in enumerate(path.read_text(errors="replace").splitlines(), start=1):
+            if tokens.search(line):
+                offenders.append(f"{name}:{lineno}: {line.strip()[:80]}")
+    assert not offenders, "vendor tokens found:\n" + "\n".join(offenders)

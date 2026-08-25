@@ -48,7 +48,7 @@ _NODE_KINDS = {
     "Taidal_waivefront_op_spectrogram_SpectrogramOp": "op",
     "Taidal_waivefront_op_visualize_RenderOverlaysOp": "op",
     "Taidal_waivefront_op_visualize_RenderSignalPlotOp": "op",
-    "Taidal_waivefront_source_HeliosFileSource": "source",
+    "Taidal_waivefront_source_HDF5WindowSource": "source",
 }
 
 

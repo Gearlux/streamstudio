@@ -1,4 +1,4 @@
-"""Tests for the StreamStudio MODEL node type, the path-output socket fix, and the Melody picker tag.
+"""Tests for the StreamStudio MODEL node type, the path-output socket fix, and stamped widget kinds.
 
 A MODEL node (``@configurable(category="model")``) RUNS inference: like an op it takes an optional
 ``record`` (a plain-dict ``Record`` on the ``RECORDSTREAM_RECORD`` wire) and outputs the applied
@@ -6,6 +6,7 @@ record, but its second output is the constructed model on a ``RECORDSTREAM_OBJEC
 (dockable into a downstream evaluator).
 """
 
+import inspect
 from typing import Optional, cast
 
 import pytest
@@ -17,10 +18,10 @@ from streamstudio.bridge import (
     _NODE_CATEGORIES,
     OBJECT_TYPE,
     RECORD_TYPE,
-    _is_melody_dataset_id_param,
     _model_params,
     _object_socket,
     _output_socket_type,
+    _widget_for,
     create_comfy_node,
 )
 
@@ -49,7 +50,7 @@ class _NoneModel:
 class _FakeInference:
     """A ``ModelInference``-style node: a WIRED ``model`` (stamped) + config widget, delegating infer.
 
-    Mirrors the waivefront-helios ``HeliosModelInference`` shape — ``__taidal_model_params__`` marks
+    Mirrors a companion package's model-inference bridge shape — ``__taidal_model_params__`` marks
     ``model`` as a wired ``RECORDSTREAM_OBJECT:model`` input; ``__call__`` delegates to it.
     """
 
@@ -161,7 +162,7 @@ def test_path_named_output_is_string_socket() -> None:
 
 
 @configurable(category="value")
-class _FakeMelodyDataset:
+class _FakeDownloadDataset:
     """A value producer whose ``directory`` @output is a path-like string."""
 
     def __init__(self, name: str = "") -> None:
@@ -177,22 +178,64 @@ class _FakeMelodyDataset:
 
 
 def test_value_node_directory_output_is_string() -> None:
-    node = create_comfy_node(_FakeMelodyDataset, "Taidal__FakeMelodyDataset")
+    node = create_comfy_node(_FakeDownloadDataset, "Taidal__FakeDownloadDataset")
     assert node.RETURN_TYPES == ("STRING",)
     assert node.RETURN_NAMES == ("directory",)
 
 
-# --------------------------------------------------------------------- Melody dataset-id picker tag
+# ------------------------------------------------------------- producer-stamped widget kinds
 
 
-def test_is_melody_dataset_id_param() -> None:
-    assert _is_melody_dataset_id_param("name", _FakeMelodyDataset) is True
-    assert _is_melody_dataset_id_param("name", _FakeModel) is False  # not a Melody class
-    assert _is_melody_dataset_id_param("k", _FakeMelodyDataset) is False  # not a dataset-id param
+@configurable(category="value")
+class _StampedDataset:
+    """A value producer whose package stamped widget kinds onto two of its params.
+
+    ``__taidal_widget_params__`` is the cross-package stamp protocol: the producing package maps a
+    param NAME to an opaque ``taidal_widget`` tag that its own web extension consumes — the bridge
+    attaches no meaning to the tag string itself.
+    """
+
+    __taidal_widget_params__ = {"name": "PLATFORM_DATASET_ID", "dataset_dir": "PLATFORM_DIR_PICKER"}
+
+    def __init__(self, name: str = "", dataset_dir: str = "", k: int = 5) -> None:
+        self.name = name
+        self.dataset_dir = dataset_dir
+        self.k = k
+
+    def __call__(self) -> str:
+        return self.name
 
 
-def test_melody_name_widget_is_tagged() -> None:
-    node = create_comfy_node(_FakeMelodyDataset, "Taidal__FakeMelodyDataset")
+def test_stamped_widget_param_is_tagged() -> None:
+    node = create_comfy_node(_StampedDataset, "Taidal__StampedDataset")
     name_spec = node.INPUT_TYPES()["required"]["name"]
     assert name_spec[0] == "STRING"
-    assert name_spec[1]["taidal_widget"] == "MELODY_DATASET_ID"
+    assert name_spec[1]["taidal_widget"] == "PLATFORM_DATASET_ID"
+
+
+def test_stamped_path_named_param_is_not_a_directory_picker() -> None:
+    # The stamp is checked BEFORE the path-name affordance: a stamped `*_dir` param keeps the
+    # producer's tag instead of falling into the directory-picker branch.
+    spec = create_comfy_node(_StampedDataset, "Taidal__StampedDataset").INPUT_TYPES()["required"]["dataset_dir"]
+    assert spec[0] == "STRING"
+    assert spec[1]["taidal_widget"] == "PLATFORM_DIR_PICKER"
+
+
+def test_unstamped_param_on_a_stamped_class_is_unaffected() -> None:
+    node = create_comfy_node(_StampedDataset, "Taidal__StampedDataset")
+    assert node.INPUT_TYPES()["required"]["k"][0] == "INT"  # not in the stamp → normal mapping
+
+
+def test_unstamped_class_gets_no_widget_tag() -> None:
+    # Without a stamp there is NO widget kind — a like-named `name` param is a plain STRING
+    # (no class-name convention resurrects a picker; the stamp is the only trigger).
+    name_spec = create_comfy_node(_FakeDownloadDataset, "Taidal__FakeDownloadDataset").INPUT_TYPES()["required"]["name"]
+    assert name_spec[0] == "STRING"
+    assert "taidal_widget" not in name_spec[1]
+
+
+def test_widget_for_without_owner_is_safe() -> None:
+    param = inspect.Parameter("name", inspect.Parameter.KEYWORD_ONLY, default="", annotation=str)
+    comfy_type, config = _widget_for(param, owner=None)
+    assert comfy_type == "STRING"
+    assert "taidal_widget" not in config

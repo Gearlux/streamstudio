@@ -374,9 +374,8 @@ def _infer_member_role(name: str) -> Optional[str]:
 # Constructor params (on higher-order ops) that hold a LIST OF OPS — rendered as dynamic
 # ``RECORDSTREAM_OP`` multi-inputs (``op_0``, ``op_1``, … via ``web/op_list.js``) instead of a STRING
 # widget, so concrete op nodes wire into them. ``Enable``/``Parallel`` take ``ops``; ``transforms``
-# is ``recordstream.transform.Pipeline``'s param (ALSO the helios convention surfaced by
-# waivefront-helios's auto-bridged composites — ``HeliosComposeOp`` & co mirror a helios
-# ``*transforms`` variadic as a list param).
+# is ``recordstream.transform.Pipeline``'s param (ALSO the convention a companion package's
+# auto-bridged composites follow when they mirror a ``*transforms`` variadic as a list param).
 _OP_LIST_PARAMS = {"ops", "transforms"}
 
 # Single-op constructor params (one op VALUE, not a chain): ``RandomApply.op``,
@@ -413,11 +412,6 @@ _RUNNABLE_LIST_PARAMS = {"steps"}
 # ``HuggingFaceClassificationDataset`` calls it ``repo_id``.
 _HF_DATASET_ID_PARAMS = {"path", "repo_id"}
 
-# Constructor param that names a Melody/MAF dataset *identifier* (a platform dataset name) — NOT a
-# filesystem path. Recognised only on a Melody value-producer node (see ``_is_melody_dataset_id_param``,
-# gated on the ``Melody`` class-name convention — matches the bridged ``HeliosMelodyDataset``). Rendered
-# as a free-text STRING + an optional platform-dataset picker (``web/melody_dataset_chooser.js``).
-_MELODY_DATASET_ID_PARAMS = {"name", "dataset"}
 
 # Constructor params (on HuggingFace dataset sources) that name a dataset *feature/column* to map
 # onto a record key — ``HuggingFaceSource.input_feature`` / ``target_feature``. Rendered as a
@@ -593,21 +587,6 @@ def _is_hf_dataset_id_param(param_name: str, owner: Optional[Callable]) -> bool:
         and owner is not None
         and inspect.isclass(owner)
         and owner.__name__.startswith("HuggingFace")
-    )
-
-
-def _is_melody_dataset_id_param(param_name: str, owner: Optional[Callable]) -> bool:
-    """True when ``param_name`` is the dataset-id arg of a Melody/MAF dataset value node.
-
-    Gated on the ``Melody`` class-name convention (matches the bridged ``HeliosMelodyDataset``
-    value-producer) — a naming rule, not a per-node special-case — so a like-named ``name`` param
-    on an unrelated class stays a plain STRING widget.
-    """
-    return (
-        param_name in _MELODY_DATASET_ID_PARAMS
-        and owner is not None
-        and inspect.isclass(owner)
-        and "Melody" in owner.__name__
     )
 
 
@@ -983,19 +962,23 @@ def _widget_for(param: inspect.Parameter, owner: Optional[Callable] = None) -> T
     """
     has_default = param.default is not inspect.Parameter.empty
 
+    # A producer-STAMPED widget kind: ``__taidal_widget_params__`` on the owner maps a param NAME
+    # to an opaque ``taidal_widget`` tag whose meaning belongs to the producing package (the same
+    # cross-package stamp protocol as ``__taidal_op_params__`` / ``__taidal_model_params__``) — its
+    # own web extension matches the tag and adds the picker; the field itself stays a free-text
+    # STRING. Checked FIRST: an explicit stamp is a stronger signal than any name-based rule below,
+    # and a stamped path-named param must never fall into the directory-picker branch.
+    stamped = getattr(owner, "__taidal_widget_params__", None) if owner is not None else None
+    if stamped and param.name in stamped:
+        default = param.default if has_default and isinstance(param.default, str) else ""
+        return "STRING", {"default": default, "taidal_widget": str(stamped[param.name])}
+
     # HuggingFace dataset identifier: a free-text STRING (a hub repo id, or a local
     # imagefolder path) tagged for the cached-dataset picker (web/hf_dataset_chooser.js)
     # — NOT a directory picker, even though the param is named ``path``.
     if _is_hf_dataset_id_param(param.name, owner):
         default = param.default if has_default and isinstance(param.default, str) else ""
         return "STRING", {"default": default, "taidal_widget": "HF_DATASET_ID"}
-
-    # Melody/MAF dataset identifier: a free-text STRING (the platform dataset name) tagged for the
-    # platform-dataset picker (web/melody_dataset_chooser.js) — selecting one fills the field, which
-    # stays editable. The downloaded directory is exposed on this node's ``directory`` @output.
-    if _is_melody_dataset_id_param(param.name, owner):
-        default = param.default if has_default and isinstance(param.default, str) else ""
-        return "STRING", {"default": default, "taidal_widget": "MELODY_DATASET_ID"}
 
     # HuggingFace feature/column selector (input_feature / target_feature): a free-text STRING
     # (any column name still types in) tagged for the column picker (web/hf_feature_chooser.js),
@@ -1058,7 +1041,7 @@ def _widget_for(param: inspect.Parameter, owner: Optional[Callable] = None) -> T
     # blank-STRING-and-stays-STRING behaviour is unchanged.)
     #
     # The RANGE_* arms cover an Optional param whose annotation ALSO has a (variadic) tuple arm —
-    # e.g. helios ``Max.axis: int | Tuple[int, ...] | None`` (reduce one axis, several axes, or ALL
+    # e.g. a reduce op's ``axis: int | Tuple[int, ...] | None`` (reduce one axis, several axes, or ALL
     # when None). ``_map_type`` returns RANGE_INT for the ``Tuple[int, ...]`` arm (→ a forced
     # ``axis__lo``/``axis__hi`` pair that can't be None), but a ``None`` default means "flexible
     # optional": render the same blank-STRING nullable scalar taidal gives ``Optional[int]/[float]``
@@ -1411,7 +1394,7 @@ def _coerce_kwargs(func: Callable, kwargs: Dict[str, Any]) -> Dict[str, Any]:
                     # A Python TUPLE LITERAL — the empty-tuple default ``()`` (the repr of an empty
                     # ``Tuple[str, ...]`` param) AND the docstring-documented ``("IQImbalanceOp",
                     # "QuantizeOp")`` form. Without this, ``"()"`` comma-splits to ``("()",)`` (a
-                    # one-element tuple of the literal string) — TRUTHY, so a helios
+                    # one-element tuple of the literal string) — TRUTHY, so an
                     # ``ImpairmentsChain.tx_disabled`` widget left at its ``()`` default would OVERRIDE
                     # the metadata config stamped by ``ImpairmentsTxConfig`` (``self.tx_disabled or
                     # metadata[...]``), silently disabling the whole tx/rx config mechanism. ``ast``
@@ -1645,13 +1628,13 @@ def _op_list_params(cls: Any) -> Dict[str, str]:
     """Map each op-LIST constructor param → its dynamic socket-family prefix.
 
     A param accepts a LIST of ops when its NAME is in ``_OP_LIST_PARAMS`` with a ``list`` annotation
-    (``Enable.ops`` / ``Pipeline.transforms`` / a helios ``*transforms`` variadic mirror) OR it is stamped
-    ``__taidal_op_list_params__`` by the waivefront-helios bridge (a ``List[Transform]`` slot whose
-    helios name — ``true_transforms`` / ``default_transforms`` — the recordstream-tuned allowlist can't
+    (``Enable.ops`` / ``Pipeline.transforms`` / a ``*transforms`` variadic mirror) OR it is stamped
+    ``__taidal_op_list_params__`` by a companion package's node bridge (an op-list slot whose own
+    name — ``true_transforms`` / ``default_transforms`` — the recordstream-tuned allowlist can't
     know). The family prefix is ``"op"`` for the original name-set params (so existing ``op_N``
     graphs/exports keep working unchanged) and the PARAM NAME otherwise — letting ONE node carry
-    SEVERAL independent op-list families (``HeliosIfOp``'s ``true_transforms_N`` + ``false_transforms_N``),
-    each grown by ``web/op_list.js``. Detected by name/stamp, NEVER per-class.
+    SEVERAL independent op-list families (a bridged If composite's ``true_transforms_N`` +
+    ``false_transforms_N``), each grown by ``web/op_list.js``. Detected by name/stamp, NEVER per-class.
     """
     result: Dict[str, str] = {}
     try:
@@ -1682,12 +1665,12 @@ def _single_op_params(cls: Any) -> List[str]:
     """An op's SINGLE-op constructor params (each holds ONE op VALUE, not a list), in signature order.
 
     A param holds one op when its NAME is in ``_SINGLE_OP_PARAMS`` with a non-scalar annotation
-    (``RandomApply.op`` / ``ConfigureOp.target``) OR it is stamped ``__taidal_op_params__`` by the
-    waivefront-helios bridge (a single ``Transform`` slot — ``Configure.compute``/``.target``,
-    ``Config.delegate`` — whose helios name the allowlist can't know). Each rides ONE optional
+    (``RandomApply.op`` / ``ConfigureOp.target``) OR it is stamped ``__taidal_op_params__`` by a
+    companion package's node bridge (a single-op slot — a ``compute``/``target`` pair, a
+    ``delegate`` — whose own name the allowlist can't know). Each rides ONE optional
     ``RECORDSTREAM_OP`` input socket instead of a STRING widget. Op-LIST params (``_op_list_params``) are
-    excluded (a list wins). Returning SEVERAL is what surfaces BOTH ``HeliosConfigureOp.compute`` and
-    ``.target`` — the old single-name helper exposed only the first.
+    excluded (a list wins). Returning SEVERAL is what surfaces BOTH a bridged Configure composite's
+    ``compute`` and ``target`` — the old single-name helper exposed only the first.
     """
     try:
         sig = inspect.signature(cls)
@@ -1708,7 +1691,7 @@ def _single_op_params(cls: Any) -> List[str]:
 def _model_params(cls: Any) -> List[str]:
     """A MODEL node's constructor params that hold a WIRED model object, in signature order.
 
-    Read from the ``__taidal_model_params__`` stamp the waivefront-helios ``bridge_model`` sets on a
+    Read from the ``__taidal_model_params__`` stamp a companion package's model bridge sets on a
     ``ModelInference``-style class (a ``model``-named, non-scalar ctor param — the wrapped type is
     deliberately open, so it can't be inferred from the annotation). Each rides ONE optional
     ``RECORDSTREAM_OBJECT:model`` INPUT socket (a Loader model node's model output wires straight in)
@@ -2072,8 +2055,8 @@ def _build_op_node(cls: Callable, name: str, category: str) -> Type:
     as an op-value. Op-VALUED constructor params ride ``RECORDSTREAM_OP`` sockets instead of STRING
     widgets: each single-op param (``_single_op_params``) is one static socket, and each op-LIST param
     (``_op_list_params``) a dynamic ``<prefix>_N`` family. A node may carry SEVERAL of each — e.g.
-    ``HeliosConfigureOp`` sockets BOTH ``compute`` and ``target``; ``HeliosIfOp`` carries the
-    ``true_transforms_N`` and ``false_transforms_N`` families.
+    a bridged Configure composite sockets BOTH ``compute`` and ``target``; a bridged If composite
+    carries the ``true_transforms_N`` and ``false_transforms_N`` families.
 
     Any ``@output`` properties declared on the op class (e.g. ``applied_impairments``) become extra
     output sockets appended after ``(record, op)`` — read from the live op instance after
@@ -2092,7 +2075,7 @@ def _build_op_node(cls: Callable, name: str, category: str) -> Type:
     for prefix in list_prefixes:
         optional[f"{prefix}_0"] = (OP_TYPE,)  # seed; web/op_list.js grows <prefix>_1, _2, … per family
     for pname in single_op_params:
-        # one op VALUE each (RandomApply.op / ConfigureOp.target / helios compute/target/delegate/…)
+        # one op VALUE each (RandomApply.op / ConfigureOp.target / stamped compute/target/delegate/…)
         optional[pname] = (OP_TYPE,)
 
     # Collect any @output properties declared on this op class.
@@ -2157,11 +2140,11 @@ def _build_model_node(cls: Callable, name: str, category: str) -> Type:
     widgets and outputs the applied ``record``, but its SECOND output is the constructed model on a
     role-qualified ``RECORDSTREAM_OBJECT:model`` socket (it outputs ITSELF as the model object — so it can
     also dock into a downstream evaluator's ``model`` slot) rather than a ``RECORDSTREAM_OP``. The wrapped
-    class must be callable as ``model(record) -> record`` (the waivefront-helios bridge generates such a
-    wrapper around a helios ``infer``). ``@output`` properties, if any, are appended as extra sockets.
+    class must be callable as ``model(record) -> record`` (a companion package's model bridge generates
+    such a wrapper around its own ``infer``). ``@output`` properties, if any, are appended as extra sockets.
 
     A ``model``-typed ctor param (``_model_params`` — the ``ModelInference.model`` loader→runner
-    decoupling, stamped ``__taidal_model_params__`` by the waivefront-helios bridge) rides a wired
+    decoupling, stamped ``__taidal_model_params__`` by that bridge) rides a wired
     ``RECORDSTREAM_OBJECT:model`` INPUT socket instead of a STRING widget, so a Loader model node's model
     output wires straight in. ``execute`` ``setattr``s each wired model post-construction (the confluid
     paradigm) — mirroring how :func:`_build_op_node` injects single-op ``RECORDSTREAM_OP`` values.
@@ -2871,14 +2854,14 @@ def _humanize_node_name(name: str) -> str:
 
 
 def _package_tag(module_path: str, dist_name: Optional[str] = None) -> str:
-    """The bracketed package tag shown in a node's LABEL (``[SONAIR]`` / ``[WAIVEFRONT-HELIOS]``).
+    """The bracketed package tag shown in a node's LABEL (``[SONAIR]`` / ``[WAIVEFRONT]``).
 
     The palette is grouped by ROLE/TASK (or category) — NOT by package (see :func:`_node_category`) —
     so the producing package is surfaced in the node label instead.
 
-    Uses the distribution name (``ep.dist.name``) when available so companion namespace packages
-    (e.g. ``waivefront-helios``) are distinguished from their parent (``waivefront``).
-    Falls back to the top-level Python package name when ``dist_name`` is absent.
+    Uses the distribution name (``ep.dist.name``) when available so a companion namespace
+    distribution is distinguished from its parent package (whose top-level Python package name it
+    shares). Falls back to the top-level Python package name when ``dist_name`` is absent.
     """
     if dist_name is not None:
         return dist_name.upper()
@@ -3050,8 +3033,8 @@ def register_module_nodes(
         )
         target_mappings[node_name] = node_class
         # The palette LABEL is normally the verbatim callable name; a producer may override it with a
-        # ``__taidal_display_name__`` stamp (the waivefront-helios bridge sets it to the class name minus
-        # the leading ``Helios`` — the class NAME keeps the prefix as its flat confluid registry key, only
+        # ``__taidal_display_name__`` stamp (a companion package's bridge sets it to the class name minus
+        # its vendor prefix — the class NAME keeps the prefix as its flat confluid registry key, only
         # the label drops it since the ``[PKG]`` tag already disambiguates). The registration KEY
         # (``node_name`` / ``_node_key``) is unaffected, so saved workflows still resolve.
         display_label = getattr(target_func, "__taidal_display_name__", None) or name

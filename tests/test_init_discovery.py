@@ -66,8 +66,8 @@ def test_discover_returns_quietly_when_entry_points_fail() -> None:
 def test_discover_forwards_module_to_register() -> None:
     """__init__ forwards the entry-point module, shared mappings, and dist_name so the [PKG]
     label tag is derived from the distribution name (not just the top-level Python package)."""
-    fake_dist = SimpleNamespace(name="waivefront-helios")
-    fake_ep = SimpleNamespace(value="waivefront.helios", dist=fake_dist)
+    fake_dist = SimpleNamespace(name="acme-widgets")
+    fake_ep = SimpleNamespace(value="acme.widgets", dist=fake_dist)
     fake_register = MagicMock()
     with patch("importlib.metadata.entry_points", return_value=[fake_ep]):
         with patch.object(streamstudio, "register_module_nodes", fake_register):
@@ -75,11 +75,11 @@ def test_discover_forwards_module_to_register() -> None:
 
     fake_register.assert_called_once()
     args, kwargs = fake_register.call_args
-    assert args[0] == "waivefront.helios"
+    assert args[0] == "acme.widgets"
     assert args[1] is streamstudio.NODE_CLASS_MAPPINGS
     assert args[2] is streamstudio.NODE_DISPLAY_NAME_MAPPINGS
     # dist_name carries the distribution package name for the [PKG] label.
-    assert kwargs.get("dist_name") == "waivefront-helios"
+    assert kwargs.get("dist_name") == "acme-widgets"
     # No category/root override — the bridge builds the path from the module + class tags.
     assert "category" not in kwargs
     assert "root" not in kwargs
@@ -734,3 +734,37 @@ def test_list_hf_dataset_splits_degrades_to_empty_on_error() -> None:
     with patch.dict(sys.modules, {"datasets": fake}):
         # Must never raise — the picker is a convenience over a free-text field.
         assert streamstudio.list_hf_dataset_splits("nonexistent/dataset") == []
+
+
+def test_export_flow_route_accepts_a_ui_workflow_by_shape() -> None:
+    # A consuming workspace posts its OWNED graph file — the UI form the editor's save
+    # mirror writes — as {"workflow": ...} with NO prompt; the route detects the form by
+    # shape (a top-level ``nodes`` list), converts it via graphio, and compiles as usual.
+    from recordstream.ops.contract import RecordContract
+
+    from streamstudio.bridge import create_comfy_node
+    from streamstudio.graphio import yaml_to_workflow
+
+    seed = (
+        "flow:\n"
+        "  incoming: !class:recordstream.ops.contract.RecordContract\n"
+        "    name: flow input\n"
+        '    fields: {image: "*"}\n'
+        "  delivered:\n"
+        "    op: !class:recordstream.ops.contract.RecordContract\n"
+        "      name: flow output\n"
+        "      fields: {image: Image}\n"
+        "    from: incoming\n"
+        "outputs: delivered\n"
+    )
+    with _fake_comfy() as (routes, web):
+        handler = routes.post_handlers.get("/taidal/export_flow")
+        assert handler is not None
+        key = "Taidal_recordstream_op_contract_RecordContract"
+        streamstudio.NODE_CLASS_MAPPINGS[key] = create_comfy_node(RecordContract, key)
+        workflow = yaml_to_workflow(seed, streamstudio.NODE_CLASS_MAPPINGS, name="flow seed")
+        asyncio.run(handler(_json_request({"workflow": workflow})))
+    data, kwargs = web.calls[-1]
+    assert kwargs.get("status") is None, data
+    assert "RecordContract" in data["yaml"]
+    assert "flow input" in data["yaml"] and "flow output" in data["yaml"]
