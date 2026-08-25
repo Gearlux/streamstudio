@@ -516,37 +516,31 @@ def test_import_yaml_route_accepts_a_server_side_path(tmp_path) -> None:  # type
         assert kwargs.get("status") == 400 and "no such file" in data["error"]
 
 
-def test_send_to_viewer_route_converts_and_posts(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    # The /taidal/send_to_viewer handler converts the posted workflow to YAML and POSTs it
-    # to the launching viewer's /api/pipeline — server-side, so the canvas needs no CORS.
-    from recordstream.sources import HuggingFaceSource
-
-    from streamstudio.bridge import create_comfy_node
-    from streamstudio.graphio import yaml_to_workflow
-
-    outbound = []
-
-    def fake_post(url, payload):  # type: ignore[no-untyped-def]
-        outbound.append((url, payload))
-        return {"message": "pipeline sent: 40 recording(s)"}
+def test_read_and_write_graph_routes_own_the_source_file(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    # The workspace's source graph is a FILE: read_graph serves it raw for the canvas,
+    # write_graph is where the save mirror lands it. No network push anywhere.
+    import json as jsonlib
 
     with _fake_comfy() as (routes, web):
-        # AFTER entering: _fake_comfy reloads the module, which would rebind a patch made before.
-        monkeypatch.setattr(streamstudio, "_post_json", fake_post)
-        handler = routes.post_handlers.get("/taidal/send_to_viewer")
-        assert handler is not None
-        nm = {"src": create_comfy_node(HuggingFaceSource, "src")}
-        streamstudio.NODE_CLASS_MAPPINGS["src"] = nm["src"]
-        workflow = yaml_to_workflow({"raw": __import__("confluid").Target(HuggingFaceSource, path="mnist")}, nm)
-        asyncio.run(handler(_json_request({"workflow": workflow, "url": "http://127.0.0.1:8787/", "name": "demo"})))
-        data, _kwargs = web.calls[-1]
-        assert data == {"sent": {"message": "pipeline sent: 40 recording(s)"}}
-        ((url, payload),) = outbound
-        assert url == "http://127.0.0.1:8787/api/pipeline" and payload["name"] == "demo"
-        assert "HuggingFaceSource" in payload["yaml"] and "mnist" in payload["yaml"]
-        asyncio.run(handler(_json_request({"workflow": workflow})))
+        read = routes.get_handlers["/taidal/read_graph"]
+        write = routes.post_handlers["/taidal/write_graph"]
+        target = tmp_path / "ws.d" / "source.json"
+        workflow = {"nodes": [{"id": 1, "type": "src"}], "links": []}
+        asyncio.run(write(_json_request({"path": str(target), "workflow": workflow})))
+        data, _ = web.calls[-1]
+        assert data == {"written": str(target)} and jsonlib.loads(target.read_text())["nodes"][0]["type"] == "src"
+        asyncio.run(read(SimpleNamespace(query={"path": str(target)})))
+        data, _ = web.calls[-1]
+        assert data["workflow"]["nodes"][0]["type"] == "src"
+        asyncio.run(read(SimpleNamespace(query={"path": str(tmp_path / "gone.json")})))
+        _, kwargs = web.calls[-1]
+        assert kwargs.get("status") == 404
+        asyncio.run(write(_json_request({"path": str(target), "workflow": "not a dict"})))
         data, kwargs = web.calls[-1]
-        assert kwargs.get("status") == 400 and "url" in data["error"]
+        assert kwargs.get("status") == 400 and "workflow" in data["error"]
+        asyncio.run(write(_json_request({"workflow": workflow})))
+        _, kwargs = web.calls[-1]
+        assert kwargs.get("status") == 400
 
 
 def test_export_workflow_route_returns_yaml() -> None:

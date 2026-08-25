@@ -4,21 +4,32 @@ Auto-generating [ComfyUI](https://github.com/comfyanonymous/ComfyUI) nodes from 
 
 StreamStudio is the GUI layer of [Taidal](https://github.com/Gearlux). Rather than ship its own editor, it runs as a ComfyUI **custom node** package: every callable already exposed by RecordStream, Waivefront, or HuggingFace `datasets` is auto-wrapped into a ComfyUI node, so you compose and run pipelines visually on ComfyUI's canvas with no StreamStudio-specific ops to maintain.
 
-> **v0.2.0 pivot.** This release replaces the previous bespoke FastAPI server + React/`@xyflow` frontend with the ComfyUI-extension design below. The old `/api/*` server, `SteppingExecutor`, Confluid-YAML graph round-trip, and type→visualizer registry have been removed.
-
 ## Installation
 
-```bash
-pip install git+https://github.com/Gearlux/streamstudio.git@main
-```
-
-Add the `waivefront` extra to expose RF-domain ops and visualizers (spectrograms, IQ time-domain plots):
+StreamStudio is on PyPI as a pre-release, so `pip` needs `--pre` to see it:
 
 ```bash
-pip install "streamstudio[waivefront] @ git+https://github.com/Gearlux/streamstudio.git@main"
+pip install --pre streamstudio
 ```
 
 ComfyUI itself is **not** a Python dependency — the CLI clones it on first run (see below).
+
+### Domain node sets are plugins, not requirements
+
+StreamStudio generates its palette from whatever `@configurable` callables are installed. So a
+domain package — a signal/RF library, a task-specific trainer, your own ops — needs no
+registration here: install it, and its nodes appear. Nothing in StreamStudio imports one
+unconditionally, and the two places that use one (the colormap list and the array→image
+render) fall back cleanly when it is absent.
+
+The `waivefront` extra names the signal-domain set (spectrograms, IQ time-domain plots):
+
+```bash
+pip install --pre "streamstudio[waivefront]"
+```
+
+That package is not published, so the extra resolves only where it is already available —
+install it from its own source and the nodes appear either way.
 
 ### Shell completion
 
@@ -52,13 +63,13 @@ Reuse an existing ComfyUI checkout with `--comfy-dir`:
 streamstudio --comfy-dir /path/to/ComfyUI
 ```
 
-Taidal nodes then appear in ComfyUI's *Add Node* menu grouped by what they ARE, not by which package ships them. A role-bearing class nests under `Taidal/<Role>[/<Task>]` (role-first) — e.g. `Taidal/Model/Classification`, `Taidal/Trainer/Detection`, `Taidal/Logger` (loggers are task-agnostic, so no task level). An op / source / engine nests under `Taidal/<Category>[/<group>]` — `Taidal/Op/numpy`, `Taidal/Source`. The **producing package rides the node label** as an uppercased tag — `[SONAIR] TimmModel`, `[RECORDSTREAM] Threshold` — so you can tell where a node comes from without burying it in a per-package folder.
+Taidal nodes then appear in ComfyUI's *Add Node* menu grouped by what they ARE, not by which package ships them. A role-bearing class nests under `Taidal/<Role>[/<Task>]` (role-first) — e.g. `Taidal/Model/Classification`, `Taidal/Trainer/Detection`, `Taidal/Logger` (loggers are task-agnostic, so no task level). An op / source / engine nests under `Taidal/<Category>[/<group>]` — `Taidal/Op/numpy`, `Taidal/Source`. The **producing package rides the node label** as an uppercased tag — `[RECORDSTREAM] Threshold`, `[YOURPACKAGE] YourModel` — so you can tell where a node comes from without burying it in a per-package folder.
 
 Object sockets (model / loss / metric) are **role-qualified and task-agnostic**: a classification model and a segmentation model both carry `RECORDSTREAM_OBJECT:model`, so a model docks into *any* trainer's `model` slot — the role still stops you wiring a loss into a model slot. The **Retag** node re-stamps an object's role to force a connection when you need it.
 
 They are also **engine-aware**. A class that declares which framework's API it belongs to gets that engine on its socket, and a cross-engine wire is refused as you drag it — a `torch.nn` loss will not dock into a Keras trainer, because it cannot run there. The guard is deliberately one-sided: it fires only when *both* ends declare an engine, so an object from a library that says nothing about frameworks still connects anywhere it did before. Retag remains the override.
 
-A model node can come from a **builder function**, not just a class. Many libraries ship their models as factory functions — torchvision's detectors are `fasterrcnn_resnet50_fpn(...)`, `ssdlite320_mobilenet_v3_large(...)`, etc. These are registered (`raidar.configurables`, with `role="model"`), so each appears under `Taidal/Model/Detection` as an object node whose widgets (`num_classes`, `weights_backbone`, …) are read straight from the function's signature. Wire its **`class`** output into a detection **Trainer**'s `model` slot — because the node is lazy, the trainer injects the dataset-derived `num_classes` at run time, so you can leave that widget blank.
+A model node can come from a **builder function**, not just a class. Many libraries ship their models as factory functions — torchvision's detectors are `fasterrcnn_resnet50_fpn(...)`, `ssdlite320_mobilenet_v3_large(...)`, etc. A package registers them with `role="model"`, so each appears under `Taidal/Model/Detection` as an object node whose widgets (`num_classes`, `weights_backbone`, …) are read straight from the function's signature. Wire its **`class`** output into a detection **Trainer**'s `model` slot — because the node is lazy, the trainer injects the dataset-derived `num_classes` at run time, so you can leave that widget blank.
 
 ### Custom nodes: ComfyUI-Manager + extras
 
@@ -140,7 +151,7 @@ A record on the `RECORDSTREAM_RECORD` wire is a **record**: a plain `dict` of ty
 
 Node labels are the **verbatim** callable name (underscores become spaces; capitals are preserved — `HuggingFaceSource` stays `HuggingFaceSource`, not `Huggingfacesource`). Internal helpers (names starting with `_`) are not surfaced. Hovering any widget shows a **tooltip** sourced from the wrapped callable's docstring `Args:` block (see *Constructor-parameter tooltips* below).
 
-**Numeric widget ranges.** Every INT/FLOAT widget carries explicit full-range bounds (without them the ComfyUI frontend clamps input to `[0, 2048]` — negative dB values would be unenterable). An op can declare a *real* range on the parameter itself with a PEP-593 mark — `Annotated[float, Interval(ge=-200.0, le=50.0)]` (`annotated_types`) — which the bridge renders as the widget's `min`/`max` (a marked `Tuple[float, float]` range bounds both its `__lo`/`__hi` widgets), and the **same mark** flows into navigaitor's JSON schema via `confluid.to_pydantic`. Reference aliases: `waivefront.torchsig.processing.DbPower` / `DbSnr` / `Probability` / `WattRange` / `DbRange`.
+**Numeric widget ranges.** Every INT/FLOAT widget carries explicit full-range bounds (without them the ComfyUI frontend clamps input to `[0, 2048]` — negative dB values would be unenterable). An op can declare a *real* range on the parameter itself with a PEP-593 mark — `Annotated[float, Interval(ge=-200.0, le=50.0)]` (`annotated_types`) — which the bridge renders as the widget's `min`/`max` (a marked `Tuple[float, float]` range bounds both its `__lo`/`__hi` widgets), and the **same mark** flows into a generated JSON schema via `confluid.to_pydantic`. Declare the mark on the op's own signature; a shared alias per physical quantity (a dB power, a probability, a watt range) reads better than an inline `Interval(...)` at every parameter.
 
 **Container / structured widgets.** A constructor param whose type is a container that has no scalar widget renders as a `STRING` you type into, and the bridge decodes it back to the real Python value at run time:
 
@@ -149,7 +160,7 @@ Node labels are the **verbatim** callable name (underscores become spaces; capit
 | `List[str]` | `a, b, c` (comma-separated) | `["a", "b", "c"]` |
 | `Tuple[str, ...]` | `A, B` or `("A", "B")` | `("A", "B")` |
 | `Dict[int, str]` | `{0: "BG", 1: "5GNR"}` (Python/JSON literal) | `{0: "BG", 1: "5GNR"}` |
-| `list[str \| tuple[str, str]]` (a rename map, e.g. the helios **Config**'s `keys`) | `snr_db, noise_power_db:nf` *or* `[("snr_db","snr"), "noise_power_db"]` | `["snr_db", ("noise_power_db", "nf")]` |
+| `list[str \| tuple[str, str]]` (a rename map — a bare key keeps its name, a pair renames it) | `snr_db, noise_power_db:nf` *or* `[("snr_db","snr"), "noise_power_db"]` | `["snr_db", ("noise_power_db", "nf")]` |
 | `list[int] \| str \| int` (a Union with a bare scalar arm, e.g. `pytorch_lightning.Trainer.devices`) | `auto` *or* `1,2,3` *or* `2` | `"auto"` / `"1,2,3"` / `"2"` (passed through verbatim) |
 
 For the list-of-pairs case you can use either a **friendly comma list** — items split on `,`, and each item split on `:` into a `(src, dst)` rename pair (a bare item stays a plain key, i.e. `src == dst`) — or a full **Python/JSON literal** for any nesting. This is generic for any list-of-pairs/compound param; it's handled in the bridge's `_coerce_kwargs`, so it works for every such node and the value round-trips through the YAML exporters too.
@@ -199,7 +210,7 @@ A trainer / evaluator / processor node **runs itself when you Queue the graph** 
 
 > How it works: the runnable reports progress through the comfy-free `recordstream.runnable.ProgressReporting` protocol (a plain `(value, total)` callback), and StreamStudio drives `comfy.utils.ProgressBar` from it — so the bar fills regardless of whether the captured text bar is visible. A runnable that doesn't support the protocol simply shows no native bar (the text widget still streams).
 
-**Outputs are wireable sockets.** Every confluid `@output` a runnable declares is a typed output socket on the node, filled with the run's LIVE value. For a trainer / evaluator runnable (the sonair / deltaid / raidar specialisations) that's `computed_metrics` (the run's final scalar metrics, e.g. `test/accuracy`, `val/loss`) and `class_names` (the resolved class names) — both `STRING` sockets carrying JSON, so wire them into ComfyUI's native **Show Text** node to see them — plus `trained_model` (a `RECORDSTREAM_OBJECT:model` you wire straight into an evaluator node's `model` slot to chain train → eval in one graph). Add a new value `@output` upstream and it becomes a socket automatically — no StreamStudio change needed.
+**Outputs are wireable sockets.** Every confluid `@output` a runnable declares is a typed output socket on the node, filled with the run's LIVE value. For a trainer / evaluator runnable that's `computed_metrics` (the run's final scalar metrics, e.g. `test/accuracy`, `val/loss`) and `class_names` (the resolved class names) — both `STRING` sockets carrying JSON, so wire them into ComfyUI's native **Show Text** node to see them — plus `trained_model` (a `RECORDSTREAM_OBJECT:model` you wire straight into an evaluator node's `model` slot to chain train → eval in one graph). Add a new value `@output` upstream and it becomes a socket automatically — no StreamStudio change needed.
 
 **Attaching loggers / callbacks.** An object node's constructor params that accept an *object* (rather than a typed/string value) render as wired `RECORDSTREAM_OBJECT` input sockets — so to log a run, drop a logger node (e.g. `TensorBoardLogger`, `CSVLogger`) and wire its **`instance`** output into the **Lightning Trainer** node. A param that accepts a *list* of objects (the Trainer's `logger` / `callbacks`) grows **dynamic `logger_0`, `logger_1`, …** sockets as you wire — so you can attach several loggers (or callbacks) at once, just like the `op_N` / `source_N` list inputs. String-settable knobs like `accelerator` (`"gpu"`) and `precision` stay editable widgets; only genuinely object-typed params become sockets.
 
@@ -211,32 +222,30 @@ A runnable wired into a combinator slot is **dual-mode**: instead of running its
 
 ### Running a model (inference)
 
-A **model node** (a class tagged `@configurable(category="model")`, e.g. the helios
-`ExtendedHeliosModelLoader` / `HeliosExactKnnClassifier` surfaced via `waivefront-helios`) RUNS inference
-— distinct from a deterministic op. Wire a record into its optional `record` input and it outputs the
-applied `record` (with predictions stamped) PLUS the loaded model on a `RECORDSTREAM_OBJECT:model` output
-(which you can also dock into an evaluator's `model` slot). The model loads lazily on the first run.
+A **model node** (any class tagged `@configurable(category="model")`) RUNS inference — distinct from a
+deterministic op. Wire a record into its optional `record` input and it outputs the applied `record`
+(with predictions stamped) PLUS the loaded model on a `RECORDSTREAM_OBJECT:model` output (which you can
+also dock into an evaluator's `model` slot). The model loads lazily on the first run.
 
 A model node may also TAKE a model on a wired `RECORDSTREAM_OBJECT:model` **input** — the loader→runner
-decoupling. `HeliosModelInference` holds all config in the **Loader** (`ExtendedHeliosModelLoader`, set
-`model_uri` / `window_ms` / …) and just RUNS it: wire the Loader node's `model` output into the
-`HeliosModelInference` node's `model` input, then feed it a record. (The same shape is the helios eval
-YAML `model: !class ModelInference(model=!class ExtendedHeliosModelLoader(...))`.)
+decoupling that many inference libraries use. A *runner* class holds no configuration of its own; a
+*loader* class holds all of it (checkpoint URI, window length, …) and the runner just executes it. Wire
+the loader node's `model` output into the runner node's `model` input, then feed it a record. It is the
+canvas spelling of the nested YAML `model: !class:ModelInference(model=!class:ModelLoader(...))`.
 
-End-to-end RF detection example (all nodes auto-discovered from `waivefront-helios`):
+A typical detection graph, entirely from auto-discovered nodes:
 
-1. **Helios Melody Dataset** — pick a dataset name (the field has a platform picker), set `version`; on
-   Queue it downloads into `$DATA_ROOT` and outputs the local `directory` (a `STRING`).
-2. Wire `directory` into **Helios File Source**'s `directory` widget (right-click → *Convert directory to
+1. A **dataset value node** — pick a dataset identifier, set its version; on Queue it downloads into
+   `$DATA_ROOT` and outputs the local `directory` (a `STRING`).
+2. Wire `directory` into a **file source**'s `directory` widget (right-click → *Convert directory to
    input*, then drag the wire), then **Walk Dataset** to step through records.
-3. **Helios Extended Model** (`model_uri`, e.g. `maf:/Helios@baseline`) → runs detection, renders the
-   spectrogram, stamps the detections; optionally **Helios Exact Knn Classifier** (`bundle_path`) refines
-   the labels.
-4. **Helios Overlay Detections Op** draws the boxes + labels on the spectrogram, then **Extract from
-   Record** (`input` → `IMAGE`) → native **Preview Image**.
+3. A **model node** runs detection, renders the spectrogram and stamps the detections; a second model
+   node can refine the labels.
+4. An **overlay op** draws the boxes and labels onto the image, then **Extract from Record**
+   (`input` → `IMAGE`) → native **Preview Image**.
 
-Credentials for the Melody/MAF download come from the environment (`MAF_CLIENT_ID` + `MAF_CLIENT_SECRET`
-or `MAF_ACCESS_TOKEN`); set `HELIOS_MAF_OFFLINE=1` to use only the local `$DATA_ROOT` cache.
+A node that downloads from a credentialed platform reads its credentials from the environment; each
+such package documents its own variables.
 
 ## Composing ops (higher-order ops)
 
@@ -254,7 +263,7 @@ Walk ───────record┘
 
 `Parallel(ops=[ToTensor, Threshold])` applies both to the incoming record. Leave a higher-order op's `record` unconnected and take *its* `op` output to nest it inside another higher-order op.
 
-**Single-op params** work the same way with ONE socket instead of a list: a constructor param named `op` or `target` (`RandomApply.op`, `ConfigureOp.target`) renders as one optional `RECORDSTREAM_OP` input. A node may have **several** — a bridged-helios composite's op slots (named the helios way and surfaced via the bridge's `__taidal_op_params__` stamp) all become sockets, so `HeliosConfigureOp` exposes BOTH `compute` and `target`, and `HeliosConfigOp.delegate` / `HeliosApplyToTargetOp.transform` are wireable too. The canonical use is **`ConfigureOp`** (recordstream, the helios *Configure* pattern) — a per-record parameter injector: wire the value-computing ops into its `op_N` inputs, the op to configure into `target`, and name the attribute in `param`:
+**Single-op params** work the same way with ONE socket instead of a list: a constructor param named `op` or `target` (`RandomApply.op`, `ConfigureOp.target`) renders as one optional `RECORDSTREAM_OP` input. A node may have **several**: a composite whose op slots carry names of its own can advertise them through the bridge's `__taidal_op_params__` stamp, and each becomes its own socket. The canonical use is **`ConfigureOp`** (recordstream) — a per-record parameter injector: wire the value-computing ops into its `op_N` inputs, the op to configure into `target`, and name the attribute in `param`:
 
 ```
 FormulaOp    ──op──→ (op_0)   ConfigureOp(param="low_level", source="image")  ─record→ …
@@ -272,7 +281,7 @@ Any op's scalar parameter (a number you'd normally type, e.g. `noise_power_db`) 
 
 What you can wire in, and how each compiles, is the [DAG → sequential](#dag--sequential) table below — a fixed value from a **Primitive** node inlines as a literal, a same-record **Extract → Math** derivation becomes a `ConfigureOp`, and **another op's `@output`** (e.g. a `NoiseFloor`'s `applied_snr_db` into a later op's `noise_power_db`) becomes a context `Capture` + `Apply` pair as long as the producing op is upstream on the same record path.
 
-> **Scope.** Works for any op whose constructor takes an `ops`/`transforms` op-list or an `op`/`target` single-op param — and, for bridged-helios composites, the slots named the helios way (`compute`/`delegate`/`true_transforms`/…) that the bridge stamps as op-valued (an op-list slot under a helios name grows its own `<param>_N` family, e.g. `HeliosIfOp.true_transforms_N` + `false_transforms_N`). — multi-op branches mean pre-composing a branch into one op (future). `FilterOp`/`WrappedOp` wrap a *raw Python callable*, so they aren't canvas nodes at all (bare `@configurable`, i.e. UNcategorised — neither `op` nor `engine`).
+> **Scope.** Works for any op whose constructor takes an `ops`/`transforms` op-list or an `op`/`target` single-op param — and, for a composite using slot names of its own, whichever slots it stamps as op-valued (a stamped op-list slot grows its own `<param>_N` socket family). — multi-op branches mean pre-composing a branch into one op (future). `FilterOp`/`WrappedOp` wrap a *raw Python callable*, so they aren't canvas nodes at all (bare `@configurable`, i.e. UNcategorised — neither `op` nor `engine`).
 
 ## Subgraph as an Op
 
@@ -381,7 +390,7 @@ The compiler converts the whole **op DAG** of every Taidal/StreamStudio node int
 | A Taidal **value node** marked `@configurable(constant=True)` (see the worked example below) | **hoisted** as a top-level `!class:` entry carrying its widget settings verbatim; the consumer kwarg becomes a dotted `!ref:<name>.<output>` |
 | A value node **without** the `constant` mark | omitted + a note nudging you to tag the class `constant=True` |
 | An op node's `op` value output wired into a **single-op param** (`RandomApply.op`, `ConfigureOp.target`) or an `op_N` list | embedded as a nested `!class:` instance |
-| An ***op-chain → Extract(input) → Math → widget*** value chain rooted at the consumer's own record feed | **auto-compiled to a `ConfigureOp`**: the chain ops + a `FormulaOp` (the Math formula) re-run per record inside the wrap and inject the result as the param (the helios *Configure* pattern — e.g. `Threshold.low_level = max * 0.2`); a PURE chain leaves the op schedule entirely |
+| An ***op-chain → Extract(input) → Math → widget*** value chain rooted at the consumer's own record feed | **auto-compiled to a `ConfigureOp`**: the chain ops + a `FormulaOp` (the Math formula) re-run per record inside the wrap and inject the result as the param (e.g. `Threshold.low_level = max * 0.2`); a PURE chain leaves the op schedule entirely |
 | An op's **`@output`** socket (e.g. `NoiseFloor.applied_snr_db`) wired into a LATER op's param, where the producer is on the consumer's **record-ancestor** path | **auto-compiled to the context ops `Capture` + `Apply`**: the producer's ACTUAL `@output` value is recorded into a Context cell after it runs (stochastic-safe — captured, not recomputed) and injected into the param per record. A cross-branch producer (not an ancestor) instead gets the omit note below |
 | Anything else (a runtime value the compiler can't relate to the consumer's record) | omitted (the op keeps its constructor default) + a note pointing at the sanctioned mechanisms — wire it through `ConfigureOp` yourself, or, for `str`-capable params, set the widget to a `'{meta_key}'` **metadata expression** an upstream op writes |
 
@@ -428,25 +437,22 @@ The whole-graph export (**Export Graph → Taidal YAML**) honors the same mark: 
 
 ### Opening with a given canvas (URL params)
 
-A tool that launches the editor can decide what the canvas shows, instead of whatever the
-previous session left behind:
+A tool that launches the editor can name the graph FILE it works from:
 
 ```
-http://127.0.0.1:8188/?taidal_graph=/abs/path/to/pipeline.yaml   # that config, as the canvas
-http://127.0.0.1:8188/?taidal_new=1                              # an empty canvas
+http://127.0.0.1:8188/?taidal_graph=/abs/path/ws.d/source.json   # the launcher's graph file
+http://127.0.0.1:8188/?taidal_graph=/abs/path/pipeline.yaml      # a Confluid config, converted
 ```
 
-`taidal_graph` names a **server-side** Confluid YAML; the `Taidal.OpenGraph` frontend
-extension posts it to `/taidal/import_yaml` (which accepts `{path: …}` beside the usual
-`{yaml: …}`) and loads the converted workflow. The param is applied once and stripped from
-the URL, so reloading the editor afterwards keeps what you build there.
-
-A third param, `taidal_return=<origin>`, tells the editor where its work should go back
-to: **Taidal → Send Graph → Viewer** converts the active graph (same converter as the
-YAML export) and POSTs it to `<origin>/api/pipeline` server-side via
-`/taidal/send_to_viewer` — no export-file → drop round trip, and no CORS since the canvas
-never talks to the viewer directly. Opened by hand (no param), the command asks for the
-viewer address once per session.
+A `.json` path is a native workflow file: the `Taidal.OpenGraph` extension puts it on the
+canvas via `/taidal/read_graph` (a missing file is fine — the first save creates it) and
+**mirrors every native workflow save** (Ctrl-S / Save / Save As) into it via
+`/taidal/write_graph` — the file, not a network push, is how the canvas reaches the
+launcher, which stats it whenever it likes. A `.yaml` path is a Confluid config,
+converted by `/taidal/import_yaml` as before. Either way the canvas is loaded only when
+it does not already show that graph (re-opening never stacks duplicate workflow tabs),
+without the param the editor keeps its own last session, and the param is applied once
+and stripped, so reloading afterwards keeps what you build.
 
 ## Importing a `flow.yaml` back to the canvas
 
@@ -471,7 +477,7 @@ document imports normally. `--as group` wraps the result in one box; `--as subgr
 
 ## Importing & exporting whole pipelines (Taidal YAML ↔ canvas)
 
-Beyond the ops-only export above, StreamStudio round-trips a **whole** Confluid config — sources, ops, object members (model / loss / optimizer / loaders / logger / Lightning Trainer), and the runnable that ties them together — between a Confluid YAML and a full ComfyUI `workflow.json`. So you can load an existing training config (e.g. [`sonair/examples/train_efficientvit_b0_mnist.yaml`](../sonair/examples/train_efficientvit_b0_mnist.yaml)) onto the canvas, edit it visually, and save it back to YAML that runs with `recordstream run -c config.yaml`.
+Beyond the ops-only export above, StreamStudio round-trips a **whole** Confluid config — sources, ops, object members (model / loss / optimizer / loaders / logger / Lightning Trainer), and the runnable that ties them together — between a Confluid YAML and a full ComfyUI `workflow.json`. So you can load an existing training config onto the canvas, edit it visually, and save it back to YAML that runs with `recordstream run -c config.yaml`.
 
 The converter lives in `streamstudio.graphio` (`yaml_to_workflow` / `workflow_to_yaml`); the **Fluid graph is the shared intermediate representation** (confluid owns YAML↔Fluid via `resolve`/`dump`, StreamStudio owns Fluid↔`workflow.json`). It works **without a running ComfyUI**.
 
@@ -501,16 +507,16 @@ streamstudio export-workflow workflow.json -o config.yaml # whole canvas → hoi
 
 ### The exported shape (hoisted `!ref:`)
 
-Every node becomes a **top-level key** named by the socket it feeds (path-prefixed on collision); a wire becomes a `!ref:`; shared scalar dimensions (`num_classes` / `image_size`) are hoisted. A deferred member (optimizer / loaders / Lightning Trainer) emits `!lazy:`, an eager one `!class:`. This matches the navigaitor / hand-written reference configs (e.g. [`waivefront/config/train_efficientvit_b0.yaml`](../waivefront/config/train_efficientvit_b0.yaml)):
+Every node becomes a **top-level key** named by the socket it feeds (path-prefixed on collision); a wire becomes a `!ref:`; shared scalar dimensions (`num_classes` / `image_size`) are hoisted. A deferred member (optimizer / loaders / Lightning Trainer) emits `!lazy:`, an eager one `!class:`. It matches the shape of a hand-written reference config:
 
 ```yaml
 num_classes: 37
-model: !class:sonair.timm_model.TimmModel
+model: !class:myproject.models.ImageClassifier
   model_name: efficientvit_b0
   num_classes: !ref:num_classes
 optimizer: !lazy:torch.optim.AdamW
   lr: 0.0001
-runnable: !class:sonair.lightning_classifier.LightningClassifier
+runnable: !class:myproject.training.ClassificationTrainer
   task: fit
   model: !ref:model
   optimizer: !ref:optimizer
@@ -525,7 +531,7 @@ runnable: !class:sonair.lightning_classifier.LightningClassifier
 - **Export skips what YAML can't express — it never fails on it.** A canvas usually contains nodes with no Confluid form: native ComfyUI nodes (*Preview Image*, *Show Text*), the canvas-only Taidal adapters (*Walk Dataset*, *Extract from Record*, *Retag*, …), and occasionally a node whose config can't be serialized. **Export Graph → Taidal YAML** leaves those out and lists each one (with the reason) in a leading `#` comment block of the downloaded YAML — the document below stays a normal, loadable config of the remaining Taidal nodes. A wire from a skipped node into an exported config member is dropped (the member falls back to its default) and noted in the same block — **except** a wire from a native **primitive** node (`PrimitiveInt`/`PrimitiveFloat`/…), which inlines as its literal `value` widget. The canvas **wiring is preserved**: each run of record-chained ops folds into a `pipeline: !class:recordstream.core.stream.Stream` entry — `source: !ref:<source>` (traced through the *Walk Dataset* adapter back to the source node) plus the ordered `ops:` list, with fan-out compiled to `Save`/`Use` context cells — so the exported YAML reconstructs the same data flow (`confluid.load("config.yaml")["pipeline"]` is an iterable `Stream`). A chain broken by a skipped node continues as its own `pipeline_N` entry.
 - **Value chains compile here too.** The ``op-chain → Extract(input) → Math → widget`` pattern wraps the consumer in a `ConfigureOp` (chain ops + `FormulaOp`) exactly like the flow export — inside pipeline folds and on standalone op-value entries; the consumed Extract/Math adapters are no longer listed as "left out".
 - **Value nodes export by their class name with DOTTED output refs.** A wire from a value-producer node's output slot (e.g. a config node's `disabled` output feeding an op's `tx_disabled` param) emits `!ref:<entry>.<output>` — the `@output` *property value*, not the config instance a plain `!ref:` would inject. On **import**, confluid's resolver instantiates such dotted refs (a documented `resolve()` caveat), so the consumer widget receives the *evaluated* value and the config lands as a standalone value node carrying its settings — re-wire the two on the canvas to re-establish the live link.
-- A config member with **no StreamStudio node** (a class not tagged op/source/engine/member — e.g. a torchmetrics `MetricCollection`) is **dropped from the canvas with a warning** on import; the runnable falls back to its default. To surface such a class, tag/register it (loggers and the lazy torch / Lightning object members are registered in `matrainer.lightning.configurables`).
+- A config member with **no StreamStudio node** (a class not tagged op/source/engine/member — e.g. a torchmetrics `MetricCollection`) is **dropped from the canvas with a warning** on import; the runnable falls back to its default. To surface such a class, tag/register it (a package registers its loggers and lazy torch / Lightning object members the same way).
 - Object **nodes** grow dynamic `logger_N` / `callbacks_N` sockets for list-valued object params (see *Attaching loggers / callbacks* above), and the whole-graph graphio round-trip respects them: **import** wires a `List`-valued member's items into `logger_0`, `logger_1`, … and **export** collapses those sockets back into one `logger:` list (the importer/exporter read the node's own `<name>_0` seed to decide).
 - **Subgraphs** are self-contained in the `workflow.json` (`definitions.subgraphs`); on export they're **inlined** back into the flat YAML — including workflows saved by current ComfyUI (which stores a definition's inner links as dicts), several instances of the same definition, nested definitions, and the wires crossing the subgraph boundary (an outer wire into a subgraph input re-attaches to the inner node(s) it feeds — fan-out included — and a subgraph output re-originates at its inner producer). Standalone reusable `include:` files are a follow-up.
 - Round-trip is **semantic** (topology + kwargs + kinds), not byte-exact: node positions are re-derived by a deterministic layered layout (sources left → runnable right), and only non-default widget values are emitted.
@@ -558,11 +564,11 @@ StreamStudio never hand-defines a node. At ComfyUI startup, `_discover_and_regis
 2. For each module, `recordstream.discovery.scan_module` finds the compatible callables.
 3. `register_module_nodes` / `create_comfy_node` (`streamstudio/bridge.py`) classify each callable (Source / Op / Generic — see *Building a pipeline*) and wrap it in a ComfyUI node class, keyed by `_node_key` as `Taidal_<package>_<category>[_<group>]_<callable>` (globally unique, so a same-named class in two modules — e.g. numpy's vs torch's `Threshold` — doesn't clobber its twin) and filed under a `Taidal/<Package>/<Category>[/<group>]` palette path (built by `_node_category`: top-level package via `_PACKAGE_DISPLAY_NAMES` for canonical casing, then the `@configurable` category, then the optional `group` tag). The displayed name stays the verbatim class name.
 
-Registration is a **positive allowlist**: a class becomes a node only if its `@configurable` category is one of `_NODE_CATEGORIES` (currently `{op, model, source, engine, sink, value}`). So the palette is exactly the deliberately-tagged ops, sources, engines, and sinks. The generic recordstream **engines** (`Stream` / `JointStream`, `category="engine"`) and the source-view `DatasetSplit` (`category="source"`) **are** buildable on the canvas: their source-typed constructor params render as wired sockets — a single `source` → a `RECORDSTREAM_SOURCE` input, a source-list (`streams`) → dynamic `source_N` inputs, an op-list (`ops`) → dynamic `op_N` `RECORDSTREAM_OP` inputs — so a Source/Op node (which already outputs *itself* as `RECORDSTREAM_SOURCE` / `RECORDSTREAM_OP`) wires straight into them. The RecordStream storage **sinks** (`category="sink"` — `HDF5Sink` / `ZarrGroupSink` / `ZarrBatchSink` / `DirectorySink` / `JsonSink` / `JsonPerWindowSink` / `YoloSink`) become **object-member producer** nodes (two outputs, `instance` + `class`, on a role-qualified `RECORDSTREAM_OBJECT:sink` wire) that dock into a `DatasetProcessor` runnable node's `sink` slot — wire `Source → Stream → DatasetProcessor(stream, sink)` and queue it to write the dataset, or export the graph to a `recordstream run` YAML. Excluded *by construction*: the **raw-callable op wrappers** (`FilterOp` / `WrappedOp`) — UNcategorised (bare `@configurable`), since they take a raw Python callable nothing a widget or socket supplies (so they stay out even with `engine` allowed); **task datasets** (`*_dataset`, e.g. `classification_dataset`) — a trainer-config concept navigaitor cares about, but a canvas only needs a `source` to yield records; uncategorised module-level helper functions; and an **UNtagged sink** (a raw `Storage` subclass without `category="sink"`, including the `write(prediction, metadata)` **prediction** sinks `DetectionPredictionsSink` / `ClassificationPredictionsSink`, which aren't record sinks). You can build a dataset by wiring `Source → Op → …` *or* by feeding a `Source`/`Op` into a `Stream` / `DatasetSplit` engine node. (To surface another role, add its category to `_NODE_CATEGORIES` in `bridge.py` and tag the classes. Note: the flow export compiles the op DAG — fan-out, *Mix Records* fan-in, `op_N` op-values — but engine-node graphs (`Stream`/`JointStream` built on the canvas) and sink/`DatasetProcessor` nodes aren't exportable through it; use the whole-graph export for those.)
+Registration is a **positive allowlist**: a class becomes a node only if its `@configurable` category is one of `_NODE_CATEGORIES` (currently `{op, model, source, engine, sink, value}`). So the palette is exactly the deliberately-tagged ops, sources, engines, and sinks. The generic recordstream **engines** (`Stream` / `JointStream`, `category="engine"`) and the source-view `DatasetSplit` (`category="source"`) **are** buildable on the canvas: their source-typed constructor params render as wired sockets — a single `source` → a `RECORDSTREAM_SOURCE` input, a source-list (`streams`) → dynamic `source_N` inputs, an op-list (`ops`) → dynamic `op_N` `RECORDSTREAM_OP` inputs — so a Source/Op node (which already outputs *itself* as `RECORDSTREAM_SOURCE` / `RECORDSTREAM_OP`) wires straight into them. The RecordStream storage **sinks** (`category="sink"` — `HDF5Sink` / `ZarrGroupSink` / `ZarrBatchSink` / `DirectorySink` / `JsonSink` / `JsonPerWindowSink` / `YoloSink`) become **object-member producer** nodes (two outputs, `instance` + `class`, on a role-qualified `RECORDSTREAM_OBJECT:sink` wire) that dock into a `DatasetProcessor` runnable node's `sink` slot — wire `Source → Stream → DatasetProcessor(stream, sink)` and queue it to write the dataset, or export the graph to a `recordstream run` YAML. Excluded *by construction*: the **raw-callable op wrappers** (`FilterOp` / `WrappedOp`) — UNcategorised (bare `@configurable`), since they take a raw Python callable nothing a widget or socket supplies (so they stay out even with `engine` allowed); **task datasets** (`*_dataset`, e.g. `classification_dataset`) — a trainer-config concept a config generator cares about, but a canvas only needs a `source` to yield records; uncategorised module-level helper functions; and an **UNtagged sink** (a raw `Storage` subclass without `category="sink"`, including the `write(prediction, metadata)` **prediction** sinks `DetectionPredictionsSink` / `ClassificationPredictionsSink`, which aren't record sinks). You can build a dataset by wiring `Source → Op → …` *or* by feeding a `Source`/`Op` into a `Stream` / `DatasetSplit` engine node. (To surface another role, add its category to `_NODE_CATEGORIES` in `bridge.py` and tag the classes. Note: the flow export compiles the op DAG — fan-out, *Mix Records* fan-in, `op_N` op-values — but engine-node graphs (`Stream`/`JointStream` built on the canvas) and sink/`DatasetProcessor` nodes aren't exportable through it; use the whole-graph export for those.)
 
 A module that fails to import or scan is skipped at `debug` level, so one package's missing optional dependency never empties the palette.
 
-> **Entry points live in installed metadata.** Discovery reads `importlib.metadata`, so editable installs *freeze* the entry-point table at install time. After adding or changing a `[project.entry-points."confluid.configurables"]` declaration in any workspace package, reinstall that editable (e.g. `aisland setup`) or its nodes silently vanish from the palette. Do **not** use `--reinstall` / `--force-reinstall` — that re-resolves the internal deps from the index instead of your checkouts. An unpublished dep (liquifai, recordstream, …) isn't there and the command fails; a published one (loggair, confluid) is, so your editable install is silently swapped for a release wheel — the worse outcome, because nothing errors. To consume a project from PyPI deliberately, use `aisland source set <project> pypi`.
+> **Entry points live in installed metadata.** Discovery reads `importlib.metadata`, so editable installs *freeze* the entry-point table at install time. After adding or changing a `[project.entry-points."confluid.configurables"]` declaration in any workspace package, reinstall that editable or its nodes silently vanish from the palette. Do **not** use `--reinstall` / `--force-reinstall` — that re-resolves your dependencies from the index instead of your checkouts, so an editable install is silently swapped for a release wheel and nothing errors.
 
 ## Type mapping
 
@@ -587,7 +593,7 @@ The directory picker calls the `/taidal/choose_directory` route registered in `s
 
 ### HuggingFace dataset-id field
 
-A HuggingFace dataset source's identifier is a **name**, not a folder — `recordstream.sources.huggingface.HuggingFaceSource` happens to call it `path` (mirroring `datasets.load_dataset`), and sonair's `HuggingFaceClassificationDataset` calls it `repo_id`. Either way StreamStudio renders it as a free-text `STRING` (so you can type any Hub repo id like `kitofrank/RFUAV`, or a local imagefolder path), **not** the directory picker. `web/hf_dataset_chooser.js` adds an optional “📚 cached dataset” combo populated from the `/taidal/hf_datasets` route (`huggingface_hub.scan_cache_dir()`, dataset repos only) — selecting one fills the text field, which stays editable. The field is detected by the `HuggingFace*` class-name convention, so any future `HuggingFace*` source inherits it automatically.
+A HuggingFace dataset source's identifier is a **name**, not a folder — `recordstream.sources.huggingface.HuggingFaceSource` happens to call it `path` (mirroring `datasets.load_dataset`), while another package's dataset class may call it `repo_id`. Either way StreamStudio renders it as a free-text `STRING` (so you can type any Hub repo id like `kitofrank/RFUAV`, or a local imagefolder path), **not** the directory picker. `web/hf_dataset_chooser.js` adds an optional “📚 cached dataset” combo populated from the `/taidal/hf_datasets` route (`huggingface_hub.scan_cache_dir()`, dataset repos only) — selecting one fills the text field, which stays editable. The field is detected by the `HuggingFace*` class-name convention, so any future `HuggingFace*` source inherits it automatically.
 
 ### HuggingFace feature-selector fields
 
@@ -603,7 +609,7 @@ A HuggingFace dataset source's identifier is a **name**, not a folder — `recor
 
 ### Constructor-parameter tooltips
 
-Each widget's hover tooltip is sourced from the wrapped callable's docstring `Args:` block (parsed by `confluid.parse_param_docs`) — the **same** per-parameter help [navigaitor](https://github.com/Gearlux/navigaitor) surfaces as JSON-Schema `description`s in its visual editor. Document a constructor parameter once in the upstream class's `Args:` and it shows up in both GUIs. A parameter with no `Args:` entry simply has no tooltip; the fix is to document it in recordstream / waivefront, never to hand-write a tooltip in StreamStudio.
+Each widget's hover tooltip is sourced from the wrapped callable's docstring `Args:` block (parsed by `confluid.parse_param_docs`) — the **same** per-parameter help a schema generator surfaces as JSON-Schema `description`s. Document a constructor parameter once in the upstream class's `Args:` and it shows up in both GUIs. A parameter with no `Args:` entry simply has no tooltip; the fix is to document it in the package that owns the class, never to hand-write a tooltip in StreamStudio.
 
 ## Connection typing
 
