@@ -1,6 +1,6 @@
 import { app } from "../../scripts/app.js";
 
-console.log("ComfyStream: Loaded Taidal.RunnableListInputs extension");
+console.log("StreamStudio: Loaded Taidal.RunnableListInputs extension");
 
 // Dynamic runnable-list inputs for a workflow COMBINATOR node whose constructor takes a LIST of
 // runnables (recordstream.workflow.Sequence's `steps` — tagged by a seed `<name>_0` input of type

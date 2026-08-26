@@ -12,7 +12,7 @@ import { app } from "../../scripts/app.js";
 // semantics (an unconnected required socket blocks the run; an unconnected optional one passes None) are
 // owned by ComfyUI + bridge.py; this only makes the distinction legible on the canvas.
 
-console.log("ComfyStream: Loaded Taidal.OptionalInputs extension");
+console.log("StreamStudio: Loaded Taidal.OptionalInputs extension");
 
 const OPTIONAL_DOT_COLOR = "#7d8590"; // muted slate for the unconnected optional dot
 const OPTIONAL_SUFFIX = " (optional)";

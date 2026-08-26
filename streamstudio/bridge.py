@@ -1561,6 +1561,25 @@ def _is_runnable(obj: Any) -> bool:
     return len(params) == 0
 
 
+def _is_engine_class(obj: Any) -> bool:
+    """True if ``obj`` is an ``@configurable(category="engine")`` class — ``Stream`` / ``FlowGraph`` / ``JointStream``.
+
+    An engine WRAPS a source (``source=``) and applies ops to it, so it belongs on the canvas as a
+    Source node: its ``source`` / ``ops`` params ride wired ``RECORDSTREAM_SOURCE`` / ``RECORDSTREAM_OP``
+    sockets and it hands back a ``RECORDSTREAM_SOURCE`` (:func:`_build_source_node`).
+
+    The engine CATEGORY decides this, NOT the structural :func:`_is_source` probe, because an engine's
+    ``__iter__`` / ``__getitem__`` is honestly annotated ``Any``: a Stream's source is duck-typed ("any
+    iterable"), so it cannot promise ``Iterator[Record]`` the way a leaf source can. Leaning on the
+    annotation split the siblings — ``JointStream`` (``Iterator[Record]``) built a Source node while
+    ``Stream`` / ``FlowGraph`` (``Iterator[Any]``) silently fell through to the GENERIC builder, whose
+    ``source`` is a STRING widget and whose output is a bare ``STRING``. ComfyUI connects sockets on
+    type-string EQUALITY, so a leaf source's ``RECORDSTREAM_SOURCE`` output then had nothing to dock
+    into and the canvas simply refused the wire. Pinned by ``tests/test_engine_source_nodes.py``.
+    """
+    return inspect.isclass(obj) and marks(obj).category == "engine"
+
+
 def _is_dataset_member_class(obj: Any) -> bool:
     """True if ``obj`` is a task ``role="dataset"`` class (a model-ready dataset Source).
 
@@ -2812,14 +2831,16 @@ def create_comfy_node(
 ) -> Type:
     """Dynamically construct a ComfyUI node class from a Python callable.
 
-    Dispatches on the callable's RecordStream role: a ``run()``-implementing class (trainer / evaluator /
-    processor) becomes a buildable RUNNABLE node (members as wired sockets); ``category="op"``
-    classes (record-taking ops) become ``RECORD -> RECORD`` nodes; record-yielding sources (and task
-    ``role="dataset"`` classes) become ``-> SOURCE`` nodes; runnable MEMBER classes (model / loss /
-    metric / optimizer / loader / lightning) AND ``category="sink"`` storage sinks become ``-> OBJECT``
-    nodes (a sink outputs ``RECORDSTREAM_OBJECT:sink``, docking into a ``DatasetProcessor`` node's
-    ``sink`` slot); a no-arg ``__call__(self)`` class becomes a VALUE node (config widgets ->
-    ``@output`` sockets, no record I/O); everything else falls back to generic.
+    Dispatches on the callable's RecordStream role: a ``run()``-implementing class (trainer /
+    evaluator / processor) becomes a buildable RUNNABLE node (members as wired sockets);
+    ``category="op"`` classes (record-taking ops) become ``RECORD -> RECORD`` nodes; record-yielding
+    sources, ``category="engine"`` classes (``Stream`` / ``FlowGraph`` / ``JointStream`` — tagged,
+    NOT probed; see :func:`_is_engine_class`) and task ``role="dataset"`` classes become
+    ``-> SOURCE`` nodes; runnable MEMBER classes (model / loss / metric / optimizer / loader /
+    lightning) AND ``category="sink"`` storage sinks become ``-> OBJECT`` nodes (a sink outputs
+    ``RECORDSTREAM_OBJECT:sink``, docking into a ``DatasetProcessor`` node's ``sink`` slot); a no-arg
+    ``__call__(self)`` class becomes a VALUE node (config widgets -> ``@output`` sockets, no record
+    I/O); everything else falls back to generic.
     """
     if _is_runnable(func):
         return _build_runnable_node(func, name, category)
@@ -2830,7 +2851,7 @@ def create_comfy_node(
         return _build_model_node(func, name, category)
     if _op_call_signature(func) is not None:
         return _build_op_node(func, name, category)
-    if _is_source(func) or _is_dataset_member_class(func):
+    if _is_source(func) or _is_engine_class(func) or _is_dataset_member_class(func):
         return _build_source_node(func, name, category)
     if _is_object_member_class(func) or _is_sink_class(func):
         # A sink is an object-member PRODUCER (like a model / loss / logger): config widgets ->
@@ -2966,13 +2987,13 @@ def register_module_nodes(
     """
     if root is None:
         root = node_root()
-    logger.info(f"ComfyStream: Scanning module {module_path} for nodes...")
+    logger.debug(f"StreamStudio: Scanning module {module_path} for nodes...")
 
     # Pass 1: module-local callables (name -> target). ``setdefault`` so pass 2 never overrides.
     candidates: Dict[str, Any] = {}
     for item in scan_module(module_path):
         if item["name"].startswith("_"):
-            logger.debug(f"ComfyStream: Skipping private callable {item['path']}")
+            logger.debug(f"StreamStudio: Skipping private callable {item['path']}")
             continue
         target_func = resolve_callable(item["path"])
         if callable(target_func):
@@ -3008,7 +3029,7 @@ def register_module_nodes(
             or _is_object_member_class(target_func)
         )
         if not admitted:
-            logger.debug(f"ComfyStream: Skipping {module_path}.{name} (not an op/source/engine/runnable/member)")
+            logger.debug(f"StreamStudio: Skipping {module_path}.{name} (not an op/source/engine/runnable/member)")
             continue
 
         group = target_marks.group
@@ -3041,4 +3062,4 @@ def register_module_nodes(
         display_name_mappings[node_name] = (
             f"[{_package_tag(module_path, dist_name)}] {_humanize_node_name(display_label)}"
         )
-        logger.debug(f"ComfyStream: Registered node {node_name} for {module_path}.{name}")
+        logger.debug(f"StreamStudio: Registered node {node_name} for {module_path}.{name}")

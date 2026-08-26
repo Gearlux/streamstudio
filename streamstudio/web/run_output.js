@@ -2,7 +2,7 @@ import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 import { ComfyWidgets } from "../../scripts/widgets.js";
 
-console.log("ComfyStream: Loaded Taidal.RunOutput extension");
+console.log("StreamStudio: Loaded Taidal.RunOutput extension");
 
 // Shows the captured stdout/stderr of a RUNNABLE node (trainer / evaluator / processor) in a
 // read-only, COLLAPSIBLE multiline text widget on the node. Runnable nodes RUN on execute (they are

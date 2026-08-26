@@ -1,6 +1,6 @@
 import { app } from "../../scripts/app.js";
 
-console.log("ComfyStream: Loaded Taidal.SourceListInputs extension");
+console.log("StreamStudio: Loaded Taidal.SourceListInputs extension");
 
 // Dynamic source-list inputs for engine nodes whose constructor takes a list of sources
 // (JointStream.streams — tagged by a seed `source_0` input of type RECORDSTREAM_SOURCE in

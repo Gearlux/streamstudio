@@ -1,7 +1,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-console.log("ComfyStream: Loaded Taidal.ImportYaml extension");
+console.log("StreamStudio: Loaded Taidal.ImportYaml extension");
 
 // Canvas-side companion to the /taidal/import_yaml backend route + the `streamstudio import` CLI.
 // Picks a Confluid YAML config from disk, converts it to a ComfyUI workflow server-side via

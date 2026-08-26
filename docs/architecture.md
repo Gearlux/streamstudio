@@ -70,3 +70,178 @@ getattr-read); tighten dedup logging; extend the stamp's value type if a widget 
 than a tag (do it on the stamp, not with a name rule). Do not reintroduce name-based widget
 gates, per-vendor branches in `_widget_for`, or a second discovery mechanism beside the
 entry-point group.
+
+## Node-shape classification: the category tag outranks the structural probe (2026-08-26)
+
+**Context.** `create_comfy_node` must decide which of the seven node shapes a discovered callable
+becomes. Most of that decision is structural — does the class implement a no-arg `run()`, does its
+`__call__` take a record, does its iteration yield records — which is deliberate: a producer should
+not have to learn a bridge vocabulary to get a sensible node. But structural probes read
+annotations, and an annotation is a promise about a *value*, not a statement about a *role*.
+
+The two collide at the stream engines. A leaf source materialises its own data, so it can honestly
+annotate `__iter__ -> Iterator[Record]`. An engine wraps a source that is duck-typed on purpose —
+"any iterable" — so the only honest annotation it can carry is `Iterator[Any]`. The source probe
+therefore split three siblings that are the same kind of thing: the one whose sub-streams are
+themselves engines kept the `Record` annotation and built a source node; the two that accept an
+arbitrary iterable fell through to the generic builder, where a `source` parameter becomes a text
+widget and the node returns a bare `STRING`.
+
+That failure is silent and total at the canvas. ComfyUI connects two sockets only when their type
+strings are EQUAL, so a source's `RECORDSTREAM_SOURCE` output had nothing to dock into on the engine
+node: dragging the wire simply did nothing, with no error in the log, no failed validation, and no
+diagnostic to grep for. Nothing downstream could detect it either — the graph was well-formed, it
+just could not be drawn.
+
+**Decision.** Where a class carries a `@configurable` category that names its canvas shape, the
+CATEGORY decides and the structural probe is not consulted. `category="model"` already worked this
+way (a model's `__call__` takes a record, so the op probe would otherwise claim it); `category="engine"`
+now does the same for the source probe, via `_is_engine_class`. Structural probes remain the rule for
+UNtagged callables, which is most of the palette.
+
+The producer keeps its honest annotations. The bridge stops inferring a role from a type.
+
+**Consequences.**
+
+- An engine is a source node by definition, not by annotation: its `source` param rides a
+  `RECORDSTREAM_SOURCE` socket, an `ops` param seeds the dynamic `op_N` `RECORDSTREAM_OP` family, and
+  it returns `RECORDSTREAM_SOURCE` — so engines chain into each other and into runnables.
+- A producer cannot lose its node shape by refining a type hint. This is the property the probe
+  lacked, and the reason the regression survived a rename, a data-model migration, and a package
+  split without anyone noticing.
+- The tag is now load-bearing, so an untagged engine-like class is invisible as one. That is the
+  intended trade: the registration allowlist is already category-driven, so a class with no category
+  is not a palette node at all.
+- A structural probe that contradicts a tag is a bug in the probe, not a tie to break at the call
+  site. Do not add a "probe wins when it is more specific" rule.
+
+**Example.**
+
+```python
+@configurable(category="engine")
+class Stream:
+    def __init__(self, source: Optional[Iterable[Any]] = None, ops: Optional[List[Any]] = None): ...
+    def __iter__(self) -> Iterator[Any]: ...      # honest: the source is duck-typed
+
+# probe:  _is_source(Stream) is False           -> generic node, `source` a STRING widget
+# tag:    marks(Stream).category == "engine"    -> source node:
+#   optional: {"source": "RECORDSTREAM_SOURCE", "op_0": "RECORDSTREAM_OP"}
+#   RETURN_TYPES: ("RECORDSTREAM_SOURCE",)   RETURN_NAMES: ("source",)
+```
+
+**What you may change.** Give another category the same treatment when its structural probe cannot
+answer honestly — add a `_is_<category>_class` predicate beside the existing ones and place it in the
+documented dispatch order. Do not widen the structural probes to cover a tagged class (accepting
+`Iterator[Any]` as record-yielding would sweep in every unrelated iterable), and do not change a
+producer's annotations to satisfy this bridge — the annotation belongs to the producer's own type
+contract, and bending it to move a socket is how the two got coupled in the first place.
+
+## The studio is addressed by its PORT, not by a pid file (2026-08-26)
+
+**Context.** `stop` and `restart` need to find a running studio. The obvious mechanism is a pid file
+written at launch and removed at exit, and it is what most single-process servers do.
+
+It does not fit here, for a reason specific to this launcher: the process that holds the port is not
+the process the launcher is. `run` blocks in `subprocess.run` while the server is the ComfyUI it
+spawned — a grandchild by the time the shell is counted — so a naive pid file records the launcher,
+and signalling it does not free the port. Recording the child's pid instead means restructuring the
+launch to `Popen` and keeping a file in sync with a process that can be killed, crash, or be
+restarted by a third party. Worse, a pid file only ever knows about studios THIS launcher started:
+an editor's launch button spawns one detached, and a developer may simply run `python main.py`. Those
+are exactly the studios a user reaches for `restart` to deal with.
+
+**Decision.** The port IS the identity. `_studio_process(port)` scans processes for the one listening
+on `127.0.0.1:<port>` and that process is the studio, whatever spawned it and whatever its ancestry.
+Nothing is written to disk, so there is no state to go stale.
+
+The scan is per-process rather than whole-system because the whole-system call is privileged:
+`psutil.net_connections(kind='tcp')` raises `AccessDenied` for an ordinary user on macOS, while
+iterating processes and asking each for its own connections does not.
+
+**Consequences.**
+
+- `stop` / `restart` work on any studio on that port — this launcher's, an editor's, a hand-run one.
+- No pid file, no lock file, no cleanup path, and no stale-state failure mode to reason about.
+- `psutil` becomes a hard dependency. It is already ComfyUI's own, so the practical cost is zero in
+  any environment that can run a studio, but the declaration is not optional.
+- The scan is O(processes) and touches every process the user owns. That is fine for a command a
+  human types; it would not be fine on a hot path, so do not reuse it as one.
+- Two studios on two ports are independent, which falls out for free: every command takes `--port`.
+
+**Example.**
+
+```python
+proc = _studio_process(8188)          # the LISTENER, not the launcher that spawned it
+proc.terminate()                      # port measured free 64 ms later
+proc.wait(timeout=grace)              # deterministic; kill() only if it ignores SIGTERM
+```
+
+**What you may change.** Widen the match (a host other than loopback, a port range) inside
+`_studio_process`; make `grace` configurable if a slow shutdown ever needs it. Do not introduce a pid
+file, a lock file, or any launch-time state as a "faster" lookup — it would reintroduce exactly the
+staleness and the this-launcher-only blindness this avoids. Do not reach for the whole-system
+`net_connections()`; it is privileged, and the failure is a permission error rather than an empty
+result.
+
+## A subgraph boundary is DECLARED by the document, not inferred from it (2026-08-26)
+
+**Context.** Packaging an imported document as a reusable subgraph needs two things the flat graph
+does not carry: which sockets cross the boundary, and in which direction. The first implementation
+inferred both. Inputs came from unresolved `!ref:NAME` markers — a dangling reference reads as "this
+is supplied from outside" — and outputs from the pipeline roots, the nodes nothing else consumes.
+
+Inference failed in both directions. The input rule is unreachable: the importer resolves the
+document before the builder sees it, and resolution is precisely what rejects an unresolved
+reference, so the marker the rule looks for can never survive to be read. The output rule is a guess
+that happens to be right for a straight chain and silently wrong for anything else, and it cannot
+express an output that is *declared but not yet connected* — the case that matters most, because an
+empty boundary socket is the affordance telling a user where to connect.
+
+Meanwhile a `flow:` document states its boundary outright and always has. Its head step has no `from:`,
+so nothing feeds that step's record — that is the input. Its `outputs:` key names the step whose
+record leaves — that is the output. Nothing needs deriving.
+
+**Decision.** Where the document declares its boundary, read the declaration. The flow path builds
+its slots from the head step and `outputs:`; the older inference stays only for whole-config
+documents, which declare nothing.
+
+Slots are emitted whether or not anything is wired to them. A boundary that appears only once it is
+connected is invisible exactly when a user needs to see it.
+
+The importer additionally places the op terminator on the final step and promotes its output, so the
+instance carries an op connector. This is not boundary inference — it is the same "make the
+affordance exist" rule: the capability was already there, reachable only by knowing which node to add.
+
+**Consequences.**
+
+- A blueprint's boundary is a property of its source document, so it is stable and reviewable. Two
+  imports of the same document produce the same sockets.
+- The two wrap modes share one envelope and one slot builder; only the slot LISTS differ. A third
+  mode supplies lists, it does not copy the envelope.
+- Taps ride alongside the spine for free. The terminator compiles its record *ancestor* cone, and a
+  tap is a descendant of a spine step rather than an ancestor of the terminator, so it is outside the
+  cone without any rule about taps existing anywhere. Only a fork that re-merges *inside* the cone is
+  refused, and it names the step it refused at.
+- A tap cannot be carried in the document, because a document expressing one is branchy and the flow
+  importer replays a sequence. That limit belongs to the importer, not to this boundary rule.
+
+**Example.**
+
+```yaml
+flow:
+  image: {op: !class:...RecordContract {name: image, fields: {image: Image}}}   # head: nothing feeds it
+  class: {from: image, op: !class:...RecordContract {name: class, fields: {class: Label}}}
+outputs: class                                                                  # the record that leaves
+```
+
+```
+instance in : [('record', 'RECORDSTREAM_RECORD', None)]        # declared, unconnected, visible
+instance out: [('record', 'RECORDSTREAM_RECORD', []),
+               ('op',     'RECORDSTREAM_OP',     [])]          # terminator placed + promoted
+```
+
+**What you may change.** Read further declarations the flow grammar grows (a multi-output `outputs:`
+would become several record slots). Do not reintroduce inference on this path, and do not "fix" the
+`!ref:` rule by loosening resolution globally — settling exists to catch a genuine typo in a
+reference, and turning it off to make one branch reachable would trade a located load error for a
+silent, mysterious boundary socket.

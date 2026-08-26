@@ -1,6 +1,6 @@
 import { app } from "../../scripts/app.js";
 
-console.log("ComfyStream: Loaded Taidal.RetagOutputType extension");
+console.log("StreamStudio: Loaded Taidal.RetagOutputType extension");
 
 // Dynamic output socket typing for the Retag node (streamstudio/nodes.py:RetagObjectNode).
 //

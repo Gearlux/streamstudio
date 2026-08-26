@@ -1,6 +1,6 @@
 import { app } from "../../scripts/app.js";
 
-console.log("ComfyStream: Loaded Taidal.OpListInputs extension");
+console.log("StreamStudio: Loaded Taidal.OpListInputs extension");
 
 // Dynamic op-list inputs for higher-order op nodes (Parallel/Pipeline/Enable/Stream — any op whose
 // constructor takes a list of ops; tagged by a seed `<prefix>_0` input of type RECORDSTREAM_OP in

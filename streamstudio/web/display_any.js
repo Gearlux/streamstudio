@@ -1,7 +1,7 @@
 import { app } from "../../scripts/app.js";
 import { ComfyWidgets } from "../../scripts/widgets.js";
 
-console.log("ComfyStream: Loaded Taidal.DisplayAny extension");
+console.log("StreamStudio: Loaded Taidal.DisplayAny extension");
 
 // Shows the text output of a Display Any node (`streamstudio.nodes.DisplayAnyNode`, class key
 // `Taidal_DisplayAny`) in a read-only multiline widget ON the node. The node is an OUTPUT_NODE that

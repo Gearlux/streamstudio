@@ -1,7 +1,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-console.log("ComfyStream: Loaded Taidal.PaletteFilter extension");
+console.log("StreamStudio: Loaded Taidal.PaletteFilter extension");
 
 // "Use only Taidal nodes" (the CLI's --only-taidal-nodes flag → STREAMSTUDIO_ONLY_TAIDAL_NODES=1).
 // Removes every NON-Taidal node type from the Add-Node menu / search — ComfyUI built-ins AND other

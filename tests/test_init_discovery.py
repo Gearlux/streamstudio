@@ -32,6 +32,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 import streamstudio
+from streamstudio import bridge
 
 
 @pytest.fixture(autouse=True)
@@ -768,3 +769,27 @@ def test_export_flow_route_accepts_a_ui_workflow_by_shape() -> None:
     assert kwargs.get("status") is None, data
     assert "RecordContract" in data["yaml"]
     assert "flow input" in data["yaml"] and "flow output" in data["yaml"]
+
+
+def test_module_scan_is_logged_at_debug_not_info() -> None:
+    """Scanning a module is per-iteration diagnostics, so it belongs at debug.
+
+    Discovery walks one entry point per installed package, and every one of them logged
+    a line at INFO. Measured on a clean install: ``import streamstudio`` printed 26
+    lines, 24 of them ``Scanning module ... for nodes...`` — before the caller had done
+    anything. The workspace rule is explicit that per-iteration events are trace/debug
+    fodder and that ``info``/``warning`` are for what an operator must act on, and this
+    is the sibling of :func:`test_discover_skips_failing_module_at_debug_level`: the
+    skip was already quiet while the ordinary case was not.
+
+    It also stopped being only noise. The first log call is what makes loggair create
+    its file sink, so the scan line meant that merely importing the package — or running
+    ``streamstudio --help`` — wrote a ``logs/`` directory into the current folder.
+    """
+    fake_logger = MagicMock()
+    with patch.object(bridge, "logger", fake_logger):
+        with patch.object(bridge, "scan_module", return_value=[]):
+            bridge.register_module_nodes("streamstudio.custom_nodes", {}, {})
+
+    assert not fake_logger.info.called, f"module scan logged at info: {fake_logger.info.call_args_list}"
+    assert not fake_logger.warning.called, f"module scan logged at warning: {fake_logger.warning.call_args_list}"

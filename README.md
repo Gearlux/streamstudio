@@ -22,27 +22,54 @@ registration here: install it, and its nodes appear. Nothing in StreamStudio imp
 unconditionally, and the two places that use one (the colormap list and the array→image
 render) fall back cleanly when it is absent.
 
-The `waivefront` extra names the signal-domain set (spectrograms, IQ time-domain plots):
-
-```bash
-pip install --pre "streamstudio[waivefront]"
-```
-
-That package is not published, so the extra resolves only where it is already available —
-install it from its own source and the nodes appear either way.
+Install the domain package however you normally would — from PyPI, from a git checkout,
+editable — and restart the editor. There is no extra to enable and nothing to configure
+here: discovery reads what the environment holds.
 
 ### Shell completion
 
-The CLI is argparse-based and ships [argcomplete](https://kislyuk.github.io/argcomplete/)
-support (`cli.py` calls `argcomplete.autocomplete` before parsing). Enable it with:
+The CLI is a [liquifai](https://github.com/Gearlux/liquifai) app, so completion comes from
+the shared installer rather than a per-CLI hook:
 
 ```bash
-eval "$(register-python-argcomplete streamstudio)"     # add to your ~/.bashrc / ~/.zshrc
-streamstudio exp<TAB>                                   # -> export  export-workflow
+liquifai-install-completions            # bash / zsh / fish
+streamstudio exp<TAB>                   # -> export  export-workflow
 ```
 
-The import is guarded, so an environment without argcomplete still runs the CLI normally —
-completion is a convenience, never a hard requirement.
+### Options
+
+Every option is derived from the command function's signature, so `--help` on a command is
+generated rather than hand-maintained and cannot go stale:
+
+```bash
+streamstudio restart --help             # or -h
+```
+
+Options work on either side of the command name (`streamstudio --port 9000 restart` ≡
+`streamstudio restart --port 9000`), and a key may be spelled with hyphens or underscores.
+The launcher commands carry short forms — **`-p`** for `--port`, **`-b`** for `--background`
+(and `-o` for `--output` on the export/import commands):
+
+```bash
+streamstudio restart -b                 # detached
+streamstudio stop -p 8189
+```
+
+Three spellings differ from a typical argparse CLI:
+
+| | |
+|---|---|
+| turn a boolean **off** | `--install-` (and `--install+` for on) — not `--no-install` |
+| pass a list | `--custom-node=[urlA,urlB]` — not a repeated flag |
+| the palette file | `--palette-config` — `--config` is liquifai's own config-file flag |
+
+A flag that names no parameter is **refused**, not ignored:
+
+```
+$ streamstudio restart --prt 9000
+Error: streamstudio: unknown option 'prt' — it names no parameter of the 'restart'
+command and no key in the configuration. Did you mean 'port'? …
+```
 
 ## Quick start
 
@@ -52,16 +79,73 @@ streamstudio
 
 On first run this:
 
-1. Clones ComfyUI into `~/.streamstudio/ComfyUI` when it is missing, and on EVERY launch syncs its `requirements.txt` into the active environment (pip is a no-op when satisfied — a checkout that ComfyUI-Manager updated in place otherwise imports a module the environment never got; `--no-install` skips the sync).
+1. Clones ComfyUI into `~/.streamstudio/ComfyUI` when it is missing, and on EVERY launch syncs its `requirements.txt` into the active environment (pip is a no-op when satisfied — a checkout that ComfyUI-Manager updated in place otherwise imports a module the environment never got; `--install-` skips the sync).
 2. Installs the [ComfyUI-Manager](https://github.com/Comfy-Org/ComfyUI-Manager) custom node, plus any custom nodes declared by installed packages or requested by you — see [Custom nodes](#custom-nodes-comfyui-manager--extras) below.
 3. Symlinks the installed `streamstudio` package into `ComfyUI/custom_nodes/streamstudio`.
-4. Launches ComfyUI (`python main.py`) under the **same interpreter**, so ComfyUI's node discovery reads the entry-point metadata from your active `.venv`.
+4. Launches ComfyUI (`python main.py --port 8188`) under the **same interpreter**, so ComfyUI's node discovery reads the entry-point metadata from your active `.venv`.
 
 Reuse an existing ComfyUI checkout with `--comfy-dir`:
 
 ```bash
 streamstudio --comfy-dir /path/to/ComfyUI
 ```
+
+### The port
+
+StreamStudio serves on `http://127.0.0.1:8188` (ComfyUI's own default). The launcher checks that
+address **before** it does any work, so a studio that is already up is reported in a second rather
+than after a full boot:
+
+```
+Port 8188 is already in use — StreamStudio may already be running there.
+
+    Open it:  http://127.0.0.1:8188
+
+If that is a different program, run StreamStudio elsewhere:  streamstudio --port 8189
+```
+
+The command exits non-zero and starts nothing. Use `--port` to serve somewhere else — to run a
+second studio beside one that is already open, or when another program holds 8188:
+
+```bash
+streamstudio --port 8189
+```
+
+### Stopping and restarting
+
+`stop` and `restart` find the studio by the port it holds, so they work whatever started it — this
+launcher, an editor's launch button, or a `python main.py` you ran by hand:
+
+```bash
+streamstudio restart          # stop what is on 8188, then launch again
+streamstudio stop             # just stop it
+streamstudio restart --port 8189
+```
+
+`restart` re-walks the whole launch flow (requirements sync, custom nodes, symlink), so it is also
+how you pick up newly installed nodes or a changed entry point. Stopping a port nothing is listening
+on is not an error — `restart` simply starts.
+
+### Running detached
+
+Both `run` and `restart` hold the terminal by default, the way a server should. `--background` (or
+`--bg`) hands it back:
+
+```bash
+streamstudio restart --bg
+```
+
+```
+Stopped StreamStudio on port 8188 (pid 7819).
+StreamStudio is starting in the background — log: ~/.streamstudio/logs/studio-8188.log
+
+    Open it:  http://127.0.0.1:8188
+```
+
+The studio runs in its own session, so it survives the shell that started it, and its output goes to
+a per-port log under `~/.streamstudio/logs/` — never the directory you launched from. The command
+returns as soon as the process is spawned rather than waiting for the bind, so a boot that fails
+shows up in that log; `streamstudio stop` is how you end it.
 
 Taidal nodes then appear in ComfyUI's *Add Node* menu grouped by what they ARE, not by which package ships them. A role-bearing class nests under `Taidal/<Role>[/<Task>]` (role-first) — e.g. `Taidal/Model/Classification`, `Taidal/Trainer/Detection`, `Taidal/Logger` (loggers are task-agnostic, so no task level). An op / source / engine nests under `Taidal/<Category>[/<group>]` — `Taidal/Op/numpy`, `Taidal/Source`. The **producing package rides the node label** as an uppercased tag — `[RECORDSTREAM] Threshold`, `[YOURPACKAGE] YourModel` — so you can tell where a node comes from without burying it in a per-package folder.
 
@@ -82,7 +166,7 @@ Every launch (not just the first) seeds ComfyUI's `custom_nodes/` directory from
    my_package = "my_package.custom_nodes:CUSTOM_NODE_URLS"   # a git-URL str, or an iterable of them
    ```
 
-   To bundle more nodes with **streamstudio itself**, append to `CUSTOM_NODE_URLS` in [`streamstudio/custom_nodes.py`](streamstudio/custom_nodes.py) — that tuple is streamstudio's own declaration. (Editing the tuple takes effect on the next launch; *adding or renaming an entry point* changes installed metadata, so an editable install must be reinstalled — `uv pip install -e ./streamstudio`.) Skip just the manager with `--no-manager`; skip the entire declared tier with `--no-declared-nodes`.
+   To bundle more nodes with **streamstudio itself**, append to `CUSTOM_NODE_URLS` in [`streamstudio/custom_nodes.py`](streamstudio/custom_nodes.py) — that tuple is streamstudio's own declaration. (Editing the tuple takes effect on the next launch; *adding or renaming an entry point* changes installed metadata, so an editable install must be reinstalled — `uv pip install -e ./streamstudio`.) Skip just the manager with `--manager-`; skip the entire declared tier with `--declared-nodes-`.
 
 2. **`STREAMSTUDIO_CUSTOM_NODES` env var** — comma-separated git URLs:
 
@@ -96,14 +180,14 @@ Every launch (not just the first) seeds ComfyUI's `custom_nodes/` directory from
    streamstudio --custom-node https://github.com/rgthree/rgthree-comfy --custom-node https://github.com/crystian/ComfyUI-Crystools
    ```
 
-Each repo is cloned into `custom_nodes/<repo-name>` and, if it ships a `requirements.txt`, its dependencies are pip-installed into the **active environment** (the same one ComfyUI runs in). The install is **idempotent**: a repo whose directory already exists is skipped, so updating or removing a node is ComfyUI-Manager's job, not the launcher's. A clone or dependency failure of one node — or a broken entry-point declaration — logs a warning and the launch continues; a broken custom node never blocks the studio. (`--no-manager` filters the manager from the *declared* tier only: explicitly requesting its URL via env/flag still installs it.)
+Each repo is cloned into `custom_nodes/<repo-name>` and, if it ships a `requirements.txt`, its dependencies are pip-installed into the **active environment** (the same one ComfyUI runs in). The install is **idempotent**: a repo whose directory already exists is skipped, so updating or removing a node is ComfyUI-Manager's job, not the launcher's. A clone or dependency failure of one node — or a broken entry-point declaration — logs a warning and the launch continues; a broken custom node never blocks the studio. (`--manager-` filters the manager from the *declared* tier only: explicitly requesting its URL via env/flag still installs it.)
 
 ### Hiding ComfyUI's built-in nodes
 
-By default the palette shows ComfyUI's built-in nodes (KSampler, Preview Image, …) **alongside** the Taidal nodes. To launch a Taidal-only palette, pass `--no-default-nodes`:
+By default the palette shows ComfyUI's built-in nodes (KSampler, Preview Image, …) **alongside** the Taidal nodes. To launch a Taidal-only palette, pass `--default-nodes-`:
 
 ```bash
-streamstudio --no-default-nodes
+streamstudio --default-nodes-
 ```
 
 This (a) prunes ComfyUI's built-in / `comfy_extras` / API nodes from the *Add Node* menu, leaving the auto-discovered Taidal nodes (and any other third-party custom nodes), and (b) surfaces the Taidal nodes at the **palette root** — `RecordStream/Op/numpy`, `Waivefront/Op/targets`, `StreamStudio` — instead of nested under a `Taidal/` folder (there's nothing left to disambiguate them from). The default `--default-nodes` keeps everything visible and the `Taidal/` grouping.
@@ -117,14 +201,14 @@ keep_nodes:
   - LoadImage
 ```
 
-A **default config ships with the package** (`streamstudio/config.default.yaml`, source-controlled) and is used as the fallback when you haven't supplied your own — so sensible defaults (`MaskToImage`, …) apply out of the box. Resolution order: `--config <file>` / `$STREAMSTUDIO_CONFIG` → your `~/.streamstudio/config.yaml` → the shipped `config.default.yaml`. To customize, copy the shipped file to `~/.streamstudio/config.yaml` (or any path) and edit:
+A **default config ships with the package** (`streamstudio/config.default.yaml`, source-controlled) and is used as the fallback when you haven't supplied your own — so sensible defaults (`MaskToImage`, …) apply out of the box. Resolution order: `--palette-config <file>` / `$STREAMSTUDIO_CONFIG` → your `~/.streamstudio/config.yaml` → the shipped `config.default.yaml`. To customize, copy the shipped file to `~/.streamstudio/config.yaml` (or any path) and edit:
 
 ```bash
 cp "$(python -c 'import streamstudio,os;print(os.path.join(os.path.dirname(streamstudio.__file__),"config.default.yaml"))')" ~/.streamstudio/config.yaml
-streamstudio --no-default-nodes --config ./my-palette.yaml   # or point at any file
+streamstudio --default-nodes- --config ./my-palette.yaml   # or point at any file
 ```
 
-**Only Taidal nodes** (`--only-taidal-nodes`) goes further: it hides **every** non-Taidal node — ComfyUI's built-ins **and** other third-party custom packs (mtb, WWAA, …) — leaving only Taidal nodes + the keep-list. It implies `--no-default-nodes`.
+**Only Taidal nodes** (`--only-taidal-nodes`) goes further: it hides **every** non-Taidal node — ComfyUI's built-ins **and** other third-party custom packs (mtb, WWAA, …) — leaving only Taidal nodes + the keep-list. It implies `--default-nodes-`.
 
 ```bash
 streamstudio --only-taidal-nodes                          # only Taidal + Preview Image/as-text
@@ -144,6 +228,7 @@ StreamStudio starts on an **empty canvas** rather than ComfyUI's built-in Stable
 Discovered callables are classified by their RecordStream role so they wire together by **type**, not opaque strings:
 
 - **Source** nodes (e.g. `HuggingFaceSource`, under `Taidal/RecordStream/Source`) construct a dataset and output a `RECORDSTREAM_SOURCE`.
+- **Engine** nodes (`Stream`, `FlowGraph`, `JointStream` — every `@configurable(category="engine")` class, under `Taidal/RecordStream/Engine`) wrap a source and apply ops to it, so they both **take** and **output** a `RECORDSTREAM_SOURCE`: the `source` param is a wired input socket (not a text widget), `ops` becomes the dynamic `op_0`, `op_1`, … `RECORDSTREAM_OP` family, and the result is a `source` output you can chain into the next engine. Wire `HuggingFaceSource → Stream` directly.
 - **Op** nodes (e.g. `Threshold`, `ToTensor`, `ConvertToImage`) take a `RECORDSTREAM_RECORD` input **plus** their constructor config as widgets, apply the op, and output a `RECORDSTREAM_RECORD` — so ops chain. A class becomes an op node by carrying the `@configurable(category="op")` tag (its `__call__` is resolved through the MRO, so an op that inherits `__call__` from a base `Transform` — a kernel-only transform — classifies correctly).
 - **Generic** nodes (plain functions) keep scalar widgets with a `STRING` fallback.
 
@@ -171,8 +256,8 @@ Three adapter nodes (under `Taidal/StreamStudio`) let you step through a dataset
 
 - **Walk Dataset (by index)** — takes a `RECORDSTREAM_SOURCE` and an `index`, and outputs the record at that index (`source[index]`). The `index` widget uses ComfyUI's `control_after_generate`, **defaulting to *increment*** so each **Queue Prompt** advances to the next record in order — set the control to *fixed* (or `index` `0`) to reset, or *randomize* to record at random. `wrap` cycles modulo the dataset length.
 - **Extract from Record** — takes a `RECORDSTREAM_RECORD` and a free-text `field` **record key** and unpacks the selected value onto **typed** sockets — `IMAGE`, `MASK`, `STRING`, `INT`, `FLOAT`, `array` — so you wire the one your viewer expects. Type the key you want (`image`, `mask`, `class`, …); the legacy selections `input` / `target` (and any key not present in the record) fall back to a conventional-key scan — `input` → the first of `input`/`image`/`signal`/`iq` else the record's FIRST key, `target` → `target`/`label`/`mask`/`class` else its SECOND — so canvases saved before the record model keep working. The chosen entry is payload-unwrapped (a `Label` yields its value, any other typed item its underlying data). ComfyUI types sockets statically, so instead of retyping one socket per run it surfaces every plausible type; *which* one is meaningful is derived from the resolved entry itself. `IMAGE` is rendered via `waivefront.visualizers.value_to_image` (PIL / tensor / 2-D map → image; a non-visual value renders as a small text image); the `colormap` widget is a **dropdown** of the supported colormaps (the closed `waivefront.visualizers.Colormap` set — `viridis`, `magma`, `gray`, …) applied to 2-D maps, and `max_size` caps the longest side of the rendered image in pixels (default `512`, larger renders are downscaled, aspect ratio preserved). `MASK` carries a 2-D field (segmentation targets); `STRING` is a label/scalar (with `label_name` when the target has it) or a compact type summary; `INT` / `FLOAT` carry a scalar (e.g. a class id). The **`array`** output (`RECORDSTREAM_ARRAY`) carries the **raw field value on demand** — a tensor stays a tensor, an ndarray stays an ndarray (NOT normalized/colormapped like `IMAGE`) — to feed the **Array / Tensor Histogram** viewer or any array-consuming node. Drop two of these next to each other (one set to `image`, one to `class`) to view both at once.
-- **Array / Tensor Histogram** — wire the `array` output above (or a native `IMAGE`) into this node and **Queue Prompt** to inspect the raw values *on the node itself*: a **histogram** of the value distribution (with a `log scale` toggle), the array **rendered as a colormapped image**, and a **hover readout** — move the cursor over the image to read the value (and source coordinate) under the pointer. The `channel` widget selects which channel to view (`-1` = all → mean view / natural RGB; `0..N` picks one) and `colormap` / `bins` / `max_size` control the render. All computation lives in recordstream (`array_histogram` / `select_channel` / `value_to_image`); the node just ships the result to its in-canvas widget — so unlike *Extract → Preview Image* it works **regardless of `--no-default-nodes`** (no native viewer needed). It passes the array straight through so it can sit inline in a pipeline.
-- **Confusion Matrix** — wire the **`all_metrics`** output of a **classification evaluator** (a JSON `STRING` of every metric) — or a raw `N×N` matrix on the `matrix` input plus optional `class_names` — into this node and **Queue Prompt**. It **extracts every confusion matrix** from the metrics (the square `N×N` ones — there can be several) and shows a **class-labeled grid** *on the node itself*: rows = the true class, columns = the predicted class, cells coloured by value with the diagonal (correct predictions) outlined, and the class names down the left and across the top. A `view:` button cycles between **count → row % → col % → all %** (the normalized views render as **percentages**, **without re-running** — the variants are precomputed); a `cm:` button cycles between matrices when several are present; and a **hover readout** reports `true=<class>, pred=<class>` and the count (and percentage when a % view is active) under the pointer. To get a confusion matrix, wire a `MulticlassConfusionMatrix` metric node's **`class`** output into the evaluator's `metrics` slot (the deferred `class` output sizes itself to the model's `num_classes` at run time). The evaluator output stays generic (all metrics); the extraction + normalization math lives in recordstream (`confusion_matrices_payload`), so the node is glue and works under `--no-default-nodes`.
+- **Array / Tensor Histogram** — wire the `array` output above (or a native `IMAGE`) into this node and **Queue Prompt** to inspect the raw values *on the node itself*: a **histogram** of the value distribution (with a `log scale` toggle), the array **rendered as a colormapped image**, and a **hover readout** — move the cursor over the image to read the value (and source coordinate) under the pointer. The `channel` widget selects which channel to view (`-1` = all → mean view / natural RGB; `0..N` picks one) and `colormap` / `bins` / `max_size` control the render. All computation lives in recordstream (`array_histogram` / `select_channel` / `value_to_image`); the node just ships the result to its in-canvas widget — so unlike *Extract → Preview Image* it works **regardless of `--default-nodes-`** (no native viewer needed). It passes the array straight through so it can sit inline in a pipeline.
+- **Confusion Matrix** — wire the **`all_metrics`** output of a **classification evaluator** (a JSON `STRING` of every metric) — or a raw `N×N` matrix on the `matrix` input plus optional `class_names` — into this node and **Queue Prompt**. It **extracts every confusion matrix** from the metrics (the square `N×N` ones — there can be several) and shows a **class-labeled grid** *on the node itself*: rows = the true class, columns = the predicted class, cells coloured by value with the diagonal (correct predictions) outlined, and the class names down the left and across the top. A `view:` button cycles between **count → row % → col % → all %** (the normalized views render as **percentages**, **without re-running** — the variants are precomputed); a `cm:` button cycles between matrices when several are present; and a **hover readout** reports `true=<class>, pred=<class>` and the count (and percentage when a % view is active) under the pointer. To get a confusion matrix, wire a `MulticlassConfusionMatrix` metric node's **`class`** output into the evaluator's `metrics` slot (the deferred `class` output sizes itself to the model's `num_classes` at run time). The evaluator output stays generic (all metrics); the extraction + normalization math lives in recordstream (`confusion_matrices_payload`), so the node is glue and works under `--default-nodes-`.
 
 - **Display Any** — wire **any** value (a scalar, list, a whole record, tensor, op/source) into `value` and its text representation appears on the node after **Queue Prompt**. `mode` picks `raw value` (`repr`, truncated for huge values) or `tensor shape` (a recursive summary of shapes/dtypes through lists/dicts — a record IS a dict, so it unpacks entry by entry — "what shape is this actually?"). The text is also emitted on a `text` output. A Taidal-native, `--only-taidal-nodes`-friendly stand-in for WAA's *Display Any*.
 - **Apply Text Template** — fill a `template` string with `{a}`…`{e}` placeholders from the matching `a`…`e` inputs (any type; an unwired input is empty; standard format specs like `{a:.2f}` work; an unknown `{x}` renders empty rather than erroring). Emits the filled string on `text` — wire it into *Display Any* or a sink. Inspired by mtb's *Apply Text Template*.
@@ -200,7 +285,7 @@ Extract from Record (field=image)
 Array / Tensor Histogram         # histogram + colormapped image + hover-to-read-value
 ```
 
-`Extract from Record` renders the `IMAGE` socket via `value_to_image` (in recordstream, re-exported from waivefront); the `STRING` / `INT` / `FLOAT` / `array` outputs work without the optional `[waivefront]` extra. The **Array / Tensor Histogram** viewer likewise runs on the core install (its math is in recordstream), so it needs no extra and no native viewer.
+`Extract from Record` renders the `IMAGE` socket via `value_to_image` (in recordstream, re-exported from waivefront); the `STRING` / `INT` / `FLOAT` / `array` outputs work without any domain package installed. The **Array / Tensor Histogram** viewer likewise runs on the core install (its math is in recordstream), so it needs no extra and no native viewer.
 
 ### Running a trainer / evaluator / processor
 
@@ -285,7 +370,72 @@ What you can wire in, and how each compiles, is the [DAG → sequential](#dag--s
 
 ## Subgraph as an Op
 
-The higher-order ops above are *sequential* (a flat op-list wired into `op_N`). To package a **more complex transformation — an arbitrary record → record DAG with fan-out and `Mix` fan-in — as one reusable Op**, draw it the normal way (record wires) and cap it with the **Extract as Op** node (`Taidal/StreamStudio`). It compiles the whole upstream sub-pipeline into a single `recordstream.transform.Pipeline` and emits it on an **`op`** output (`RECORDSTREAM_OP`):
+**Draw a subgraph, then compile it.** Chain some ops record → record, select them, convert to a
+subgraph — then right-click the rectangle and choose **Taidal: compile to Op** (or use
+**Taidal: make a Stream op from selection**, which converts and compiles in one step). It reports
+what it built:
+
+```
+extract → op — record contract: {text, image}. Drag the rectangle's 'op' output into a Stream.
+```
+
+```
+┌─ my ops ─────────────┐
+│ (record)         op ●│────────► Stream.op_0
+└──────────────────────┘
+```
+
+Compiling is a **decision, never automatic** — nothing is added to your canvas until you ask — and it
+is re-runnable: the nodes it owns are marked, so changing the boundary and compiling again rebuilds
+them rather than duplicating them.
+
+### What the compile builds
+
+**Every op in the rectangle**, joined into one chain in canvas reading order (left to right, then top
+to bottom) — so the pipeline is the whole graph, not whichever branch happened to reach the end.
+Anything you wired by hand keeps the order you gave it; only the gaps between wired runs are filled:
+
+```
+laid out C  B  A   and wired  C → A     ⟹   compiled: C → A → B
+```
+
+**A *Build Record* gathering your promoted OUTPUTS**, one socket per label. The labels you promote
+*are* the record keys, so the wiring states the contract with every arrow present:
+
+```
+Extract(field='label') ──text──┐
+                                ├──► Build Record ──record──► Extract as Op ──op──► (op)
+Extract(field='input') ──image──┘
+```
+
+**An *Extract as Op* terminator** on the end, with its `op` promoted to the boundary.
+
+> **Where the record ops come from.** *Extract from Record* and *Build Record* are canvas glue — they
+> have no recordstream counterpart, so neither can appear inside a compiled `Pipeline`. The
+> **compiler** translates the shape: each builder entry becomes `RenameField(field → label)`, closed
+> by a `SelectFields` over the labels. So the canvas keeps the graph you drew, and the translation
+> happens where it belongs. Your `{text, image}` rectangle runs as:
+>
+> ```
+> in : {input: 'IMG', label: 3, path: '/x.png'}
+> out: {text: 3, image: 'IMG'}
+> ```
+>
+> `SelectFields` closes it — afterwards the record holds the promised entries and nothing else — so
+> the rectangle is a promise that can be checked. That is exactly the shape an annotation workspace
+> declares as its interface, drawn instead of written.
+
+A promoted output carrying a whole **record** combines — its entries ride through, and the close is
+skipped because its keys are not knowable from the boundary. **Two** record outputs is a fan-in, and
+a `Pipeline` is a straight op list, so the compile refuses and says so (use the flow export for a
+branchy graph). A rectangle that neither transforms records nor promises entries is refused with the
+reason, rather than silently doing nothing.
+
+The terminator is still a normal palette node (`Taidal/StreamStudio` → **Extract as Op**) if you want
+to place it yourself — on the flat canvas, or to pick a different tail. It compiles the whole upstream
+sub-pipeline into a single `recordstream.transform.Pipeline` and emits it on an **`op`** output
+(`RECORDSTREAM_OP`), which is what makes an arbitrary record → record DAG (fan-out, `Mix` fan-in) into
+one reusable op:
 
 ```
 (subgraph input: RECORDSTREAM_RECORD)
@@ -299,7 +449,7 @@ The higher-order ops above are *sequential* (a flat op-list wired into `op_N`). 
                         Extract as Op ──op──► (promote to subgraph boundary)
 ```
 
-Inside a **ComfyUI native subgraph**, build the inner pipeline starting from the subgraph's `RECORDSTREAM_RECORD` input boundary, drop **Extract as Op** at the end, and *promote its `op` output to the subgraph boundary*. The subgraph instance then exposes a **`RECORDSTREAM_OP` output** and behaves as:
+Placed by hand or automatically, the subgraph instance exposes a **`RECORDSTREAM_OP` output** and behaves as:
 
 - **an Op** — wire that output into any op slot (`Parallel`/`Pipeline`/`Enable` `op_N`, `ConfigureOp.target`/`RandomApply.op`, or another op-list); the subgraph *is* the transformation, reusable across the canvas;
 - **a graph** — run a record through the subgraph's record boundary inline (the normal native-subgraph use).
@@ -311,6 +461,66 @@ The DAG→sequential translation (fan-out → auto `Save`/`Use` context cells, `
 > **Why the `record` input is lazy.** Because the node compiles from the static `PROMPT` and never reads the runtime record, its `record` input is a **lazy** ComfyUI input — running the graph (e.g. Queueing a `DatasetProcessor` fed by the Stream) does **not** execute the op chain feeding it. That matters: when you use a subgraph purely as an Op, the op chain has **no source on the canvas** (the source feeds the `Stream` directly, and the ops arrive via the compiled `Pipeline`), so forcing it to run would push a `None` record through the head op and crash a downstream viewer or value-chain `Extract from Record`. The lazy input avoids that entirely. Running a record *through* the subgraph's boundary (using it as a graph, not an Op) is unaffected.
 >
 > **Both exporters compile it.** The *flow export* (next section) embeds a subgraph-Op as a nested `Pipeline` in its consumer. The **whole-graph** export (*Export Graph → Taidal YAML*) now compiles it too: when the terminator feeds a `Stream`'s op list, its cone is compiled (same DAG→sequential compiler, same constant-hoisting) and **spliced inline** into the Stream's `ops:` — a sequential op-list makes a nested chain equivalent to its ops spliced, and inline ops survive `recordstream run`'s deep-flow where a nested deferred chain marker would not. An **unwired** terminator (used as a graph, or floating) has nothing to compile and is skipped-with-comment as before.
+
+## Pipeline blueprints (a `flow:` document as a subgraph)
+
+`Subgraph as an Op` above is the by-hand route: you draw the chain, drop **Extract as Op**, promote
+its output. A `flow:` document can be imported as that whole rectangle in one step, boundary and all:
+
+```bash
+streamstudio import pipeline.yaml -o blueprint.json --as subgraph
+```
+
+A flow document already **declares** its own boundary — the head step's `record` input is fed by
+nothing (that is where a source connects) and `outputs:` names the step whose record leaves — so
+nothing has to be inferred. From this document:
+
+```yaml
+flow:
+  image: {op: !class:recordstream.ops.contract.RecordContract {name: image, fields: {image: Image}}}
+  class: {from: image, op: !class:recordstream.ops.contract.RecordContract {name: class, fields: {class: Label}}}
+outputs: class
+```
+
+you get one node on the canvas — a subgraph instance whose sockets are all visible **before anything
+is wired to them**:
+
+```
+  instance in : [('record', 'RECORDSTREAM_RECORD', None)]
+  instance out: [('record', 'RECORDSTREAM_RECORD', []), ('op', 'RECORDSTREAM_OP', [])]
+
+  subgraph 'pipeline'
+    nodes: [RecordContract, RecordContract, Extract as Op]
+    links: -10 -> 1, 1 -> 2, 2 -> -20 (record), 2 -> 3, 3 -> -20 (op)
+```
+
+The **Extract as Op** terminator is placed and promoted for you, so the `op` output is there without
+your having to know that node exists. Wire it into a `Stream`'s `op_0` and export, and the chain
+lands in the Stream's ops:
+
+```yaml
+stream:
+  _target_: Stream
+  source: {_ref_: source}
+  ops:
+  - {_target_: RecordContract, name: image, fields: {image: Image}}
+  - {_target_: RecordContract, name: class, fields: {class: Label}}
+```
+
+**One shape, pipeline *and* viewer.** Open the rectangle and hang taps (*Extract from Record*, a
+viewer) off any step, then promote them as extra boundary outputs. The terminator compiles its record
+**ancestor** cone, and a tap is a *descendant* of a step rather than an ancestor of the terminator —
+so taps never enter the `Pipeline`. Only a fork that **re-merges** inside the cone is refused, naming
+the step:
+
+```
+The op cone feeding this 'Extract as Op' terminator is branchy (at step 'node_13'),
+and a Pipeline holds a straight op LIST — it cannot express a fork or a Mix
+```
+
+**Limit:** taps have to be drawn *in the editor*, not carried in the document. A document whose steps
+fork is branchy, and importing one is not supported yet — it refuses, naming the forking steps (see
+`TASKS.md`).
 
 ## Exporting the canvas to a `flow:` document
 
@@ -613,7 +823,7 @@ StreamStudio never hand-defines a node. At ComfyUI startup, `_discover_and_regis
 2. For each module, `recordstream.discovery.scan_module` finds the compatible callables.
 3. `register_module_nodes` / `create_comfy_node` (`streamstudio/bridge.py`) classify each callable (Source / Op / Generic — see *Building a pipeline*) and wrap it in a ComfyUI node class, keyed by `_node_key` as `Taidal_<package>_<category>[_<group>]_<callable>` (globally unique, so a same-named class in two modules — e.g. numpy's vs torch's `Threshold` — doesn't clobber its twin) and filed under a `Taidal/<Package>/<Category>[/<group>]` palette path (built by `_node_category`: top-level package via `_PACKAGE_DISPLAY_NAMES` for canonical casing, then the `@configurable` category, then the optional `group` tag). The displayed name stays the verbatim class name.
 
-Registration is a **positive allowlist**: a class becomes a node only if its `@configurable` category is one of `_NODE_CATEGORIES` (currently `{op, model, source, engine, sink, value}`). So the palette is exactly the deliberately-tagged ops, sources, engines, and sinks. The generic recordstream **engines** (`Stream` / `JointStream`, `category="engine"`) and the source-view `DatasetSplit` (`category="source"`) **are** buildable on the canvas: their source-typed constructor params render as wired sockets — a single `source` → a `RECORDSTREAM_SOURCE` input, a source-list (`streams`) → dynamic `source_N` inputs, an op-list (`ops`) → dynamic `op_N` `RECORDSTREAM_OP` inputs — so a Source/Op node (which already outputs *itself* as `RECORDSTREAM_SOURCE` / `RECORDSTREAM_OP`) wires straight into them. The RecordStream storage **sinks** (`category="sink"` — `HDF5Sink` / `ZarrGroupSink` / `ZarrBatchSink` / `DirectorySink` / `JsonSink` / `JsonPerWindowSink` / `YoloSink`) become **object-member producer** nodes (two outputs, `instance` + `class`, on a role-qualified `RECORDSTREAM_OBJECT:sink` wire) that dock into a `DatasetProcessor` runnable node's `sink` slot — wire `Source → Stream → DatasetProcessor(stream, sink)` and queue it to write the dataset, or export the graph to a `recordstream run` YAML. Excluded *by construction*: the **raw-callable op wrappers** (`FilterOp` / `WrappedOp`) — UNcategorised (bare `@configurable`), since they take a raw Python callable nothing a widget or socket supplies (so they stay out even with `engine` allowed); **task datasets** (`*_dataset`, e.g. `classification_dataset`) — a trainer-config concept a config generator cares about, but a canvas only needs a `source` to yield records; uncategorised module-level helper functions; and an **UNtagged sink** (a raw `Storage` subclass without `category="sink"`, including the `write(prediction, metadata)` **prediction** sinks `DetectionPredictionsSink` / `ClassificationPredictionsSink`, which aren't record sinks). You can build a dataset by wiring `Source → Op → …` *or* by feeding a `Source`/`Op` into a `Stream` / `DatasetSplit` engine node. (To surface another role, add its category to `_NODE_CATEGORIES` in `bridge.py` and tag the classes. Note: the flow export compiles the op DAG — fan-out, *Mix Records* fan-in, `op_N` op-values — but engine-node graphs (`Stream`/`JointStream` built on the canvas) and sink/`DatasetProcessor` nodes aren't exportable through it; use the whole-graph export for those.)
+Registration is a **positive allowlist**: a class becomes a node only if its `@configurable` category is one of `_NODE_CATEGORIES` (currently `{op, model, source, engine, sink, value}`). So the palette is exactly the deliberately-tagged ops, sources, engines, and sinks. The recordstream **engines** (`Stream` / `FlowGraph` / `JointStream`, `category="engine"`) and the source-view `DatasetSplit` (`category="source"`) **are** buildable on the canvas: their source-typed constructor params render as wired sockets — a single `source` → a `RECORDSTREAM_SOURCE` input, a source-list (`streams`) → dynamic `source_N` inputs, an op-list (`ops`) → dynamic `op_N` `RECORDSTREAM_OP` inputs — so a Source/Op node (which already outputs *itself* as `RECORDSTREAM_SOURCE` / `RECORDSTREAM_OP`) wires straight into them. The RecordStream storage **sinks** (`category="sink"` — `HDF5Sink` / `ZarrGroupSink` / `ZarrBatchSink` / `DirectorySink` / `JsonSink` / `JsonPerWindowSink` / `YoloSink`) become **object-member producer** nodes (two outputs, `instance` + `class`, on a role-qualified `RECORDSTREAM_OBJECT:sink` wire) that dock into a `DatasetProcessor` runnable node's `sink` slot — wire `Source → Stream → DatasetProcessor(stream, sink)` and queue it to write the dataset, or export the graph to a `recordstream run` YAML. Excluded *by construction*: the **raw-callable op wrappers** (`FilterOp` / `WrappedOp`) — UNcategorised (bare `@configurable`), since they take a raw Python callable nothing a widget or socket supplies (so they stay out even with `engine` allowed); **task datasets** (`*_dataset`, e.g. `classification_dataset`) — a trainer-config concept a config generator cares about, but a canvas only needs a `source` to yield records; uncategorised module-level helper functions; and an **UNtagged sink** (a raw `Storage` subclass without `category="sink"`, including the `write(prediction, metadata)` **prediction** sinks `DetectionPredictionsSink` / `ClassificationPredictionsSink`, which aren't record sinks). You can build a dataset by wiring `Source → Op → …` *or* by feeding a `Source`/`Op` into a `Stream` / `DatasetSplit` engine node. (To surface another role, add its category to `_NODE_CATEGORIES` in `bridge.py` and tag the classes. Note: the flow export compiles the op DAG — fan-out, *Mix Records* fan-in, `op_N` op-values — but engine-node graphs (`Stream`/`JointStream` built on the canvas) and sink/`DatasetProcessor` nodes aren't exportable through it; use the whole-graph export for those.)
 
 A module that fails to import or scan is skipped at `debug` level, so one package's missing optional dependency never empties the palette.
 
@@ -673,7 +883,7 @@ Every record wire keeps the single `RECORDSTREAM_RECORD` socket string, so any o
 | `datasets` | HuggingFace `Dataset` ↔ `HF_DATASET` socket. |
 | `liquifai` | App / CLI framework. |
 | `loggair` | Logging. |
-| `waivefront` *(optional `[waivefront]` extra)* | RF-domain ops + visualizers (spectrogram, IQ time/freq). |
+| `waivefront` *(optional plugin — install it and its nodes appear)* | RF-domain ops + visualizers (spectrogram, IQ time/freq). |
 
 ## Development
 

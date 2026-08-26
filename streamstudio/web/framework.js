@@ -1,6 +1,6 @@
 import { app } from "../../scripts/app.js";
 
-console.log("ComfyStream: Loaded Taidal.FrameworkSockets extension");
+console.log("StreamStudio: Loaded Taidal.FrameworkSockets extension");
 
 // Refuse a cross-ENGINE object wire as it is dragged.
 //

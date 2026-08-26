@@ -1,6 +1,6 @@
 import { app } from "../../scripts/app.js";
 
-console.log("ComfyStream: Loaded Taidal.ConfusionMatrix extension");
+console.log("StreamStudio: Loaded Taidal.ConfusionMatrix extension");
 
 // Interactive confusion-matrix viewer. The python node (`streamstudio.nodes.ConfusionMatrixViewerNode`,
 // class key `Taidal_ConfusionMatrix`) is an OUTPUT_NODE that returns

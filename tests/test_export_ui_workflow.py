@@ -10,7 +10,6 @@ EXECUTE the exported flow document through recordstream, so the wiring is proven
 end — both contract boundaries firing where they should.
 """
 
-from argparse import Namespace
 from pathlib import Path
 from typing import Any, Dict
 
@@ -22,7 +21,7 @@ from recordstream.ops.contract import ContractError
 
 import streamstudio  # noqa: F401  (populates NODE_CLASS_MAPPINGS)
 from streamstudio import NODE_CLASS_MAPPINGS
-from streamstudio.cli import _export
+from streamstudio.cli import export_flow
 from streamstudio.export import export_flow_yamls
 from streamstudio.graphio import ui_workflow_to_prompt, yaml_to_workflow
 
@@ -87,7 +86,7 @@ def test_cli_export_auto_detects_a_ui_workflow(tmp_path: Path) -> None:
     graph_path = tmp_path / "flow.json"
     graph_path.write_text(json.dumps(_ui_workflow()))
     out = tmp_path / "flow.yaml"
-    _export(Namespace(graph=graph_path, output=out, skip=None, target=None))
+    export_flow(graph_path, output=out)
     text = out.read_text()
     assert "RecordContract" in text and "flow input" in text and "flow output" in text
 
@@ -98,4 +97,4 @@ def test_cli_export_still_refuses_a_non_graph_json(tmp_path: Path) -> None:
     graph_path = tmp_path / "other.json"
     graph_path.write_text(json.dumps({"neither": "prompt nor workflow"}))
     with pytest.raises(SystemExit, match="not a ComfyUI"):
-        _export(Namespace(graph=graph_path, output=None, skip=None, target=None))
+        export_flow(graph_path)

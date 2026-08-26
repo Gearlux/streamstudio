@@ -86,4 +86,4 @@ app.registerExtension({
     },
 });
 
-console.log("ComfyStream: Loaded Taidal.EmptyDefaultGraph extension (empty canvas instead of the SD record workflow)");
+console.log("StreamStudio: Loaded Taidal.EmptyDefaultGraph extension (empty canvas instead of the SD record workflow)");

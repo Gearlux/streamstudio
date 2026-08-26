@@ -1,7 +1,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-console.log("ComfyStream: Loaded Taidal.HFMetadataChooser extension");
+console.log("StreamStudio: Loaded Taidal.HFMetadataChooser extension");
 
 // Optional MULTI-select column picker for a HuggingFace source's `metadata_features` input (tagged
 // taidal_widget="HF_METADATA" by streamstudio/bridge.py). The underlying STRING widget holds a

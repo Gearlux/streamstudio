@@ -1,7 +1,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-console.log("ComfyStream: Loaded Taidal.HFSplitChooser extension");
+console.log("StreamStudio: Loaded Taidal.HFSplitChooser extension");
 
 // Optional split picker for a HuggingFace source's `split` input (tagged taidal_widget="HF_SPLIT"
 // by streamstudio/bridge.py). The underlying STRING widget stays freely editable — HF supports slice

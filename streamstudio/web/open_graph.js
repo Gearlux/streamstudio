@@ -1,7 +1,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-console.log("ComfyStream: Loaded Taidal.OpenGraph extension");
+console.log("StreamStudio: Loaded Taidal.OpenGraph extension");
 
 // StreamStudio: a workspace's SOURCE GRAPH, edited here, owned as a file.
 //

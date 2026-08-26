@@ -1,7 +1,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-console.log("ComfyStream: Loaded Taidal.HFDatasetChooser extension");
+console.log("StreamStudio: Loaded Taidal.HFDatasetChooser extension");
 
 // Optional picker for HuggingFace dataset-id inputs (tagged taidal_widget="HF_DATASET_ID"
 // by streamstudio/bridge.py). The underlying STRING widget stays freely editable — you

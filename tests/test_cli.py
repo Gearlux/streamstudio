@@ -12,6 +12,7 @@ assert on the resulting link state instead.
 
 import os
 import runpy
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -25,6 +26,17 @@ from streamstudio.custom_nodes import CUSTOM_NODE_URLS
 
 # The symlink target main() computes: this installed package's directory.
 SOURCE = Path(cli.__file__).parent.resolve()
+
+# The launch command ``_run`` issues. The port is stated EXPLICITLY (ComfyUI's own default, forwarded
+# from ``--port``) so a second studio can be started beside a running one.
+LAUNCH = [sys.executable, "main.py", "--port", str(cli.DEFAULT_PORT)]
+
+
+def _free_port() -> int:
+    """An ephemeral port nothing listens on — bound, read, released."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind((cli.STUDIO_HOST, 0))
+        return int(probe.getsockname()[1])
 
 
 class _FakeEntryPoint:
@@ -45,6 +57,18 @@ class _FakeEntryPoint:
 def _no_ambient_custom_nodes(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep call-count assertions hermetic — ignore any ambient STREAMSTUDIO_CUSTOM_NODES export."""
     monkeypatch.delenv(cli.CUSTOM_NODES_ENV_VAR, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _port_always_free(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Neutralize the pre-launch port probe — same ambient-leak class as the env var above.
+
+    ``_run`` refuses a port that is already listening (``tests/test_cli_port.py`` owns that
+    behaviour, against real sockets on ephemeral ports). Every test HERE is about the bootstrap /
+    launch flow and uses the default 8188, so a studio running on the developer's own machine would
+    otherwise make the whole file exit 1 before reaching a single assertion.
+    """
+    monkeypatch.setattr(cli, "_port_in_use", lambda port, host=cli.STUDIO_HOST: False)
 
 
 @pytest.fixture(autouse=True)
@@ -91,7 +115,7 @@ def test_main_clones_when_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     assert calls[1].args[0][1:4] == ["-m", "pip", "install"]
     assert calls[1].args[0][-1] == str(comfy / "requirements.txt")
     # 3) launch main.py from inside the comfy dir
-    assert calls[-1].args[0] == [sys.executable, "main.py"]
+    assert calls[-1].args[0] == LAUNCH
     assert calls[-1].kwargs["cwd"] == comfy
     # symlink freshly created, pointing at this package
     link = comfy / "custom_nodes" / "streamstudio"
@@ -118,7 +142,7 @@ def test_main_uses_existing_and_updates_stale_symlink(
 
     # comfy + manager already exist -> no clone; the requirements sync + the launch
     assert run_mock.call_count == 2  # the requirements sync + the launch
-    assert run_mock.call_args.args[0] == [sys.executable, "main.py"]
+    assert run_mock.call_args.args[0] == LAUNCH
     assert run_mock.call_args.kwargs["cwd"] == comfy
     # the stale symlink was repointed at this package
     assert link.is_symlink()
@@ -194,7 +218,7 @@ def test_main_default_nodes_shown_exports_env_zero(
         cli.main()
 
     launch = run_mock.call_args
-    assert launch.args[0] == [sys.executable, "main.py"]
+    assert launch.args[0] == LAUNCH
     assert launch.kwargs["env"]["STREAMSTUDIO_HIDE_DEFAULT_NODES"] == "0"
 
 
@@ -205,7 +229,7 @@ def test_main_no_default_nodes_exports_env_one(
     # streamstudio import inside ComfyUI prunes the defaults and surfaces Taidal nodes at the root.
     comfy = tmp_path / "ComfyUI"
     comfy.mkdir()
-    monkeypatch.setattr(sys, "argv", ["streamstudio", "--comfy-dir", str(comfy), "--no-default-nodes"])
+    monkeypatch.setattr(sys, "argv", ["streamstudio", "--comfy-dir", str(comfy), "--default-nodes-"])
 
     with patch("subprocess.run") as run_mock:
         cli.main()
@@ -221,18 +245,20 @@ def test_main_no_default_nodes_exports_env_one(
 def test_main_config_exports_config_env(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, logger_mock: MagicMock
 ) -> None:
-    # --config <file> is forwarded as STREAMSTUDIO_CONFIG (the PATH; the keep-list lives IN the file).
+    # --palette-config <file> is forwarded as STREAMSTUDIO_CONFIG (the PATH; the keep-list lives
+    # IN the file). NOT --config: liquifai reserves that for the app's own configuration file, so
+    # the palette flag had to be renamed when the CLI moved off argparse.
     comfy = tmp_path / "ComfyUI"
     comfy.mkdir()
     cfg = tmp_path / "palette.yaml"
     cfg.write_text("keep_nodes: [MaskToImage]\n")
-    monkeypatch.setattr(sys, "argv", ["streamstudio", "--comfy-dir", str(comfy), "--config", str(cfg)])
+    monkeypatch.setattr(sys, "argv", ["streamstudio", "--comfy-dir", str(comfy), "--palette-config", str(cfg)])
     with patch("subprocess.run") as run_mock:
         cli.main()
     assert run_mock.call_args.kwargs["env"]["STREAMSTUDIO_CONFIG"] == str(cfg)
 
 
-def test_main_no_config_clears_config_env(
+def test_main_no_palette_config_clears_config_env(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, logger_mock: MagicMock
 ) -> None:
     # Without --config the flag is authoritative: STREAMSTUDIO_CONFIG is set to "" (clearing any ambient
@@ -267,7 +293,9 @@ def test_module_run_as_script_invokes_main(tmp_path: Path, monkeypatch: pytest.M
     # Exercise the ``if __name__ == "__main__": main()`` entry guard.
     comfy = tmp_path / "ComfyUI"
     comfy.mkdir()
-    monkeypatch.setattr(sys, "argv", ["streamstudio", "--comfy-dir", str(comfy)])
+    # run_path re-executes cli.py as ``__main__``, a module identity the autouse ``_port_always_free``
+    # fixture cannot reach — so give this one a genuinely free port rather than the shared default.
+    monkeypatch.setattr(sys, "argv", ["streamstudio", "--comfy-dir", str(comfy), "--port", str(_free_port())])
 
     with patch("loggair.get_logger", return_value=MagicMock()), patch("subprocess.run"), patch("os.symlink"):
         runpy.run_path(cli.__file__, run_name="__main__")
@@ -307,14 +335,14 @@ def test_main_no_manager_skips_manager_install(
 ) -> None:
     comfy = tmp_path / "ComfyUI"
     comfy.mkdir()
-    monkeypatch.setattr(sys, "argv", ["streamstudio", "--comfy-dir", str(comfy), "--no-manager"])
+    monkeypatch.setattr(sys, "argv", ["streamstudio", "--comfy-dir", str(comfy), "--manager-"])
 
     with patch("subprocess.run") as run_mock:
         cli.main()
 
     # No custom-node clone at all -> the launch is the only subprocess call.
     assert run_mock.call_count == 2  # the requirements sync + the launch
-    assert run_mock.call_args.args[0] == [sys.executable, "main.py"]
+    assert run_mock.call_args.args[0] == LAUNCH
 
 
 def test_main_skips_already_installed_custom_node(
@@ -330,7 +358,7 @@ def test_main_skips_already_installed_custom_node(
 
     # Just the launch — an existing checkout is never re-cloned (update via ComfyUI-Manager).
     assert run_mock.call_count == 2  # the requirements sync + the launch
-    assert run_mock.call_args.args[0] == [sys.executable, "main.py"]
+    assert run_mock.call_args.args[0] == LAUNCH
 
 
 def test_custom_node_flag_and_env_combine(
@@ -390,7 +418,7 @@ def test_custom_node_clone_failure_warns_and_launch_continues(
     comfy = tmp_path / "ComfyUI"
     comfy.mkdir()
     bad = "https://github.com/nowhere/Missing"
-    monkeypatch.setattr(sys, "argv", ["streamstudio", "--comfy-dir", str(comfy), "--no-manager", "--custom-node", bad])
+    monkeypatch.setattr(sys, "argv", ["streamstudio", "--comfy-dir", str(comfy), "--manager-", "--custom-node", bad])
 
     def fake_run(cmd: list[str], **kwargs: object) -> MagicMock:
         if cmd[:2] == ["git", "clone"]:
@@ -400,7 +428,7 @@ def test_custom_node_clone_failure_warns_and_launch_continues(
     with patch("subprocess.run", side_effect=fake_run) as run_mock:
         cli.main()  # must not raise
 
-    assert run_mock.call_args.args[0] == [sys.executable, "main.py"]  # launch still happened
+    assert run_mock.call_args.args[0] == LAUNCH  # launch still happened
     warnings = [str(c.args[0]) for c in logger_mock.warning.call_args_list]
     assert any("Failed to clone custom node" in w and bad in w for w in warnings)
 
@@ -424,7 +452,7 @@ def test_custom_node_pip_failure_warns_and_launch_continues(
     with patch("subprocess.run", side_effect=fake_run) as run_mock:
         cli.main()  # must not raise
 
-    assert run_mock.call_args.args[0] == [sys.executable, "main.py"]
+    assert run_mock.call_args.args[0] == LAUNCH
     warnings = [str(c.args[0]) for c in logger_mock.warning.call_args_list]
     assert any("Failed to install requirements" in w and "ComfyUI-Manager" in w for w in warnings)
 
@@ -518,7 +546,7 @@ def test_main_no_declared_nodes_skips_package_declared_tier(
             "streamstudio",
             "--comfy-dir",
             str(comfy),
-            "--no-declared-nodes",
+            "--declared-nodes-",
             "--custom-node",
             "https://github.com/c/FlagNode",
         ],
@@ -557,7 +585,7 @@ def test_no_manager_filters_declared_tier_only(
     monkeypatch.setattr(
         sys,
         "argv",
-        ["streamstudio", "--comfy-dir", str(comfy), "--no-manager", "--custom-node", cli.COMFYUI_MANAGER_URL],
+        ["streamstudio", "--comfy-dir", str(comfy), "--manager-", "--custom-node", cli.COMFYUI_MANAGER_URL],
     )
 
     with patch("subprocess.run") as run_mock:
@@ -585,7 +613,6 @@ def _rescale_prompt_node(record_src: object, in_max: float) -> dict:
 
 
 def test_export_single_chain_writes_output_verbatim(tmp_path: Path, logger_mock: MagicMock) -> None:
-    import argparse
     import json
 
     _register_rescale_node()
@@ -593,7 +620,7 @@ def test_export_single_chain_writes_output_verbatim(tmp_path: Path, logger_mock:
     graph.write_text(json.dumps({"2": _rescale_prompt_node(["x", 0], 255.0)}))
     out = tmp_path / "flow.yaml"
 
-    cli._export(argparse.Namespace(graph=graph, output=out))
+    cli.export_flow(graph=graph, output=out)
 
     assert out.exists()
     assert "ToTensor" in out.read_text()
@@ -603,7 +630,6 @@ def test_export_single_chain_writes_output_verbatim(tmp_path: Path, logger_mock:
 def test_export_skip_flag_excludes_marked_node(tmp_path: Path, logger_mock: MagicMock) -> None:
     # ``--skip 2`` (repeatable) is the CLI twin of the canvas export-skip mark: the node
     # (and anything data-downstream) leaves the export.
-    import argparse
     import json
 
     _register_rescale_node()
@@ -611,7 +637,7 @@ def test_export_skip_flag_excludes_marked_node(tmp_path: Path, logger_mock: Magi
     graph.write_text(json.dumps({"2": _rescale_prompt_node(["x", 0], 255.0)}))
     out = tmp_path / "flow.yaml"
 
-    cli._export(argparse.Namespace(graph=graph, output=out, skip=["2"]))
+    cli.export_flow(graph=graph, output=out, skip=["2"])
 
     text = out.read_text()
     assert "ToTensor" not in text  # the marked op is gone — only the empty flow doc remains
@@ -620,14 +646,13 @@ def test_export_skip_flag_excludes_marked_node(tmp_path: Path, logger_mock: Magi
 
 def test_export_multi_chain_writes_one_file_per_chain(tmp_path: Path, logger_mock: MagicMock) -> None:
     # Two disconnected op components -> no error; flow.yaml fans out to flow_1.yaml + flow_2.yaml.
-    import argparse
     import json
 
     _register_rescale_node()
     graph = tmp_path / "graph.json"
     graph.write_text(json.dumps({"2": _rescale_prompt_node(["x", 0], 255.0), "3": _rescale_prompt_node(["y", 0], 1.0)}))
 
-    cli._export(argparse.Namespace(graph=graph, output=tmp_path / "flow.yaml"))
+    cli.export_flow(graph=graph, output=tmp_path / "flow.yaml")
 
     assert not (tmp_path / "flow.yaml").exists()
     docs = [(tmp_path / name).read_text() for name in ("flow_1.yaml", "flow_2.yaml")]
@@ -641,14 +666,13 @@ def test_export_multi_chain_stdout_is_document_stream(
     tmp_path: Path, logger_mock: MagicMock, capsys: pytest.CaptureFixture
 ) -> None:
     # Without -o, several chains stream to stdout as ``---``-separated YAML documents.
-    import argparse
     import json
 
     _register_rescale_node()
     graph = tmp_path / "graph.json"
     graph.write_text(json.dumps({"2": _rescale_prompt_node(["x", 0], 255.0), "3": _rescale_prompt_node(["y", 0], 1.0)}))
 
-    cli._export(argparse.Namespace(graph=graph, output=None))
+    cli.export_flow(graph=graph, output=None)
 
     out = capsys.readouterr().out
     assert out.count("flow:") == 2
@@ -679,7 +703,7 @@ def test_main_syncs_requirements_for_an_existing_checkout(
     (install,) = _pip_install_calls(run_mock, comfy)
     launch = run_mock.call_args_list[-1]
     assert install.kwargs.get("check") is True
-    assert list(launch.args[0]) == [sys.executable, "main.py"]  # the sync happens BEFORE the launch
+    assert list(launch.args[0]) == LAUNCH  # the sync happens BEFORE the launch
     assert run_mock.call_args_list.index(install) < run_mock.call_args_list.index(launch)
 
 
@@ -690,11 +714,11 @@ def test_main_no_install_skips_the_sync(
     comfy.mkdir()
     (comfy / "requirements.txt").write_text("comfy_aimdo\n")
     _preinstall_manager(comfy)
-    monkeypatch.setattr(sys, "argv", ["streamstudio", "--comfy-dir", str(comfy), "--no-install"])
+    monkeypatch.setattr(sys, "argv", ["streamstudio", "--comfy-dir", str(comfy), "--install-"])
     with patch("subprocess.run") as run_mock:
         cli.main()
     assert _pip_install_calls(run_mock, comfy) == []
-    assert list(run_mock.call_args_list[-1].args[0]) == [sys.executable, "main.py"]
+    assert list(run_mock.call_args_list[-1].args[0]) == LAUNCH
 
 
 def test_main_installs_exactly_once_after_a_clone(

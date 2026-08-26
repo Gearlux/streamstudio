@@ -1,6 +1,6 @@
 import { app } from "../../scripts/app.js";
 
-console.log("ComfyStream: Loaded Taidal.ObjectListInputs extension");
+console.log("StreamStudio: Loaded Taidal.ObjectListInputs extension");
 
 // Dynamic object-list inputs for object nodes whose constructor takes a LIST of objects (a
 // pytorch_lightning.Trainer's `logger` / `callbacks` / `plugins` — tagged by a seed `<name>_0` input
