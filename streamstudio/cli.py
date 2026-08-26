@@ -26,15 +26,17 @@ entry-point discovery, so the converters work WITHOUT a running ComfyUI):
   "Export Graph → Taidal YAML". Uses :func:`streamstudio.graphio.workflow_to_yaml`.
 """
 
-import argparse
 import json
 import os
+import socket
 import subprocess
 import sys
-from collections.abc import Sequence
 from importlib.metadata import entry_points
 from pathlib import Path
+from typing import List, Optional, Sequence, Union
 
+import psutil
+from liquifai import LiquifyApp
 from loggair import get_logger
 
 from streamstudio.custom_nodes import COMFYUI_MANAGER_URL  # bundled default; --no-manager filters it
@@ -49,6 +51,146 @@ CUSTOM_NODES_ENTRY_POINT_GROUP = "streamstudio.custom_nodes"
 # Env twin of the repeatable --custom-node flag: comma-separated git URLs of EXTRA custom nodes
 # to install on launch. Install order is declared (entry points) -> env -> flags, deduped.
 CUSTOM_NODES_ENV_VAR = "STREAMSTUDIO_CUSTOM_NODES"
+
+# ComfyUI's own listen defaults (comfy/cli_args.py: ``--listen 127.0.0.1``, ``--port 8188``, both
+# plain argparse defaults with no env/config fallback). We mirror them so the launcher can (a) probe
+# the address BEFORE doing any launch work and (b) print the URL of whatever is already there.
+DEFAULT_PORT = 8188
+STUDIO_HOST = "127.0.0.1"
+
+
+def default_comfy_dir() -> Path:
+    """Where ComfyUI is cloned to when ``--comfy-dir`` is not given.
+
+    A FUNCTION, not a module constant: a signature default is evaluated at IMPORT, which froze the
+    path against ``Path.home()`` before anything could change it (argparse built its parser inside
+    ``main()``, so it never had this problem). The commands therefore default the parameter to
+    ``None`` and resolve here.
+    """
+    return Path.home() / ".streamstudio" / "ComfyUI"
+
+
+#: ``strict_flags``: every command here takes PLAIN values — there is no config document for an
+#: override to fall through to, so a flag that reaches nothing reached nothing at all. Without it a
+#: mistyped ``--custom-nod`` is indistinguishable from one that worked (liquifai's report-based
+#: warning only speaks when something was materialized, and a launcher materializes nothing).
+app = LiquifyApp(
+    name="streamstudio",
+    description="StreamStudio — ComfyUI with the Taidal nodes.",
+    strict_flags=True,
+)
+
+
+def _port_in_use(port: int, host: str = STUDIO_HOST) -> bool:
+    """True when something already listens on ``host:port``.
+
+    Probed by BINDING rather than connecting: a connect test cannot tell "nothing is listening"
+    apart from "listening but not accepting yet", and a refused connection is the same errno as a
+    host that is simply slow. ``SO_REUSEADDR`` IS set on purpose — on this platform family it lets a
+    bind succeed beside a socket left in ``TIME_WAIT`` (a studio killed seconds ago, whose port is
+    genuinely free) while still failing against a live LISTENING socket, which is the only state we
+    mean to report. Pins: ``tests/test_cli_port.py`` (both directions, against a real socket).
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            probe.bind((host, port))
+        except OSError:
+            return True
+    return False
+
+
+def studio_log_path(port: int) -> Path:
+    """Where a ``--background`` studio writes its output — ``~/.streamstudio/logs/studio-<port>.log``.
+
+    PER-PORT so two studios never interleave into one file, and under the studio's OWN home rather
+    than the launch directory: this package has already been burned once by writing a ``logs/``
+    directory into whatever folder the user happened to be standing in (see AGENTS, "The Package
+    Speaks Its OWN Name"), and a detached server's log is not a per-run artifact belonging to a
+    project checkout.
+    """
+    return Path.home() / ".streamstudio" / "logs" / f"studio-{port}.log"
+
+
+def _studio_process(port: int, host: str = STUDIO_HOST) -> Optional[psutil.Process]:
+    """The process LISTENING on ``host:port``, or ``None``.
+
+    Located per-process on purpose: the whole-system ``psutil.net_connections()`` raises
+    ``AccessDenied`` for an unprivileged caller on macOS, while asking each process for its own
+    connections needs no privileges for processes you own. The port OWNER is the target — a
+    foreground ``streamstudio run`` is the launcher, and the server is the ``main.py`` it spawned
+    (measured: ``74841 streamstudio run`` -> ``74870 python main.py --port 8189``, and the launcher
+    exits by itself once that child returns).
+    """
+    for proc in psutil.process_iter(["pid"]):
+        try:
+            for conn in proc.net_connections(kind="tcp"):
+                if conn.status == psutil.CONN_LISTEN and conn.laddr and conn.laddr.port == port:
+                    return proc
+        except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess):
+            continue  # someone else's process, or one that died mid-scan
+    return None
+
+
+def _stop_studio(port: int, grace: float = 10.0) -> Optional[int]:
+    """Stop the studio holding ``port``; return the pid stopped, or ``None`` if nothing was there.
+
+    ``terminate()`` then a DETERMINISTIC ``wait()`` — never a sleep-and-recheck. A clean studio frees
+    the port in well under a second (measured 64 ms); ``grace`` seconds later a process that ignored
+    the signal is killed outright, which is the only way to hand the port to the relaunch.
+    """
+    proc = _studio_process(port)
+    if proc is None:
+        return None
+    pid = int(proc.pid)  # psutil types .pid loosely; the caller and every message want a plain int
+    try:
+        proc.terminate()
+        try:
+            proc.wait(timeout=grace)
+        except psutil.TimeoutExpired:
+            logger.warning(f"StreamStudio (pid {pid}) ignored SIGTERM after {grace}s — killing it.")
+            proc.kill()
+            proc.wait(timeout=grace)
+    except psutil.NoSuchProcess:  # exited between the scan and the signal
+        pass
+    return pid
+
+
+def _report_stopped(port: int, pid: Optional[int]) -> None:
+    """Say what was stopped, in the same plain voice as the port-in-use message."""
+    if pid is None:
+        print(f"Nothing is listening on port {port} — no StreamStudio to stop.")
+    else:
+        print(f"Stopped StreamStudio on port {port} (pid {pid}).")
+
+
+def _report_port_in_use(port: int) -> None:
+    """Say what holds the port and hand over a clickable way in, then stop the launch.
+
+    Printed PLAIN (not through loggair) and on its own line: a terminal linkifies a bare ``http://``
+    URL, and a log prefix in front of it buries the one thing the reader came for. Without this
+    check ComfyUI discovers the clash only at the end of its own boot — measured 2026-08-26, 23
+    seconds and 91 lines to reach one ERROR line on line 85, followed by exit code 0.
+    """
+    print(f"Port {port} is already in use — StreamStudio may already be running there.")
+    print()
+    print(f"    Open it:  http://{STUDIO_HOST}:{port}")
+    print()
+    print(f"If that is a different program, run StreamStudio elsewhere:  streamstudio --port {port + 1}")
+
+
+def _as_list(value: Union[str, Sequence[str], None]) -> List[str]:
+    """A repeatable option as a LIST, whatever spelling it arrived in.
+
+    ``--custom-node URL`` binds a single string and ``--custom-node=[a,b]`` a list, so every
+    consumer would otherwise have to guess — and splatting the string form iterates it CHARACTER BY
+    CHARACTER, which fails as a wrong-looking clone URL rather than as a type error.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    return [str(item) for item in value]
 
 
 def _custom_node_dir_name(url: str) -> str:
@@ -134,9 +276,36 @@ def _install_custom_nodes(comfy_dir: Path, urls: Sequence[str]) -> None:
                 )
 
 
-def _run(args: argparse.Namespace) -> None:
-    """Clone ComfyUI if needed, install custom nodes, symlink the Taidal nodes in, and launch it."""
-    comfy_dir: Path = args.comfy_dir
+def _run(
+    comfy_dir: Optional[Path] = None,
+    port: int = DEFAULT_PORT,
+    background: bool = False,
+    default_nodes: bool = True,
+    only_taidal_nodes: bool = False,
+    palette_config: Optional[Path] = None,
+    install: bool = True,
+    manager: bool = True,
+    declared_nodes: bool = True,
+    custom_node: Optional[List[str]] = None,
+) -> None:
+    """Clone ComfyUI if needed, install custom nodes, symlink the Taidal nodes in, and launch it.
+
+    The shared launch body behind both the ``run`` and ``restart`` commands — plain parameters, so
+    the two command functions declare the SAME surface and neither can drift from it.
+    """
+    # liquifai binds CLI values VERBATIM as strings (its documented contract: "a command that needs
+    # another type coerces in its body"), so a `--comfy-dir /x` arrives as `str` while the default
+    # is already a Path. Coerce once, here, rather than at every use.
+    comfy_dir = Path(comfy_dir) if comfy_dir is not None else default_comfy_dir()
+    port = int(port)
+    palette_config = Path(palette_config) if palette_config is not None else None
+
+    # 0. Refuse a taken port BEFORE any launch work. Everything below (clone, requirements sync,
+    # custom nodes, symlink) is wasted when ComfyUI cannot bind, and ComfyUI itself only finds out
+    # at the very end of its boot — see _report_port_in_use.
+    if _port_in_use(port):
+        _report_port_in_use(port)
+        raise SystemExit(1)
 
     # 1. Clone ComfyUI if it doesn't exist
     if not comfy_dir.exists():
@@ -157,7 +326,7 @@ def _run(args: argparse.Namespace) -> None:
     # drifts (ComfyUI-Manager updates it in place; a newer main.py then imports a module the venv
     # never received — `comfy_aimdo`, measured 2026-08-22 — and dies at startup). pip is a no-op
     # when everything is already satisfied, so this costs seconds, not a reinstall.
-    if getattr(args, "install", True):
+    if install:
         logger.info(f"Syncing ComfyUI requirements into {sys.executable}...")
         try:
             subprocess.run(
@@ -179,10 +348,10 @@ def _run(args: argparse.Namespace) -> None:
     # Tiers: entry-point-declared (incl. streamstudio's own bundled ComfyUI-Manager) -> env -> flags.
     # --no-manager filters the manager URL from the DECLARED tier only — an explicit env/flag
     # request for it is the stronger signal and still installs.
-    declared = _declared_custom_nodes() if args.declared_nodes else []
-    if not args.manager:
+    declared = _declared_custom_nodes() if declared_nodes else []
+    if not manager:
         declared = [url for url in declared if url != COMFYUI_MANAGER_URL]
-    custom_node_urls = list(dict.fromkeys([*declared, *_env_custom_nodes(), *(args.custom_node or [])]))
+    custom_node_urls = list(dict.fromkeys([*declared, *_env_custom_nodes(), *_as_list(custom_node)]))
     _install_custom_nodes(comfy_dir, custom_node_urls)
 
     # 3. Symlink StreamStudio nodes into ComfyUI's custom_nodes directory
@@ -208,38 +377,187 @@ def _run(args: argparse.Namespace) -> None:
     # env var is the channel). streamstudio's import inside ComfyUI reads STREAMSTUDIO_HIDE_DEFAULT_NODES
     # to (a) prune ComfyUI's built-in nodes and (b) surface the Taidal nodes at the palette root.
     # Set explicitly ("0" / "1") so the flag wins over any ambient shell export of the var.
-    only_taidal = getattr(args, "only_taidal_nodes", False)
-    hide_defaults = (not args.default_nodes) or only_taidal  # only-Taidal mode implies hiding built-ins
+    only_taidal = only_taidal_nodes
+    hide_defaults = (not default_nodes) or only_taidal  # only-Taidal mode implies hiding built-ins
     # The palette keep-list lives in the config FILE (keep_nodes:), not an env var — pass only its
     # LOCATION (explicitly, so --config wins over any ambient STREAMSTUDIO_CONFIG; empty ⇒ the bridge's
     # default ~/.streamstudio/config.yaml).
-    if args.config is not None and not args.config.exists():
-        logger.warning(f"--config file not found: {args.config} (PreviewImage/PreviewAny are still kept).")
+    if palette_config is not None and not palette_config.exists():
+        logger.warning(f"--palette-config file not found: {palette_config} (PreviewImage/PreviewAny are still kept).")
     env = {
         **os.environ,
         "STREAMSTUDIO_HIDE_DEFAULT_NODES": "1" if hide_defaults else "0",
         "STREAMSTUDIO_ONLY_TAIDAL_NODES": "1" if only_taidal else "0",
-        "STREAMSTUDIO_CONFIG": str(args.config) if args.config is not None else "",
+        "STREAMSTUDIO_CONFIG": str(palette_config) if palette_config is not None else "",
     }
     logger.info("🚀 Launching StreamStudio (ComfyUI) 🚀")
     if only_taidal:
         logger.info("Showing ONLY Taidal nodes (+ kept defaults) — hiding built-ins and other custom packs.")
-    elif not args.default_nodes:
+    elif not default_nodes:
         logger.info("Hiding ComfyUI's built-in nodes — Taidal + other custom nodes appear (at the palette root).")
+    command = [sys.executable, "main.py", "--port", str(port)]
+    if background:
+        # Detached: its own session, so it outlives the shell that started it, and its output goes
+        # to a per-port file (this terminal is being handed back). We do NOT wait for the bind —
+        # that is the whole point of --background; the log path is where a failed boot shows up.
+        log = studio_log_path(port)
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with open(log, "ab") as handle:
+            subprocess.Popen(
+                command, cwd=comfy_dir, env=env, stdout=handle, stderr=subprocess.STDOUT, start_new_session=True
+            )
+        print(f"StreamStudio is starting in the background — log: {log}")
+        print()
+        print(f"    Open it:  http://{STUDIO_HOST}:{port}")
+        return
     try:
-        subprocess.run([sys.executable, "main.py"], cwd=comfy_dir, env=env)
+        subprocess.run(command, cwd=comfy_dir, env=env)
     except KeyboardInterrupt:
         logger.info("StreamStudio stopped.")
 
 
-def _export(args: argparse.Namespace) -> None:
-    """Compile a saved API-format graph's ops into Confluid YAML op-list(s) — one per chain."""
+# =======================================================================================
+# Commands
+# =======================================================================================
+
+
+@app.command(default=True, short={"p": "port", "b": "background"})
+def run(
+    comfy_dir: Optional[Path] = None,
+    port: int = DEFAULT_PORT,
+    background: bool = False,
+    default_nodes: bool = True,
+    only_taidal_nodes: bool = False,
+    palette_config: Optional[Path] = None,
+    install: bool = True,
+    manager: bool = True,
+    declared_nodes: bool = True,
+    custom_node: Optional[List[str]] = None,
+) -> None:
+    """Launch ComfyUI with the Taidal nodes (the default command).
+
+    Args:
+        comfy_dir: Path to the ComfyUI installation (default: ~/.streamstudio/ComfyUI).
+            Cloned there if it does not exist.
+        port: Port ComfyUI listens on. A port already in use is refused before any launch work,
+            with the address of what is there printed as a clickable URL.
+        background: Start the studio DETACHED and return immediately instead of holding this
+            terminal. Output goes to a per-port log under ~/.streamstudio/logs/.
+        default_nodes: Show ComfyUI's built-in nodes alongside the Taidal nodes. Turn it off
+            (--default-nodes-) to hide them and surface the Taidal nodes at the palette root.
+        only_taidal_nodes: Show ONLY Taidal nodes — hide the built-ins AND every other
+            third-party pack. Implies --default-nodes-.
+        palette_config: Palette config file (YAML). Its keep_nodes: list names extra
+            default/custom nodes to KEEP when hiding the palette. Defaults to
+            ~/.streamstudio/config.yaml. NOT --config, which liquifai reserves for the app's own
+            configuration file.
+        install: Sync ComfyUI's requirements.txt into this environment on every launch (a no-op
+            when satisfied). Turn it off (--install-) for an air-gapped run.
+        manager: Install the ComfyUI-Manager custom node, giving the GUI an in-app store for
+            further custom nodes.
+        declared_nodes: Install the custom nodes that installed packages declare through the
+            streamstudio.custom_nodes entry-point group.
+        custom_node: Git URL(s) of extra ComfyUI custom nodes to clone on launch. Several:
+            --custom-node=[urlA,urlB].
+    """
+    _run(
+        comfy_dir,
+        port,
+        background,
+        default_nodes,
+        only_taidal_nodes,
+        palette_config,
+        install,
+        manager,
+        declared_nodes,
+        custom_node,
+    )
+
+
+@app.command(short={"p": "port"})
+def stop(port: int = DEFAULT_PORT) -> None:
+    """Stop the StreamStudio server listening on --port.
+
+    An idle port is not an error — it reports that nothing was there.
+
+    Args:
+        port: Port whose studio to stop.
+    """
+    _report_stopped(port, _stop_studio(port))
+
+
+@app.command(short={"p": "port", "b": "background"})
+def restart(
+    comfy_dir: Optional[Path] = None,
+    port: int = DEFAULT_PORT,
+    background: bool = False,
+    default_nodes: bool = True,
+    only_taidal_nodes: bool = False,
+    palette_config: Optional[Path] = None,
+    install: bool = True,
+    manager: bool = True,
+    declared_nodes: bool = True,
+    custom_node: Optional[List[str]] = None,
+) -> None:
+    """Stop the server on --port (if any), then launch it again — the full run flow.
+
+    Deliberately re-walks the WHOLE launch (clone, requirements sync, custom nodes, symlink)
+    rather than shortcutting to the relaunch: a restart is the moment a drifted checkout or a
+    newly installed entry point bites, so it is also how you pick those up.
+
+    Args:
+        comfy_dir: Path to the ComfyUI installation (default: ~/.streamstudio/ComfyUI).
+        port: Port whose studio to restart.
+        background: Start the new studio DETACHED and return immediately.
+        default_nodes: Show ComfyUI's built-in nodes alongside the Taidal nodes.
+        only_taidal_nodes: Show ONLY Taidal nodes. Implies --default-nodes-.
+        palette_config: Palette config file (YAML). NOT --config (liquifai's own).
+        install: Sync ComfyUI's requirements.txt into this environment.
+        manager: Install the ComfyUI-Manager custom node.
+        declared_nodes: Install the entry-point-declared custom nodes.
+        custom_node: Git URL(s) of extra ComfyUI custom nodes.
+    """
+    _report_stopped(port, _stop_studio(port))
+    _run(
+        comfy_dir,
+        port,
+        background,
+        default_nodes,
+        only_taidal_nodes,
+        palette_config,
+        install,
+        manager,
+        declared_nodes,
+        custom_node,
+    )
+
+
+@app.command(name="export", positionals=["graph"], short={"o": "output"})
+def export_flow(
+    graph: Path,
+    output: Optional[Path] = None,
+    skip: Optional[List[str]] = None,
+    target: Optional[List[str]] = None,
+) -> None:
+    """Compile a saved graph (API form or native workflow.json, auto-detected) to Confluid flow document(s).
+
+    One document per independent op component. The offline twin of the canvas Export-Flow button.
+
+    Args:
+        graph: ComfyUI graph JSON to compile — API form, or a native workflow.json save.
+        output: Write the YAML here (default: stdout). Several components become
+            flow_1.yaml … flow_N.yaml.
+        skip: Node id(s) to EXCLUDE from the export, with everything data-downstream of them —
+            the CLI twin of the canvas export-skip mark. Several: --skip=[3,7].
+        target: Export ONLY the ops that compute this node (its data ancestor cone). Several:
+            --target=[12,19].
+    """
     # Import here (not at module top): pulling in streamstudio runs entry-point node discovery,
     # which is unnecessary weight for the common ``run`` path.
     import streamstudio
     from streamstudio.export import chain_output_paths, collect_export_marks, export_flow_yamls
 
-    graph_path: Path = args.graph
+    graph_path = Path(graph)
     if not graph_path.exists():
         raise SystemExit(f"Graph file not found: {graph_path}")
 
@@ -249,8 +567,8 @@ def _export(args: argparse.Namespace) -> None:
     # ``--skip`` mirrors the canvas export-skip mark; an API-format file carries no node
     # properties, so the marked ids must be named explicitly here (getattr: tolerate
     # programmatic Namespace callers that predate the flag).
-    skip_ids = list(getattr(args, "skip", None) or [])
-    target_ids = list(getattr(args, "target", None) or [])
+    skip_ids = _as_list(skip)
+    target_ids = _as_list(target)
     if isinstance(prompt, dict) and isinstance(prompt.get("nodes"), list):
         # AUTO-DETECTED by payload shape (only the UI form carries a top-level ``nodes`` list):
         # a UI-form workflow.json — the editor's native save, e.g. a workspace-owned graph file
@@ -277,10 +595,10 @@ def _export(args: argparse.Namespace) -> None:
 
     if len(yaml_docs) > 1:
         logger.info(f"Graph contains {len(yaml_docs)} independent op components — exporting each individually.")
-    if args.output:
-        # One file per component: ``-o flow.yaml`` stays ``flow.yaml`` for a single one,
+    if output:
+        # One file per component: ``--output flow.yaml`` stays ``flow.yaml`` for a single one,
         # ``flow_1.yaml`` … ``flow_N.yaml`` for several.
-        for chain_path, yaml_doc in zip(chain_output_paths(args.output, len(yaml_docs)), yaml_docs):
+        for chain_path, yaml_doc in zip(chain_output_paths(Path(output), len(yaml_docs)), yaml_docs):
             chain_path.write_text(yaml_doc)
             logger.info(f"Wrote flow YAML to {chain_path}")
     else:
@@ -289,230 +607,77 @@ def _export(args: argparse.Namespace) -> None:
         sys.stdout.write("---\n".join(yaml_docs))
 
 
-def _import(args: argparse.Namespace) -> None:
-    """Convert a Confluid YAML config into a ComfyUI ``workflow.json`` (loadable on the canvas)."""
+@app.command(name="import", positionals=["document"], short={"o": "output"})
+def import_config(
+    document: Path,
+    output: Optional[Path] = None,
+    as_: str = "graph",
+    instantiate: bool = False,
+) -> None:
+    """Convert a Confluid YAML config into a ComfyUI workflow.json, loadable on the canvas.
+
+    Auto-detects a flow-export document and rebuilds the connected op graph. The offline twin of
+    the canvas "Import Taidal YAML" menu command.
+
+    Args:
+        document: Confluid YAML to import — a whole-graph config, or a flow-export document.
+        output: Write the workflow JSON here (default: stdout).
+        as_: graph (default) lays the nodes out; group wraps them in one visual box; subgraph
+            packages them as a reusable blueprint with a declared record boundary and an op output.
+        instantiate: Walk live-but-inert objects (materialize, solidify suppressed) instead of
+            un-built markers.
+    """
     import json as _json
 
     import streamstudio
     from streamstudio.graphio import yaml_to_workflow
 
-    yaml_path: Path = args.config
+    yaml_path = Path(document)
     if not yaml_path.exists():
         raise SystemExit(f"Config file not found: {yaml_path}")
     workflow = yaml_to_workflow(
         str(yaml_path),
         streamstudio.NODE_CLASS_MAPPINGS,
-        instantiate=args.instantiate,
-        as_=args.as_,
+        instantiate=instantiate,
+        as_=as_,
         name=yaml_path.stem,
     )
     text = _json.dumps(workflow, indent=2)
-    if args.output:
-        args.output.write_text(text)
-        logger.info(f"Wrote workflow JSON to {args.output}")
+    if output:
+        Path(output).write_text(text)
+        logger.info(f"Wrote workflow JSON to {output}")
     else:
         sys.stdout.write(text)
 
 
-def _export_workflow(args: argparse.Namespace) -> None:
-    """Convert a whole ComfyUI ``workflow.json`` (UI or API form) into a hoisted-``!ref:`` YAML."""
+@app.command(name="export-workflow", positionals=["workflow"], short={"o": "output"})
+def export_workflow(workflow: Path, output: Optional[Path] = None) -> None:
+    """Convert a WHOLE ComfyUI workflow.json (UI or API form) into a hoisted-!ref: YAML.
+
+    The twin of the canvas "Export Graph → Taidal YAML".
+
+    Args:
+        workflow: ComfyUI workflow JSON (UI or API form).
+        output: Write the YAML here (default: stdout).
+    """
     import streamstudio
     from streamstudio.graphio import workflow_to_yaml
 
-    graph_path: Path = args.workflow
+    graph_path = Path(workflow)
     if not graph_path.exists():
         raise SystemExit(f"Workflow file not found: {graph_path}")
     graph = json.loads(graph_path.read_text())
     yaml_doc = workflow_to_yaml(graph, streamstudio.NODE_CLASS_MAPPINGS)
-    if args.output:
-        args.output.write_text(yaml_doc)
-        logger.info(f"Wrote YAML to {args.output}")
+    if output:
+        Path(output).write_text(yaml_doc)
+        logger.info(f"Wrote YAML to {output}")
     else:
         sys.stdout.write(yaml_doc)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="StreamStudio (ComfyUI with Taidal nodes).")
-    parser.add_argument(
-        "--comfy-dir",
-        type=Path,
-        default=Path.home() / ".streamstudio" / "ComfyUI",
-        help="Path to ComfyUI installation. Will be cloned if it doesn't exist.",
-    )
-    parser.add_argument(
-        "--default-nodes",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help=(
-            "Show ComfyUI's built-in nodes alongside the Taidal nodes (default). "
-            "Use --no-default-nodes to hide them (keeping other custom nodes + the keep-list), "
-            "surfaced at the palette root rather than under a Taidal/ folder."
-        ),
-    )
-    parser.add_argument(
-        "--only-taidal-nodes",
-        action="store_true",
-        help=(
-            "Show ONLY Taidal/StreamStudio nodes — hide ComfyUI's built-ins AND every other "
-            "third-party custom-node pack. Implies --no-default-nodes. Extra nodes to keep are listed "
-            "in the config file's keep_nodes (PreviewImage and PreviewAny are always kept)."
-        ),
-    )
-    parser.add_argument(
-        "--config",
-        type=Path,
-        default=None,
-        metavar="FILE",
-        help=(
-            "Palette config file (YAML). Its 'keep_nodes:' list names extra default/custom nodes to "
-            "KEEP when hiding the palette (PreviewImage / PreviewAny are always kept). "
-            "Defaults to ~/.streamstudio/config.yaml when omitted."
-        ),
-    )
-    parser.add_argument(
-        "--install",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help=(
-            "Sync ComfyUI's requirements.txt into this environment on every launch (default; a "
-            "no-op when satisfied). --no-install skips it — for an air-gapped run, or when the "
-            "environment is managed elsewhere."
-        ),
-    )
-    parser.add_argument(
-        "--manager",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help=(
-            "Install the ComfyUI-Manager custom node on launch (default), giving the GUI an "
-            "in-app store to install/update/remove further custom nodes. --no-manager skips it."
-        ),
-    )
-    parser.add_argument(
-        "--declared-nodes",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help=(
-            "Install the custom nodes installed packages declare via the streamstudio.custom_nodes "
-            "entry-point group (default; includes streamstudio's own bundled ComfyUI-Manager). "
-            "--no-declared-nodes skips the whole tier — --custom-node / STREAMSTUDIO_CUSTOM_NODES "
-            "still install."
-        ),
-    )
-    parser.add_argument(
-        "--custom-node",
-        action="append",
-        default=None,
-        metavar="GIT_URL",
-        help=(
-            "Git URL of an extra ComfyUI custom node to clone into custom_nodes/ on launch "
-            "(repeatable). The STREAMSTUDIO_CUSTOM_NODES env var (comma-separated URLs) adds more. "
-            "Already-installed nodes are skipped — update or remove them via ComfyUI-Manager."
-        ),
-    )
-    sub = parser.add_subparsers(dest="command")
-    sub.add_parser("run", help="Launch ComfyUI with Taidal nodes (default).")
-
-    export_parser = sub.add_parser(
-        "export",
-        help=(
-            "Compile a saved graph (API form or native workflow.json, auto-detected) to Confluid "
-            "`flow:` document(s) — one per independent component."
-        ),
-    )
-    export_parser.add_argument(
-        "graph",
-        type=Path,
-        help="ComfyUI graph JSON — API form OR a native workflow.json save (auto-detected by shape).",
-    )
-    export_parser.add_argument(
-        "-o",
-        "--output",
-        type=Path,
-        default=None,
-        help=(
-            "Write the YAML here (default: stdout). With several disconnected op components, one "
-            "file per component is written (flow.yaml -> flow_1.yaml ... flow_N.yaml)."
-        ),
-    )
-    export_parser.add_argument(
-        "--target",
-        action="append",
-        metavar="NODE_ID",
-        default=None,
-        help=(
-            "Export ONLY the ops that compute this node (its data ancestor cone; the node is the "
-            "final op) — the CLI twin of the canvas export-target mark; repeatable (one document "
-            "per target)."
-        ),
-    )
-    export_parser.add_argument(
-        "--skip",
-        action="append",
-        metavar="NODE_ID",
-        default=None,
-        help=(
-            "Exclude this node (and everything data-downstream of it) from the export — the CLI "
-            "twin of the canvas export-skip mark (right-click > 'Taidal: exclude from export'); "
-            "repeatable. A subgraph-instance id excludes the whole inlined instance."
-        ),
-    )
-
-    import_parser = sub.add_parser(
-        "import",
-        help=(
-            "Convert a Confluid YAML config into a ComfyUI workflow.json. Auto-detects an ops-export "
-            "document ({...,ops:[...]}) and rebuilds the connected op graph (auto-stash removed, taps coloured)."
-        ),
-    )
-    import_parser.add_argument(
-        "config", type=Path, help="Confluid YAML config (whole-graph OR flow-export doc) to import."
-    )
-    import_parser.add_argument(
-        "-o", "--output", type=Path, default=None, help="Write the workflow JSON here (default: stdout)."
-    )
-    import_parser.add_argument(
-        "--as",
-        dest="as_",
-        choices=["graph", "group", "subgraph"],
-        default="graph",
-        help="graph (default) lays nodes out; group wraps them in a box; subgraph packages a reusable blueprint.",
-    )
-    import_parser.add_argument(
-        "--instantiate",
-        action="store_true",
-        help="Walk live-but-inert objects (materialize, solidify suppressed) instead of un-built markers.",
-    )
-
-    expw_parser = sub.add_parser(
-        "export-workflow", help="Convert a whole ComfyUI workflow.json (UI or API form) into a hoisted-!ref: YAML."
-    )
-    expw_parser.add_argument("workflow", type=Path, help="ComfyUI workflow JSON (UI or API form).")
-    expw_parser.add_argument("-o", "--output", type=Path, default=None, help="Write the YAML here (default: stdout).")
-
-    # Shell completion. StreamStudio is an argparse app, so it gets NEITHER liquifai's
-    # completion (that walks the `liquifai.apps` entry-point group — see aisland/setup.sh)
-    # NOR click's built-in `_PROG_COMPLETE` protocol; argcomplete is the argparse
-    # equivalent. It must run AFTER the parser is fully built (it introspects it) and
-    # BEFORE parse_args. The import is guarded so a venv without argcomplete still runs
-    # the CLI normally — completion is a convenience, never a hard requirement.
-    try:
-        import argcomplete
-    except ImportError:
-        pass
-    else:
-        argcomplete.autocomplete(parser)
-
-    args = parser.parse_args()
-
-    if args.command == "export":
-        _export(args)
-    elif args.command == "import":
-        _import(args)
-    elif args.command == "export-workflow":
-        _export_workflow(args)
-    else:  # None (bare `streamstudio`) or explicit `run`
-        _run(args)
+    """Console-script entry point (``[project.scripts] streamstudio``)."""
+    app.run()
 
 
 if __name__ == "__main__":

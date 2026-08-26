@@ -801,7 +801,10 @@ def flow_yaml_to_workflow(
     _complete_widget_input_slots(workflow, node_mappings)
     if as_ == "group":
         return _wrap_in_group(workflow, name)
-    # "subgraph" degrades to "graph" — a flow-doc has no natural !ref-boundary inputs to promote.
+    if as_ == "subgraph" and op_node_ids:
+        # The flow document DECLARES its own boundary (head step's unfed record / ``outputs:`` step),
+        # so the !ref: convention _wrap_in_subgraph infers from is not needed here.
+        return _wrap_flow_in_subgraph(workflow, op_node_ids[0], op_node_ids[-1], name, node_mappings)
     return workflow
 
 
@@ -923,17 +926,7 @@ def _wrap_in_subgraph(
             link_ids.append(next_link)
             if node_id in nodes_by_id and idx < len(nodes_by_id[node_id]["inputs"]):
                 nodes_by_id[node_id]["inputs"][idx]["link"] = next_link
-        input_defs.append(
-            {
-                "id": _sg_uuid(name, "in", ref_name),
-                "name": ref_name,
-                "type": stype,
-                "linkIds": link_ids,
-                "localized_name": ref_name,
-                "label": ref_name,
-                "pos": [0, 50 + slot_i * 40],
-            }
-        )
+        input_defs.append(_boundary_slot(ref_name, stype, slot_i, link_ids, _sg_uuid(name, "in", ref_name)))
 
     # OUTPUT boundary: a pipeline root is a node whose OWN output nothing internal consumes (it is the
     # SOURCE of no internal link) → one output socket each.
@@ -944,18 +937,149 @@ def _wrap_in_subgraph(
         out_type = root["outputs"][0]["type"] if root["outputs"] else "*"
         next_link += 1
         internal_links.append([next_link, root["id"], 0, -20, slot_i, out_type])
+        out_name = root["outputs"][0]["name"] if root["outputs"] else "output"
         output_defs.append(
-            {
-                "id": _sg_uuid(name, "out", str(root["id"])),
-                "name": root["outputs"][0]["name"] if root["outputs"] else "output",
-                "type": out_type,
-                "linkIds": [next_link],
-                "localized_name": "output",
-                "label": "output",
-                "pos": [0, 50 + slot_i * 40],
-            }
+            _boundary_slot(out_name, out_type, slot_i, [next_link], _sg_uuid(name, "out", str(root["id"])))
         )
 
+    return _subgraph_envelope(
+        name,
+        sg_id,
+        input_defs,
+        output_defs,
+        internal_nodes,
+        internal_links,
+        last_node_id=workflow["last_node_id"],
+        last_link_id=next_link,
+    )
+
+
+def _wrap_flow_in_subgraph(
+    workflow: Dict[str, Any],
+    head_id: int,
+    final_id: int,
+    name: str,
+    node_mappings: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Package an imported flow document as a PIPELINE BLUEPRINT — a subgraph with a DECLARED boundary.
+
+    A flow document already states its boundary, which is why this does not need the ``!ref:``
+    convention :func:`_wrap_in_subgraph` infers from: the head step's ``record`` input is fed by
+    nothing (that is where a source connects) and ``outputs:`` names the step whose record leaves.
+    Both slots are emitted whether or not anything is connected — a boundary that renders only once
+    it is wired cannot be aimed at, the same defect the ``Stream.source`` STRING widget had.
+
+    The instance additionally carries an ``op`` output (``RECORDSTREAM_OP``): an *Extract as Op*
+    terminator is placed on the final step and promoted, so the rectangle drops straight into a
+    ``Stream``'s op slot and the user never has to know that node exists. The terminator compiles its
+    own record-ANCESTOR cone, so taps drawn off the spine inside the blueprint stay out of the
+    resulting ``Pipeline`` — that is what lets one shape be both a pipeline and a viewer.
+    """
+    internal_nodes: List[Dict[str, Any]] = workflow["nodes"]
+    internal_links: List[Any] = list(workflow["links"])
+    next_link: int = workflow["last_link_id"]
+    next_node: int = workflow["last_node_id"]
+    by_id = {n["id"]: n for n in internal_nodes}
+    sg_id = _sg_uuid(name)
+
+    # -- INPUT: the head step's unfed ``record`` socket, wired from the inputNode (-10).
+    input_defs: List[Dict[str, Any]] = []
+    head: Optional[Dict[str, Any]] = by_id.get(head_id)
+    head_slot = (
+        next((i for i, inp in enumerate(head["inputs"]) if inp.get("name") == _RECORD_INPUT), None)
+        if head is not None
+        else None
+    )
+    if head is not None and head_slot is not None:
+        next_link += 1
+        internal_links.append([next_link, -10, 0, head_id, head_slot, RECORD_TYPE])
+        head["inputs"][head_slot]["link"] = next_link
+        input_defs.append(
+            _boundary_slot(_RECORD_INPUT, RECORD_TYPE, 0, [next_link], _sg_uuid(name, "in", _RECORD_INPUT))
+        )
+
+    # -- The terminator: placed on the final step, its ``op`` promoted to the boundary.
+    output_defs: List[Dict[str, Any]] = []
+    final = by_id.get(final_id)
+    if final is not None:
+        next_link += 1  # final step's record -> outputNode slot 0
+        internal_links.append([next_link, final_id, 0, -20, 0, RECORD_TYPE])
+        final["outputs"][0]["links"].append(next_link)
+        output_defs.append(_boundary_slot("record", RECORD_TYPE, 0, [next_link], _sg_uuid(name, "out", "record")))
+
+        terminator_cls = node_mappings.get(_SUBGRAPH_OP_CLASS_TYPE)
+        if terminator_cls is not None:
+            next_node += 1
+            terminator: Dict[str, Any] = {
+                "id": next_node,
+                "type": _SUBGRAPH_OP_CLASS_TYPE,
+                "pos": [final["pos"][0] + _MARGIN_X + _DEFAULT_SIZE[0], final["pos"][1] + _DEFAULT_SIZE[1]],
+                "size": list(_DEFAULT_SIZE),
+                "flags": {},
+                "order": next_node,
+                "mode": 0,
+                "inputs": [{"name": _RECORD_INPUT, "type": RECORD_TYPE, "link": None}],
+                "outputs": _WorkflowBuilder._build_outputs(terminator_cls),
+                "properties": {"Node name for S&R": _SUBGRAPH_OP_CLASS_TYPE},
+                "widgets_values": [],
+            }
+            next_link += 1  # final step's record -> the terminator
+            internal_links.append([next_link, final_id, 0, terminator["id"], 0, RECORD_TYPE])
+            final["outputs"][0]["links"].append(next_link)
+            terminator["inputs"][0]["link"] = next_link
+            next_link += 1  # the terminator's op -> outputNode slot 1
+            internal_links.append([next_link, terminator["id"], 0, -20, 1, OP_TYPE])
+            terminator["outputs"][0]["links"].append(next_link)
+            internal_nodes.append(terminator)
+            output_defs.append(_boundary_slot("op", OP_TYPE, 1, [next_link], _sg_uuid(name, "out", "op")))
+
+    return _subgraph_envelope(
+        name,
+        sg_id,
+        input_defs,
+        output_defs,
+        internal_nodes,
+        internal_links,
+        last_node_id=next_node,
+        last_link_id=next_link,
+    )
+
+
+def _boundary_slot(name: str, socket_type: str, slot_i: int, link_ids: List[int], uid: str) -> Dict[str, Any]:
+    """One declared boundary slot of a subgraph definition (input or output).
+
+    Declared means RENDERED — a slot exists in the definition whether or not the instance has
+    anything wired to it. An unconnected boundary that does not render cannot be aimed at, which is
+    the same defect the ``Stream.source`` STRING widget had.
+    """
+    return {
+        "id": uid,
+        "name": name,
+        "type": socket_type,
+        "linkIds": list(link_ids),
+        "localized_name": name,
+        "label": name,
+        "pos": [0, 50 + slot_i * 40],
+    }
+
+
+def _subgraph_envelope(
+    name: str,
+    sg_id: str,
+    input_defs: List[Dict[str, Any]],
+    output_defs: List[Dict[str, Any]],
+    internal_nodes: List[Dict[str, Any]],
+    internal_links: List[Any],
+    *,
+    last_node_id: int,
+    last_link_id: int,
+) -> Dict[str, Any]:
+    """The ``definitions.subgraphs[] + one instance node`` workflow both wrap modes return.
+
+    Shared by :func:`_wrap_in_subgraph` (boundary INFERRED from unresolved ``!ref:`` + pipeline roots)
+    and :func:`_wrap_flow_in_subgraph` (boundary DECLARED by the flow document's own structure), so
+    the envelope shape is written once.
+    """
     subgraph_def = {
         "id": sg_id,
         "version": 1,
@@ -970,8 +1094,8 @@ def _wrap_in_subgraph(
         "groups": [],
         "extra": {},
         "state": {
-            "lastNodeId": workflow["last_node_id"],
-            "lastLinkId": next_link,
+            "lastNodeId": last_node_id,
+            "lastLinkId": last_link_id,
             "lastGroupId": 0,
             "lastRerouteId": 0,
         },

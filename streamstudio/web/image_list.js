@@ -1,6 +1,6 @@
 import { app } from "../../scripts/app.js";
 
-console.log("ComfyStream: Loaded Taidal.ImageListInputs extension");
+console.log("StreamStudio: Loaded Taidal.ImageListInputs extension");
 
 // Dynamic image-list inputs for the Image Grid node — tagged by a seed `image_0` optional input
 // of type IMAGE. Wire any IMAGE output into `image_0`; a fresh `image_1` slot appears, and so on.

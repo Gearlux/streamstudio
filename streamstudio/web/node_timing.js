@@ -7,7 +7,7 @@ import { app } from "../../scripts/app.js";
 // For RUNNABLE nodes the timing is appended to their training-log text and shown in the existing
 // run_output.js text area; skip them here to avoid double-handling.
 
-console.log("ComfyStream: Loaded Taidal.NodeTiming extension");
+console.log("StreamStudio: Loaded Taidal.NodeTiming extension");
 
 function isTaidalNode(nodeData) {
     return !!(nodeData?.category?.startsWith?.("Taidal") || nodeData?.category?.startsWith?.("RecordStream"));

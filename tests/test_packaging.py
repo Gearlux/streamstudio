@@ -273,3 +273,60 @@ def test_no_vendor_traces_in_the_repository() -> None:
             if tokens.search(line):
                 offenders.append(f"{name}:{lineno}: {line.strip()[:80]}")
     assert not offenders, "vendor tokens found:\n" + "\n".join(offenders)
+
+
+def test_the_readme_does_not_advertise_an_unresolvable_extra() -> None:
+    """An extra may exist; an install command a reader can copy must actually work.
+
+    The domain extra names a distribution that is on no index, so
+    ``pip install --pre "streamstudio[waivefront]"`` — which the README used to print as a
+    fenced, copyable command — resolves to *"your requirements are unsatisfiable"* and
+    installs NOTHING, streamstudio included. The extra is kept: it is the honest declaration
+    of an optional dependency, it costs nothing where the package is already present, and an
+    undeclared extra is silently ignored by installers anyway.
+
+    What is NOT kept is the instruction. Documenting a command that cannot succeed is worse
+    than documenting no command, because the reader blames their environment. The README
+    tells them to install the domain package by whatever means they have; the palette is
+    built from what the environment holds, so that is the whole truth.
+
+    Scoped to install commands in fenced blocks, so prose may still name the extra.
+    """
+    extras = set(_project().get("optional-dependencies", {}))
+    readme = _README.read_text()
+
+    advertised = [
+        line.strip()
+        for line in readme.splitlines()
+        if "pip install" in line
+        for extra in extras
+        if f"[{extra}]" in line and extra != "dev"
+    ]
+
+    assert not advertised, f"README shows an install command for an unresolvable extra: {advertised}"
+
+
+def test_no_superseded_project_name_in_shipped_code() -> None:
+    """The package speaks its own name — not the two it used to have.
+
+    ``fluxstudio`` -> ``streamstudio`` renamed the distribution, the import, the repo, the
+    console script, the env vars and the socket vocabulary. An older name still survived
+    underneath both: every scan line and all 27 frontend extensions announced themselves
+    as ``ComfyStream``, so a first ``import streamstudio`` printed 24 lines branded with a
+    name that appears nowhere in the docs, and every ComfyUI session logged it to the
+    browser console.
+
+    Scoped to the shipped package because that is what a user can see. Per the pre-1.0
+    rule the old spellings are simply gone — there is no alias to keep working.
+    """
+    superseded = re.compile("|".join(("Comfy" "Stream", "flux" "studio", "Flux" "studio")), re.IGNORECASE)
+
+    offenders = [
+        f"{path.relative_to(_REPO)}:{lineno}: {line.strip()[:80]}"
+        for path in sorted(_PACKAGE.rglob("*"))
+        if path.is_file() and path.suffix in {".py", ".js", ".yaml"}
+        for lineno, line in enumerate(path.read_text(errors="replace").splitlines(), start=1)
+        if superseded.search(line)
+    ]
+
+    assert not offenders, "superseded project names in shipped code:\n" + "\n".join(offenders)

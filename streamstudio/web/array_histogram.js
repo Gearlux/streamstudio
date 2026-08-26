@@ -1,6 +1,6 @@
 import { app } from "../../scripts/app.js";
 
-console.log("ComfyStream: Loaded Taidal.ArrayHistogram extension");
+console.log("StreamStudio: Loaded Taidal.ArrayHistogram extension");
 
 // Interactive viewer for the values of an array / tensor — the StreamStudio analogue of
 // ComfyUI-Olm-Histogram. The python node (`streamstudio.nodes.ArrayHistogramViewerNode`, class key

@@ -1,7 +1,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-console.log("ComfyStream: Loaded Taidal.HFFeatureChooser extension");
+console.log("StreamStudio: Loaded Taidal.HFFeatureChooser extension");
 
 // Optional column picker for HuggingFace feature-selector inputs (input_feature / target_feature,
 // tagged taidal_widget="HF_FEATURE" by streamstudio/bridge.py). The underlying STRING widget stays

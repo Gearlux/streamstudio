@@ -1,7 +1,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-console.log("ComfyStream: Loaded Taidal.ExportFlow extension");
+console.log("StreamStudio: Loaded Taidal.ExportFlow extension");
 
 // Canvas-side companion to the /taidal/export_flow + /taidal/export_ops_graph backend routes and
 // the `streamstudio export` CLI. Both commands export the current graph's OPS (the op-kind nodes +

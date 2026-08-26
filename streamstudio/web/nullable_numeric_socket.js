@@ -1,6 +1,6 @@
 import { app } from "../../scripts/app.js";
 
-console.log("ComfyStream: Loaded Taidal.NullableNumericSocket extension");
+console.log("StreamStudio: Loaded Taidal.NullableNumericSocket extension");
 
 // Connectable nullable-numeric op params.
 //

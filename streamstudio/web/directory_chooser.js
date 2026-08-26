@@ -1,7 +1,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-console.log("ComfyStream: Loaded Taidal.DirectoryChooser extension");
+console.log("StreamStudio: Loaded Taidal.DirectoryChooser extension");
 
 app.registerExtension({
     name: "Taidal.DirectoryChooser",

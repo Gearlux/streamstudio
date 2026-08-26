@@ -1230,6 +1230,55 @@ class ComposeRecordNode:
         return (result,)
 
 
+class RecordBuilderNode:
+    """Assemble a record from labelled values — the inverse of *Extract from Record*.
+
+    Each input SLOT NAME is a record key, so the wiring on the canvas states the record being
+    built: an ``image`` socket fed by an extract's IMAGE output means the result carries ``image``.
+    **Taidal: compile to Op** creates one socket per promoted subgraph output and names it after
+    that output's label. By hand the node offers the seeded ``entry_0`` only — growing sockets
+    interactively is not wired up yet, so build the rectangle and compile it.
+
+    **Why this node exists at all.** A subgraph's promoted outputs ARE its record contract, but they
+    are typed values (IMAGE / STRING / …), and a ``Stream`` op must hand back a RECORD. Without a
+    visible node to gather them, the only way to express the contract was to drop loose
+    ``RenameField`` / ``SelectFields`` nodes beside the extracts — technically equivalent, and
+    unreadable, because nothing on the canvas connected them to the outputs they described (user
+    instruction 2026-08-26: *"this makes the whole process visible, now it seems a lot of hocus
+    pocus without connections"*). With this node the graph IS the statement:
+    ``Extract → Build Record → Extract as Op → op``, every arrow present.
+
+    The *compiler* — not the canvas — turns that shape into runnable ops: a builder in an *Extract
+    as Op* terminator's cone becomes ``RenameField(field -> label)`` per entry plus a closing
+    ``SelectFields``. See :func:`streamstudio.export.record_builder_ops`.
+
+    Inputs are wildcard-typed (:data:`ANY`) because a record entry may be an image, a mask, a label,
+    a number or a raw array; the record model does not narrow them and neither does this.
+    """
+
+    __confluid_display_name__ = "Build Record"
+    CATEGORY = _STREAMSTUDIO_CATEGORY
+    RETURN_TYPES = (RECORD_TYPE,)
+    RETURN_NAMES = ("record",)
+    FUNCTION = "build"
+
+    @classmethod
+    def INPUT_TYPES(cls) -> Dict[str, Any]:
+        # ``entry_0`` seeds the family; the frontend grows a socket per connection and renames each
+        # to its record key. Everything is optional so an unwired builder is an empty record rather
+        # than a validation error.
+        return {"optional": {"entry_0": (ANY,)}}
+
+    def build(self, **kwargs: Any) -> Tuple[Any, ...]:
+        """The record: every wired slot, keyed by its socket NAME, in wiring order.
+
+        Unwired slots arrive as ``None`` and are skipped — a socket the user added and then cleared
+        must not put a ``None`` entry into the record, which would satisfy a contract falsely.
+        """
+        record = {name: value for name, value in kwargs.items() if value is not None}
+        return (record,)
+
+
 class MixRecordsNode:
     """Build a new record record combining entries from three source records, merging all metadata.
 
@@ -1302,7 +1351,7 @@ def compile_subgraph_ops(prompt: Any, unique_id: Any, node_mappings: Optional[Di
     import confluid
     from recordstream.flow import parse_flow
 
-    from streamstudio.export import export_flow_yamls
+    from streamstudio.export import expand_record_builders, export_flow_yamls
 
     mappings: Dict[str, Any]
     if node_mappings is not None:
@@ -1311,6 +1360,10 @@ def compile_subgraph_ops(prompt: Any, unique_id: Any, node_mappings: Optional[Di
         from streamstudio import NODE_CLASS_MAPPINGS
 
         mappings = NODE_CLASS_MAPPINGS
+    # A *Build Record* fed by *Extract from Record* nodes is how a subgraph states its record
+    # contract on the canvas — every arrow visible. Neither node can run inside a Pipeline, so the
+    # pair is TRANSLATED to RenameField/SelectFields before the cone is walked.
+    prompt = expand_record_builders(prompt, mappings)
     # Target mode: the cone of the terminator is precisely the inner pipeline (the terminator
     # itself is a non-op boundary, so it is never scheduled — only its ancestors compile).
     docs = export_flow_yamls(prompt, mappings, target_ids=[str(unique_id)])
@@ -1981,6 +2034,7 @@ NODE_CLASS_MAPPINGS: Dict[str, Type] = {
     "Taidal_Retag": RetagObjectNode,
     "Taidal_ComposeRecord": ComposeRecordNode,
     "Taidal_MixRecords": MixRecordsNode,
+    "Taidal_RecordBuilder": RecordBuilderNode,
     "Taidal_SubgraphOp": SubgraphOpExtractNode,
     "Taidal_YamlDump": YamlDumpNode,
     "Taidal_Math": MathNode,

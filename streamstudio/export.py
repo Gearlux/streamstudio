@@ -647,6 +647,89 @@ def _expand_skip_ids(skip_ids: Any, prompt: Dict[str, Any]) -> Set[str]:
             return excluded
 
 
+#: The canvas node that gathers labelled values into a record (``streamstudio.nodes.RecordBuilderNode``).
+_RECORD_BUILDER_CLASS_TYPE = "Taidal_RecordBuilder"
+_RENAME_FIELD_CLASS_TYPE = "Taidal_recordstream_op_structure_RenameField"
+_SELECT_FIELDS_CLASS_TYPE = "Taidal_recordstream_op_structure_SelectFields"
+
+
+def expand_record_builders(prompt: Dict[str, Any], node_mappings: Dict[str, Any]) -> Dict[str, Any]:
+    """Rewrite every *Build Record* into the record ops it means, returning a NEW prompt.
+
+    ``Extract → Build Record → Extract as Op`` is how a subgraph states its record contract on the
+    canvas: each builder slot NAME is a record key, and the extract feeding it says, through its
+    ``field`` widget, where the value came from. Neither node can appear in a compiled ``Pipeline``
+    — both are canvas glue with no recordstream counterpart — so the pair is TRANSLATED here:
+
+    * ``field`` → slot name becomes ``RenameField(src=field, dst=name)`` (skipped when they already
+      agree — the entry is under the right key already);
+    * a closing ``SelectFields`` over the slot names, so the record then carries exactly what the
+      boundary promised and nothing else;
+    * the chain is rooted at whatever fed the extracts, so it runs over the incoming record.
+
+    Doing it HERE rather than by placing those nodes on the canvas is the whole point: loose
+    ``RenameField`` nodes beside the extracts were equivalent and unreadable, because nothing
+    connected them to the outputs they described. The canvas keeps the shape the user drew; the
+    compiler is what knows how to run it.
+
+    A builder whose entries are NOT fed by extracts is left untouched — only that shape carries a
+    ``field`` to derive a rename from, and inventing one would be a guess. Callers therefore still
+    see it in the prompt and treat it as they would any other unresolvable node.
+    """
+    builders = {
+        nid: node
+        for nid, node in prompt.items()
+        if isinstance(node, dict) and node.get("class_type") == _RECORD_BUILDER_CLASS_TYPE
+    }
+    if not builders:
+        return prompt
+
+    expanded: Dict[str, Any] = {k: v for k, v in prompt.items()}
+    replacements: Dict[str, List[Any]] = {}  # builder id -> the link that now stands in for it
+    consumed: Set[str] = set()
+
+    for builder_id, builder in builders.items():
+        entries = [
+            (name, link)
+            for name, link in (builder.get("inputs") or {}).items()
+            if _is_link(link) and prompt.get(link[0], {}).get("class_type") == _EXTRACT_CLASS_TYPE
+        ]
+        if not entries or len(entries) != len([1 for v in (builder.get("inputs") or {}).values() if _is_link(v)]):
+            continue  # not the extract shape (or only partly) — leave it for the caller to report
+
+        source = prompt[entries[0][1][0]]["inputs"].get("record")
+        previous: Any = source
+        for index, (name, link) in enumerate(entries):
+            extract = prompt[link[0]]
+            consumed.add(link[0])
+            field = str(extract["inputs"].get("field") or "")
+            if field and field != name:
+                new_id = f"{builder_id}__rename_{index}"
+                expanded[new_id] = {
+                    "class_type": _RENAME_FIELD_CLASS_TYPE,
+                    "inputs": {"record": previous, "src": field, "dst": name},
+                }
+                previous = [new_id, 0]
+        close_id = f"{builder_id}__select"
+        expanded[close_id] = {
+            "class_type": _SELECT_FIELDS_CLASS_TYPE,
+            "inputs": {"record": previous, "keys": ",".join(name for name, _ in entries)},
+        }
+        replacements[builder_id] = [close_id, 0]
+
+    if not replacements:
+        return prompt
+
+    # Re-point every consumer of a translated builder at its closing op, then drop the glue.
+    for node in expanded.values():
+        for key, value in list((node.get("inputs") or {}).items()):
+            if _is_link(value) and value[0] in replacements:
+                node["inputs"][key] = replacements[value[0]]
+    for dead in {*replacements, *consumed}:
+        expanded.pop(dead, None)
+    return expanded
+
+
 def _ancestor_cone(target_id: str, prompt: Dict[str, Any]) -> Set[str]:
     """The export-target's dependency cone: the target + every data ancestor.
 

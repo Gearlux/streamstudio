@@ -1,6 +1,6 @@
 import { app } from "../../scripts/app.js";
 
-console.log("ComfyStream: Loaded Taidal.ExportSkip extension");
+console.log("StreamStudio: Loaded Taidal.ExportSkip extension");
 
 // Export marks, both stored in node.properties.taidal_export (persisted in workflow.json,
 // mutually exclusive per node, toggled from the right-click menu):

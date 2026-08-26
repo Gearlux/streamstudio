@@ -1,7 +1,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-console.log("ComfyStream: Loaded Taidal.ExportWorkflow extension");
+console.log("StreamStudio: Loaded Taidal.ExportWorkflow extension");
 
 // Canvas-side companion to the /taidal/export_workflow backend route + the `streamstudio
 // export-workflow` CLI. Serializes the WHOLE active graph (sources, ops, object members, the

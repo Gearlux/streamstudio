@@ -1,6 +1,6 @@
 import { app } from "../../scripts/app.js";
 
-console.log("ComfyStream: Loaded Taidal.WalkDatasetStep extension");
+console.log("StreamStudio: Loaded Taidal.WalkDatasetStep extension");
 
 // Makes the Walk Dataset node's `step` widget control how much `index` advances after each
 // Queue Prompt, instead of ComfyUI's hard-wired +1.
