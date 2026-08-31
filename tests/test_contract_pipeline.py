@@ -34,6 +34,7 @@ outputs: class
 """
 
 DETECTION = CLASSIFICATION.replace('"class": "Label"', '"class": "Boxes"')
+SEGMENTATION = CLASSIFICATION.replace('"class": "Label"', '"class": "Mask"')
 
 
 def _build(document: str, name: str = "classification source") -> Dict[str, Any]:
@@ -212,8 +213,12 @@ class TestTheParentCanvasIsTheBlueprintAndTheStream:
         assert "Taidal_WalkDataset" not in kinds, "the parent canvas places no walker"
 
     def test_a_contract_asking_nothing_extra_is_just_the_blueprint_and_the_stream(self) -> None:
-        """The CON case: no class vocabulary to ask for, so no third node appears."""
-        assert len(_build(DETECTION)["nodes"]) == 2
+        """The CON case: no class vocabulary to ask for, so no third node appears.
+
+        Segmentation is now the con case — ``Boxes`` grew ``classes`` (its labels ARE
+        classes; user instruction 2026-08-31), so detection ASKS like classification does;
+        a ``Mask`` still carries no vocabulary field."""
+        assert len(_build(SEGMENTATION)["nodes"]) == 2
 
     def test_the_only_wire_is_the_op_into_the_stream(self) -> None:
         workflow = _build(CLASSIFICATION)
@@ -332,8 +337,12 @@ class TestTheClassVocabularyIsAskedForOnTheCanvas:
         assert _declaration(_build(CLASSIFICATION)) is not None
 
     def test_a_contract_with_no_vocabulary_does_not_place_it(self) -> None:
-        """The CON case: ``Boxes`` has ``labels`` but no ``classes`` field, so it is not asked."""
-        assert _declaration(_build(DETECTION)) is None
+        """The CON case: a ``Mask`` has no ``classes`` field, so it is not asked. (``Boxes``
+        DOES now — its labels are classes — so detection gets the declaration node.)"""
+        assert _declaration(_build(SEGMENTATION)) is None
+
+    def test_a_boxes_contract_IS_asked_for_its_vocabulary(self) -> None:
+        assert _declaration(_build(DETECTION)) is not None
 
     def test_it_arrives_EMPTY_never_guessed(self) -> None:
         assert _declaration(_build(CLASSIFICATION))["widgets_values"] == [""]

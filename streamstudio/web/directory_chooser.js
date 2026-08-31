@@ -3,30 +3,39 @@ import { api } from "../../scripts/api.js";
 
 console.log("StreamStudio: Loaded Taidal.DirectoryChooser extension");
 
+// One browse affordance per picker KIND: a DIRECTORY-tagged param opens the folder dialog, a
+// FILE-tagged one (checkpoint_path and friends) opens the file dialog — a folder dialog cannot
+// select a file (user report 2026-08-31).
+const PICKERS = {
+    DIRECTORY: { icon: "\u{1F4C2}", route: "/taidal/choose_directory", label: "directory" },
+    FILE: { icon: "\u{1F4C4}", route: "/taidal/choose_file", label: "file" },
+};
+
 app.registerExtension({
     name: "Taidal.DirectoryChooser",
     async beforeRegisterNodeDef(nodeType, nodeData, app) {
         const inputs = nodeData.input?.required || {};
-        let dirFields = [];
-        
+        let pickerFields = [];
+
         for (const [name, config] of Object.entries(inputs)) {
-            if (config[1] && config[1].taidal_widget === "DIRECTORY") {
-                dirFields.push(name);
+            const kind = config[1] && PICKERS[config[1].taidal_widget];
+            if (kind) {
+                pickerFields.push([name, kind]);
             }
         }
 
-        if (dirFields.length > 0) {
+        if (pickerFields.length > 0) {
             const onNodeCreated = nodeType.prototype.onNodeCreated;
-            
+
             nodeType.prototype.onNodeCreated = function() {
                 if (onNodeCreated) {
                     onNodeCreated.apply(this, arguments);
                 }
 
-                // Add a browse button for each directory field
-                for (const name of dirFields) {
-                    this.addWidget("button", "📂 Browse " + name, "browse", () => {
-                        api.fetchApi('/taidal/choose_directory', { method: 'POST' })
+                // Add a browse button for each picker field
+                for (const [name, kind] of pickerFields) {
+                    this.addWidget("button", kind.icon + " Browse " + name, "browse", () => {
+                        api.fetchApi(kind.route, { method: 'POST' })
                             .then(res => res.json())
                             .then(data => {
                                 if (data.path) {
@@ -39,13 +48,13 @@ app.registerExtension({
                                         alert("Could not find the text widget to update.");
                                     }
                                 } else if (data.error) {
-                                    alert("Failed to choose directory: " + data.error);
+                                    alert("Failed to choose " + kind.label + ": " + data.error);
                                 }
                             })
                             .catch(err => alert("API Error: " + err));
                     });
                 }
-                
+
                 // Force a resize so the new buttons fit
                 if (this.onResize) {
                     this.onResize(this.size);
@@ -54,4 +63,3 @@ app.registerExtension({
         }
     }
 });
-

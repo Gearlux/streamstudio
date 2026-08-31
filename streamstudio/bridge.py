@@ -1012,9 +1012,19 @@ def _map_type(param_name: str, annotation: Any) -> str:
     # HuggingFace dataset → the HF_DATASET wire.
     if _type_mentions(annotation, datasets.Dataset):
         return "HF_DATASET"
-    # A path: the annotation IS pathlib.Path, OR the param NAME signals a path/dir → directory picker.
-    if _type_mentions(annotation, Path) or any(seg in param_name.lower() for seg in _PATH_NAME_SEGMENTS):
-        return "PATH"
+    # A path affordance: the annotation IS pathlib.Path, OR the NAME signals a path/dir/file.
+    # Directory signals WIN over file signals — ``checkpoint_dir`` (a directory OF checkpoints)
+    # carries both — and a bare ``path`` stays the folder picker (it may be a dataset id or a
+    # local directory, e.g. a hub source's ``path``). ``checkpoint_path`` names a FILE.
+    # The name rules SKIP a non-string scalar: a picker is a STRING affordance, and a bool/int
+    # whose name happens to carry a segment (``checkpoint_strict``) must keep its scalar widget
+    # (measured 2026-08-31: a browse button landed on a BOOLEAN).
+    lowered = param_name.lower()
+    if not _is_nonstring_scalar(annotation):
+        if any(seg in lowered for seg in _FILE_NAME_SEGMENTS) and not any(seg in lowered for seg in _DIR_NAME_SEGMENTS):
+            return "FILEPATH"
+        if _type_mentions(annotation, Path) or any(seg in lowered for seg in _PATH_NAME_SEGMENTS):
+            return "PATH"
 
     # A (min, max) numeric RANGE tuple (2-element OR variadic numeric tuple) → the __lo/__hi pair.
     range_type = _range_tuple_type(annotation)
@@ -1045,7 +1055,19 @@ def _map_type(param_name: str, annotation: Any) -> str:
 # The param-NAME segments that signal a directory/file path → a directory-picker widget
 # (``web/directory_chooser.js``). This is a deliberate UX affordance keyed on the NAME, NOT a type
 # inference (a ``str`` named ``output_dir`` SHOULD get the picker), so it stays name-based by design.
+def _is_nonstring_scalar(annotation: Any) -> bool:
+    """True for a bool/int/float-armed annotation with NO str arm — the shapes a picker cannot fill."""
+    try:
+        arms = [_strip_annotated(a) for a in _flatten_union(_resolve_annotation(annotation))]
+    except Exception:  # pragma: no cover - defensive: an unresolvable annotation stays eligible
+        return False
+    concrete = [a for a in arms if isinstance(a, type)]
+    return any(a in (bool, int, float) for a in concrete) and not any(a is str for a in concrete)
+
+
 _PATH_NAME_SEGMENTS = ("path", "dir", "root", "folder")
+_DIR_NAME_SEGMENTS = ("dir", "root", "folder")  # unambiguous directory signals — they beat file signals
+_FILE_NAME_SEGMENTS = ("file", "checkpoint", "ckpt")  # a single file -> file picker, not folder
 
 
 def _widget_for(param: inspect.Parameter, owner: Optional[Callable] = None) -> Tuple[Any, Dict[str, Any]]:
@@ -1122,6 +1144,9 @@ def _widget_for(param: inspect.Parameter, owner: Optional[Callable] = None) -> T
     if comfy_type == "PATH":
         default = param.default if has_default and isinstance(param.default, str) else ""
         return "STRING", {"default": default, "taidal_widget": "DIRECTORY"}
+    if comfy_type == "FILEPATH":
+        default = param.default if has_default and isinstance(param.default, str) else ""
+        return "STRING", {"default": default, "taidal_widget": "FILE"}
 
     # Nullable numeric (e.g. ``Optional[int] = None``, ``Optional[float] = None`` like
     # ``NoiseFloorOp.noise_power_db`` / ``HuggingFaceSource.count``):
@@ -2603,10 +2628,10 @@ def _output_socket_type(prop_name: str, anno: Any, owner: Any = None) -> str:
         return SOURCE_TYPE
     if _is_scalar_anno(anno):
         socket = _map_type(prop_name, anno)
-        # An OUTPUT is never a directory picker: a path-named scalar output (e.g. a value
+        # An OUTPUT is never a picker of either kind: a path-named scalar output (e.g. a value
         # producer's ``directory``) rides a plain ``STRING`` socket so it wires into a reader's
-        # path/directory widget (which is itself STRING-backed, converted to a STRING input).
-        return "STRING" if socket == "PATH" else socket
+        # path/directory/file widget (which is itself STRING-backed, converted to a STRING input).
+        return "STRING" if socket in ("PATH", "FILEPATH") else socket
     if get_origin(anno) in (dict, list, set, tuple):
         return "STRING"  # container -> JSON STRING socket (wire into a native Show Text node)
     role = _infer_member_role(prop_name)
