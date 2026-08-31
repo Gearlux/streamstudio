@@ -121,12 +121,26 @@ app.registerExtension({
                 };
             }
 
+            // A LOADED graph fills widget values in configure(), AFTER onNodeCreated -- and it
+            // assigns widget.value directly, firing no callback. Stash the refresh so onConfigure
+            // can re-run it; otherwise the picker keeps the empty-dataset list it built here, and
+            // only a hand-picked dataset (which DOES fire the callback above) ever populates it.
+            node._taidalRefreshFeatures = refreshFeatures;
+
             refreshFeatures(); // warm the list for the initial dataset (if any)
 
             // Force a resize so the new combos fit.
             if (node.onResize) {
                 node.onResize(node.size);
             }
+        };
+
+        // Re-read the dataset id after a saved graph restores its widget values.
+        const onConfigure = nodeType.prototype.onConfigure;
+        nodeType.prototype.onConfigure = function () {
+            const result = onConfigure ? onConfigure.apply(this, arguments) : undefined;
+            if (this._taidalRefreshFeatures) this._taidalRefreshFeatures();
+            return result;
         };
     },
 });

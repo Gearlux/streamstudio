@@ -96,6 +96,101 @@ ARRAY_TYPE = "RECORDSTREAM_ARRAY"
 # the hand-written **Value** node (``nodes.py``), which parses a Python/JSON literal into the value.
 VALUE_TYPE = "RECORDSTREAM_VALUE"
 
+# One socket type per REGISTERED item type (``Image``, ``Label``, ``Boxes``, …), so a record
+# entry can travel as a wire that CARRIES ITS TYPE. ComfyUI connects on socket-type equality,
+# which is what turns a drawn graph into a stated contract: an ``Image`` output only docks into
+# something declared to take an Image, and a subgraph boundary fed by one inherits that type.
+#
+# Distinct from ``IMAGE``/``MASK`` (ComfyUI natives, normalized and colormapped for viewers):
+# these carry the item VERBATIM, which is what a boundary must pass on. Derived from the
+# registry rather than listed here, so a domain package registering its own item type gets a
+# socket — and the node family built on it — without editing streamstudio.
+
+
+#: Item types ComfyUI already has a socket for. An ``Image`` entry rides the native ``IMAGE``
+#: wire rather than a parallel ``RECORDSTREAM_ITEM_IMAGE`` one: two sockets carrying the same
+#: entry is one socket too many, and the native one is what every ComfyUI viewer accepts.
+NATIVE_ITEM_SOCKETS = {"Image": "IMAGE", "Mask": "MASK"}
+
+#: The package whose item types are the BASE vocabulary. Everything else is a domain's own and
+#: gets its own extract node — mixing a signal package's entries into the base one puts eleven
+#: outputs on a node that needs four.
+_BASE_ITEM_MODULE = "recordstream"
+
+
+def item_socket_type(name: str) -> str:
+    """The socket type carrying the registered item type ``name``.
+
+    ``Image`` → ``IMAGE`` and ``Mask`` → ``MASK`` (the natives); anything else gets its own
+    ``RECORDSTREAM_ITEM_<NAME>``.
+    """
+    return NATIVE_ITEM_SOCKETS.get(name, f"RECORDSTREAM_ITEM_{name.upper()}")
+
+
+def item_socket_types(package: Optional[str] = None) -> "Dict[str, str]":
+    """``{item type name: socket type}`` for the registered item types, in registry order.
+
+    ``package`` selects by the module the type is DEFINED in: ``"recordstream"`` for the base
+    vocabulary, a domain's own top-level package for its additions, ``None`` for all of them.
+    """
+    from recordstream.items import get_item_type, item_type_names
+
+    out: Dict[str, str] = {}
+    for name in item_type_names():
+        if package is not None:
+            try:
+                owner = get_item_type(name).__module__.split(".")[0]
+            except KeyError:  # pragma: no cover - the registry changed under us
+                continue
+            if owner != package:
+                continue
+        out[name] = item_socket_type(name)
+    return out
+
+
+def extract_source_for(item_name: str) -> "Tuple[str, str]":
+    """``(extract node key, output name)`` producing the registered item type ``item_name``.
+
+    The base extract carries the record engine's own types; a domain package's types live on
+    its own node. Item ``Image``/``Mask`` leave on the NATIVE ``image``/``mask`` outputs — there
+    is no second socket for them.
+    """
+    from recordstream.items import get_item_type
+
+    if item_name in NATIVE_ITEM_SOCKETS:
+        return "Taidal_ExtractRecord", item_name.lower()
+    owner = get_item_type(item_name).__module__.split(".")[0]
+    if owner == _BASE_ITEM_MODULE:
+        return "Taidal_ExtractRecord", item_name.lower()
+    return f"Taidal_ExtractRecord_{owner}", item_name.lower()
+
+
+def item_packages() -> "List[str]":
+    """Every package registering item types, base first — one extract node is built per entry."""
+    from recordstream.items import get_item_type, item_type_names
+
+    seen: List[str] = []
+    for name in item_type_names():
+        try:
+            owner = get_item_type(name).__module__.split(".")[0]
+        except KeyError:  # pragma: no cover
+            continue
+        if owner not in seen:
+            seen.append(owner)
+    return sorted(seen, key=lambda pkg: (pkg != _BASE_ITEM_MODULE, pkg))
+
+
+def base_item_sockets() -> "Dict[str, str]":
+    """The base item types that need a socket of their OWN — the natives already have one.
+
+    ``Image``/``Mask`` are omitted: *Extract from Record* already emits them as ``IMAGE`` /
+    ``MASK``, and adding ``item_image`` beside ``image`` was a second output for the same entry.
+    """
+    return {
+        name: socket for name, socket in item_socket_types(_BASE_ITEM_MODULE).items() if name not in NATIVE_ITEM_SOCKETS
+    }
+
+
 # Mapping Python types to ComfyUI widget types.
 TYPE_MAP = {
     int: "INT",
@@ -2048,15 +2143,30 @@ def _build_source_node(cls: Callable, name: str, category: str) -> Type:
             kwargs[op_list_param] = ops
         obj = cls(**_coerce_kwargs(cls, kwargs))
         stream = obj if isinstance(obj, Stream) else Stream.from_source(obj)
-        return (stream,)
+        extras: List[Any] = []
+        for spec, socket in zip(out_specs, extra_sockets):
+            try:
+                value = getattr(obj, spec["name"])
+            except Exception as exc:
+                logger.debug("{}: output {!r} unavailable ({}); emitting None.", name, spec["name"], exc)
+                value = None
+            extras.append(_coerce_output_value(value, socket))
+        return (stream, *extras)
+
+    # Declared @outputs ride ALONGSIDE the source socket — a source that knows something about
+    # its dataset (a HuggingFace ClassLabel's class names) can SAY so on the canvas instead of
+    # the fact being invisible. Appended after ``source`` so a saved canvas, which addresses
+    # outputs positionally, keeps pointing at the same slot.
+    out_specs = list(output_specs(cast(type, cls))) if inspect.isclass(cls) else []
+    extra_sockets = [_output_socket_type(s["name"], _output_return_anno(cls, s["name"]), cls) for s in out_specs]
 
     return _node_class(
         name,
         category,
         required,
-        (SOURCE_TYPE,),
+        (SOURCE_TYPE, *extra_sockets),
         execute,
-        return_names=("source",),
+        return_names=("source", *(s["name"] for s in out_specs)),
         optional_inputs=optional or None,
         kind="source",
         callable_path=_safe_callable_path(cls),
@@ -2086,11 +2196,21 @@ def _build_op_node(cls: Callable, name: str, category: str) -> Type:
     list_prefixes = sorted(set(op_list_params.values()))
     # Config widgets EXCLUDING the op-typed params (they ride RECORDSTREAM_OP sockets, not widgets).
     cls_marks = marks(cls)
-    _socketed = set(op_list_params) | set(single_op_params)
+    # A bare-`Any` param is another NODE, not a value to type — same rule as value producers
+    # (see _wired_value_params): it rides an optional socket accepting a source or a producer's
+    # object output. Canonical case: PutField.value fed by a RandomNumber, drawn PER record.
+    wired_any_params = [p for p in _wired_value_params(cls) if p not in op_list_params and p not in single_op_params]
+    _socketed = set(op_list_params) | set(single_op_params) | set(wired_any_params)
     required, nullable_opts, _split_map = _build_config_inputs(
         cls, skip=_socketed or None, strict_typing=cls_marks.strict_typing
     )
     optional: Dict[str, Any] = {"record": (RECORD_TYPE,), **nullable_opts}
+    for pname in wired_any_params:
+        # A wired-Any op param NAMED after a strict slot role docks the role's producers: an op's
+        # `model` param must accept a model node's `RECORDSTREAM_OBJECT:model:…` union, which the
+        # generic VALUE_INPUT_TYPE never intersects (comma types connect on set INTERSECTION).
+        role = _STRICT_SLOT_ROLES.get(pname)
+        optional[pname] = (_object_socket(role),) if role else (VALUE_INPUT_TYPE,)
     for prefix in list_prefixes:
         optional[f"{prefix}_0"] = (OP_TYPE,)  # seed; web/op_list.js grows <prefix>_1, _2, … per family
     for pname in single_op_params:
@@ -2111,7 +2231,9 @@ def _build_op_node(cls: Callable, name: str, category: str) -> Type:
             kwargs.update(list_values)
         # Post-construction injection (the confluid paradigm) of each wired single-op RECORDSTREAM_OP value.
         wired_singles = {p: kwargs.pop(p, None) for p in single_op_params}
-        op = cls(**_coerce_kwargs(cls, kwargs))
+        # Wired objects bypass string coercion — they are live values, not widget text.
+        wired_objects = {p: kwargs.pop(p) for p in wired_any_params if kwargs.get(p) is not None}
+        op = cls(**_coerce_kwargs(cls, kwargs), **wired_objects)
         for pname, wired in wired_singles.items():
             if wired is not None:
                 setattr(op, pname, wired)
@@ -2220,6 +2342,42 @@ def _build_model_node(cls: Callable, name: str, category: str) -> Type:
     )
 
 
+#: What a value node's WIRED input accepts: a source (a Stream, a dataset source) or another
+#: producer's object output. A comma union, which both ComfyUI halves read as "compatible when
+#: the two sets intersect" — so either kind docks, and nothing else does.
+VALUE_INPUT_TYPE = f"{SOURCE_TYPE},{OBJECT_TYPE}"
+
+
+def _wired_value_params(cls: Callable) -> List[str]:
+    """Params of a value producer that take a WIRED object rather than a typed value.
+
+    Structural, not a name list: a param annotated as bare ``Any`` (or ``Optional[Any]``) is one
+    whose value cannot be typed into a widget at all — it is another node. Everything with a real
+    annotation (a scalar, a container, a Literal) keeps its widget.
+
+    This is what lets a graph WIRE its class vocabulary instead of pasting it: a source that knows
+    its own classes, or a walker that derives them, connects into the output node that reads them.
+    The consumer holds the whole object and reads what it needs, because a config document cannot
+    carry an attribute reference (``!ref:src.class_names``) — that spelling was removed, and this
+    selector-on-the-consumer shape is its documented replacement.
+    """
+    wired: List[str] = []
+    try:
+        hints = _resolved_param_hints(cls)
+        params = inspect.signature(cls).parameters
+    except (ValueError, TypeError):  # pragma: no cover - defensive: inspect rejects rare builtins
+        return wired
+    for param_name in params:
+        if param_name in ("self", "args", "kwargs"):
+            continue
+        annotation = _strip_annotated(hints.get(param_name, inspect.Signature.empty))
+        for arm in get_args(annotation) or (annotation,):
+            if _strip_annotated(arm) is Any:
+                wired.append(param_name)
+                break
+    return wired
+
+
 def _build_value_node(cls: Callable, name: str, category: str) -> Type:
     """Build a VALUE-producer node: ``(config widgets) -> (@output sockets…)``.
 
@@ -2232,14 +2390,26 @@ def _build_value_node(cls: Callable, name: str, category: str) -> Type:
     per-transform config utilities were removed upstream; see :func:`_value_call_signature`.
     """
     cls_marks = marks(cls)
-    required, nullable_opts, _split_map = _build_config_inputs(cls, strict_typing=cls_marks.strict_typing)
+    wired = _wired_value_params(cls)
+    required, nullable_opts, _split_map = _build_config_inputs(
+        cls, strict_typing=cls_marks.strict_typing, skip=set(wired) or None
+    )
     optional: Dict[str, Any] = dict(nullable_opts)
+    # A wired param is always OPTIONAL: unconnected keeps the constructor default, which is what
+    # makes a template able to PLACE the node before anything feeds it.
+    for param_name in wired:
+        optional[param_name] = (VALUE_INPUT_TYPE,)
 
     out_specs = list(output_specs(cast(type, cls)))
     out_sockets = [_output_socket_type(s["name"], _output_return_anno(cls, s["name"]), cls) for s in out_specs]
+    # ...plus the producer ITSELF, so one value node can be connected into another's wired param
+    # (a walker into the output that reads it). The consumer needs the OBJECT, not the rendered
+    # value: a config document has no attribute references to reach through with.
+    out_sockets.append(OBJECT_TYPE)
 
     def execute(self: Any, **kwargs: Any) -> Tuple[Any, ...]:
-        obj = cls(**_coerce_kwargs(cls, kwargs))
+        wired_values = {k: kwargs.pop(k) for k in list(kwargs) if k in wired}
+        obj = cls(**_coerce_kwargs(cls, kwargs), **wired_values)
         obj()  # run the producer (no-arg; @output values may depend on it — harmless for pure-config ones)
         outs: List[Any] = []
         for spec, socket in zip(out_specs, out_sockets):
@@ -2249,6 +2419,7 @@ def _build_value_node(cls: Callable, name: str, category: str) -> Type:
                 logger.debug("{}: output {!r} unavailable ({}); emitting None.", name, spec["name"], exc)
                 value = None
             outs.append(_coerce_output_value(value, socket))
+        outs.append(obj)
         return tuple(outs)
 
     return _node_class(
@@ -2257,7 +2428,7 @@ def _build_value_node(cls: Callable, name: str, category: str) -> Type:
         required,
         tuple(out_sockets),
         execute,
-        return_names=tuple(s["name"] for s in out_specs),
+        return_names=tuple(s["name"] for s in out_specs) + ("object",),
         optional_inputs=optional or None,
         kind="value",
         callable_path=_safe_callable_path(cls),

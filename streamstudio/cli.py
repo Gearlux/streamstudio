@@ -675,6 +675,39 @@ def export_workflow(workflow: Path, output: Optional[Path] = None) -> None:
         sys.stdout.write(yaml_doc)
 
 
+@app.command(name="convert-server")
+def convert_server() -> None:
+    """Serve workflow→YAML conversions over stdin/stdout — one process, many conversions.
+
+    A one-shot ``export-workflow`` pays the node-registry import (~10 s) EVERY call; a
+    consuming workspace that converts several graphs per user action keeps ONE of these
+    alive instead. Protocol, line-oriented JSON: after the imports finish, one
+    ``{"ready": true}`` line; then per request ``{"json": "<workflow path>", "yaml": "<out
+    path>"}`` → the conversion is written to the out path and answered with
+    ``{"ok": true}`` or ``{"error": "..."}``. EOF on stdin ends the server.
+    """
+    import streamstudio
+    from streamstudio.graphio import workflow_to_yaml
+
+    def answer(payload: dict) -> None:
+        sys.stdout.write(json.dumps(payload) + "\n")
+        sys.stdout.flush()
+
+    answer({"ready": True})
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            request = json.loads(line)
+            graph = json.loads(Path(request["json"]).read_text())
+            yaml_doc = workflow_to_yaml(graph, streamstudio.NODE_CLASS_MAPPINGS)
+            Path(request["yaml"]).write_text(yaml_doc)
+            answer({"ok": True})
+        except Exception as exc:  # noqa: BLE001 - every failure answers the requester, never kills the server
+            answer({"error": f"{type(exc).__name__}: {exc}"})
+
+
 def main() -> None:
     """Console-script entry point (``[project.scripts] streamstudio``)."""
     app.run()

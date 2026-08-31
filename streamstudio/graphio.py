@@ -30,6 +30,7 @@ inlines any saved subgraph back into the flat hoisted YAML.
 from __future__ import annotations
 
 import copy
+import dataclasses
 import math
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union, cast
@@ -38,11 +39,12 @@ from confluid import PartialClass, Reference, Target
 from confluid import dump as _confluid_dump
 from confluid import get_configurable_attrs
 from confluid import load as _confluid_load
-from confluid import marks
+from confluid import marks, output_specs
 from confluid.registry import resolve_class
 from loggair import get_logger
 from recordstream import Pipeline, Stream
 from recordstream.discovery import resolve_callable
+from recordstream.items import get_item_type
 from recordstream.ops.configure import ConfigureOp
 from recordstream.ops.formula import FormulaOp
 
@@ -55,6 +57,8 @@ from streamstudio.bridge import (
     SOURCE_TYPE,
     _coerce_kwargs,
     _op_list_params,
+    extract_source_for,
+    item_socket_types,
 )
 from streamstudio.export import (
     _EXPORT_SKIP_PROPERTY,
@@ -95,6 +99,23 @@ _COL_DX = 340  # horizontal spacing between dependency layers (sources left → 
 _ROW_DY = 200  # vertical spacing between siblings in a layer
 _MARGIN_X = 40
 _MARGIN_Y = 40
+
+#: Canvas-glue node keys the contract template places (see :func:`_contract_pipeline`).
+# A DECLARATION the consuming workspace needs and only the graph author can answer, PLACED
+# unfilled by the contract template. Coloured apart from every working node because it is the
+# one thing on a freshly-seeded canvas that is not yet true -- it must read as an empty field,
+# not as a finished step. The title says so too: colour alone is no affordance for a reader who
+# cannot see it, and a field nobody knows to look for is indistinguishable from a missing one.
+_DECLARE_COLOR = "#653a1c"
+_DECLARE_BGCOLOR = "#47280f"
+_DECLARE_TITLE = "{name} — graph OUTPUT, fill this in"
+
+#: recordstream's dataset-level class-vocabulary declaration.
+_CLASS_NAMES_OUTPUT_CLASS_TYPE = "Taidal_recordstream_value_contract_ClassNamesOutput"
+
+_EXTRACT_CLASS_TYPE = "Taidal_ExtractRecord"
+_RECORD_BUILDER_CLASS_TYPE = "Taidal_RecordBuilder"
+_STREAM_CLASS_TYPE = "Taidal_recordstream_engine_Stream"
 _DEFAULT_SIZE = [280, 130]
 
 # Scalar dimension fields hoisted to top-level YAML vars + referenced via !ref: on export,
@@ -744,7 +765,9 @@ def flow_yaml_to_workflow(
         doc: A flow-doc as a YAML path / string, or an already-parsed raw-marker dict.
         node_mappings: StreamStudio's ``NODE_CLASS_MAPPINGS``.
         as_: ``"graph"`` (default) lays the nodes out; ``"group"`` additionally wraps them in one
-            visual box. ``"subgraph"`` has no natural flow-doc boundary and degrades to ``"graph"``.
+            visual box. ``"subgraph"`` wraps them with a declared boundary. ``"pipeline"`` reads the
+            document's ``RecordContract`` steps as a contract and builds the typed boundary they
+            describe, beside a pre-wired ``Stream`` (see :func:`_contract_pipeline`).
         name: Title for the group box.
 
     Returns:
@@ -756,6 +779,19 @@ def flow_yaml_to_workflow(
             "flow_yaml_to_workflow expects a flow-export document (a top-level 'flow:' step mapping)."
         )
     raw = _flow_document_to_replay(cast(Dict[str, Any], raw))
+
+    # PIPELINE packaging reads the contract ops as the DECLARATION they are and builds the typed
+    # boundary they describe — the contract ops themselves are never drawn. It replaces the replay
+    # entirely, so it dispatches before any node is emitted.
+    if as_ == "pipeline":
+        contract = _contract_of(raw)
+        if not contract:
+            raise UnsupportedTopologyError(
+                "pipeline packaging needs a contract to build from: the document declares no "
+                "RecordContract entries (a 'flow:' whose steps are RecordContract ops)"
+            )
+        return _contract_pipeline(contract, name, node_mappings)
+
     builder = _WorkflowBuilder(node_mappings)
 
     # 1. Hoisted constants → value nodes (document key -> node id), for dotted-!ref wiring below.
@@ -806,6 +842,46 @@ def flow_yaml_to_workflow(
         # so the !ref: convention _wrap_in_subgraph infers from is not needed here.
         return _wrap_flow_in_subgraph(workflow, op_node_ids[0], op_node_ids[-1], name, node_mappings)
     return workflow
+
+
+def _declared_output_names(src_cls: Any) -> "Set[str]":
+    """The ``@output`` property names a node's class declares — the ones that are ATTRIBUTES.
+
+    Everything else a node emits is a STRUCTURAL socket standing for the node itself (a source's
+    ``source``, an op's ``op``, a value producer's ``object``) or for data flow (``record``), and
+    those are what a ``!ref:`` can name. Asking the class is what makes the distinction exact:
+    a slot index cannot tell them apart, and a name list would go stale the next time a builder
+    grows a socket.
+    """
+    path = getattr(src_cls, "TAIDAL_CALLABLE_PATH", None)
+    if not path:
+        return set()
+    try:
+        return {str(spec["name"]) for spec in output_specs(cast(type, resolve_callable(str(path))))}
+    except Exception:  # pragma: no cover - a class we cannot resolve declares nothing we can fold
+        return set()
+
+
+def _contract_of(replay: Dict[str, Any]) -> "Dict[str, str]":
+    """``{record entry: item type}`` declared by the ``RecordContract`` steps of a flow document.
+
+    In pipeline packaging a contract op is a DECLARATION, not a node: it says what the record must
+    carry, and the builder turns that into the typed boundary it was describing. Steps are read in
+    document order and merged, so a chain of one-entry contracts (the readable way to write it —
+    one node per requirement) states the same thing as a single multi-entry one.
+    """
+    contract: Dict[str, str] = {}
+    for marker in replay.get("__steps__", []):
+        parsed = _target_and_kwargs(marker)
+        if parsed is None:
+            continue
+        cls, _lazy, kwargs = parsed
+        if getattr(cls, "__name__", "") != "RecordContract":
+            continue
+        fields = kwargs.get("fields")
+        if isinstance(fields, dict):
+            contract.update({str(k): str(v) for k, v in fields.items()})
+    return contract
 
 
 def _wire_constant_refs(builder: "_WorkflowBuilder", const_nodes: Dict[str, int]) -> None:
@@ -1045,6 +1121,266 @@ def _wrap_flow_in_subgraph(
     )
 
 
+def _contract_pipeline(
+    contract: "Dict[str, str]",
+    name: str,
+    node_mappings: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Build the canvas a workspace opens on: a CONTRACT subgraph beside a ``Stream``.
+
+    ``contract`` maps a record entry to its item type (``{"image": "Image", "class": "Label"}``).
+    Each entry becomes an *Extract from Record* on the incoming record, feeding the passthrough
+    node for its item type, whose output is promoted to a boundary output NAMED AFTER THE ENTRY
+    and TYPED by the item. The graph then states the contract structurally — record in, one typed
+    entry out per requirement — with nothing to read out of a widget.
+
+    The type nodes also feed a *Build Record*, closed by the *Extract as Op* terminator whose
+    ``op`` is promoted: that is what makes the rectangle droppable into a ``Stream``'s op slot,
+    and it is pre-wired here into the ``Stream`` placed beside it. Exactly ONE thing is left
+    unconnected — the ``Stream``'s ``source`` — which is the one decision the workspace cannot
+    make for the user.
+    """
+    extract_cls = node_mappings.get(_EXTRACT_CLASS_TYPE)
+    builder_cls = node_mappings.get(_RECORD_BUILDER_CLASS_TYPE)
+    terminator_cls = node_mappings.get(_SUBGRAPH_OP_CLASS_TYPE)
+    stream_cls = node_mappings.get(_STREAM_CLASS_TYPE)
+    missing = [
+        key
+        for key, cls in (
+            (_EXTRACT_CLASS_TYPE, extract_cls),
+            (_RECORD_BUILDER_CLASS_TYPE, builder_cls),
+            (_SUBGRAPH_OP_CLASS_TYPE, terminator_cls),
+            (_STREAM_CLASS_TYPE, stream_cls),
+        )
+        if cls is None
+    ]
+    if missing:
+        raise UnsupportedTopologyError(f"the contract pipeline needs nodes that are not registered: {missing}")
+
+    sockets = item_socket_types()
+    unknown = {item for item in contract.values() if item not in sockets}
+    if unknown:
+        raise UnsupportedTopologyError(f"no item type registered as {sorted(unknown)} (known: {', '.join(sockets)})")
+
+    nodes: List[Dict[str, Any]] = []
+    links: List[Any] = []
+    next_node = 0
+    next_link = 0
+
+    # -- Build Record: one entry socket per contract field, gathering the typed items.
+    next_node += 1
+    gather = _node(next_node, _RECORD_BUILDER_CLASS_TYPE, builder_cls, [_MARGIN_X + 2 * _COL_DX, _MARGIN_Y])
+    gather_id = next_node
+
+    output_defs: List[Dict[str, Any]] = []
+    for slot, (field, item) in enumerate(contract.items()):
+        socket = sockets[item]
+        row = _MARGIN_Y + slot * _ROW_DY
+
+        # The extract carrying THIS item type — the base node for the record engine's own,
+        # a domain package's own node for its additions.
+        extract_key, item_output = extract_source_for(item)
+        item_extract_cls = node_mappings.get(extract_key)
+        if item_extract_cls is None:
+            raise UnsupportedTopologyError(f"no extract node registered for item type {item!r} ({extract_key})")
+        next_node += 1
+        widgets = [field, "viridis", 512] if extract_key == _EXTRACT_CLASS_TYPE else [field]
+        extract = _node(next_node, extract_key, item_extract_cls, [_MARGIN_X, row], widgets)
+        extract["inputs"].append({"name": _RECORD_INPUT, "type": RECORD_TYPE, "link": None})
+        nodes.append(extract)
+
+        next_node += 1  # the item's Type node — the contract, stated
+        type_key = f"Taidal_{item}Type"
+        type_cls = node_mappings.get(type_key)
+        if type_cls is None:
+            raise UnsupportedTopologyError(f"no passthrough node registered for item type {item!r} ({type_key})")
+        declare = _node(next_node, type_key, type_cls, [_MARGIN_X + _COL_DX, row])
+        declare["inputs"].append({"name": item.lower(), "type": socket, "link": None})
+        nodes.append(declare)
+
+        # the extract's item-typed output -> the type node, BY NAME (an Image leaves on the
+        # native ``image`` socket, which several outputs could otherwise match by type)
+        item_slot = next((i for i, out in enumerate(extract["outputs"]) if out["name"] == item_output), None)
+        if item_slot is None:  # pragma: no cover - defensive: the extract lost that output
+            raise UnsupportedTopologyError(f"{extract_key} has no {item_output!r} output for {field!r}")
+        next_link += 1
+        links.append([next_link, extract["id"], item_slot, declare["id"], 0, extract["outputs"][item_slot]["type"]])
+        extract["outputs"][item_slot]["links"].append(next_link)
+        declare["inputs"][0]["link"] = next_link
+
+        # the type node -> the boundary output, named after the ENTRY and typed by the ITEM
+        next_link += 1
+        links.append([next_link, declare["id"], 0, -20, slot, socket])
+        declare["outputs"][0]["links"].append(next_link)
+        output_defs.append(_boundary_slot(field, socket, slot, [next_link], _sg_uuid(name, "out", field)))
+
+        # ...and -> Build Record. The socket NAME is the record key the compiler renames to
+        # (``RenameField(field -> label)``), so it must be the ENTRY name: seeded ``entry_0``
+        # would build a record carrying ``entry_0`` instead of ``image``.
+        gather["inputs"].append({"name": field, "type": socket, "link": None})
+        next_link += 1
+        links.append([next_link, declare["id"], 0, gather_id, slot, socket])
+        declare["outputs"][0]["links"].append(next_link)
+        gather["inputs"][slot]["link"] = next_link
+
+    nodes.append(gather)
+
+    # -- the incoming record feeds every extract (the default wiring; the user may rewire).
+    input_defs: List[Dict[str, Any]] = []
+    fed = [n for n in nodes if n["type"] == _EXTRACT_CLASS_TYPE]
+    link_ids: List[int] = []
+    for extract in fed:
+        next_link += 1
+        links.append([next_link, -10, 0, extract["id"], 0, RECORD_TYPE])
+        extract["inputs"][0]["link"] = next_link
+        link_ids.append(next_link)
+    if link_ids:
+        input_defs.append(_boundary_slot(_RECORD_INPUT, RECORD_TYPE, 0, link_ids, _sg_uuid(name, "in", _RECORD_INPUT)))
+
+    # -- the terminator: Build Record -> Extract as Op -> the promoted ``op`` boundary.
+    next_node += 1
+    terminator = _node(next_node, _SUBGRAPH_OP_CLASS_TYPE, terminator_cls, [_MARGIN_X + 3 * _COL_DX, _MARGIN_Y])
+    terminator["inputs"].append({"name": _RECORD_INPUT, "type": RECORD_TYPE, "link": None})
+    next_link += 1
+    links.append([next_link, gather_id, 0, terminator["id"], 0, RECORD_TYPE])
+    gather["outputs"][0]["links"].append(next_link)
+    terminator["inputs"][0]["link"] = next_link
+    op_slot = len(output_defs)
+    next_link += 1
+    links.append([next_link, terminator["id"], 0, -20, op_slot, OP_TYPE])
+    terminator["outputs"][0]["links"].append(next_link)
+    output_defs.append(_boundary_slot("op", OP_TYPE, op_slot, [next_link], _sg_uuid(name, "out", "op")))
+    nodes.append(terminator)
+
+    envelope = _subgraph_envelope(
+        name,
+        _sg_uuid(name),
+        input_defs,
+        output_defs,
+        nodes,
+        links,
+        last_node_id=next_node,
+        last_link_id=next_link,
+    )
+
+    # -- the parent canvas: the blueprint and a ``Stream``, its ``op`` already wired.
+    #    The blueprint's ``record`` input is deliberately NOT wired here: the subgraph is an OP
+    #    of the Stream, so the Stream feeds it at RUN time. Wiring it on the canvas — from the
+    #    Stream's own output, through a walker — would draw a loop that says the opposite.
+    instance = envelope["nodes"][0]
+    instance["pos"] = [_MARGIN_X + _COL_DX, _MARGIN_Y]
+    op_out = next(i for i, out in enumerate(instance["outputs"]) if out["name"] == "op")
+
+    # One seed value per WIDGET the class declares (chunk_size, class_names) -- a longer seed
+    # assigns values to the wrong knobs when ComfyUI rebuilds the node from the class.
+    stream_spec: Dict[str, Any] = getattr(stream_cls, "INPUT_TYPES", dict)() or {}
+    stream_widgets = list(stream_spec.get("required") or {})
+    stream = _node(
+        2,
+        _STREAM_CLASS_TYPE,
+        stream_cls,
+        [_MARGIN_X + 2 * _COL_DX, _MARGIN_Y],
+        [0 if w == "chunk_size" else "" for w in stream_widgets],
+    )
+    stream["inputs"] = [
+        {"name": "source", "type": SOURCE_TYPE, "link": None},  # THE one thing left to connect
+        {"name": "op_0", "type": OP_TYPE, "link": 1},
+    ]
+    instance["outputs"][op_out]["links"] = [1]
+    envelope["nodes"].append(stream)
+    envelope["links"] = [[1, instance["id"], op_out, stream["id"], 1, OP_TYPE]]
+    last_node = 2
+
+    # -- the class vocabulary, when the contract declares an item type that HAS one.
+    #    It sits on the PARENT canvas, not inside the blueprint: the blueprint compiles to a
+    #    per-RECORD Pipeline, and a dataset-level constant threaded through a per-record
+    #    boundary would be folded away or left dangling. Unwired is its FINISHED state -- it is
+    #    a declaration the document carries, hoisted to its own top-level key because the class
+    #    is ``constant=True``, and read from there by whatever opens the document.
+    declaration_cls = node_mappings.get(_CLASS_NAMES_OUTPUT_CLASS_TYPE)
+    if declaration_cls is not None and _declares_a_class_vocabulary(contract):
+        last_node += 1
+        declaration = _node(
+            last_node,
+            _CLASS_NAMES_OUTPUT_CLASS_TYPE,
+            declaration_cls,
+            [_MARGIN_X + 2 * _COL_DX, _MARGIN_Y + 2 * _ROW_DY],
+            [""],  # EMPTY: the graph author is the only one who knows the answer
+        )
+        declaration["title"] = _DECLARE_TITLE.format(name="class_names")
+        declaration["color"] = _DECLARE_COLOR
+        declaration["bgcolor"] = _DECLARE_BGCOLOR
+        envelope["nodes"].append(declaration)
+
+    envelope["last_node_id"] = last_node
+    envelope["last_link_id"] = 1
+    return envelope
+
+
+def _declares_a_class_vocabulary(contract: "Dict[str, str]") -> bool:
+    """True when a declared item type MODELS a class vocabulary (a ``classes`` field).
+
+    Structural, never a list of type names: ``Label`` and ``MultiLabel`` carry ``classes``,
+    while ``Image`` / ``Mask`` / ``Boxes`` do not — so a segmentation contract is not asked
+    for classes and a classification one is, decided by the record model rather than by
+    anything hard-coded here. An item type that grows a vocabulary later starts qualifying
+    with no change to this function.
+    """
+    for item in contract.values():
+        try:
+            item_type = get_item_type(item)
+        except KeyError:
+            continue
+        if dataclasses.is_dataclass(item_type) and any(f.name == "classes" for f in dataclasses.fields(item_type)):
+            return True
+    return False
+
+
+def _inner_link(link: Any) -> Optional[Dict[str, Any]]:
+    """A subgraph definition's inner link, in the DICT form ComfyUI reads.
+
+    Top-level links are 6-arrays; a subgraph definition's inner links are DICTS — the same
+    asymmetry :func:`_link_six` normalises on the way IN. Built once, here, because both wrap
+    modes feed :func:`_subgraph_envelope` and a second copy is a second chance to get it wrong.
+    """
+    six = _link_six(link)
+    if six is None:
+        return None
+    return {
+        "id": six[0],
+        "origin_id": six[1],
+        "origin_slot": six[2],
+        "target_id": six[3],
+        "target_slot": six[4],
+        "type": six[5],
+    }
+
+
+def _node(node_id: int, key: str, node_cls: Any, pos: List[int], widgets: Optional[List[Any]] = None) -> Dict[str, Any]:
+    """One workflow node for a registered class, with its declared outputs and no inputs yet.
+
+    The caller appends the inputs it wires; outputs come from the class so a socket the node
+    really has is never invented here.
+    """
+    outputs = [
+        {"name": name, "type": rtype, "links": []}
+        for name, rtype in zip(getattr(node_cls, "RETURN_NAMES", ()) or (), getattr(node_cls, "RETURN_TYPES", ()) or ())
+    ]
+    return {
+        "id": node_id,
+        "type": key,
+        "pos": list(pos),
+        "size": [300, 100],
+        "flags": {},
+        "order": node_id,
+        "mode": 0,
+        "inputs": [],
+        "outputs": outputs,
+        "properties": {"Node name for S&R": key},
+        "widgets_values": list(widgets or []),
+    }
+
+
 def _boundary_slot(name: str, socket_type: str, slot_i: int, link_ids: List[int], uid: str) -> Dict[str, Any]:
     """One declared boundary slot of a subgraph definition (input or output).
 
@@ -1090,7 +1426,11 @@ def _subgraph_envelope(
         "outputNode": {"id": -20, "bounding": [800, 0, 120, 60]},
         "widgets": [],
         "nodes": internal_nodes,
-        "links": internal_links,
+        # A subgraph definition's inner links are DICTS (top-level links are 6-arrays -- the same
+        # asymmetry _link_six normalises on the way IN). Emitting arrays here produced a definition
+        # whose every wire was silently dropped on load: nodes appeared, sockets appeared, nothing
+        # was connected. Built at this ONE chokepoint because both wrap modes come through here.
+        "links": [d for d in (_inner_link(link) for link in internal_links) if d is not None],
         "groups": [],
         "extra": {},
         "state": {
@@ -1895,7 +2235,8 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
     # wire and fragmenting the inner ops into stray ``pipeline_N`` entries. All terminators share ONE
     # ``fold`` so a ``constant=True`` config (``ImpairmentsTx/RxConfig``) hoists exactly once.
     sg_prompt = _collapse_reroutes(prompt_view)  # Reroutes break the one-stream check (see helper)
-    sg_fold = _FoldContext(sg_prompt, node_mappings, [], configure_specs, vc_excluded, output_captures)
+    sg_notes: List[str] = []  # the cone compiler's own omission notes — surfaced in the comment block
+    sg_fold = _FoldContext(sg_prompt, node_mappings, sg_notes, configure_specs, vc_excluded, output_captures)
     subgraph_op_instances: Dict[str, Any] = {}
     sg_cone_excluded: set = set()
     for tid, pnode in pnodes.items():
@@ -2001,21 +2342,82 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
 
     names = _assign_ref_names(pnodes, specs, node_mappings)
 
-    def _node_reference(src_id: str, src_slot: int) -> Reference:
-        """The ``!ref:`` for a wire from ``src_id``'s output ``src_slot``.
+    def _node_reference(src_id: str, src_slot: int) -> Any:
+        """The VALUE a wire from ``src_id``'s output ``src_slot`` becomes: a ``!ref:`` or a literal.
 
-        A VALUE node's outputs are its declared ``@output`` properties (slot order ==
-        ``RETURN_NAMES``), so the ref is DOTTED — ``!ref:<name>.<output>`` resolves the
-        property value (e.g. ``impairments_tx_config.disabled``), not the config INSTANCE
-        a plain ``!ref:<name>`` would inject where a tuple/dict belongs. Every other kind
-        keeps the plain whole-node ref (slot semantics live in ``_output_slot``).
+        Always the WHOLE node — ``!ref:<name>``. A dotted ``!ref:<name>.<output>`` used to be
+        emitted for a value node's declared ``@output``s, and it no longer resolves: attribute
+        references were REMOVED from the config layer (architecture record 19), so such a
+        document raises ``ConfigurationError`` the moment anything loads it. The replacement,
+        which that error itself names, is a selector parameter on the CONSUMER: it takes the
+        whole object and reads the attribute it wants.
+
+        A value node's ``object`` output IS the node, so it maps to the whole-node ref cleanly.
+        A wire from any OTHER value output is asking for an attribute, which cannot be spelled —
+        :func:`_refuse_attribute_wire` refuses it here, by name, rather than writing a document
+        that cannot be opened.
         """
         src_cls = node_mappings.get(pnodes[src_id].class_type)
-        if getattr(src_cls, "TAIDAL_NODE_KIND", None) == "value":
-            return_names = tuple(getattr(src_cls, "RETURN_NAMES", ()) or ())
-            if src_slot < len(return_names):
-                return Reference(f"{names[src_id]}.{return_names[src_slot]}")
+        return_names = tuple(getattr(src_cls, "RETURN_NAMES", ()) or ())
+        wired_output = return_names[src_slot] if src_slot < len(return_names) else None
+        # Decided by asking the CLASS, never by slot index: a declared ``@output`` is an
+        # ATTRIBUTE of the node, which no reference can name, so its value is FOLDED into the
+        # document as a literal. Every other socket stands for the node itself (`source`, `op`,
+        # `object`) or for data flow (`record`), and keeps the whole-node reference. Indexing
+        # got this wrong twice — a value node's slot 0 is an @output, and an op node's `op` is not.
+        if wired_output is not None and wired_output in _declared_output_names(src_cls):
+            return _fold_output_literal(src_id, wired_output, src_cls)
         return Reference(names[src_id])
+
+    def _fold_output_literal(src_id: str, output_name: str, src_cls: Any) -> Any:
+        """Evaluate a wired ``@output`` HERE and inline its value.
+
+        A document references a NODE, never one of its attributes — attribute references were
+        removed from the config layer, so ``!ref:src.class_names`` is refused the moment anything
+        loads the file. But the wire the user drew is the obvious one (a source's class names into
+        the field that names the classes), so it is honoured by reading the value at export and
+        writing it as a literal: the document then carries ``names: ['0', '1', …]``, which loads
+        anywhere and says plainly what the graph delivers.
+
+        The producer is built with its OWN wires resolved, not from its widgets alone. That
+        distinction is the whole correctness of this: a node whose value depends on an input —
+        a class-name walker reading a source — evaluated from widgets alone returns its EMPTY
+        default, and the document is written happily with the wrong answer. Silently. Building
+        the graph behind it is what makes the folded value the one the canvas actually describes.
+        """
+        try:
+            value = getattr(_build_node_object(src_id, set()), output_name)
+        except Exception as exc:
+            raise UnsupportedTopologyError(
+                f"{names[src_id]!r}: its {output_name!r} output is wired into another node's "
+                f"parameter, and its value could not be read to inline it ({type(exc).__name__}: "
+                f"{exc}). A config document references a NODE, not one of its attributes — wire "
+                f"the node's first output instead, into a parameter that takes the whole node."
+            ) from exc
+        return list(value) if isinstance(value, (list, tuple)) else value
+
+    def _build_node_object(node_id: str, building: "Set[str]") -> Any:
+        """The live object a node stands for, with its wired inputs resolved first.
+
+        ``building`` carries the ids already under construction, so a cycle raises here instead
+        of recursing until the stack gives out.
+        """
+        if node_id in building:
+            raise UnsupportedTopologyError(f"{names.get(node_id, node_id)!r}: its inputs form a cycle")
+        building = building | {node_id}
+        pnode = pnodes[node_id]
+        cls, _lazy, kwargs = _build_fluid(pnode, node_mappings)
+        for input_name, (wired_id, wired_slot) in pnode.links.items():
+            if input_name == _RECORD_INPUT:  # data flow, not configuration
+                continue
+            wired_cls = node_mappings.get(pnodes[wired_id].class_type)
+            wired_names = tuple(getattr(wired_cls, "RETURN_NAMES", ()) or ())
+            wired_output = wired_names[wired_slot] if wired_slot < len(wired_names) else None
+            if wired_output is not None and wired_output in _declared_output_names(wired_cls):
+                kwargs[input_name] = getattr(_build_node_object(wired_id, building), wired_output)
+            else:
+                kwargs[input_name] = _build_node_object(wired_id, building)
+        return cls(**kwargs)
 
     def _op_value_for(src_id: str, src_slot: int) -> Any:
         """The value for a SINGLE op-slot wire (``op``/``target``): a Subgraph-Op terminator
@@ -2152,7 +2554,7 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
         document.setdefault(cname, cval)
     for key, value in chain_entries:  # pipelines last — they are the roots of the config
         document[key] = value
-    return _skipped_comment_block(skipped, dropped_wires) + _confluid_dump(document)
+    return _skipped_comment_block(skipped, dropped_wires, sg_notes) + _confluid_dump(document)
 
 
 def _collect_op_chains(
@@ -2245,24 +2647,35 @@ def _collect_op_chains(
     return chain_specs, chain_heads, op_succs
 
 
-def _skipped_comment_block(skipped: List[Tuple[str, str, str]], dropped_wires: List[Tuple[str, str, str, str]]) -> str:
+def _skipped_comment_block(
+    skipped: List[Tuple[str, str, str]],
+    dropped_wires: List[Tuple[str, str, str, str]],
+    fold_notes: Optional[List[str]] = None,
+) -> str:
     """Render the skipped-node / dropped-wire summary as a leading ``#`` comment block.
 
     Comments are invisible to ``confluid.load`` / any YAML parser, so the document below
     stays a normal, runnable config — the block only tells the user what the export left out
     and why. Empty string when nothing was skipped (the all-Taidal export is byte-identical
-    to before).
+    to before). ``fold_notes`` carries the ops-compiler's own omission notes (a wire inside a
+    Subgraph-Op cone that could not fold) — already fully worded, so they render verbatim;
+    without this the cone's drops were invisible in the whole-graph export, and a canvas that
+    LOOKED wired exported an op silently missing a param.
     """
-    if not skipped and not dropped_wires:
+    if not skipped and not dropped_wires and not fold_notes:
         return ""
-    lines = ["# NOTE: the canvas contained node(s) with no Confluid YAML form; they were left out:"]
-    for nid, class_type, reason in sorted(skipped, key=lambda s: _id_sort_key(s[0])):
-        lines.append(f"#   - node {nid} ({class_type}): {reason}")
+    lines: List[str] = []
+    if skipped:
+        lines.append("# NOTE: the canvas contained node(s) with no Confluid YAML form; they were left out:")
+        for nid, class_type, reason in sorted(skipped, key=lambda s: _id_sort_key(s[0])):
+            lines.append(f"#   - node {nid} ({class_type}): {reason}")
     if dropped_wires:
         lines.append("# Wires from skipped nodes into exported config members were dropped")
         lines.append("# (each member falls back to its default):")
         for consumer, input_name, src_id, src_type in dropped_wires:
             lines.append(f"#   - {consumer}.{input_name} <- node {src_id} ({src_type})")
+    for note in fold_notes or []:
+        lines.append(f"# NOTE: {note}")
     return "\n".join(lines) + "\n"
 
 

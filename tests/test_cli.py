@@ -736,3 +736,38 @@ def test_main_installs_exactly_once_after_a_clone(
     with patch("subprocess.run", side_effect=fake_run) as run_mock:
         cli.main()
     assert len(_pip_install_calls(run_mock, comfy)) == 1  # the clone's install IS the sync — not twice
+
+
+class TestConvertServer:
+    """One resident process, many conversions — the ~10 s registry import is paid ONCE."""
+
+    def test_the_loop_serves_conversions_until_eof(self, tmp_path: Any, monkeypatch: Any) -> None:
+        import io
+        import json as jsonlib
+
+        from streamstudio import cli as cli_module
+
+        source = tmp_path / "g.json"
+        source.write_text("{}")
+        out_a, out_b = tmp_path / "a.yaml", tmp_path / "b.yaml"
+        requests = "\n".join(
+            jsonlib.dumps(r)
+            for r in [
+                {"json": str(source), "yaml": str(out_a)},
+                {"json": str(tmp_path / "missing.json"), "yaml": str(out_b)},
+                {"json": str(source), "yaml": str(out_b)},
+            ]
+        )
+        stdout = io.StringIO()
+        monkeypatch.setattr(cli_module.sys, "stdin", io.StringIO(requests + "\n"))
+        monkeypatch.setattr(cli_module.sys, "stdout", stdout)
+        (
+            cli_module.convert_server.__wrapped__()
+            if hasattr(cli_module.convert_server, "__wrapped__")
+            else cli_module.convert_server()
+        )
+        lines = [jsonlib.loads(line) for line in stdout.getvalue().splitlines()]
+        assert lines[0] == {"ready": True}, "the parent waits for this before sending requests"
+        assert lines[1] == {"ok": True} and out_a.is_file()
+        assert "error" in lines[2], "a bad request answers the requester — it never kills the server"
+        assert lines[3] == {"ok": True}, "the server survives a failed request"

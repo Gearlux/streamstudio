@@ -29,7 +29,17 @@ import torch
 from confluid import marks
 from loggair import get_logger
 
-from streamstudio.bridge import ARRAY_TYPE, OP_TYPE, RECORD_TYPE, SOURCE_TYPE, VALUE_TYPE, node_root
+from streamstudio.bridge import (
+    ARRAY_TYPE,
+    OP_TYPE,
+    RECORD_TYPE,
+    SOURCE_TYPE,
+    VALUE_TYPE,
+    base_item_sockets,
+    item_packages,
+    item_socket_types,
+    node_root,
+)
 
 if TYPE_CHECKING:
     from recordstream.ops.image import TextPosition
@@ -250,8 +260,35 @@ class RecordExtractorNode:
 
     __confluid_display_name__ = "Extract from Record"
     CATEGORY = _STREAMSTUDIO_CATEGORY
-    RETURN_TYPES = ("IMAGE", "MASK", "STRING", "INT", "FLOAT", ARRAY_TYPE, VALUE_TYPE)
-    RETURN_NAMES = ("image", "mask", "text", "int", "float", "array", "value")
+    # The item-typed outputs come LAST so the existing slot indices never move — a saved
+    # canvas addresses outputs positionally, and inserting in the middle would silently
+    # rewire every graph anyone has drawn.
+    _NATIVE_TYPES: Tuple[str, ...] = ("IMAGE", "MASK", "STRING", "INT", "FLOAT", ARRAY_TYPE, VALUE_TYPE)
+    _NATIVE_NAMES: Tuple[str, ...] = ("image", "mask", "text", "int", "float", "array", "value")
+    _ITEM_SOCKETS: Dict[str, str] = {}
+    # Widened because :meth:`refresh_item_outputs` REPLACES these once the item registry is
+    # filled — the declared length is the native set, the live one grows by the item sockets.
+    RETURN_TYPES: Tuple[str, ...] = _NATIVE_TYPES
+    RETURN_NAMES: Tuple[str, ...] = _NATIVE_NAMES
+
+    @classmethod
+    def refresh_item_outputs(cls) -> None:
+        """Append one output per REGISTERED item type, replacing any previous set.
+
+        Only the BASE (record-engine) item types, and only those with no native socket: an
+        ``Image`` entry already leaves on ``image`` and a ``Mask`` on ``mask``, so an
+        ``item_image`` beside them was a second output for the same entry. A DOMAIN package's
+        item types get their own extract node — mixing them in put eleven outputs on a node
+        that needs four.
+
+        Item outputs come LAST so the native slot indices never move: a saved canvas addresses
+        outputs positionally, and inserting in the middle would silently rewire every graph
+        anyone has drawn.
+        """
+        cls._ITEM_SOCKETS = base_item_sockets()
+        cls.RETURN_TYPES = cls._NATIVE_TYPES + tuple(cls._ITEM_SOCKETS.values())
+        cls.RETURN_NAMES = cls._NATIVE_NAMES + tuple(name.lower() for name in cls._ITEM_SOCKETS)
+
     FUNCTION = "extract"
 
     @classmethod
@@ -301,7 +338,27 @@ class RecordExtractorNode:
         array_val = self._to_array(value)
         logger.debug(f"RecordExtractorNode: field={field} type={spec} scalar={scalar}")
         # ``value`` is the RAW field value, verbatim (a list of boxes stays a list) → RECORDSTREAM_VALUE.
-        return (image, mask, text, int_val, float_val, array_val, value)
+        return (image, mask, text, int_val, float_val, array_val, value) + self._item_outputs(value)
+
+    @classmethod
+    def _item_outputs(cls, value: Any) -> Tuple[Any, ...]:
+        """The value on the socket of ITS item type, ``None`` on the others.
+
+        A record entry is one item, so at most one of these slots carries it; the rest stay
+        empty. Wiring the wrong one is refused by ComfyUI on socket type before it can run —
+        which is the point of the typed sockets.
+        """
+        from recordstream.items import get_item_type
+
+        out: List[Any] = []
+        for name in cls._ITEM_SOCKETS:
+            try:
+                expected = get_item_type(name)
+            except KeyError:  # pragma: no cover - the registry shrank after class creation
+                out.append(None)
+                continue
+            out.append(value if isinstance(value, expected) else None)
+        return tuple(out)
 
     # ------------------------------------------------------------------ #
     @staticmethod
@@ -1236,8 +1293,11 @@ class RecordBuilderNode:
     Each input SLOT NAME is a record key, so the wiring on the canvas states the record being
     built: an ``image`` socket fed by an extract's IMAGE output means the result carries ``image``.
     **Taidal: compile to Op** creates one socket per promoted subgraph output and names it after
-    that output's label. By hand the node offers the seeded ``entry_0`` only — growing sockets
-    interactively is not wired up yet, so build the rectangle and compile it.
+    that output's label, and a generated contract canvas declares them the same way. The node
+    declares NO socket of its own: a seeded ``entry_0`` survived onto every generated builder
+    (ComfyUI unions class inputs onto a loaded node) as a stray the user had to look past, and
+    it earned nothing — the compile clears it before naming its own, and growing sockets by
+    hand was never wired up. Sockets come from the compile; build the rectangle and compile it.
 
     **Why this node exists at all.** A subgraph's promoted outputs ARE its record contract, but they
     are typed values (IMAGE / STRING / …), and a ``Stream`` op must hand back a RECORD. Without a
@@ -1264,10 +1324,12 @@ class RecordBuilderNode:
 
     @classmethod
     def INPUT_TYPES(cls) -> Dict[str, Any]:
-        # ``entry_0`` seeds the family; the frontend grows a socket per connection and renames each
-        # to its record key. Everything is optional so an unwired builder is an empty record rather
-        # than a validation error.
-        return {"optional": {"entry_0": (ANY,)}}
+        # No declared socket: the compile (or a generated contract canvas) adds one per record
+        # entry, NAMED after it. Anything declared here is unioned onto every loaded builder by
+        # ComfyUI, which is how the placeholder became a stray socket on a canvas that had
+        # already stated its entries. Optional-by-absence also means an unwired builder is an
+        # empty record rather than a validation error.
+        return {"optional": {}}
 
     def build(self, **kwargs: Any) -> Tuple[Any, ...]:
         """The record: every wired slot, keyed by its socket NAME, in wiring order.
@@ -2017,6 +2079,132 @@ class DrawTextNode:
             wrap=wrap,
         )
         return (torch.from_numpy(rgb.astype(np.float32) / 255.0)[None,],)
+
+
+# --------------------------------------------------------------------------------------- #
+# The item TYPE family — one passthrough node per registered item type
+# --------------------------------------------------------------------------------------- #
+
+
+def _make_item_type_node(item_name: str, socket: str) -> Type:
+    """Build the passthrough node DECLARING one item type (``Image`` → an ``Image Type`` node).
+
+    The node does nothing to the value: it takes the item on a socket of its own type and emits
+    it on the same one. What it exists for is to be a NAMED, TYPED point on the canvas — wire an
+    extracted entry into it and the graph now STATES that this entry is an ``Image``, and a
+    subgraph boundary fed by it inherits that socket type. ComfyUI connects on socket-type
+    equality, so a wrong wire is refused while you draw it rather than at run time.
+
+    Generated per registry entry, so a domain package that registers its own item type gets its
+    node without editing streamstudio.
+    """
+
+    class _ItemTypeNode:
+        __doc__ = (
+            f"Declare a record entry to be a {item_name}. Passes the item straight through on a\n"
+            f"{item_name}-typed socket, so what it feeds — a subgraph boundary, another op — "
+            f"carries the type."
+        )
+        __confluid_display_name__ = f"{item_name} Type"
+        CATEGORY = _STREAMSTUDIO_CATEGORY
+        RETURN_TYPES = (socket,)
+        RETURN_NAMES = (item_name.lower(),)
+        FUNCTION = "declare"
+
+        @classmethod
+        def INPUT_TYPES(cls) -> Dict[str, Any]:
+            return {"required": {item_name.lower(): (socket,)}}
+
+        def declare(self, **kwargs: Any) -> Tuple[Any]:
+            return (next(iter(kwargs.values()), None),)
+
+    _ItemTypeNode.__name__ = f"{item_name}TypeNode"
+    _ItemTypeNode.__qualname__ = _ItemTypeNode.__name__
+    return _ItemTypeNode
+
+
+def _make_domain_extract_node(package: str, sockets: Dict[str, str]) -> Type:
+    """The *Extract from Record* for ONE domain package's item types.
+
+    A domain registers its own item types (a signal package's ``Signal`` / ``Spectrogram`` /
+    ``Regions`` / …). Adding them to the base extract put eleven outputs on a node that needs
+    four and mixed vocabularies that have nothing to do with each other, so each package gets
+    its own node carrying only its own types.
+    """
+
+    class _DomainExtractNode:
+        __doc__ = (
+            f"Extract one {package} item from a record.\n\n"
+            f"The {package} counterpart of *Extract from Record*: same record + field selection, "
+            f"outputs typed with {package}'s own item sockets."
+        )
+        __confluid_display_name__ = f"Extract from Record ({package})"
+        CATEGORY = _STREAMSTUDIO_CATEGORY
+        RETURN_TYPES = tuple(sockets.values())
+        RETURN_NAMES = tuple(name.lower() for name in sockets)
+        FUNCTION = "extract"
+        _SOCKETS = dict(sockets)
+
+        @classmethod
+        def INPUT_TYPES(cls) -> Dict[str, Any]:
+            return {"required": {"record": (RECORD_TYPE,), "field": ("STRING", {"default": ""})}}
+
+        def extract(self, record: Any, field: str = "") -> Tuple[Any, ...]:
+            if record is None:
+                raise ValueError(
+                    f"Extract from Record ({package}) received an empty record (None) — its upstream "
+                    "op produced no record, which usually means the op chain ran with no source."
+                )
+            key = _resolve_field_key(record, field)
+            value = _field_payload(record, key)
+            from recordstream.items import get_item_type
+
+            out: List[Any] = []
+            for name in self._SOCKETS:
+                try:
+                    expected = get_item_type(name)
+                except KeyError:  # pragma: no cover - the registry shrank after class creation
+                    out.append(None)
+                    continue
+                out.append(value if isinstance(value, expected) else None)
+            return tuple(out)
+
+    _DomainExtractNode.__name__ = f"{package.title()}ExtractRecordNode"
+    _DomainExtractNode.__qualname__ = _DomainExtractNode.__name__
+    return _DomainExtractNode
+
+
+#: ``{node key: class}`` for the per-package extract family — ``Taidal_ExtractRecord_waivefront``, ….
+DOMAIN_EXTRACT_NODES: Dict[str, Type] = {}
+
+
+#: ``{node key: class}`` for the item type family — ``Taidal_ImageType``, ``Taidal_LabelType``, ….
+#: Populated by :func:`build_item_type_nodes`, NOT at import: the item registry is filled by the
+#: entry-point scan, so a family built here would carry only the record engine's own types and
+#: silently miss every domain one (a signal package's ``Signal`` / ``Spectrogram`` / ``Regions``).
+ITEM_TYPE_NODES: Dict[str, Type] = {}
+
+
+def build_item_type_nodes() -> Dict[str, Type]:
+    """(Re)build the item type family from the registry AS IT STANDS, and return it.
+
+    Called after node discovery, when every installed package has registered its item types.
+    Re-running is safe and is how a late registration is picked up: the family and
+    ``Extract from Record``'s item outputs are rebuilt together, so a type can never have a
+    node without the extract output that feeds it.
+    """
+    ITEM_TYPE_NODES.clear()
+    DOMAIN_EXTRACT_NODES.clear()
+    for name, socket in item_socket_types().items():
+        ITEM_TYPE_NODES[f"Taidal_{name}Type"] = _make_item_type_node(name, socket)
+    for package in item_packages():
+        if package == "recordstream":
+            continue  # the base extract already carries these
+        sockets = item_socket_types(package)
+        if sockets:
+            DOMAIN_EXTRACT_NODES[f"Taidal_ExtractRecord_{package}"] = _make_domain_extract_node(package, sockets)
+    RecordExtractorNode.refresh_item_outputs()
+    return {**ITEM_TYPE_NODES, **DOMAIN_EXTRACT_NODES}
 
 
 # Statically-defined adapter nodes, merged into the auto-discovered set by streamstudio/__init__.py.

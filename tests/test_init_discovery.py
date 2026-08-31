@@ -50,6 +50,25 @@ def _reset_discovery_cache() -> Iterator[None]:
     sys.__dict__.pop("_streamstudio_discovered_nodes", None)
 
 
+@pytest.fixture(autouse=True)
+def _restore_node_mappings() -> Iterator[None]:
+    """Restore the GLOBAL node registries these tests mutate in place.
+
+    ``test_discover_is_one_shot_per_process`` clears ``streamstudio.NODE_CLASS_MAPPINGS``
+    and repopulates it from a MOCKED scan, leaving the process-shared palette with only the
+    fake ``Taidal_X`` entry. Any later test file that reads the global mapping (e.g. the
+    ops-export pins driving ``workflow_to_yaml``) then sees every real node as "native
+    ComfyUI node" — a test-order failure that never reproduces in a single-file run.
+    """
+    saved_classes = dict(streamstudio.NODE_CLASS_MAPPINGS)
+    saved_displays = dict(streamstudio.NODE_DISPLAY_NAME_MAPPINGS)
+    yield
+    streamstudio.NODE_CLASS_MAPPINGS.clear()
+    streamstudio.NODE_CLASS_MAPPINGS.update(saved_classes)
+    streamstudio.NODE_DISPLAY_NAME_MAPPINGS.clear()
+    streamstudio.NODE_DISPLAY_NAME_MAPPINGS.update(saved_displays)
+
+
 # --------------------------------------------------------------------------- #
 # _discover_and_register_nodes
 # --------------------------------------------------------------------------- #
@@ -607,15 +626,46 @@ def test_export_flow_route_400_on_bad_topology() -> None:
 
 
 def test_hf_datasets_route_lists_cached_datasets() -> None:
-    # The /taidal/hf_datasets GET handler returns whatever list_cached_hf_datasets() yields,
+    # The /taidal/hf_datasets GET handler returns whatever cached_hf_datasets() yields,
     # which the HF dataset-id picker (web/hf_dataset_chooser.js) offers as options.
     with _fake_comfy() as (routes, web):
         handler = routes.get_handlers.get("/taidal/hf_datasets")
         assert handler is not None
-        with patch.object(streamstudio, "list_cached_hf_datasets", return_value=["cifar10", "mnist"]):
+        with patch.object(streamstudio, "cached_hf_datasets", return_value=(["cifar10", "mnist"], "")):
             asyncio.run(handler(SimpleNamespace()))
     data, _kwargs = web.calls[-1]
-    assert data == {"datasets": ["cifar10", "mnist"]}
+    assert data == {"datasets": ["cifar10", "mnist"], "reason": ""}
+
+
+def test_hf_datasets_route_says_WHY_it_is_empty() -> None:
+    """An empty picker that explains nothing is indistinguishable from a broken one.
+
+    The canonical case: HF_HOME changed and the running editor still holds the old value,
+    because huggingface_hub reads it at import.
+    """
+    reason = "CacheNotFound: Cache directory not found: /old/path/hub"
+    with _fake_comfy() as (routes, web):
+        handler = routes.get_handlers.get("/taidal/hf_datasets")
+        with patch.object(streamstudio, "cached_hf_datasets", return_value=([], reason)):
+            asyncio.run(handler(SimpleNamespace()))
+    data, _kwargs = web.calls[-1]
+    assert data == {"datasets": [], "reason": reason}
+
+
+def test_a_missing_cache_directory_is_a_warning_naming_the_path(caplog: Any) -> None:
+    """Actionable, so not a debug line — and it must name the path THIS process resolved."""
+    fake_hub = ModuleType("huggingface_hub")
+
+    class CacheNotFound(Exception):
+        pass
+
+    def boom() -> Any:
+        raise CacheNotFound("Cache directory not found: /gone/hub")
+
+    fake_hub.scan_cache_dir = boom  # type: ignore[attr-defined]
+    with patch.dict(sys.modules, {"huggingface_hub": fake_hub}):
+        datasets, reason = streamstudio.cached_hf_datasets()
+    assert datasets == [] and "CacheNotFound" in reason
 
 
 def test_list_cached_hf_datasets_filters_to_dataset_repos() -> None:

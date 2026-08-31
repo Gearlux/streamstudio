@@ -462,6 +462,36 @@ The DAG→sequential translation (fan-out → auto `Save`/`Use` context cells, `
 >
 > **Both exporters compile it.** The *flow export* (next section) embeds a subgraph-Op as a nested `Pipeline` in its consumer. The **whole-graph** export (*Export Graph → Taidal YAML*) now compiles it too: when the terminator feeds a `Stream`'s op list, its cone is compiled (same DAG→sequential compiler, same constant-hoisting) and **spliced inline** into the Stream's `ops:` — a sequential op-list makes a nested chain equivalent to its ops spliced, and inline ops survive `recordstream run`'s deep-flow where a nested deferred chain marker would not. An **unwired** terminator (used as a graph, or floating) has nothing to compile and is skipped-with-comment as before.
 
+## Class names — wired, not typed
+
+A contract declaring an item type that carries a class vocabulary (`Label`, `MultiLabel`) makes
+the pipeline template place a **Class Names Output** node, coloured and titled *"class_names —
+graph OUTPUT, fill this in"*. Fill it either way:
+
+```
+HuggingFaceSource.class_names ──→ ClassNamesOutput.names      # one wire, nothing else needed
+```
+
+A HuggingFace source knows its own classes — `class_names` reads `features[target_feature].names`
+from the dataset metadata (measured 0.00008 s once the schema is known, no records read) and the
+source node surfaces it as an output socket beside `source`. For a source that declares none — a
+folder reader, a CSV — place **Class Names Scan**, wire the source into it, and wire its
+`class_names` onward; it walks the label column through `recordstream.projection`.
+
+**A wire becomes a literal.** A config document references a NODE, never one of its attributes
+(attribute references were removed from the config layer), so the exporter EVALUATES a wired
+`@output` and writes its value down:
+
+```yaml
+class_names_output:
+  _target_: ClassNamesOutput
+  names: ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9']
+```
+
+Which output is an attribute and which is the node is decided by asking the class, not by slot
+index: a declared `@output` folds, while the structural sockets that stand for the node itself
+(`source`, `op`, `object`) keep a whole-node `!ref:`.
+
 ## Pipeline blueprints (a `flow:` document as a subgraph)
 
 `Subgraph as an Op` above is the by-hand route: you draw the chain, drop **Extract as Op**, promote
@@ -713,7 +743,13 @@ The converter lives in `streamstudio.graphio` (`yaml_to_workflow` / `workflow_to
 streamstudio import config.yaml -o workflow.json          # YAML → canvas workflow
 streamstudio import config.yaml --as subgraph -o sub.json # … as a reusable subgraph blueprint
 streamstudio export-workflow workflow.json -o config.yaml # whole canvas → hoisted-!ref: YAML
+streamstudio convert-server                               # resident converter: JSON lines on stdin
 ```
+
+`convert-server` answers `{"ready": true}` once its node registry is imported, then serves
+`{"json": "<workflow>", "yaml": "<out>"}` requests until stdin closes — for a consuming
+workspace that converts several graphs per user action, the ~10 s import is paid once
+instead of per call.
 
 ### The exported shape (hoisted `!ref:`)
 

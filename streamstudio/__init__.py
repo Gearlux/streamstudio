@@ -2,6 +2,7 @@
 
 import importlib.metadata
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -28,6 +29,7 @@ from streamstudio.bridge import (
 from streamstudio.export import UnsupportedTopologyError, chain_output_paths, collect_export_marks, export_flow_yamls
 from streamstudio.nodes import NODE_CLASS_MAPPINGS as _STATIC_NODE_CLASS_MAPPINGS
 from streamstudio.nodes import NODE_DISPLAY_NAME_MAPPINGS as _STATIC_NODE_DISPLAY_NAME_MAPPINGS
+from streamstudio.nodes import build_item_type_nodes as _build_item_type_nodes
 
 logger = get_logger(__name__)
 
@@ -35,24 +37,53 @@ NODE_CLASS_MAPPINGS: Dict[str, Any] = {}
 NODE_DISPLAY_NAME_MAPPINGS: Dict[str, str] = {}
 
 
-def list_cached_hf_datasets() -> list:
-    """Return sorted repo ids of HuggingFace **datasets** already in the local cache.
+def cached_hf_datasets() -> "tuple[List[str], str]":
+    """``(dataset repo ids, reason)`` — the local HF cache, and why it is empty when it is.
 
     Backs the ``/taidal/hf_datasets`` route + the HF dataset-id picker
-    (``web/hf_dataset_chooser.js``). Degrades to an empty list on ANY failure
-    (``huggingface_hub`` not installed, no cache dir, scan error) — the picker is
-    a convenience over a free-text field, so it must never break node discovery
-    or the editor.
+    (``web/hf_dataset_chooser.js``). Still degrades to an empty list on ANY failure — the
+    picker is a convenience over a free-text field and must never break the editor — but the
+    REASON travels with it, because an empty picker that explains nothing is indistinguishable
+    from a broken one. The canonical case: ``HF_HOME`` changed, the process still holds the
+    OLD value (``huggingface_hub`` reads it at import), and the picker silently shows nothing.
     """
     try:
         from huggingface_hub import scan_cache_dir
 
         info = scan_cache_dir()
         ids = {repo.repo_id for repo in info.repos if getattr(repo, "repo_type", None) == "dataset"}
-        return sorted(ids)
-    except Exception as e:
-        logger.debug(f"list_cached_hf_datasets: returning [] ({type(e).__name__}: {e})")
-        return []
+        if not ids:
+            return [], f"no datasets cached at {_hf_cache_dir()}"
+        return sorted(ids), ""
+    except Exception as exc:
+        reason = f"{type(exc).__name__}: {exc}"
+        # A MISSING cache directory is actionable and is what a changed HF_HOME looks like from
+        # here, so it is a warning naming the path this process is actually reading — the value
+        # is read at import, so a running editor keeps the one it was started with.
+        if type(exc).__name__ == "CacheNotFound":
+            logger.warning(
+                f"the HuggingFace cache directory does not exist: {_hf_cache_dir()} "
+                f"(this process was started with HF_HOME={os.environ.get('HF_HOME', '<unset>')}; "
+                "restart the editor after changing it)"
+            )
+        else:
+            logger.debug(f"cached_hf_datasets: returning [] ({reason})")
+        return [], reason
+
+
+def _hf_cache_dir() -> str:
+    """The hub cache path THIS process resolved — read at import, so it can be stale."""
+    try:
+        from huggingface_hub import constants
+
+        return str(constants.HF_HUB_CACHE)
+    except Exception:  # pragma: no cover - huggingface_hub absent
+        return "<huggingface_hub not installed>"
+
+
+def list_cached_hf_datasets() -> list:
+    """Sorted repo ids of the locally cached HuggingFace datasets (the reason is dropped)."""
+    return cached_hf_datasets()[0]
 
 
 def list_hf_dataset_features(path: str, name: Optional[str] = None, split: Optional[str] = None) -> List[str]:
@@ -359,6 +390,14 @@ loggair.force_no_color()
 NODE_CLASS_MAPPINGS.update(_STATIC_NODE_CLASS_MAPPINGS)
 NODE_DISPLAY_NAME_MAPPINGS.update(_STATIC_NODE_DISPLAY_NAME_MAPPINGS)
 
+# The item TYPE family is built HERE, not at nodes.py import: item types are registered BY the
+# scan above, so building it earlier would carry only the record engine's own types and silently
+# miss every domain one. Rebuilding also refreshes ``Extract from Record``'s item outputs, so a
+# type can never have a node without the extract output that feeds it.
+for _key, _cls in _build_item_type_nodes().items():
+    NODE_CLASS_MAPPINGS[_key] = _cls
+    NODE_DISPLAY_NAME_MAPPINGS[_key] = getattr(_cls, "__confluid_display_name__", _key)
+
 WEB_DIRECTORY = "./web"
 
 
@@ -428,7 +467,8 @@ try:
 
         @server.PromptServer.instance.routes.get("/taidal/hf_datasets")
         async def hf_datasets_handler(request: Any) -> Any:
-            return web.json_response({"datasets": list_cached_hf_datasets()})
+            datasets, reason = cached_hf_datasets()
+            return web.json_response({"datasets": datasets, "reason": reason})
 
     # List the feature/column names of the dataset named in a node's HF dataset-id field so the
     # feature picker (web/hf_feature_chooser.js) can offer them for input_feature / target_feature

@@ -4,6 +4,79 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the versioning is
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Item types are socket types, and each gets a passthrough node.** Every registered
+  `recordstream` item type (`Image`, `Label`, `Boxes`, `Mask`, `MultiLabel`, plus whatever a
+  domain package registers) now has a socket type `RECORDSTREAM_ITEM_<NAME>`, an output on
+  *Extract from Record* carrying the item verbatim (`item_image`, `item_label`, …), and a
+  generated `<Item> Type` passthrough node. Since ComfyUI connects on socket-type equality, a
+  drawn graph can now STATE a contract: an entry declared `Image` only docks into something
+  taking an Image, and a subgraph boundary fed by one inherits that type. The family is built
+  after node discovery, not at import — item types are registered BY the scan, so building
+  earlier carried only the record engine's own and silently missed every domain one.
+- **`--as_ pipeline`: a contract document becomes a whole starting canvas.** A `flow:` of
+  `RecordContract` steps is read as a DECLARATION rather than laid out as nodes: it becomes a
+  subgraph with a `record` input and one typed output per required entry (each extracted and
+  passed through its item's type node), an `op` promoted via *Build Record* → *Extract as Op*,
+  and a `Stream` placed beside it with that `op` already wired. Exactly one thing arrives
+  unconnected — the `Stream`'s `source`.
+
+### Added
+
+- **A source can say what it knows.** A source node now surfaces its declared `@output`s beside
+  its `source` socket — a HuggingFace source shows `class_names`, read from the dataset's own
+  `ClassLabel` metadata (no records). Appended after `source`, so saved canvases keep their slots.
+- **A value producer's `Any` params are WIRED, and it emits itself.** A param annotated bare `Any`
+  renders as an optional socket accepting a source or another producer's object; every value node
+  gains a trailing `object` output carrying the producer.
+
+### Fixed
+
+- **A wired `@output` no longer exports a reference nothing can load.** The exporter emitted
+  `!ref:node.attr` for such a wire, and attribute references were removed from the config layer —
+  so the file was written happily and then refused to open (reported as a broken graph after
+  wiring a source's class names into the field that names the classes). A declared `@output` is
+  now EVALUATED at export and written as a literal; the structural sockets that stand for the node
+  (`source`, `op`, `object`) keep a whole-node reference. Which is which comes from the class, not
+  a slot index — indexing got it wrong in both directions.
+
+### Fixed
+
+- **The HuggingFace pickers survive a graph LOAD, not only a hand-picked dataset.** The
+  split / column / metadata-column pickers build their options from the node's dataset-id
+  widget, and refreshed only in `onNodeCreated` — but a loaded graph fills widget values in
+  `configure()`, AFTER that, by assigning `widget.value` directly, which fires no callback.
+  So opening a saved workflow whose source already named a dataset left all three pickers
+  empty, while choosing the same dataset by hand populated them. Each now stashes its
+  refresh and re-runs it from `onConfigure`, chaining any previous handler.
+
+- **An empty HuggingFace dataset picker now says WHY.** `HF_HOME` is read by
+  `huggingface_hub` at IMPORT, so a running editor keeps the value it was started with —
+  change it and the picker silently shows nothing, the reason buried in a `debug` line.
+  `cached_hf_datasets()` returns `(ids, reason)`, the route sends both, and the picker shows
+  the reason as its placeholder; a MISSING cache directory is a `warning` naming the path
+  this process resolved and the `HF_HOME` it was started with.
+
+- **A workspace graph opens as a NAMED workflow, so Save writes where it belongs.** Loaded
+  straight onto the canvas it was an *Unsaved Workflow*: Ctrl-S demanded a name for a graph
+  that already had a home, and cancelling meant the save mirror never fired. The graph is now
+  persisted into ComfyUI's own store under `workflows/taidal/<workspace>.json` and opened from
+  there, so Save is a plain overwrite — and that overwrite is exactly the POST the mirror
+  copies back into the workspace's graph file. `openWorkflow` alone is not enough: it binds the
+  identity but does not load the content (measured — the tab showed the right name over an
+  empty canvas), so the graph is loaded with `loadGraphData(workflow, …, persisted)`.
+- **Build Record declares no socket of its own.** The seeded `entry_0` was unioned by ComfyUI
+  onto every generated builder, leaving a stray socket on a canvas that had already stated its
+  entries — and it earned nothing: the compile clears it before naming its own, and growing
+  sockets by hand was never wired up.
+- *Extract from Record*'s native outputs keep their slot indices; the item outputs are
+  appended. A saved canvas addresses outputs positionally, so inserting would have silently
+  rewired every existing graph. Output names are `item_`-prefixed because the natives already
+  own `image`/`mask`, and slot lookup by name resolves to the first match.
+
 ## [0.1.0a1] — unreleased
 
 First public pre-release. StreamStudio is a ComfyUI custom-node extension, not a server of
