@@ -250,7 +250,7 @@ function buildRecordFromOutputs(sg) {
     const anchor = values[0].producer;
     builder.pos = [(anchor.pos?.[0] ?? 0) + TERMINATOR_OFFSET[0], anchor.pos?.[1] ?? 0];
     sg.add(builder);
-    // The seeded `entry_0` is a placeholder for hand use; the compile names a socket per label.
+    // Start from nothing: the node declares no socket, and the compile names one per label.
     builder.inputs = [];
     values.forEach((promise, index) => {
         builder.addInput(promise.label, "*");

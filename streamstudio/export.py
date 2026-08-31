@@ -805,17 +805,35 @@ def _resolve_widget_link(target: Any, key: str, link: Any, fold: _FoldContext) -
     node_cls = fold.node_mappings.get(class_type)
     kind = getattr(node_cls, "TAIDAL_NODE_KIND", None)
     if kind == "value":
+        return_names = tuple(getattr(node_cls, "RETURN_NAMES", ()) or ())
+        if slot < len(return_names) and return_names[slot] == "object":
+            # The trailing ``object`` output (bridge appends it to every value node) IS the
+            # configured node itself: the consumer wants the LIVE instance — a ``random=True``
+            # producer keeps drawing per call — so hoist the node and hand back a WHOLE-NODE
+            # ``!ref:``. The ``constant`` gate below guards only the declared-@output slots,
+            # whose fold EVALUATES the property into a frozen literal; referencing the
+            # instance evaluates nothing, so every value node qualifies.
+            name = _hoist_constant(upstream_id, upstream, fold)
+            return ("ref", Reference(name))
         if not getattr(node_cls, "TAIDAL_CONSTANT", False):
             return (
                 "drop",
                 f"; upstream {class_type} is a value node not marked constant — tag the class "
                 "@configurable(constant=True) to fold its settings into the export",
             )
-        return_names = tuple(getattr(node_cls, "RETURN_NAMES", ()) or ())
         if slot >= len(return_names):
             return ("drop", f"; upstream {class_type} output slot {slot} has no declared @output")
         name = _hoist_constant(upstream_id, upstream, fold)
         return ("ref", Reference(f"{name}.{return_names[slot]}"))
+
+    if kind == "object" and slot == 0:
+        # An OBJECT node's ``instance`` output (slot 0) wired into an op's param — a model into a
+        # ``PredictClass.model``: hoist the node as a top-level ``!class:`` entry and hand the
+        # consumer a WHOLE-NODE ref, the same shape as a value node's ``object`` output above.
+        # Slot 1 (the ``lazy`` output) keeps the drop below: the hoist emits an EAGER entry, and
+        # silently building what the author marked deferred would change when the cost is paid.
+        name = _hoist_constant(upstream_id, upstream, fold)
+        return ("ref", Reference(name))
 
     if kind == "op":
         # A wire from an op node's ``op`` VALUE output (a RECORDSTREAM_OP wire into a single-op

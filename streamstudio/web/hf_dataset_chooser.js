@@ -12,12 +12,17 @@ console.log("StreamStudio: Loaded Taidal.HFDatasetChooser extension");
 const PLACEHOLDER = "— pick a cached dataset —";
 let _cachedDatasets = null;
 
+// An empty picker that explains nothing is indistinguishable from a broken one, so the
+// backend sends WHY it is empty (a changed HF_HOME the running editor never saw is the
+// usual answer) and it becomes the placeholder instead of a silent blank list.
 async function fetchCachedDatasets() {
     if (_cachedDatasets) return _cachedDatasets;
     try {
         const res = await api.fetchApi("/taidal/hf_datasets");
         const data = await res.json();
-        _cachedDatasets = Array.isArray(data.datasets) ? data.datasets : [];
+        const datasets = Array.isArray(data.datasets) ? data.datasets : [];
+        _cachedDatasets = datasets.length || !data.reason ? datasets : [`— ${data.reason} —`];
+        if (data.reason) console.warn("HFDatasetChooser: no cached datasets —", data.reason);
     } catch (err) {
         console.warn("HFDatasetChooser: failed to list cached datasets", err);
         _cachedDatasets = [];

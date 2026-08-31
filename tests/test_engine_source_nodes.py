@@ -96,7 +96,12 @@ def test_a_leaf_source_gains_no_source_socket() -> None:
     """HuggingFaceSource has no source/ops constructor params — it stays a pure producer."""
     optional = _slots(HF_SOURCE, "optional")
     assert "source" not in optional and "op_0" not in optional and "source_0" not in optional
-    assert NODE_CLASS_MAPPINGS[HF_SOURCE].RETURN_TYPES == (SOURCE_TYPE,)
+    node = NODE_CLASS_MAPPINGS[HF_SOURCE]
+    assert node.RETURN_TYPES[0] == SOURCE_TYPE and node.RETURN_NAMES[0] == "source"
+    # It may ALSO say what it knows about its dataset — a HuggingFace ClassLabel carries its
+    # class names — on declared @output sockets APPENDED after `source`, so a saved canvas
+    # (which addresses outputs positionally) keeps pointing at the same slot.
+    assert "class_names" in node.RETURN_NAMES
 
 
 def test_a_leaf_sources_own_settings_stay_text_widgets() -> None:

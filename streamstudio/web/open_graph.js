@@ -77,6 +77,42 @@ async function fetchWorkflow(graphPath) {
     return data.workflow;
 }
 
+// The workflow PATH this graph file is opened as, inside ComfyUI's own store. Derived from the
+// workspace file the graph belongs to (``…/my.workspace.yaml.d/source.json`` → ``my.workspace``)
+// and grouped under ``taidal/`` so a consuming tool's graphs stay together.
+function workflowPathFor(graphPath) {
+    const parts = graphPath.split(/[\\/]/);
+    const dir = parts[parts.length - 2] || "";              // "my.workspace.yaml.d"
+    const owner = dir.replace(/\.d$/, "").replace(/\.ya?ml$/, "");  // "my.workspace"
+    const stem = parts[parts.length - 1].replace(/\.json$/, "");     // "source"
+    const name = owner || stem || "graph";
+    return `workflows/taidal/${name}.json`;
+}
+
+// Put the graph in ComfyUI's store and OPEN it from there, so the canvas is a NAMED document.
+// Loaded straight onto the canvas it is an "Unsaved Workflow": Ctrl-S then demands a name for a
+// graph that already has a home, and cancelling means the save mirror never fires. Persisted
+// first, Save is a plain overwrite — and that overwrite is exactly the POST the mirror watches.
+async function openAsNamedWorkflow(workflow, graphPath) {
+    const store = app.extensionManager && app.extensionManager.workflow;
+    if (!store || !store.syncWorkflows || !store.getWorkflowByPath) return false;
+    const path = workflowPathFor(graphPath);
+    const res = await api.fetchApi(`/userdata/${encodeURIComponent(path)}?overwrite=true`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(workflow),
+    });
+    if (!res.ok) throw new Error(`could not persist ${path}: ${res.status}`);
+    await store.syncWorkflows(); // a just-written file is not in the store's list until it re-reads
+    const persisted = store.getWorkflowByPath(path);
+    if (!persisted) throw new Error(`${path} was written but is not listed`);
+    // loadGraphData with the workflow, NOT store.openWorkflow: opening binds the identity but
+    // does not load the content — measured, the canvas stayed empty while the tab showed the
+    // right name. Passing the workflow object here does both at once.
+    await app.loadGraphData(workflow, true, true, persisted);
+    return true;
+}
+
 async function applyOpenParams() {
     const url = new URL(window.location.href);
     const graphPath = url.searchParams.get("taidal_graph");
@@ -96,8 +132,16 @@ async function applyOpenParams() {
             console.log("Taidal.OpenGraph: the canvas already shows", graphPath);
             return; // never stack a duplicate workflow tab for the graph already on screen
         }
-        await loadUntilItSticks(workflow);
-        console.log("Taidal.OpenGraph: loaded", graphPath);
+        let opened = false;
+        try {
+            opened = await openAsNamedWorkflow(workflow, graphPath);
+        } catch (err) {
+            // Never lose the graph over the naming: fall back to putting it on the canvas as
+            // before. The user then gets the Save-As prompt, which still mirrors.
+            console.warn("Taidal.OpenGraph: could not open it as a named workflow —", err);
+        }
+        if (!opened) await loadUntilItSticks(workflow);
+        console.log("Taidal.OpenGraph: loaded", graphPath, opened ? "(named workflow)" : "(canvas only)");
     } catch (err) {
         console.error("Taidal.OpenGraph: could not open", graphPath, err);
         alert("Open graph failed for " + graphPath + ":\n\n" + err + "\n\nThe canvas is left as it was.");

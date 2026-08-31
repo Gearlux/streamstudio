@@ -179,8 +179,15 @@ class _FakeDownloadDataset:
 
 def test_value_node_directory_output_is_string() -> None:
     node = create_comfy_node(_FakeDownloadDataset, "Taidal__FakeDownloadDataset")
-    assert node.RETURN_TYPES == ("STRING",)
-    assert node.RETURN_NAMES == ("directory",)
+    # Every value node ALSO emits the producer itself on a trailing ``object`` output, so one
+    # value node can be connected into another's wired param (a class-name walker into the
+    # output that reads it) — a config document has no attribute reference to reach through.
+    assert node.RETURN_TYPES == ("STRING", "RECORDSTREAM_OBJECT")
+    assert node.RETURN_NAMES == ("directory", "object")
+
+    # The declared @outputs keep their slot INDICES: a saved canvas addresses outputs
+    # positionally, so the producer socket is APPENDED, never inserted.
+    assert node.RETURN_NAMES[0] == "directory"
 
 
 # ------------------------------------------------------------- producer-stamped widget kinds
