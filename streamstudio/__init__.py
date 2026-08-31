@@ -457,6 +457,35 @@ try:
             except Exception as e:
                 return web.json_response({"error": str(e)}, status=500)
 
+    # The FILE twin of the directory chooser: a param tagged ``taidal_widget="FILE"``
+    # (``checkpoint_path`` and friends) browses for a single file — a folder dialog cannot
+    # select one (user report 2026-08-31). Same idempotent guard, same macOS osascript approach.
+    file_route_exists = any(
+        r.path == "/taidal/choose_file" and r.method == "POST" for r in server.PromptServer.instance.routes
+    )
+    if not file_route_exists:
+
+        @server.PromptServer.instance.routes.post("/taidal/choose_file")
+        async def choose_file_handler(request: Any) -> Any:
+            try:
+                # Pop up the native macOS file picker on the host machine
+                result = subprocess.run(
+                    [
+                        "osascript",
+                        "-e",
+                        'POSIX path of (choose file with prompt "Select a file:")',
+                    ],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                return web.json_response({"path": result.stdout.strip()})
+            except subprocess.CalledProcessError:
+                # User likely clicked Cancel in the dialog
+                return web.json_response({"path": ""})
+            except Exception as e:
+                return web.json_response({"error": str(e)}, status=500)
+
     # List locally-cached HuggingFace datasets so the HF dataset-id field
     # (web/hf_dataset_chooser.js) can offer them as an optional picker. Free-text entry
     # is preserved on the widget itself; this only surfaces what's already downloaded.

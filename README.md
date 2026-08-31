@@ -880,11 +880,12 @@ Node sockets and widgets are derived from each callable's signature by `_map_typ
 | the `split` param of a `HuggingFace*` source | free-text `STRING` + optional split picker (`web/hf_split_chooser.js` → `/taidal/hf_dataset_splits`), tagged `taidal_widget="HF_SPLIT"` |
 | the `metadata_features` list param of a `HuggingFace*` source | comma-separated `STRING` + multi-select "add column" picker incl. `*` (`web/hf_metadata_chooser.js` → `/taidal/hf_dataset_features`), tagged `taidal_widget="HF_METADATA"` |
 | `pathlib.Path`, or a param named `*path*` / `*dir*` / `*root*` / `*folder*` | directory-picker `STRING` (`web/directory_chooser.js` → `/taidal/choose_directory`) |
+| a param named `*file*` / `*checkpoint*` / `*ckpt*` (without a `*dir*` / `*root*` / `*folder*` segment — `checkpoint_dir` stays a directory) | file-picker `STRING` (`web/directory_chooser.js` → `/taidal/choose_file`) |
 | anything else | `STRING` fallback |
 
 `RECORDSTREAM_SOURCE` and `RECORDSTREAM_RECORD` are StreamStudio socket types that carry the live `Stream` / record (a plain `dict`) objects between nodes (ComfyUI connects two sockets only when their type strings match), which is what lets ops chain into a pipeline.
 
-The directory picker calls the `/taidal/choose_directory` route registered in `streamstudio/__init__.py`, currently a native **macOS** folder dialog (`osascript`). Extend `TYPE_MAP` / `_map_type` to support new types — never special-case an individual node.
+The pickers call the `/taidal/choose_directory` / `/taidal/choose_file` routes registered in `streamstudio/__init__.py`, currently native **macOS** dialogs (`osascript`) — a folder dialog cannot select a file, which is why the two kinds exist. Extend `TYPE_MAP` / `_map_type` to support new types — never special-case an individual node.
 
 ### HuggingFace dataset-id field
 

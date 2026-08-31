@@ -77,16 +77,16 @@ async function fetchWorkflow(graphPath) {
     return data.workflow;
 }
 
-// The workflow PATH this graph file is opened as, inside ComfyUI's own store. Derived from the
-// workspace file the graph belongs to (``…/my.workspace.yaml.d/source.json`` → ``my.workspace``)
-// and grouped under ``taidal/`` so a consuming tool's graphs stay together.
+// The workflow PATH this graph file is opened as, inside ComfyUI's own store — ONE document
+// PER GRAPH: ``…/my.workspace.yaml.d/model_echo.json`` → ``taidal/my.workspace/model_echo``.
+// It used to collapse to the workspace name alone, so every graph of a workspace shared one
+// document — opening echo landed on the efficientvit canvas (user report 2026-08-31).
 function workflowPathFor(graphPath) {
     const parts = graphPath.split(/[\\/]/);
     const dir = parts[parts.length - 2] || "";              // "my.workspace.yaml.d"
     const owner = dir.replace(/\.d$/, "").replace(/\.ya?ml$/, "");  // "my.workspace"
-    const stem = parts[parts.length - 1].replace(/\.json$/, "");     // "source"
-    const name = owner || stem || "graph";
-    return `workflows/taidal/${name}.json`;
+    const stem = parts[parts.length - 1].replace(/\.json$/, "");     // "model_echo"
+    return `workflows/taidal/${owner || "graphs"}/${stem || "graph"}.json`;
 }
 
 // Put the graph in ComfyUI's store and OPEN it from there, so the canvas is a NAMED document.
@@ -117,7 +117,14 @@ async function applyOpenParams() {
     const url = new URL(window.location.href);
     const graphPath = url.searchParams.get("taidal_graph");
     if (!graphPath) return;
-    if (graphPath.endsWith(".json")) sessionStorage.setItem("taidal.sourceFile", graphPath); // the mirror target
+    if (graphPath.endsWith(".json")) {
+        // The mirror MAP: workflow document -> the workspace graph file it mirrors to. A tab
+        // may hold several taidal graphs at once (echo AND efficientvit as workflow tabs), so
+        // one remembered file would mirror whichever canvas saves into the WRONG graph.
+        const mirrors = JSON.parse(sessionStorage.getItem("taidal.graphFiles") || "{}");
+        mirrors[workflowPathFor(graphPath)] = graphPath;
+        sessionStorage.setItem("taidal.graphFiles", JSON.stringify(mirrors));
+    }
     url.searchParams.delete("taidal_graph");
     window.history.replaceState({}, "", url.pathname + url.search + url.hash);
     await appSettled();
@@ -156,14 +163,21 @@ if (!api.__taidalSaveMirror) {
     api.fetchApi = function (route, options) {
         const result = original(route, options);
         try {
-            const target = sessionStorage.getItem("taidal.sourceFile");
-            const isSave =
-                target &&
-                options &&
-                options.method === "POST" &&
-                typeof route === "string" &&
-                decodeURIComponent(route).includes("/userdata/workflows/");
-            if (isSave) {
+            const mirrors = JSON.parse(sessionStorage.getItem("taidal.graphFiles") || "{}");
+            let target = null;
+            if (options && options.method === "POST" && typeof route === "string") {
+                const decoded = decodeURIComponent(route);
+                // mirror ONLY the save of a workflow document this tab opened FROM a graph
+                // file, and only to THAT file — a save of any other workflow (another taidal
+                // graph, the user's own documents) must never touch this workspace's graphs
+                for (const [workflowPath, graphFile] of Object.entries(mirrors)) {
+                    if (decoded.includes("/userdata/" + workflowPath) || decoded.includes("/userdata/" + encodeURIComponent(workflowPath))) {
+                        target = graphFile;
+                        break;
+                    }
+                }
+            }
+            if (target) {
                 const body = JSON.parse(options.body);
                 Promise.resolve(result)
                     .then((res) => {

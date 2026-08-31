@@ -310,6 +310,7 @@ class _FakeRoutes:
         # routes now — choose_directory, export_flow, hf_datasets).
         if self._existing:
             yield SimpleNamespace(path="/taidal/choose_directory", method="POST")
+            yield SimpleNamespace(path="/taidal/choose_file", method="POST")
             yield SimpleNamespace(path="/taidal/export_flow", method="POST")
             yield SimpleNamespace(path="/taidal/export_ops_graph", method="POST")
             yield SimpleNamespace(path="/taidal/import_yaml", method="POST")

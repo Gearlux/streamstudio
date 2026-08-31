@@ -161,6 +161,61 @@ def test_path_named_output_is_string_socket() -> None:
     assert _output_socket_type("count", int) == "INT"
 
 
+# ------------------------------------------------------------------ file picker vs folder picker
+
+
+def _param(name: str) -> inspect.Parameter:
+    return inspect.Parameter(name, inspect.Parameter.KEYWORD_ONLY, default="", annotation=str)
+
+
+class TestFileVsFolderPickers:
+    """A checkpoint names a FILE — its browse button must open a file dialog, not a folder one.
+
+    (User report 2026-08-31: "I cannot specify the checkpoint paths (files) in the streamstudio
+    nodes, I can only specify directories.") Directory signals WIN over file signals, because
+    ``checkpoint_dir`` — a directory OF checkpoints — carries both.
+    """
+
+    def test_a_checkpoint_param_gets_the_file_picker(self) -> None:
+        for name in ("checkpoint_path", "ckpt_path", "input_file", "filename"):
+            spec = _widget_for(_param(name))
+            assert spec[0] == "STRING" and spec[1]["taidal_widget"] == "FILE", name
+
+    def test_a_directory_param_keeps_the_folder_picker(self) -> None:
+        for name in ("output_dir", "data_root", "save_folder", "checkpoint_dir"):
+            spec = _widget_for(_param(name))
+            assert spec[0] == "STRING" and spec[1]["taidal_widget"] == "DIRECTORY", name
+
+    def test_a_bare_path_param_keeps_the_folder_picker(self) -> None:
+        # `path` alone stays the folder picker: it may be a dataset id or a local directory.
+        spec = _widget_for(_param("path"))
+        assert spec[1]["taidal_widget"] == "DIRECTORY"
+
+    def test_a_non_string_scalar_never_gets_a_picker(self) -> None:
+        """A picker is a STRING affordance — measured 2026-08-31: a 📄 browse button landed on
+        the BOOLEAN ``checkpoint_strict`` because only the NAME was consulted."""
+        strict = inspect.Parameter("checkpoint_strict", inspect.Parameter.KEYWORD_ONLY, default=False, annotation=bool)
+        assert _widget_for(strict)[0] == "BOOLEAN"
+        count = inspect.Parameter("max_file_count", inspect.Parameter.KEYWORD_ONLY, default=0, annotation=int)
+        assert _widget_for(count)[0] == "INT"
+        blob = inspect.Parameter(
+            "checkpoint_path", inspect.Parameter.KEYWORD_ONLY, default=None, annotation=Optional[str]
+        )
+        assert _widget_for(blob)[1]["taidal_widget"] == "FILE", "Optional[str] stays a picker"
+
+    def test_a_file_named_output_is_still_a_plain_string_socket(self) -> None:
+        # Outputs are never pickers of either kind.
+        assert _output_socket_type("checkpoint_path", str) == "STRING"
+
+    def test_the_file_route_is_registered_in_the_chooser_js(self) -> None:
+        """The web extension must offer BOTH dialogs — tag -> route, keyed off taidal_widget."""
+        from pathlib import Path as _P
+
+        js = (_P(__file__).parent.parent / "streamstudio" / "web" / "directory_chooser.js").read_text()
+        assert "/taidal/choose_directory" in js and "/taidal/choose_file" in js
+        assert "FILE" in js and "DIRECTORY" in js
+
+
 @configurable(category="value")
 class _FakeDownloadDataset:
     """A value producer whose ``directory`` @output is a path-like string."""
