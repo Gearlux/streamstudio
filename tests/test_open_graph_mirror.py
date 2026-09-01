@@ -14,7 +14,7 @@ _JS = Path(__file__).resolve().parents[1] / "streamstudio" / "web" / "open_graph
 class TestPerGraphDocuments:
     def test_the_workflow_path_keeps_the_graph_stem(self) -> None:
         js = _JS.read_text()
-        assert "workflows/taidal/${owner || \"graphs\"}/${stem || \"graph\"}.json" in js, (
+        assert 'workflows/taidal/${owner || "graphs"}/${stem || "graph"}.json' in js, (
             "collapsing to the workspace name alone made every graph share ONE document — "
             "opening echo landed on the efficientvit canvas"
         )
@@ -27,6 +27,14 @@ class TestThePathKeyedMirror:
     def test_saves_mirror_only_their_own_document(self) -> None:
         js = _JS.read_text()
         assert "taidal.graphFiles" in js, "a MAP: workflow document -> graph file"
-        assert 'decoded.includes("/userdata/" + workflowPath)' in js, (
-            "a save of any OTHER workflow in the tab must never touch this workspace's graphs"
-        )
+        assert (
+            'decoded.includes("/userdata/" + workflowPath)' in js
+        ), "a save of any OTHER workflow in the tab must never touch this workspace's graphs"
+
+    def test_the_app_mode_derivative_mirrors_to_the_same_file(self) -> None:
+        """ComfyUI's App/Linear view saves the workflow as `<stem>.app.json` — the same
+        document under its app identity. Unmapped, a parameter typed into the app form
+        (an update sink's output directory) saved to the derivative and the workspace's
+        graph file kept the stale value (measured 2026-09-01)."""
+        js = _JS.read_text()
+        assert 'workflowPath.replace(/\\.json$/, ".app.json")' in js
