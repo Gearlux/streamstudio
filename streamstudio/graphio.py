@@ -2491,6 +2491,8 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
         kwargs = dict(kwargs)
         configured = {param for param, _chain in configure_specs.get(nid, [])}
         configured |= {param for param, _cap in output_captures.get(nid, [])}  # capture wraps inject these
+        list_params = _op_list_params(cls)
+        wired_lists: Dict[str, List[Tuple[str, str, int]]] = {}
         for input_name, (src_id, src_slot) in pnodes[nid].links.items():
             base = _strip_index_for(cls, input_name)
             if base == _RECORD_INPUT:
@@ -2499,7 +2501,15 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
                 continue  # injected per record by the ConfigureOp wrap
             if src_id in specs:
                 referenced.add(src_id)
-                kwargs[base] = _node_reference(src_id, src_slot)
+                if base in list_params and input_name != base:
+                    # A dynamic op_N fan-in on a CHAINED op: every wire joins the list,
+                    # ordered by slot index below — the standalone path already did this,
+                    # but a per-wire kwargs assignment here kept only the LAST wire
+                    # (measured: a chained ConfigureOp drawn with two compute ops exported
+                    # `ops: {_ref_: <second>}`, orphaning the first and failing the load).
+                    wired_lists.setdefault(base, []).append((input_name, src_id, src_slot))
+                else:
+                    kwargs[base] = _node_reference(src_id, src_slot)
             else:
                 literal = _primitive_literal(src_id, pnodes)
                 if literal is not _MISSING:
@@ -2507,6 +2517,9 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
                     continue
                 src_type = pnodes[src_id].class_type if src_id in pnodes else "unknown"
                 dropped_wires.append((f"{chain_key}[{cls.__name__}]", base, src_id, src_type))
+        for base, items in wired_lists.items():
+            ordered = sorted(items, key=lambda it: _index_of(it[0]))
+            kwargs[base] = [_node_reference(src, slot) for _name, src, slot in ordered]
         instance = _wrap_configured(nid, _marker(Target, cls, kwargs), eager=True)
         return cast(Target, instance)
 
