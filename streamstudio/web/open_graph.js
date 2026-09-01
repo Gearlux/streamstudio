@@ -121,8 +121,15 @@ async function applyOpenParams() {
         // The mirror MAP: workflow document -> the workspace graph file it mirrors to. A tab
         // may hold several taidal graphs at once (echo AND efficientvit as workflow tabs), so
         // one remembered file would mirror whichever canvas saves into the WRONG graph.
+        // A graph whose extra carries linearMode (the App/Linear view) saves as the
+        // `<stem>.app.json` DERIVATIVE — same document, app identity — so that path maps
+        // to the same file: an output-directory typed into the app form must reach the
+        // workspace's graph file exactly like a node edit (measured 2026-09-01: the app
+        // save missed the mirror and the workspace ran with the stale value).
+        const workflowPath = workflowPathFor(graphPath);
         const mirrors = JSON.parse(sessionStorage.getItem("taidal.graphFiles") || "{}");
-        mirrors[workflowPathFor(graphPath)] = graphPath;
+        mirrors[workflowPath] = graphPath;
+        mirrors[workflowPath.replace(/\.json$/, ".app.json")] = graphPath;
         sessionStorage.setItem("taidal.graphFiles", JSON.stringify(mirrors));
     }
     url.searchParams.delete("taidal_graph");

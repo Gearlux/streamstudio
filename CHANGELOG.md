@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **A ComfyUI App-mode save now mirrors to the workspace graph file.** A graph opened via
+  `?taidal_graph=` whose `extra` carries `linearMode` presents as a ComfyUI APP (a form of
+  exposed parameters, no node canvas) and saves as the `<stem>.app.json` derivative — a
+  path the save mirror did not map, so a parameter typed into the app form (an update
+  sink's output directory) never reached the workspace's graph file. Both paths now map to
+  the same file.
+
 ### Added
 
 - **Item types are socket types, and each gets a passthrough node.** Every registered
