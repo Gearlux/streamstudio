@@ -8,6 +8,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **A chained op's op-list fan-in survives the whole-graph export.** The folded-chain
+  path of `workflow_to_yaml` assigned each `op_N` wire to the same kwarg — last wire
+  wins — so an op with several nested compute ops (a `ConfigureOp` drawn with two)
+  exported with only the second, orphaning the first and failing the re-load. The
+  chain path now accumulates dynamic op-list wires in slot order, like the
+  standalone-node path always did.
 - **A ComfyUI App-mode save now mirrors to the workspace graph file.** A graph opened via
   `?taidal_graph=` whose `extra` carries `linearMode` presents as a ComfyUI APP (a form of
   exposed parameters, no node canvas) and saves as the `<stem>.app.json` derivative — a
