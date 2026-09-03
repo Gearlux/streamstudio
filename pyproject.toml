@@ -24,7 +24,14 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "liquifai>=0.2.0",
+    # 0.3.0 is the floor for `strict_flags=True` (cli.py) and the declared `short=`
+    # options every command carries — both absent from 0.2.0, and both used at MODULE
+    # level, so an older liquifai is not a degraded CLI but an ImportError-equivalent:
+    # `LiquifyApp.__init__() got an unexpected keyword argument 'strict_flags'` at
+    # import, taking every entry point with it (measured 2026-09-03, when the workspace
+    # resolved the PyPI 0.2.0 wheel). 0.3.0 is NOT on PyPI yet — until it is, this
+    # package needs liquifai from a checkout or from git.
+    "liquifai>=0.3.0",
     "loggair>=0.2.0",
     # [pydantic] extra: bridge.py enumerates fields via confluid.to_pydantic.
     "confluid[pydantic]>=0.3.0",
