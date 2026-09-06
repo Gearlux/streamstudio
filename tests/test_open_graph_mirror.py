@@ -38,3 +38,41 @@ class TestThePathKeyedMirror:
         graph file kept the stale value (measured 2026-09-01)."""
         js = _JS.read_text()
         assert 'workflowPath.replace(/\\.json$/, ".app.json")' in js
+
+
+class TestTheRequestedView:
+    """A launcher may say which FACE to open a graph on: ``taidal_view=app`` is the settings
+    form (the App view), ``taidal_view=graph`` the node canvas (user request 2026-09-05).
+
+    The frontend derives the opening mode from the DOCUMENT's ``extra.linearMode`` at load, so
+    the choice is applied to the in-memory workflow BEFORE it is handed to ``loadGraphData`` —
+    both load paths receive that same object, so one mutation covers both.
+    """
+
+    def test_the_view_param_is_read_and_stripped_like_the_graph_param(self) -> None:
+        js = _JS.read_text()
+        assert 'url.searchParams.get("taidal_view")' in js
+        assert 'url.searchParams.delete("taidal_view")' in js, "never left in the URL for a reload to replay"
+
+    def test_the_view_is_applied_BEFORE_either_load_path(self) -> None:
+        js = _JS.read_text()
+        applied = js.index("const view = applyRequestedView(workflow, requestedView);")
+        assert applied < js.index("opened = await openAsNamedWorkflow(workflow, graphPath);")
+        assert applied < js.index("if (!opened) await loadUntilItSticks(workflow);")
+
+    def test_app_sets_the_flag_and_graph_clears_it(self) -> None:
+        body = _JS.read_text().split("function applyRequestedView")[1].split("async function applyOpenParams")[0]
+        assert 'workflow.extra.linearMode = view === "app";' in body
+
+    def test_a_graph_without_a_form_falls_back_to_the_canvas_and_says_so(self) -> None:
+        """An App view over a graph that declares no ``linearData`` would be an empty form —
+        the failure mode the importer refuses at build time, refused again here at open time."""
+        body = _JS.read_text().split("function applyRequestedView")[1].split("async function applyOpenParams")[0]
+        assert "linearData" in body and 'return "graph";' in body
+        assert "declares no App view" in body
+
+    def test_asking_for_a_view_re_navigates_a_graph_already_on_screen(self) -> None:
+        """The duplicate-tab guard must not swallow a request for the OTHER face of the same
+        graph — that is exactly the case where the canvas already shows it."""
+        js = _JS.read_text()
+        assert "if (fingerprint() === want && !requestedView)" in js

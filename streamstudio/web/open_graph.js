@@ -113,9 +113,30 @@ async function openAsNamedWorkflow(workflow, graphPath) {
     return true;
 }
 
+// A launcher may ALSO say which VIEW to open the graph in: `taidal_view=app` lands on
+// ComfyUI's App view (the form of the widgets `extra.linearData` names — "just the
+// settings"), `taidal_view=graph` on the node canvas ("edit the graph"). The frontend derives
+// the opening mode from the DOCUMENT's `extra.linearMode` at load, so the choice is applied
+// to the in-memory copy before it is loaded — no store access, no toggle race. Absent, the
+// file's own flag decides, exactly as before. A graph with no `linearData` has nothing to
+// show as a form, so `app` falls back to the canvas and says so rather than opening empty.
+function applyRequestedView(workflow, view) {
+    if (!workflow || (view !== "app" && view !== "graph")) return view ? "graph" : null;
+    workflow.extra = workflow.extra || {};
+    const hasForm = !!(workflow.extra.linearData && (workflow.extra.linearData.inputs || []).length);
+    if (view === "app" && !hasForm) {
+        console.log("Taidal.OpenGraph: this graph declares no App view (no linearData) — opening the canvas");
+        workflow.extra.linearMode = false;
+        return "graph";
+    }
+    workflow.extra.linearMode = view === "app";
+    return view;
+}
+
 async function applyOpenParams() {
     const url = new URL(window.location.href);
     const graphPath = url.searchParams.get("taidal_graph");
+    const requestedView = url.searchParams.get("taidal_view");
     if (!graphPath) return;
     if (graphPath.endsWith(".json")) {
         // The mirror MAP: workflow document -> the workspace graph file it mirrors to. A tab
@@ -133,6 +154,7 @@ async function applyOpenParams() {
         sessionStorage.setItem("taidal.graphFiles", JSON.stringify(mirrors));
     }
     url.searchParams.delete("taidal_graph");
+    url.searchParams.delete("taidal_view");
     window.history.replaceState({}, "", url.pathname + url.search + url.hash);
     await appSettled();
     try {
@@ -142,10 +164,12 @@ async function applyOpenParams() {
             return;
         }
         const want = (workflow.nodes || []).map((n) => n.type).sort().join(",");
-        if (fingerprint() === want) {
+        if (fingerprint() === want && !requestedView) {
             console.log("Taidal.OpenGraph: the canvas already shows", graphPath);
             return; // never stack a duplicate workflow tab for the graph already on screen
         }
+        // BEFORE either load path below: both hand this same object to loadGraphData.
+        const view = applyRequestedView(workflow, requestedView);
         let opened = false;
         try {
             opened = await openAsNamedWorkflow(workflow, graphPath);
@@ -155,7 +179,8 @@ async function applyOpenParams() {
             console.warn("Taidal.OpenGraph: could not open it as a named workflow —", err);
         }
         if (!opened) await loadUntilItSticks(workflow);
-        console.log("Taidal.OpenGraph: loaded", graphPath, opened ? "(named workflow)" : "(canvas only)");
+        console.log("Taidal.OpenGraph: loaded", graphPath, opened ? "(named workflow)" : "(canvas only)",
+            view ? `as ${view}` : "");
     } catch (err) {
         console.error("Taidal.OpenGraph: could not open", graphPath, err);
         alert("Open graph failed for " + graphPath + ":\n\n" + err + "\n\nThe canvas is left as it was.");

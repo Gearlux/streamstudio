@@ -684,6 +684,15 @@ http://127.0.0.1:8188/?taidal_graph=/abs/path/ws.d/source.json   # the launcher'
 http://127.0.0.1:8188/?taidal_graph=/abs/path/pipeline.yaml      # a Confluid config, converted
 ```
 
+A launcher may also name the **view** to open the graph on: `?taidal_graph=<file>&taidal_view=app`
+lands on ComfyUI's App view (the form of the widgets the document's `extra.linearData` names),
+`&taidal_view=graph` on the node canvas. The opener applies the choice to the document's
+`extra.linearMode` before loading it — which is where the frontend reads the opening mode — so
+the file itself is untouched by the open. Absent, the file's own flag decides. A graph declaring
+no `linearData` has nothing to show as a form, so `app` falls back to the canvas and says so in
+the console.
+
+
 A `.json` path is a native workflow file: the `Taidal.OpenGraph` extension puts it on the
 canvas via `/taidal/read_graph` (a missing file is fine — the first save creates it) and
 **mirrors every native workflow save** (Ctrl-S / Save / Save As) into it via
@@ -774,7 +783,19 @@ runnable: !class:myproject.training.ClassificationTrainer
 
 ### v1 scope & limitations
 
-- **Export skips what YAML can't express — it never fails on it.** A canvas usually contains nodes with no Confluid form: native ComfyUI nodes (*Preview Image*, *Show Text*), the canvas-only Taidal adapters (*Walk Dataset*, *Extract from Record*, *Retag*, …), and occasionally a node whose config can't be serialized. **Export Graph → Taidal YAML** leaves those out and lists each one (with the reason) in a leading `#` comment block of the downloaded YAML — the document below stays a normal, loadable config of the remaining Taidal nodes. A wire from a skipped node into an exported config member is dropped (the member falls back to its default) and noted in the same block — **except** a wire from a native **primitive** node (`PrimitiveInt`/`PrimitiveFloat`/…), which inlines as its literal `value` widget. The canvas **wiring is preserved**: each run of record-chained ops folds into a `pipeline: !class:recordstream.core.stream.Stream` entry — `source: !ref:<source>` (traced through the *Walk Dataset* adapter back to the source node) plus the ordered `ops:` list, with fan-out compiled to `Save`/`Use` context cells — so the exported YAML reconstructs the same data flow (`confluid.load("config.yaml")["pipeline"]` is an iterable `Stream`). A chain broken by a skipped node continues as its own `pipeline_N` entry.
+- **Export skips what YAML can't express — with one exception, it never fails on it.** A canvas usually contains nodes with no Confluid form: native ComfyUI nodes (*Preview Image*, *Show Text*), the canvas-only Taidal adapters (*Walk Dataset*, *Extract from Record*, *Retag*, …), and occasionally a node whose config can't be serialized. **Export Graph → Taidal YAML** leaves those out and lists each one (with the reason) in a leading `#` comment block of the downloaded YAML — the document below stays a normal, loadable config of the remaining Taidal nodes. A wire from a skipped node into an exported config member is dropped (the member falls back to its default) and noted in the same block — **except** a wire from a native **primitive** node (`PrimitiveInt`/`PrimitiveFloat`/…), which inlines as its literal `value` widget. The canvas **wiring is preserved**: each run of record-chained ops folds into a `pipeline: !class:recordstream.core.stream.Stream` entry — `source: !ref:<source>` (traced through the *Walk Dataset* adapter back to the source node) plus the ordered `ops:` list, with fan-out compiled to `Save`/`Use` context cells — so the exported YAML reconstructs the same data flow (`confluid.load("config.yaml")["pipeline"]` is an iterable `Stream`). A chain broken by a skipped node continues as its own `pipeline_N` entry.
+- **The one exception: a Taidal node this StreamStudio does not have REFUSES the export.** Every discovered node is keyed `Taidal_<package>_<category>_<Class>`, so a `Taidal_*` class type the running server has no class for is not a ComfyUI node — it is a canvas the server is out of step with, almost always because the op was added *after* the server started (the node registry is read once, at startup). Dropping such a node would hand you a silently shortened chain, so the export stops and names them:
+
+  ```
+  this StreamStudio does not register 11 node(s) the canvas names: node 2
+  (Taidal_waivefront_op_measure_TuneToBand), node 3 (…SelectBurst), … A Taidal node the
+  canvas names but this installation has no class for is normally an op added AFTER the
+  editor started — the node registry is read once at startup. Restart it
+  (`streamstudio restart`) and convert again; if the op really is gone from this
+  installation, the canvas is older than the code and needs redrawing.
+  ```
+
+  The canvas button surfaces it as the error; `streamstudio export-workflow` exits with it and writes nothing (it used to write the partial YAML). Native ComfyUI nodes and the registered canvas-only adapters (*Extract as Op*, *Mix Records*, *Value*, *Math*) are unaffected — they still drop into the comment block as before.
 - **Value chains compile here too.** The ``op-chain → Extract(input) → Math → widget`` pattern wraps the consumer in a `ConfigureOp` (chain ops + `FormulaOp`) exactly like the flow export — inside pipeline folds and on standalone op-value entries; the consumed Extract/Math adapters are no longer listed as "left out".
 - **Value nodes export by their class name with DOTTED output refs.** A wire from a value-producer node's output slot (e.g. a config node's `disabled` output feeding an op's `tx_disabled` param) emits `!ref:<entry>.<output>` — the `@output` *property value*, not the config instance a plain `!ref:` would inject. On **import**, confluid's resolver instantiates such dotted refs (a documented `resolve()` caveat), so the consumer widget receives the *evaluated* value and the config lands as a standalone value node carrying its settings — re-wire the two on the canvas to re-establish the live link.
 - A config member with **no StreamStudio node** (a class not tagged op/source/engine/member — e.g. a torchmetrics `MetricCollection`) is **dropped from the canvas with a warning** on import; the runnable falls back to its default. To surface such a class, tag/register it (a package registers its loggers and lazy torch / Lightning object members the same way).
@@ -906,6 +927,42 @@ A HuggingFace dataset source's identifier is a **name**, not a folder — `recor
 ### Constructor-parameter tooltips
 
 Each widget's hover tooltip is sourced from the wrapped callable's docstring `Args:` block (parsed by `confluid.parse_param_docs`) — the **same** per-parameter help a schema generator surfaces as JSON-Schema `description`s. Document a constructor parameter once in the upstream class's `Args:` and it shows up in both GUIs. A parameter with no `Args:` entry simply has no tooltip; the fix is to document it in the package that owns the class, never to hand-write a tooltip in StreamStudio.
+
+## Declaring a canvas's App view (`app:`)
+
+ComfyUI can open a workflow as a **form** instead of a node graph — its App view — showing only the
+widgets a document names. A source document declares that view in an `app:` block, and
+`streamstudio import` emits it, so regenerating the JSON keeps it:
+
+```yaml
+flow:
+  # …the graph…
+outputs: verdict
+
+app:
+  inputs:
+    - [ClassifyBluetooth, envelope_spread_db]   # [class name, widget name]
+    - [ClassifyBluetooth, ble_index]
+  outputs: [BluetoothVerdict]                   # what the Run button drives
+```
+
+Nodes are addressed by **class name**, not by node id: an id is assigned by the importer, so
+regenerating would renumber it, and a class name reads the same in both document shapes (a `flow:`
+step graph and a whole-graph config). A `(min, max)` parameter arrives as two widgets, so expose the
+halves (`deviation_hz__lo` / `deviation_hz__hi`).
+
+A declaration that could not render is **refused at import**, naming what the canvas does carry —
+because the frontend fails silently otherwise (an entry whose node or widget does not resolve is
+dropped, leaving an empty form with no error):
+
+```
+AppViewError: app: MeasureSymbolClock.windows_hz is a wired socket, not a widget — an App view
+shows fields, so expose one of: max_points, inst_freq, output, findings
+```
+
+`app:` is refused for `--as_ subgraph` too: subgraph packaging moves every node inside a definition,
+and the App view renders a subgraph-internal widget only once it has been promoted onto the instance
+node. Import a template that wants an App view **flat**.
 
 ## Connection typing
 
