@@ -245,3 +245,109 @@ would become several record slots). Do not reintroduce inference on this path, a
 `!ref:` rule by loosening resolution globally — settling exists to catch a genuine typo in a
 reference, and turning it off to make one branch reachable would trade a located load error for a
 silent, mysterious boundary socket.
+
+## The App view is declared in the source document, not pasted into the generated one (`app:`, 2026-09-05)
+
+**Context.** ComfyUI's App view turns a workflow into a FORM: `extra.linearMode` plus
+`extra.linearData` naming `[[node id, widget name], …]` inputs and the output nodes the Run button
+drives. It is how a template exposes one parameter without the user ever seeing nodes.
+
+The importer wrote `"extra": {}` unconditionally. So a template that wanted an app view had the block
+added AFTER generation, and the file's own regenerate header carried a step saying so — which is the
+hand-edit-the-generated-artifact trap the template-first rule exists to prevent. Measured on the
+shipped detection sink before this change:
+
+```
+SHIPPED    : extra = {"linearMode": true, "linearData": {"inputs": [[5, "store"]], "outputs": ["1"]}}
+REGENERATED: extra = {}
+```
+
+**Decision.** A source document declares its App view in an `app:` block, and the importer emits the
+`extra` from it. Nodes are addressed by CLASS NAME, which is the only spelling that reads the same in
+both document shapes a template can have — a `flow:` step graph keys its ops by step name, a
+whole-graph config nests them under arbitrary keys — and unlike a node id it survives regeneration.
+
+An unusable declaration is REFUSED at import: a class no node carries, a class on two nodes, a widget
+the class does not have, a wired socket named as a field. That is the point rather than a nicety,
+because the frontend fails SILENTLY — `pruneLinearData` drops an entry whose node does not resolve and
+the App-view renderer drops one whose widget does not, so a wrong name yields an empty form with no
+error anywhere.
+
+`app:` on a `--as_ subgraph` import is refused too. Subgraph packaging moves every node inside
+`definitions.subgraphs[]`, and `resolveNodeWidget` renders a subgraph-internal widget only once it has
+been PROMOTED onto the instance node — so ids that point inside a definition are skipped and the form
+comes up empty. A template wanting an App view imports flat.
+
+**Consequences.** Regenerating a declaring template reproduces its app view; the shipped detection
+sink's JSON is byte-identical before and after, and its header lost the manual step. A template's App
+view is now readable in its source rather than only in the generated artifact. The cost is that a
+class appearing twice on one canvas cannot be addressed at all — deliberately, because a class name
+cannot say which one and guessing would ship the wrong field.
+
+**Example.**
+
+```yaml
+app:
+  inputs:
+    - [ClassifyBluetooth, envelope_spread_db]
+    - [ClassifyBluetooth, ble_index]
+  outputs: [BluetoothVerdict]
+```
+
+```
+AppViewError: app: MeasureSymbolClock.windows_hz is a wired socket, not a widget — an App view
+shows fields, so expose one of: max_points, inst_freq, output, findings
+```
+
+**What you may change.** The block's keys, and which failures are refused. What must hold: the
+declaration lives in the SOURCE so regeneration preserves it, nodes are addressed by something stable
+across a regeneration, an ambiguous or unrenderable declaration is refused rather than emitted, and
+the subgraph combination stays refused until promoted widgets are emitted with it.
+
+## An unregistered `Taidal_*` node is a refusal, not a comment (`graphio.workflow_to_yaml`, 2026-09-06)
+
+**Context.** The exporter is deliberately forgiving: a canvas holds viewers, primitives and
+canvas-only adapters that have no Confluid form, and failing on them would make export
+useless. So every node the registry did not know was listed in a leading comment block and
+skipped. That reasoning is sound for a node that is genuinely not ours — and wrong for one
+that is. The node registry is a SNAPSHOT taken when the server starts, so a canvas naming an
+op added since converts to a shortened chain that looks like a valid document. Measured: an
+editor six minutes older than a new op turned a twelve-node chain into one node, and the
+failure surfaced three layers downstream as "no record chain to run".
+
+**Decision.** Split the branch on the node KEY. `bridge._node_key` mints every discovered
+node as `Taidal_<package>_<category>[_<group>]_<Class>`, so the prefix is a reliable statement
+that the canvas thought this was one of ours. An unregistered name carrying it means the
+INSTALLATION is out of step with the canvas; an unregistered bare name is a real ComfyUI
+node. The first raises, naming every missing node and the remedy; the second still drops.
+
+The refusal is deliberately narrow, and the boundary is registration rather than the prefix:
+the hand-written adapters (`Taidal_SubgraphOp`, `Taidal_MixRecords`, `Taidal_Value`,
+`Taidal_Math`) carry the prefix and ARE registered, so they never reach it — which matters,
+because every shipped subgraph canvas contains one.
+
+**Consequences.** A stale server now says so in the first message a reader sees, at the layer
+that knows why. The CLI export fails where it used to write a partial YAML, which is the
+intended trade: a partial chain is not the canvas. No opt-out flag exists — one would be a
+second spelling for "give me the wrong answer", and the message already names the fix. A
+canvas that genuinely outlives an op (the package was removed) also refuses, and the message
+says that case out loud rather than pretending a restart will help.
+
+**Example.**
+
+```python
+from streamstudio.graphio import workflow_to_yaml
+from streamstudio.export import UnsupportedTopologyError
+
+stale = {k: v for k, v in NODE_CLASS_MAPPINGS.items() if "measure" not in k}
+try:
+    workflow_to_yaml(canvas, stale)
+except UnsupportedTopologyError as refusal:
+    print(refusal)
+# this StreamStudio does not register 11 node(s) the canvas names: node 2
+# (Taidal_waivefront_op_measure_TuneToBand), … Restart it (`streamstudio restart`) …
+```
+
+**What you may change.** The wording, and which reasons are listed together. What must hold:
+an unregistered `Taidal_*` node never reaches the output document, a registered adapter never
+raises, and a bare ComfyUI node still drops with its comment.

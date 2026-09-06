@@ -661,13 +661,19 @@ def export_workflow(workflow: Path, output: Optional[Path] = None) -> None:
         output: Write the YAML here (default: stdout).
     """
     import streamstudio
+    from streamstudio.export import UnsupportedTopologyError
     from streamstudio.graphio import workflow_to_yaml
 
     graph_path = Path(workflow)
     if not graph_path.exists():
         raise SystemExit(f"Workflow file not found: {graph_path}")
     graph = json.loads(graph_path.read_text())
-    yaml_doc = workflow_to_yaml(graph, streamstudio.NODE_CLASS_MAPPINGS)
+    try:
+        yaml_doc = workflow_to_yaml(graph, streamstudio.NODE_CLASS_MAPPINGS)
+    except UnsupportedTopologyError as refusal:
+        # A refusal is an ANSWER, not a crash — the message names the node and the remedy,
+        # so print it the way a missing file is printed rather than as a traceback.
+        raise SystemExit(f"Cannot export {graph_path}: {refusal}")
     if output:
         Path(output).write_text(yaml_doc)
         logger.info(f"Wrote YAML to {output}")

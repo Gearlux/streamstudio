@@ -218,6 +218,16 @@ def _node_list_value(value: Any) -> Optional[List[Any]]:
     return out
 
 
+class AppViewError(ValueError):
+    """An ``app:`` block the importer cannot turn into a usable ComfyUI App view.
+
+    Every case here would otherwise fail SILENTLY: the frontend's ``pruneLinearData`` drops a
+    ``linearData`` entry whose node does not resolve, and its App-view renderer drops one whose
+    widget does not, so a wrong name yields an empty form with no error anywhere. The message
+    names what was asked for and what the canvas actually carries.
+    """
+
+
 def _widget_and_socket_params(node_cls: Any) -> Tuple[List[str], Dict[str, str]]:
     """Split a node's ``INPUT_TYPES`` into ordered widget names and ``{socket_name: socket_type}``.
 
@@ -639,6 +649,112 @@ class _WorkflowBuilder:
         }
 
 
+#: The top-level key a source document uses to declare its ComfyUI App view. Excluded from the
+#: node walk everywhere a document's other top-level keys are read as node values.
+APP_KEY = "app"
+
+
+def _app_declaration(raw: Any) -> Optional[Dict[str, Any]]:
+    """The document's validated ``app:`` block, or ``None`` when it declares no App view.
+
+    Shape::
+
+        app:
+          inputs:                       # the widgets the form shows, in order
+            - [ClassName, widget_name]
+          outputs: [ClassName]          # what the Run button drives
+
+    Nodes are addressed by CLASS NAME because it is the one spelling that reads the same in both
+    document shapes a template can have — a ``flow:`` step graph keys its ops by step name, a
+    whole-graph config nests them under arbitrary keys — and because a node ID is assigned by the
+    importer, so regenerating would renumber it.
+    """
+    if not isinstance(raw, dict) or APP_KEY not in raw:
+        return None
+    block = raw[APP_KEY]
+    if not isinstance(block, dict):
+        raise AppViewError(f"app: must be a mapping with 'inputs' and 'outputs' keys, got {type(block).__name__}")
+    if "outputs" not in block:
+        raise AppViewError("app: needs an 'outputs' list naming the node(s) the Run button drives")
+    inputs: List[Tuple[str, str]] = []
+    for entry in block.get("inputs") or []:
+        if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+            raise AppViewError(f"app.inputs takes a [ClassName, widget_name] pair per line, got {entry!r}")
+        inputs.append((str(entry[0]), str(entry[1])))
+    outputs = block["outputs"]
+    if not isinstance(outputs, (list, tuple)):
+        raise AppViewError(f"app.outputs takes a list of class names, got {outputs!r}")
+    return {"inputs": inputs, "outputs": [str(value) for value in outputs]}
+
+
+def _class_name_of(node: Dict[str, Any], node_mappings: Dict[str, Any]) -> str:
+    """The Python class a placed node stands for — read off the generated node class's stamp."""
+    node_cls = node_mappings.get(str(node.get("type", "")))
+    path = str(getattr(node_cls, "TAIDAL_CALLABLE_PATH", "") or "")
+    if not path:
+        return str(node.get("type", "")).rsplit("_", 1)[-1]
+    # The stamp is ``module.path:ClassName`` (a colon separates the callable from its module),
+    # falling back to a dotted tail for any stamp written without one.
+    return path.rsplit(":", 1)[-1].rsplit(".", 1)[-1]
+
+
+def _resolve_app_node(name: str, workflow: Dict[str, Any], node_mappings: Dict[str, Any]) -> Dict[str, Any]:
+    """The ONE placed node of class ``name`` — refusing when there is none, or more than one."""
+    placed = [node for node in workflow.get("nodes", []) if _class_name_of(node, node_mappings) == name]
+    if not placed:
+        carried = sorted({_class_name_of(node, node_mappings) for node in workflow.get("nodes", [])})
+        raise AppViewError(f"app: no node on this canvas is a {name} — it carries {', '.join(carried) or 'nothing'}")
+    if len(placed) > 1:
+        ids = ", ".join(str(node["id"]) for node in placed)
+        raise AppViewError(
+            f"app: {name} is on {len(placed)} nodes ({ids}) — a class name cannot say which one, "
+            "so name a class the canvas carries exactly once"
+        )
+    return cast(Dict[str, Any], placed[0])
+
+
+def _apply_app_view(
+    workflow: Dict[str, Any], spec: Dict[str, Any], node_mappings: Dict[str, Any], as_: str
+) -> Dict[str, Any]:
+    """Write ComfyUI's ``extra.linearMode`` / ``linearData`` from a validated ``app:`` block."""
+    if as_ == "subgraph":
+        # Subgraph packaging moves every node inside ``definitions.subgraphs[]``. ComfyUI's App
+        # view renders a subgraph-internal widget only when it has been PROMOTED onto the instance
+        # node (``resolveNodeWidget`` takes its ``isPromotedWidgetView`` branch there), so ids that
+        # point inside a definition are silently skipped and the form comes up empty. Refuse rather
+        # than ship that: a template wanting an App view imports flat.
+        raise AppViewError(
+            "app: cannot be declared on a subgraph import — the App view only renders a "
+            "subgraph-internal widget once it is promoted onto the instance node. Import the "
+            "template flat (drop --as_ subgraph) to give it an App view."
+        )
+    inputs: List[List[Any]] = []
+    for class_name, widget in spec["inputs"]:
+        node = _resolve_app_node(class_name, workflow, node_mappings)
+        node_cls = node_mappings.get(str(node.get("type", "")))
+        widgets, sockets = _widget_and_socket_params(node_cls) if node_cls is not None else ([], {})
+        if widget in sockets:
+            raise AppViewError(
+                f"app: {class_name}.{widget} is a wired socket, not a widget — an App view shows "
+                f"fields, so expose one of: {', '.join(widgets) or 'none'}"
+            )
+        if widget not in widgets:
+            raise AppViewError(f"app: {class_name} has no widget {widget!r} — it has {', '.join(widgets) or 'none'}")
+        inputs.append([node["id"], widget])
+    # ComfyUI stores output node ids as STRINGS and input ids numerically — matching the shape the
+    # frontend writes itself when a user builds an app view by hand.
+    outputs = [str(_resolve_app_node(name, workflow, node_mappings)["id"]) for name in spec["outputs"]]
+    workflow["extra"] = {
+        **workflow.get("extra", {}),
+        "linearMode": True,
+        "linearData": {
+            "inputs": inputs,
+            "outputs": outputs,
+        },
+    }
+    return workflow
+
+
 def yaml_to_workflow(
     doc: Union[str, Path, Dict[str, Any]],
     node_mappings: Dict[str, Any],
@@ -672,6 +788,7 @@ def yaml_to_workflow(
     # Restricted to path/text inputs (where flow docs actually arrive — the CLI passes a path, the
     # route raw YAML) so the probe never mutates a caller-owned dict; any parse failure or non-flow
     # shape falls through to the whole-graph path unchanged.
+    raw: Any = None
     if isinstance(doc, (str, Path)):
         try:
             raw = _confluid_load(doc, until="document")
@@ -690,10 +807,13 @@ def yaml_to_workflow(
             builder.emit(value)
     workflow = builder.finalize()
     if as_ == "group":
-        return _wrap_in_group(workflow, name)
-    if as_ == "subgraph":
-        return _wrap_in_subgraph(workflow, builder.free_inputs, name)
-    return workflow
+        workflow = _wrap_in_group(workflow, name)
+    elif as_ == "subgraph":
+        workflow = _wrap_in_subgraph(workflow, builder.free_inputs, name)
+    # The App-view declaration is read off the RAW document (``app:`` is plain data, so the node
+    # walk above skipped it) and applied to the finished workflow, whatever the packaging.
+    app_spec = _app_declaration(raw if isinstance(doc, (str, Path)) else doc)
+    return _apply_app_view(workflow, app_spec, node_mappings, as_) if app_spec else workflow
 
 
 # =======================================================================================
@@ -717,7 +837,10 @@ def _flow_document_to_replay(doc: Dict[str, Any]) -> Dict[str, Any]:
     from recordstream.flow import parse_flow as _parse_flow
 
     steps, outputs = _parse_flow(doc["flow"], str(doc.get("outputs", "") or ""), build=False)
-    replay: Dict[str, Any] = {k: v for k, v in doc.items() if k not in ("flow", "outputs")}
+    # ``app:`` is a declaration ABOUT the canvas, not a value on it — every other surviving
+    # top-level key is replayed as a hoisted constant node, so it is dropped here and read
+    # separately by :func:`_app_declaration`.
+    replay: Dict[str, Any] = {k: v for k, v in doc.items() if k not in ("flow", "outputs", APP_KEY)}
     branchy = [s.name for s in steps if s.from_ is not None or s.merge_from]
     if branchy and any(s.merge_from for s in steps) or _forks(steps):
         raise UnsupportedTopologyError(
@@ -778,6 +901,7 @@ def flow_yaml_to_workflow(
         raise UnsupportedTopologyError(
             "flow_yaml_to_workflow expects a flow-export document (a top-level 'flow:' step mapping)."
         )
+    app_spec = _app_declaration(raw)
     raw = _flow_document_to_replay(cast(Dict[str, Any], raw))
 
     # PIPELINE packaging reads the contract ops as the DECLARATION they are and builds the typed
@@ -836,12 +960,13 @@ def flow_yaml_to_workflow(
     #    constant → ImpairmentsChain.tx_disabled) lands at the slot index ComfyUI rebuilds from the class.
     _complete_widget_input_slots(workflow, node_mappings)
     if as_ == "group":
-        return _wrap_in_group(workflow, name)
-    if as_ == "subgraph" and op_node_ids:
+        workflow = _wrap_in_group(workflow, name)
+    elif as_ == "subgraph" and op_node_ids:
         # The flow document DECLARES its own boundary (head step's unfed record / ``outputs:`` step),
         # so the !ref: convention _wrap_in_subgraph infers from is not needed here.
-        return _wrap_flow_in_subgraph(workflow, op_node_ids[0], op_node_ids[-1], name, node_mappings)
-    return workflow
+        workflow = _wrap_flow_in_subgraph(workflow, op_node_ids[0], op_node_ids[-1], name, node_mappings)
+    # 7. The App-view declaration the document carried (``app:``), resolved against the placed nodes.
+    return _apply_app_view(workflow, app_spec, node_mappings, as_) if app_spec else workflow
 
 
 def _declared_output_names(src_cls: Any) -> "Set[str]":
@@ -2078,6 +2203,33 @@ def _forward_record_closure(roots: Set[str], prompt: Dict[str, Any]) -> Set[str]
     return reached
 
 
+#: Every node the bridge discovers is keyed ``Taidal_<package>_<category>[_<group>]_<Class>``
+#: (``bridge._node_key``), and the hand-written canvas adapters carry the prefix too. So a
+#: class type that starts with it names a TAIDAL node — and one the running installation
+#: does not register is an installation out of step with the canvas, not a ComfyUI node.
+_TAIDAL_NODE_PREFIX = "Taidal_"
+
+
+def _missing_node_refusal(missing: List[Tuple[str, str]]) -> str:
+    """The message for a canvas naming Taidal nodes this installation does not register.
+
+    Dropping them into a comment block is what this replaces: the node registry is a
+    SNAPSHOT taken when the server started, so a canvas drawn after an op was added
+    converts to a silently shortened chain, and the failure surfaces wherever the export
+    is consumed — measured 2026-09-05, an editor started before eleven ops existed turned
+    a twelve-node canvas into one node, and the workspace reported an empty chain three
+    layers away. The remedy belongs in the first message, so it is in this one.
+    """
+    names = ", ".join(f"node {nid} ({class_type})" for nid, class_type in missing)
+    return (
+        f"this StreamStudio does not register {len(missing)} node(s) the canvas names: {names}. "
+        "A Taidal node the canvas names but this installation has no class for is normally an op "
+        "added AFTER the editor started — the node registry is read once at startup. Restart it "
+        "(`streamstudio restart`) and convert again; if the op really is gone from this "
+        "installation, the canvas is older than the code and needs redrawing."
+    )
+
+
 def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> str:
     """Convert a ComfyUI workflow (UI or prompt form) into a hoisted-``!ref:`` Confluid YAML.
 
@@ -2090,7 +2242,10 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
     a leading ``#`` comment block: native ComfyUI nodes (viewers / primitives — not in
     ``node_mappings``), the canvas-only Taidal adapters (Walk / Extract / Retag / … — no
     ``TAIDAL_CALLABLE_PATH``), and any Taidal node whose spec fails to build (logged at
-    ``warning``; the rest of the graph still exports). The canvas WIRING is preserved:
+    ``warning``; the rest of the graph still exports). The ONE exception REFUSES: a
+    ``Taidal_*`` class type this installation does not register at all is a canvas the
+    running server is out of step with — normally an op added after it started — and a
+    shortened chain there is worse than an error (:func:`_missing_node_refusal`). The canvas WIRING is preserved:
     record-chained ops fold into ``pipeline: !class:Stream`` entries (``source: !ref:<source>``
     traced through a Walk-style adapter, plus an ordered ``ops:`` list). What does NOT fold stays
     a standalone entry, so the YAML keeps every op either way: an op with no record wiring, an op
@@ -2287,6 +2442,7 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
     # Non-exportable nodes are collected (not fatal) and surfaced as YAML comments below.
     specs: Dict[str, Tuple[type, bool, Dict[str, Any]]] = {}
     skipped: List[Tuple[str, str, str]] = []  # (node_id, class_type, reason)
+    missing: List[Tuple[str, str]] = []  # (node_id, class_type) — a Taidal node THIS install lacks
     for nid, pnode in pnodes.items():
         node_cls = node_mappings.get(pnode.class_type)
         if nid in export_skipped:
@@ -2314,12 +2470,18 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
                     f"could not serialize it: {type(e).__name__}: {e}"
                 )
                 skipped.append((nid, pnode.class_type, f"failed to serialize — {type(e).__name__}: {e}"))
+        elif node_cls is None and pnode.class_type.startswith(_TAIDAL_NODE_PREFIX):
+            # A Taidal node this installation does not register. See _missing_node_refusal.
+            missing.append((nid, pnode.class_type))
         elif node_cls is None:
             logger.debug(f"workflow_to_yaml: skipping node {nid} ({pnode.class_type}) — native ComfyUI node.")
             skipped.append((nid, pnode.class_type, "native ComfyUI node"))
         else:
             logger.debug(f"workflow_to_yaml: skipping node {nid} ({pnode.class_type}) — canvas-only adapter.")
             skipped.append((nid, pnode.class_type, "canvas-only Taidal adapter (no Confluid form)"))
+
+    if missing:
+        raise UnsupportedTopologyError(_missing_node_refusal(missing))
 
     # The WIRED OUTPUT SLOT is authoritative for an object node's eager/lazy-ness: a consumer that
     # pulled the `lazy` output (slot 1) → !lazy:; the `instance` output (slot 0) → !class: (eager).
