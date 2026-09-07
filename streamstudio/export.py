@@ -68,7 +68,7 @@ import inspect
 import re
 from collections import Counter, OrderedDict
 from pathlib import Path
-from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple, Union, cast
+from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Set, Tuple, Union, cast
 
 from confluid import dump
 from confluid.fluid import Reference, Target
@@ -76,9 +76,17 @@ from loggair import get_logger
 from recordstream import Pipeline
 from recordstream.discovery import resolve_callable
 from recordstream.ops.configure import ConfigureOp
+from recordstream.ops.contract import ChainContractError, check_chain
 from recordstream.ops.formula import FormulaOp
 
-from streamstudio.bridge import _SINGLE_OP_PARAMS, _coerce_kwargs, _op_list_params, _single_op_params
+from streamstudio.bridge import (
+    _SINGLE_OP_PARAMS,
+    GATE_PARAM,
+    _coerce_kwargs,
+    _op_list_params,
+    _single_op_params,
+    declared_outcomes,
+)
 
 logger = get_logger(__name__)
 
@@ -90,6 +98,10 @@ _RECORD_INPUT = "record"
 # target from arg 2, metadata = the shallow union of all three (arg 3 wins).
 _MIX_CLASS_TYPE = "Taidal_MixRecords"
 _MIX_ARGS = ("input_record", "target_record", "metadata_record")
+#: The canvas node where the branches of a decision rejoin (``nodes.JoinBranchesNode``): a
+#: DRAWING the fold removes, never a step in the exported chain.
+JOIN_CLASS_TYPE = "Taidal_JoinBranches"
+JOIN_INPUTS = tuple(f"branch_{i}" for i in range(1, 7))
 
 # The "subgraph as an Op" terminator (``streamstudio.nodes.SubgraphOpExtractNode``): its ``op``
 # output (slot 0) is the upstream op DAG compiled to ONE ``Pipeline``. When that output feeds a
@@ -1439,8 +1451,265 @@ def _compile_component_flow(
     if leftover:  # pragma: no cover - defensive: every DAG node reaches some sink
         raise UnsupportedTopologyError(f"Op nodes {sorted(leftover, key=_id_sort_key)} are unreachable from any sink.")
 
+    fan_out = Counter(pred for nid in members for _arg, pred in preds[nid] if pred != _ROOT)
+    if flow_map and all(universe[nid] == "op" for nid in members) and all(count <= 1 for count in fan_out.values()):
+        check_op_chain([entry["op"] for entry in flow_map.values() if "op" in entry], where="the drawn chain")
     outputs = next(reversed(flow_map)) if flow_map else ""
     return flow_map, outputs
+
+
+# --------------------------------------------------------------------------- decision branches
+
+
+def _class_name(class_type: str, node_mappings: Dict[str, Any]) -> str:
+    """The wrapped op class's bare name — the word a user sees on the canvas — else the node type."""
+    op_cls = _op_class_of(node_mappings.get(class_type))
+    return str(getattr(op_cls, "__name__", class_type))
+
+
+def _outcome_slots(class_type: str, node_mappings: Dict[str, Any]) -> Dict[int, str]:
+    """``{output slot: outcome}`` of a TEST node — its ``flags`` as the bridge laid them out."""
+    node_cls = node_mappings.get(class_type)
+    outcomes = set(declared_outcomes(_op_class_of(node_cls)))
+    names = list(getattr(node_cls, "RETURN_NAMES", ()) or ())
+    return {slot: name for slot, name in enumerate(names) if slot >= 2 and name in outcomes}
+
+
+def _can_be_gated(class_type: str, node_mappings: Dict[str, Any]) -> bool:
+    op_cls = _op_class_of(node_mappings.get(class_type))
+    try:
+        return op_cls is not None and GATE_PARAM in inspect.signature(op_cls).parameters
+    except (ValueError, TypeError):  # pragma: no cover - defensive
+        return False
+
+
+def _walk_branch(head: str, prompt: Dict[str, Any], successors: Dict[str, List[str]]) -> List[str]:
+    """The straight run of nodes from a branch head along pass-through record wires, up to a join."""
+    members = [head]
+    current = head
+    while True:
+        following = [c for c in successors.get(current, []) if str(prompt[c].get("class_type", "")) != JOIN_CLASS_TYPE]
+        if len(following) > 1:
+            return members + [_FORK]
+        if not following:
+            return members
+        current = following[0]
+        members.append(current)
+
+
+_FORK = "__fork__"
+
+
+def fold_branches(prompt: Dict[str, Any], node_mappings: Dict[str, Any]) -> Dict[str, Any]:
+    """Fold the DRAWN decision branches of a prompt graph into the linear, gated chain that runs.
+
+    What the user draws (design 2026-09-06 — "the graph is the truth and should visually
+    represent what is executed with branches and test"): a TEST node offers one record output
+    per outcome (its ``flags``), each branch hangs off an outcome, and the branches rejoin in a
+    ``Join branches`` node. What the record engine runs is a straight chain in which each branch
+    node carries the gate that opens it — a closed gate passes the record through at the cost of
+    one flag check, so no branch is computed "just in case". This is the ONLY place the two
+    meet: the canvas never shows the gate, the document never shows the join.
+
+    Per test node ``P``: every member of a branch gets the gate of that branch's outcome —
+    unless it already carries one, which is how a decision NESTED in a branch keeps its own
+    gate (the radio chain's ``try_linear`` branch decides ``linear`` inside); the branches are
+    chained in ``P``'s own outcome order (branch 1's head from ``P``'s record output, branch k's
+    head from branch k-1's tail); whatever the join fed — and whatever hung off ``P``'s
+    pass-through record output — now follows the last tail; the join is dropped. Nested
+    decisions fold INNERMOST first, so an outer branch's tail is its inner decision's last tail.
+
+    Refused, each naming the nodes in the user's words: a join fed by nodes that are not the
+    outcomes of ONE test node; a node on a branch that cannot be gated (it runs on every record);
+    a branch that forks; a join wired to the middle of a branch; two branches on one outcome; a
+    second join for one decision; more branches than the join has inputs. A prompt that draws
+    no decision comes back unchanged (a plain fan-out keeps the exporters' own answer).
+    """
+    prompt = {nid: {**node, "inputs": dict(node.get("inputs", {}) or {})} for nid, node in prompt.items()}
+
+    def class_type(nid: str) -> str:
+        return str(prompt[nid].get("class_type", ""))
+
+    def name_of(nid: str) -> str:
+        return _class_name(class_type(nid), node_mappings)
+
+    def survey() -> Tuple[Dict[str, Tuple[str, str]], Dict[str, List[str]]]:
+        """``(heads, successors)``: branch heads → (test node, outcome); pass-through consumers."""
+        heads: Dict[str, Tuple[str, str]] = {}
+        successors: Dict[str, List[str]] = {}
+        for nid, node in prompt.items():
+            link = node["inputs"].get(_RECORD_INPUT)
+            if not _is_link(link) or str(link[0]) not in prompt:
+                continue
+            src, slot = str(link[0]), int(link[1])
+            if slot == 0:
+                successors.setdefault(src, []).append(nid)
+                continue
+            outcome = _outcome_slots(class_type(src), node_mappings).get(slot)
+            if outcome is not None:
+                heads[nid] = (src, outcome)
+        return heads, successors
+
+    heads, successors = survey()
+    if not heads and not any(class_type(nid) == JOIN_CLASS_TYPE for nid in prompt):
+        return prompt
+
+    while heads:
+        # Decisions and their branches, as drawn right now.
+        decisions: Dict[str, List[Tuple[str, List[str]]]] = {}
+        for head, (decider, outcome) in heads.items():
+            decisions.setdefault(decider, []).append((outcome, _walk_branch(head, prompt, successors)))
+        # Innermost first: a decision none of whose branch members decides a drawn branch itself.
+        innermost: Optional[str] = next(
+            (t for t, drawn in decisions.items() if not any(m in decisions for _o, ms in drawn for m in ms)),
+            None,
+        )
+        if innermost is None:  # pragma: no cover - defensive: a cycle of decisions cannot be drawn on a DAG
+            raise UnsupportedTopologyError("the drawn decisions contain each other — redraw them as a chain")
+        test = innermost
+        drawn = decisions[test]
+        order = list(declared_outcomes(_op_class_of(node_mappings.get(class_type(test)))))
+        drawn.sort(key=lambda item: order.index(item[0]))
+        seen: Set[str] = set()
+        for outcome, members in drawn:
+            if outcome in seen:
+                raise UnsupportedTopologyError(
+                    f"two branches hang off the {outcome!r} outcome of {name_of(test)} — wire one branch per outcome"
+                )
+            seen.add(outcome)
+            if members[-1] == _FORK:
+                raise UnsupportedTopologyError(
+                    f"the {outcome!r} branch of {name_of(test)} forks at {name_of(members[-2])} — a branch is a "
+                    "straight run into Join branches"
+                )
+            for member in members:
+                gated = bool(prompt[member]["inputs"].get(GATE_PARAM))
+                if not gated and not _can_be_gated(class_type(member), node_mappings):
+                    raise UnsupportedTopologyError(
+                        f"{name_of(member)} sits on the {outcome!r} branch of {name_of(test)} but runs on every "
+                        "record — it cannot be gated, so it cannot follow an outcome; place it before the "
+                        "decision or after Join branches"
+                    )
+        if len(drawn) > len(JOIN_INPUTS):
+            raise UnsupportedTopologyError(
+                f"{name_of(test)} has {len(drawn)} branches drawn; Join branches takes at most {len(JOIN_INPUTS)}"
+            )
+        tails = {members[-1]: outcome for outcome, members in drawn}
+        member_outcome = {m: outcome for outcome, members in drawn for m in members}
+
+        # The join this decision owns: every feeder a tail of one of ITS branches.
+        owned: Optional[str] = None
+        for jid in [nid for nid in prompt if class_type(nid) == JOIN_CLASS_TYPE]:
+            inputs = prompt[jid]["inputs"]
+            feeders = [str(inputs[key][0]) for key in JOIN_INPUTS if _is_link(inputs.get(key))]
+            if not any(f in tails for f in feeders):
+                continue
+            middle = [f for f in feeders if f in member_outcome and f not in tails]
+            if middle:
+                raise UnsupportedTopologyError(
+                    f"Join branches is wired to {name_of(middle[0])} in the middle of the "
+                    f"{member_outcome[middle[0]]!r} branch of {name_of(test)} — wire the branch's last node"
+                )
+            strangers = [f for f in feeders if f not in tails]
+            if strangers:
+                others = sorted(
+                    {t for t, ds in decisions.items() for _o, ms in ds for m in ms if m in strangers and t != test}
+                )
+                enclosing = [t for t in others if any(test in ms for _o, ms in decisions[t])]
+                if others and len(enclosing) == len(others):
+                    # The join closes an OUTER decision this one is nested in (the radio chain's
+                    # `linear` decision inside the `try_linear` branch): once this decision has
+                    # folded into its branch, its tail is that branch's tail and the outer fold
+                    # owns the join. Leave it.
+                    continue
+                if others:
+                    named = " and of ".join(name_of(t) for t in [test, *others])
+                    raise UnsupportedTopologyError(
+                        f"Join branches joins the outcomes of ONE decision node — its inputs come from branches of "
+                        f"{named}; join each decision separately"
+                    )
+                raise UnsupportedTopologyError(
+                    f"Join branches joins the outcomes of ONE decision node — its inputs come from "
+                    f"{', '.join(name_of(f) for f in strangers)}, which decide nothing"
+                )
+            if owned is not None:
+                raise UnsupportedTopologyError(
+                    f"two Join branches nodes close the decision of {name_of(test)} — keep one"
+                )
+            owned = jid
+
+        # Rewire into the chain: branches in outcome order, gates written, the continuation after the last tail.
+        continuing = [nid for nid in successors.get(test, []) if nid not in heads]
+        previous = test
+        for outcome, members in drawn:
+            prompt[members[0]]["inputs"][_RECORD_INPUT] = [previous, 0]
+            for member in members:
+                if not prompt[member]["inputs"].get(GATE_PARAM):
+                    prompt[member]["inputs"][GATE_PARAM] = outcome
+            previous = members[-1]
+        if owned is not None:
+            for node in prompt.values():
+                for key, value in list(node["inputs"].items()):
+                    if _is_link(value) and str(value[0]) == owned:
+                        node["inputs"][key] = [previous, 0]
+            del prompt[owned]
+        for nid in continuing:
+            prompt[nid]["inputs"][_RECORD_INPUT] = [previous, 0]
+        heads, successors = survey()
+
+    leftover = [nid for nid in prompt if class_type(nid) == JOIN_CLASS_TYPE]
+    for jid in leftover:
+        inputs = prompt[jid]["inputs"]
+        feeders = [str(inputs[key][0]) for key in JOIN_INPUTS if _is_link(inputs.get(key))]
+        named = ", ".join(name_of(f) for f in feeders if f in prompt) or "nothing"
+        raise UnsupportedTopologyError(
+            f"Join branches joins the outcomes of ONE decision node — its inputs come from {named}, "
+            "which decide nothing"
+        )
+    return prompt
+
+
+def check_op_chain(ops: Sequence[Any], where: str = "") -> None:
+    """The record engine's per-node contract check over a STRAIGHT chain of op markers.
+
+    The editor honours each node's input/output contract (user instruction 2026-09-06): a chain
+    that reads an entry nothing before it writes is refused where it is drawn, with the engine's
+    own located message, instead of surfacing later as an empty pane. The ops are constructed
+    from their literal kwargs (a constructor does no work, by mandate); a chain whose kwargs
+    embed other nodes or references is not checked here — it is checked where it runs. The
+    first op's needs are the chain's INPUT contract, so only what a LATER op needs and nothing
+    before it produces is a refusal.
+    """
+    live: List[Any] = []
+    for marker in ops:
+        target = getattr(marker, "target", None)
+        kwargs = getattr(marker, "kwargs", None)
+        if target is None or kwargs is None:
+            return
+        if any(_is_node_value(v) or isinstance(v, Reference) for v in kwargs.values()):
+            return
+        cls = target if isinstance(target, type) else None
+        if cls is None:
+            return
+        try:
+            live.append(cls(**kwargs))
+        except Exception as exc:  # noqa: BLE001 - an op that will not build here is checked where it runs
+            name = getattr(cls, "__name__", cls)
+            logger.debug(f"check_op_chain: {name} not constructed ({exc}); chain not checked")
+            return
+    provided = set(getattr(live[0], "consumes", None) or {}) if live else set()
+    try:
+        check_chain(live, provided=provided, where=where)
+    except ChainContractError as exc:
+        raise UnsupportedTopologyError(str(exc)) from None
+
+
+def _is_node_value(value: Any) -> bool:
+    if isinstance(value, Target):  # PartialClass is a Target subclass
+        return True
+    if isinstance(value, (list, tuple)):
+        return any(_is_node_value(item) for item in value)
+    return False
 
 
 # --------------------------------------------------------------------------- public compile API
@@ -1500,6 +1769,7 @@ def _compile_components(
             several distinct record streams, an unknown export target, or a skip mark
             directly on a node inside a target's dependency cone.
     """
+    prompt = fold_branches(prompt, node_mappings)  # drawn decisions -> the gated chain (see fold_branches)
     prompt = {str(nid): node for nid, node in prompt.items()}
 
     # Targets resolve FIRST, against the raw graph. The forward-only skip closure cannot

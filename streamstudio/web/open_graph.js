@@ -93,9 +93,9 @@ function workflowPathFor(graphPath) {
 // Loaded straight onto the canvas it is an "Unsaved Workflow": Ctrl-S then demands a name for a
 // graph that already has a home, and cancelling means the save mirror never fires. Persisted
 // first, Save is a plain overwrite — and that overwrite is exactly the POST the mirror watches.
-async function openAsNamedWorkflow(workflow, graphPath) {
+async function openAsNamedWorkflow(workflow, graphPath, view) {
     const store = app.extensionManager && app.extensionManager.workflow;
-    if (!store || !store.syncWorkflows || !store.getWorkflowByPath) return false;
+    if (!store || !store.syncWorkflows || !store.getWorkflowByPath) return null;
     const path = workflowPathFor(graphPath);
     const res = await api.fetchApi(`/userdata/${encodeURIComponent(path)}?overwrite=true`, {
         method: "POST",
@@ -106,37 +106,94 @@ async function openAsNamedWorkflow(workflow, graphPath) {
     await store.syncWorkflows(); // a just-written file is not in the store's list until it re-reads
     const persisted = store.getWorkflowByPath(path);
     if (!persisted) throw new Error(`${path} was written but is not listed`);
+    // The requested FACE goes on the store's workflow OBJECT: `initialMode` is what the
+    // frontend derives from the file's flag — but only while the object has none, so a
+    // document opened once in this session keeps its first face whatever the file says
+    // (measured 2026-09-06: `settings` after `graph` stayed on the canvas). Set here, ours wins.
+    if (view) persisted.initialMode = view;
     // loadGraphData with the workflow, NOT store.openWorkflow: opening binds the identity but
     // does not load the content — measured, the canvas stayed empty while the tab showed the
     // right name. Passing the workflow object here does both at once.
     await app.loadGraphData(workflow, true, true, persisted);
-    return true;
+    return persisted;
 }
 
-// A launcher may ALSO say which VIEW to open the graph in: `taidal_view=app` lands on
+// A launcher may ALSO say which FACE to open the graph on: `taidal_view=app` lands on
 // ComfyUI's App view (the form of the widgets `extra.linearData` names — "just the
-// settings"), `taidal_view=graph` on the node canvas ("edit the graph"). The frontend derives
-// the opening mode from the DOCUMENT's `extra.linearMode` at load, so the choice is applied
-// to the in-memory copy before it is loaded — no store access, no toggle race. Absent, the
-// file's own flag decides, exactly as before. A graph with no `linearData` has nothing to
-// show as a form, so `app` falls back to the canvas and says so rather than opening empty.
-function applyRequestedView(workflow, view) {
+// settings"), `taidal_view=graph` on the node canvas ("edit the graph"). The answer is
+// "app", "graph" or null (nothing asked: the file's own flag decides, as before). The
+// DOCUMENT is never touched: the face lives on the workflow OBJECT (`initialMode`, then
+// `activeMode` once toggled — the two fields the frontend's own view reads), and the
+// persisted copy stays byte-for-byte the file, so the save mirror cannot flip the file's
+// flag on every open. A graph with no `linearData` has nothing to show as a form, so `app`
+// falls back to the canvas and says so rather than opening an empty one.
+function requestedViewFor(workflow, view) {
     if (!workflow || (view !== "app" && view !== "graph")) return view ? "graph" : null;
-    workflow.extra = workflow.extra || {};
-    const hasForm = !!(workflow.extra.linearData && (workflow.extra.linearData.inputs || []).length);
+    const extra = workflow.extra || {};
+    const hasForm = !!(extra.linearData && (extra.linearData.inputs || []).length);
     if (view === "app" && !hasForm) {
         console.log("Taidal.OpenGraph: this graph declares no App view (no linearData) — opening the canvas");
-        workflow.extra.linearMode = false;
         return "graph";
     }
-    workflow.extra.linearMode = view === "app";
     return view;
+}
+
+// The face the editor shows for the active workflow — the frontend's own expression
+// (`activeMode ?? initialMode ?? "graph"`), read off the same object its view reads.
+function currentMode() {
+    const store = app.extensionManager && app.extensionManager.workflow;
+    const active = store && store.activeWorkflow;
+    return (active && (active.activeMode || active.initialMode)) || "graph";
+}
+
+// After a load: make sure the canvas holds OUR graph and shows the REQUESTED face. Measured
+// 2026-09-06: the named-workflow path had no check, so a session restore landing after the
+// load left the canvas on the previously active document (another pane's graph, or the
+// empty "Unsaved Workflow") while the console said "loaded". Content is put back on
+// mismatch — by activating the named document first (its content is loaded by now), then
+// by loading it outright — and the face is switched with the frontend's OWN toggle, only
+// when the observed face differs from the request: a blind toggle would flip a graph that
+// was already right.
+async function settleOpen(workflow, want, view, persisted) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+        await sleep(800);
+        if (fingerprint() !== want) {
+            const store = app.extensionManager && app.extensionManager.workflow;
+            if (persisted && attempt === 0 && store && store.openWorkflow) await store.openWorkflow(persisted);
+            else await app.loadGraphData(workflow, true, true, persisted || null);
+            continue;
+        }
+        if (view && currentMode() !== view) {
+            await app.extensionManager.command.execute("Comfy.ToggleLinear");
+            await sleep(300);
+        }
+        if (fingerprint() === want && (!view || currentMode() === view)) return true;
+    }
+    return false;
+}
+
+// The launcher also says WHERE its workspace serves (`taidal_workspace`): the canvas's
+// workspace-preview nodes ask that server for the selected record, whatever address the
+// file happened to carry when it was drawn — a workspace moves ports, a file does not.
+const WORKSPACE_NODE_TYPES = ["Taidal_PreviewOnSelection", "Taidal_ShowSelection"];
+function pointPreviewNodesAt(workspaceUrl) {
+    let pointed = 0;
+    for (const node of (app.graph && app.graph.nodes) || []) {
+        if (!WORKSPACE_NODE_TYPES.includes(node.type)) continue;
+        const widget = (node.widgets || []).find((w) => w.name === "workspace_url");
+        if (widget && widget.value !== workspaceUrl) {
+            widget.value = workspaceUrl;
+            pointed += 1;
+        }
+    }
+    if (pointed) console.log("Taidal.OpenGraph: pointed", pointed, "preview node(s) at", workspaceUrl);
 }
 
 async function applyOpenParams() {
     const url = new URL(window.location.href);
     const graphPath = url.searchParams.get("taidal_graph");
     const requestedView = url.searchParams.get("taidal_view");
+    const workspaceUrl = url.searchParams.get("taidal_workspace");
     if (!graphPath) return;
     if (graphPath.endsWith(".json")) {
         // The mirror MAP: workflow document -> the workspace graph file it mirrors to. A tab
@@ -155,6 +212,7 @@ async function applyOpenParams() {
     }
     url.searchParams.delete("taidal_graph");
     url.searchParams.delete("taidal_view");
+    url.searchParams.delete("taidal_workspace");
     window.history.replaceState({}, "", url.pathname + url.search + url.hash);
     await appSettled();
     try {
@@ -168,19 +226,20 @@ async function applyOpenParams() {
             console.log("Taidal.OpenGraph: the canvas already shows", graphPath);
             return; // never stack a duplicate workflow tab for the graph already on screen
         }
-        // BEFORE either load path below: both hand this same object to loadGraphData.
-        const view = applyRequestedView(workflow, requestedView);
-        let opened = false;
+        const view = requestedViewFor(workflow, requestedView);
+        let persisted = null;
         try {
-            opened = await openAsNamedWorkflow(workflow, graphPath);
+            persisted = await openAsNamedWorkflow(workflow, graphPath, view);
         } catch (err) {
             // Never lose the graph over the naming: fall back to putting it on the canvas as
             // before. The user then gets the Save-As prompt, which still mirrors.
             console.warn("Taidal.OpenGraph: could not open it as a named workflow —", err);
         }
-        if (!opened) await loadUntilItSticks(workflow);
-        console.log("Taidal.OpenGraph: loaded", graphPath, opened ? "(named workflow)" : "(canvas only)",
-            view ? `as ${view}` : "");
+        if (!persisted) await loadUntilItSticks(workflow);
+        const settled = await settleOpen(workflow, want, view, persisted);
+        if (workspaceUrl) pointPreviewNodesAt(workspaceUrl);
+        console.log("Taidal.OpenGraph:", settled ? "loaded" : "could not settle", graphPath,
+            persisted ? "(named workflow)" : "(canvas only)", view ? `as ${view}` : "");
     } catch (err) {
         console.error("Taidal.OpenGraph: could not open", graphPath, err);
         alert("Open graph failed for " + graphPath + ":\n\n" + err + "\n\nThe canvas is left as it was.");

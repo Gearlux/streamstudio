@@ -351,3 +351,97 @@ except UnsupportedTopologyError as refusal:
 **What you may change.** The wording, and which reasons are listed together. What must hold:
 an unregistered `Taidal_*` node never reaches the output document, a registered adapter never
 raises, and a bare ComfyUI node still drops with its comment.
+
+## The App view's Run for a pane graph is answered by the workspace, not the editor (`Preview on Selection`, 2026-09-06)
+
+**Context.** A pane graph is a chain of ops with no source: the workspace that shows the pane
+feeds the record and fills the time and frequency window by shape. Its App view is a form of the
+thresholds, which is what makes it tunable without seeing nodes, but the App's Run button queues
+the canvas through ComfyUI, where nothing feeds the head op, and the output panel lists media
+outputs only. Without an output node the form is blind: the effect of a change is visible only
+after a save, in the workspace.
+
+**Decision.** Two hand-written output nodes, placed by the importer when the source document's
+`app:` block says `preview: true`. `Preview on Selection` reads the chain feeding it off the hidden
+prompt, converts it with the SAME converter the workspace applies to the saved canvas (so the
+form's unsaved values are in the document), and posts it to the workspace, which runs it over the
+record and window its page currently shows and answers the pane's payload; the node renders the
+payload as one PNG. `Selection` shows that window as the workspace renders it. The editor knows the
+workspace by three routes and an address the launcher hands over, nothing else.
+
+**Consequences.** Run previews without saving, on exactly what the analyst is looking at. The
+editor never executes the ops (the preview's record input is lazy), so a canvas without a source
+runs nowhere but where the record is. The chain must convert to the same document the pane runs,
+which is why the display nodes are canvas-only adapters the converter skips. A refusal is an image
+that says why. The workspace must be running with a record selected; the nodes carry its address
+as a widget rather than discovering it, so two workspaces cannot be confused.
+
+**Example.**
+
+```yaml
+app:
+  inputs: [[ClassifyBluetooth, ble_index]]
+  outputs: [BluetoothVerdict]
+  preview: true
+```
+
+```text
+GET  /api/state                                   -> {record: "files#0", window: {x0, x1, y0, y1}}
+POST /api/preview {document: <converted canvas>}  -> {record, window, payload: {note, cycle_hz, power_db, steps}}
+```
+
+**What you may change.** The renderer (any function from payload to image); the placement of the
+two nodes; the default address. Not the protocol's meaning (state, preview, thumbnail) without
+changing the workspace that serves it in the same change, and not the lazy record input: pulling
+it would execute a sourceless chain in the editor.
+
+## A decision is DRAWN as outcome sockets and a join, and RUN as a gated chain (`fold_branches`, 2026-09-06)
+
+**Context.** The Bluetooth probe became a chain of nodes with three gated decoders, each carrying
+`requires: <flag>` in the flow document. Imported, that is a straight row of twelve nodes with a
+text box on each decoder — the user's reaction: *"I thought we made a decision to support a real
+DAG graph … `requires` is a technical implementation and not something I should worry about …
+the graph is the truth and should visually represent what is executed with branches and test."*
+The record engine, meanwhile, runs the chain on purpose: the branches are exclusive, so a gated
+node that passes the record through costs one flag check, and nothing is computed just in case.
+
+**Decision.** Two spellings of one thing, meeting in exactly one function. On the CANVAS a test
+node (an op declaring `flags`) has one record output per outcome; a branch hangs off an outcome;
+branches rejoin in `Join branches`; the gate is neither widget nor socket. In the DOCUMENT the
+chain stays linear and gated (`requires:`), unchanged. `export.fold_branches` turns the drawing
+into the chain for both exporters (members gated by their branch's outcome unless already gated
+— a nested decision keeps its own — branches in the test node's outcome order, the join dropped,
+innermost decisions first); `graphio.flow_yaml_to_workflow` draws the chain back (a gate names
+an earlier step's outcome; an ungated step closes the open decisions through one join). A
+straight exported chain is also run through the engine's `check_chain`, so a wire that skips a
+producer is refused where it is drawn.
+
+**Consequences.** The canvas shows the fork and its condition as wires, with no domain word in
+the editor; the runtime and the shipped `bte_view.yaml` are untouched; a decision added to any
+future test node needs no editor change. The costs: a canvas saved before this carries a widget
+value that no longer exists (positional shift on its next save — regenerate or merge templates);
+canvas EXECUTION of a nested decision's untaken outcome leaves the outer join empty where the
+chain would still run the continuation (the canvas preview is not the runtime); the join takes
+six branches.
+
+**Example.**
+
+```
+ClassifyBluetooth ├ ble ─▶ DecodeBleAdvertising ─┐
+                  ├ bredr ─▶ DecodeClassic… ─────┼─▶ Join branches ─▶ BluetoothVerdict
+                  └ try_weak ─▶ CorrelateAccess… ┘
+```
+
+```yaml
+# what fold_branches exports — and what flow_yaml_to_workflow draws the picture back from
+ble:     {op: !class:…DecodeBleAdvertising {requires: ble},          from: classify}
+classic: {op: !class:…DecodeClassicAccessCode {requires: bredr},     from: ble}
+weak:    {op: !class:…CorrelateAccessAddress {requires: try_weak},   from: classic}
+verdict: {op: !class:…BluetoothVerdict {},                           from: weak}
+```
+
+**What you may change.** How branches are laid out, how many inputs the join offers, what the
+refusals say. What must hold: the document form stays the gated linear chain (the engine's
+runtime), the canvas never shows the gate, a nested decision keeps its own gate, and both
+exporters fold through the one function.
+
