@@ -57,6 +57,7 @@ from streamstudio.bridge import (
     RECORD_TYPE,
     SELECTION_NODE_CLASS_TYPE,
     SOURCE_TYPE,
+    VALUE_TYPE,
     _coerce_kwargs,
     _op_list_params,
     extract_source_for,
@@ -71,6 +72,7 @@ from streamstudio.export import (
     _PRIMITIVE_VALUE_NODES,
     _RECORD_INPUT,
     _SUBGRAPH_OP_CLASS_TYPE,
+    _VALUE_NODE_CLASS_TYPE,
     GATE_PARAM,
     JOIN_CLASS_TYPE,
     JOIN_INPUTS,
@@ -356,6 +358,30 @@ def _complete_widget_input_slots(workflow: Dict[str, Any], node_mappings: Dict[s
         _complete(definition.get("nodes"), definition.get("links"))
 
 
+def _numbers(value: Any) -> Any:
+    """A literal with its numeric STRINGS read as numbers, recursively.
+
+    PyYAML resolves a float only with a signed exponent, so a document's ``0.9e6`` arrives as
+    the string ``'0.9e6'``; the ops accept either, but a Value node on the canvas must show
+    the number the author meant.
+    """
+    if isinstance(value, str):
+        try:
+            return float(value) if any(c in value for c in ".eE") else int(value)
+        except ValueError:
+            return value
+    if isinstance(value, (list, tuple)):
+        return [_numbers(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _numbers(item) for key, item in value.items()}
+    return value
+
+
+def _value_literal_text(value: Any) -> str:
+    """The text a ``Value`` node's widget holds for a literal — what ``parse_value_literal`` reads back."""
+    return repr(_numbers(value))
+
+
 def _kwarg_to_widget(value: Any) -> Any:
     """Inverse of :func:`streamstudio.bridge._coerce_kwargs`: a ctor value → a widget literal.
 
@@ -535,6 +561,16 @@ class _WorkflowBuilder:
                 continue
             if _is_node_value(value):
                 _wire_into(pname, socket_names.get(pname, SOURCE_TYPE), value)
+                continue
+            if socket_names.get(pname) == VALUE_TYPE:
+                # A nested-container literal (the clock's `[[lo, hi], ...]` windows, a list of
+                # boxes) has no widget — the bridge gives the param a RECORDSTREAM_VALUE socket —
+                # and the canvas is the truth for the value only if something on it HOLDS it
+                # (user instruction 2026-09-07): a Value node carrying the literal, wired in.
+                # Both exporters inline it back into the kwarg.
+                value_id = self.spawn(_VALUE_NODE_CLASS_TYPE)
+                self.by_id[value_id]["widgets_values"] = [_value_literal_text(value)]
+                self.connect(value_id, 0, node_id, pname, VALUE_TYPE)
                 continue
             if pname in widget_names:
                 widget_values[pname] = _kwarg_to_widget(value)
@@ -2303,6 +2339,13 @@ def _primitive_literal(src_id: str, pnodes: Dict[str, "_PNode"]) -> Any:
     pnode = pnodes.get(src_id)
     if pnode is not None and pnode.class_type in _PRIMITIVE_VALUE_NODES:
         return pnode.widgets.get("value", _MISSING)
+    if pnode is not None and pnode.class_type == _VALUE_NODE_CLASS_TYPE:
+        # The Value node's literal → the real Python object (a list of windows, a list of boxes),
+        # inlined as the consumer's kwarg — the same fold the flow exporter does.
+        from streamstudio.nodes import parse_value_literal  # lazy: graphio ↔ nodes stay acyclic
+
+        text = pnode.widgets.get("value", "")
+        return parse_value_literal(text if isinstance(text, str) else "")
     return _MISSING
 
 
@@ -2643,6 +2686,14 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
     specs: Dict[str, Tuple[type, bool, Dict[str, Any]]] = {}
     skipped: List[Tuple[str, str, str]] = []  # (node_id, class_type, reason)
     missing: List[Tuple[str, str]] = []  # (node_id, class_type) — a Taidal node THIS install lacks
+    # A Value node wired into a consumer's socket is INLINED into that consumer's kwarg
+    # (`_primitive_literal`), so it is consumed rather than left out.
+    inlined_values = {
+        src
+        for consumer in pnodes.values()
+        for _name, (src, _slot) in consumer.links.items()
+        if src in pnodes and pnodes[src].class_type == _VALUE_NODE_CLASS_TYPE
+    }
     for nid, pnode in pnodes.items():
         node_cls = node_mappings.get(pnode.class_type)
         if nid in export_skipped:
@@ -2659,6 +2710,8 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
             logger.debug(f"workflow_to_yaml: node {nid} ({pnode.class_type}) compiled into a Subgraph-Op Pipeline.")
         elif nid in subgraph_op_instances:
             logger.debug(f"workflow_to_yaml: Subgraph-Op {nid} compiled to a Pipeline (embedded in its consumer).")
+        elif nid in inlined_values:
+            logger.debug(f"workflow_to_yaml: Value node {nid} inlined into its consumer's kwarg.")
         elif getattr(node_cls, "TAIDAL_CALLABLE_PATH", None):
             try:
                 specs[nid] = _build_fluid(pnode, node_mappings)
