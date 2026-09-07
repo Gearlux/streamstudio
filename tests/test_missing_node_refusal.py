@@ -116,7 +116,7 @@ class TestTheShippedCanvasesConvertWhole:
     """The two canvases the failure was seen on. Gated on the domain package being
     installed; the artifacts ship there."""
 
-    @pytest.mark.parametrize("slot, ops", [("view_repeat", 3), ("view_bte", 12)])
+    @pytest.mark.parametrize("slot, ops", [("view_repeat", 3), ("view_bte", 12), ("view_cell", 9), ("view_wlan", 10)])
     def test_the_signal_domain_view_graphs_drop_nothing(self, slot: str, ops: int) -> None:
         import json
 
