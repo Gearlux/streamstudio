@@ -1037,6 +1037,13 @@ first ungated step after the branches is fed through a join.
 | a branch that forks | `the 'ble' branch of ClassifyBluetooth forks at DecodeBleAdvertising — a branch is a straight run into Join branches` |
 | a plain fan-out (two consumers of one record output) | unchanged: the exporters' own branchy refusal |
 
+**A nested-container literal lands on the canvas as a `Value` node.** A param typed as a nested
+sequence (`MeasureSymbolClock.windows_hz: [[0.9e6, 1.1e6], [1.8e6, 2.2e6]]`) has no widget — the
+bridge gives it a `RECORDSTREAM_VALUE` socket — so the importer places a `Value` node holding the
+literal (numbers, even where the YAML parser read `0.9e6` as a string) and wires it in; both
+exporters inline it back into the kwarg. The canvas is the truth for that table too: edit the
+Value node and the exported chain follows.
+
 **The contract is checked where the chain is drawn.** A straight chain's ops are constructed
 from their widget values and run through the record engine's `check_chain`: a node that reads
 an entry nothing before it writes is refused at export with the engine's located message —

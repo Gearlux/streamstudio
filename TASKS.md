@@ -30,4 +30,3 @@ workspace root `TASKS.md`. Completed items are not archived here — git history
       `tests/test_graphio.py`, which no longer exist (the suite is `test_export_flow` / `test_cli` /
       `test_init_discovery` / `test_impairments_export` / …). Pre-existing drift, unrelated to the
       2026-08-01 flow-only change; an agent following a pin currently lands on a missing file.
-- [ ] **A YAML literal for a nested-sequence param is DROPPED on import** @medium @bug — a param typed as a nested sequence (`MeasureSymbolClock.windows_hz: [[lo, hi], ...]`) rides a `RECORDSTREAM_VALUE` socket, and `graphio` has no node to hold the literal, so `bte_view.yaml`'s `windows_hz` never reached the canvas (found 2026-09-06 while pinning export == source; the op's own default happens to equal the value). The canvas is not the truth for such a value: place a Value node carrying the literal on import, and fold it back on export.
