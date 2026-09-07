@@ -134,12 +134,16 @@ class TestTheShippedCanvasesConvertWhole:
 
         annotation = pytest.importorskip("waivefront.annotation")
         canvas = json.loads(Path(annotation.templates()["signal"]["view_bte"]).read_text())
-        newer = [
-            key
-            for key in NODE_CLASS_MAPPINGS
-            if key.startswith(("Taidal_waivefront_op_measure_", "Taidal_waivefront_op_bluetooth_"))
-        ]
-        assert len(newer) == 11
+        # The CANVAS's own measure/bluetooth ops — not every such node the registry happens to
+        # carry today, which grows as the domain adds nodes and has nothing to do with this canvas.
+        newer = sorted(
+            {
+                node["type"]
+                for node in canvas["nodes"]
+                if node["type"].startswith(("Taidal_waivefront_op_measure_", "Taidal_waivefront_op_bluetooth_"))
+            }
+        )
+        assert len(newer) == 11, "the eleven ops added after the stale server started"
         with pytest.raises(UnsupportedTopologyError) as caught:
             workflow_to_yaml(canvas, _stale(*newer))
         message = str(caught.value)

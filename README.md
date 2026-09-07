@@ -686,11 +686,14 @@ http://127.0.0.1:8188/?taidal_graph=/abs/path/pipeline.yaml      # a Confluid co
 
 A launcher may also name the **view** to open the graph on: `?taidal_graph=<file>&taidal_view=app`
 lands on ComfyUI's App view (the form of the widgets the document's `extra.linearData` names),
-`&taidal_view=graph` on the node canvas. The opener applies the choice to the document's
-`extra.linearMode` before loading it — which is where the frontend reads the opening mode — so
-the file itself is untouched by the open. Absent, the file's own flag decides. A graph declaring
-no `linearData` has nothing to show as a form, so `app` falls back to the canvas and says so in
-the console.
+`&taidal_view=graph` on the node canvas. The opener sets the face on the editor's workflow
+object, the way the frontend itself does, then checks after the load that the canvas holds the
+graph and shows that face, switching with the editor's own toggle only when it does not. The
+file is never rewritten for this: absent the parameter, the file's own flag decides. A graph
+declaring no `linearData` has nothing to show as a form, so `app` falls back to the canvas and
+says so in the console.
+A third parameter, `&taidal_workspace=<origin>`, names where the launching workspace serves; the
+canvas's workspace-preview nodes (below) get that address in their `workspace_url` widget.
 
 
 A `.json` path is a native workflow file: the `Taidal.OpenGraph` extension puts it on the
@@ -702,6 +705,38 @@ converted by `/taidal/import_yaml` as before. Either way the canvas is loaded on
 it does not already show that graph (re-opening never stacks duplicate workflow tabs),
 without the param the editor keeps its own last session, and the param is applied once
 and stripped, so reloading afterwards keeps what you build.
+
+### Previewing a pane graph from the App view
+
+A view graph a workspace runs per pane has no record source on the canvas: the workspace feeds the
+record and fills the window. Its App view is a form of the thresholds, but the Run button would
+show nothing — until the source document says `preview: true` in its `app:` block:
+
+```yaml
+app:
+  inputs:
+    - [ClassifyBluetooth, ble_index]
+  outputs: [BluetoothVerdict]
+  preview: true
+```
+
+The importer then places two output nodes around the chain and makes them the App's outputs
+(the first name under `outputs` is the op the preview hangs on):
+
+| node | what Run shows |
+|---|---|
+| **Selection** | the record window the workspace page currently selects, rendered by the workspace |
+| **Preview on Selection** | the chain feeding it, converted from the live canvas with the form's unsaved values, run by the workspace over that selection: its curves, note and step report as one image |
+
+Run saves nothing; Ctrl-S persists the values as before. Both nodes carry a `workspace_url` widget
+that the launcher fills through `taidal_workspace`, so a file drawn against one address follows the
+workspace wherever it serves. The protocol a workspace serves is three routes: `GET /api/state`
+(the selected record and window), `POST /api/preview {document}` (the converted document over that
+selection, answering `{record, window, payload}`) and
+`GET /api/recordings/<id>/thumbnail.png?w&h&x0&x1&y0&y1`. The preview node never executes the ops
+upstream inside the editor: its `record` input is lazy and the chain is read off the prompt, so a
+canvas without a record source runs nowhere but in the workspace. A refusal (no record selected,
+no workspace answering) comes back as an image that says so.
 
 ## Importing a `flow.yaml` back to the canvas
 
@@ -963,6 +998,51 @@ shows fields, so expose one of: max_points, inst_freq, output, findings
 `app:` is refused for `--as_ subgraph` too: subgraph packaging moves every node inside a definition,
 and the App view renders a subgraph-internal widget only once it has been promoted onto the instance
 node. Import a template that wants an App view **flat**.
+
+## Drawing a decision — outcome sockets and `Join branches`
+
+An op that declares its outcomes — a class-level `flags` tuple, the record engine's per-node
+contract — is a **test node**: the canvas gives it one **record output per outcome**, named by
+it, after its `record` / `op` outputs. Wire a node from an outcome and it runs only for the
+records that took that outcome; the branches come back together in a **`Join branches`** node
+(one output, up to six record inputs — "whichever branch ran"). The picture, for the Bluetooth
+chain:
+
+```
+… → MeasureDeviation ─▶ ClassifyBluetooth ├ ble      ─▶ DecodeBleAdvertising ────┐
+                                          ├ bredr    ─▶ DecodeClassicAccessCode ─┼─▶ Join branches ─▶ BluetoothVerdict
+                                          ├ try_weak ─▶ CorrelateAccessAddress ──┘
+                                          └ fsk        (unwired)
+```
+
+There is nothing to type: the wire is the condition. A decision may nest — a branch node that
+is itself a test node hangs its own branches off its own outcomes (the radio chain's
+`MeasureLinearEye` decides `linear` inside the `try_linear` branch), and every outermost tail
+goes into the one join.
+
+**What is exported is the chain that runs.** Both exporters (the whole-graph YAML the
+annotation workspace runs, and the `flow:` export) fold the drawing into a linear, gated
+chain: each branch node carries `requires: <outcome>` — the document's spelling, which the
+canvas never shows — the branches follow the test node in its own outcome order, and the join
+disappears. A closed gate passes the record through at the cost of one flag check, so no
+branch is computed "just in case". Importing such a document draws the branches back: a step
+gated on `ble` hangs off the outcome socket of the earlier step that decides `ble`, and the
+first ungated step after the branches is fed through a join.
+
+| you draw | the editor answers |
+|---|---|
+| a `Join branches` fed by nodes that are not outcomes of one test node | `Join branches joins the outcomes of ONE decision node — its inputs come from MeasureEnvelope, MeasureInstantaneousFrequency, which decide nothing` |
+| tails of two separate decisions into one join | `… its inputs come from branches of ClassifyBluetooth and of ClassifyRadio; join each decision separately` |
+| a node with no gate of its own on a branch | `MeasureEnvelope sits on the 'ble' branch of ClassifyBluetooth but runs on every record — it cannot be gated …` |
+| a branch that forks | `the 'ble' branch of ClassifyBluetooth forks at DecodeBleAdvertising — a branch is a straight run into Join branches` |
+| a plain fan-out (two consumers of one record output) | unchanged: the exporters' own branchy refusal |
+
+**The contract is checked where the chain is drawn.** A straight chain's ops are constructed
+from their widget values and run through the record engine's `check_chain`: a node that reads
+an entry nothing before it writes is refused at export with the engine's located message —
+`MeasureSymbolClock needs the record entry 'inst_freq', which nothing before it produces …` —
+instead of surfacing later as an empty pane. A chain whose ops embed other nodes is checked
+where it runs.
 
 ## Connection typing
 

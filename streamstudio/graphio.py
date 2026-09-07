@@ -53,7 +53,9 @@ from streamstudio.bridge import (
     _SOURCE_LIST_PARAMS,
     OBJECT_TYPE,
     OP_TYPE,
+    PREVIEW_NODE_CLASS_TYPE,
     RECORD_TYPE,
+    SELECTION_NODE_CLASS_TYPE,
     SOURCE_TYPE,
     _coerce_kwargs,
     _op_list_params,
@@ -69,6 +71,9 @@ from streamstudio.export import (
     _PRIMITIVE_VALUE_NODES,
     _RECORD_INPUT,
     _SUBGRAPH_OP_CLASS_TYPE,
+    GATE_PARAM,
+    JOIN_CLASS_TYPE,
+    JOIN_INPUTS,
     UnsupportedTopologyError,
     _ancestor_cone,
     _collect_output_captures,
@@ -82,7 +87,10 @@ from streamstudio.export import (
     _op_value_consumed,
     _snake,
     _subgraph_op_instance,
+    check_op_chain,
     collect_export_marks,
+    declared_outcomes,
+    fold_branches,
 )
 
 # Distinct node colours for a reconstructed DEAD-END TAP — a record-chain op whose own record
@@ -684,7 +692,10 @@ def _app_declaration(raw: Any) -> Optional[Dict[str, Any]]:
     outputs = block["outputs"]
     if not isinstance(outputs, (list, tuple)):
         raise AppViewError(f"app.outputs takes a list of class names, got {outputs!r}")
-    return {"inputs": inputs, "outputs": [str(value) for value in outputs]}
+    preview = block.get("preview", False)
+    if not isinstance(preview, bool):
+        raise AppViewError(f"app.preview is true or false, got {preview!r}")
+    return {"inputs": inputs, "outputs": [str(value) for value in outputs], "preview": preview}
 
 
 def _class_name_of(node: Dict[str, Any], node_mappings: Dict[str, Any]) -> str:
@@ -711,6 +722,79 @@ def _resolve_app_node(name: str, workflow: Dict[str, Any], node_mappings: Dict[s
             "so name a class the canvas carries exactly once"
         )
     return cast(Dict[str, Any], placed[0])
+
+
+def _widget_defaults(node_cls: Any) -> List[Any]:
+    """A node class's ``widgets_values`` in declaration order — its INPUT_TYPES defaults."""
+    spec = node_cls.INPUT_TYPES() if hasattr(node_cls, "INPUT_TYPES") else {}
+    values: List[Any] = []
+    for name, entry in (spec.get("required") or {}).items():
+        options = entry[1] if isinstance(entry, (list, tuple)) and len(entry) > 1 and isinstance(entry[1], dict) else {}
+        if "default" in options:
+            values.append(options["default"])
+    return values
+
+
+def _place_preview_nodes(workflow: Dict[str, Any], tail_name: str, node_mappings: Dict[str, Any]) -> List[str]:
+    """Place ``Selection`` and ``Preview on Selection`` around the chain; return the App's output ids.
+
+    The preview node hangs on the record output of the op ``tail_name`` names (a lazy wire —
+    the editor never executes the ops, the workspace does); the selection node sits left of the
+    whole chain. Both take the workspace's address as a widget the launcher fills in.
+    """
+    preview_cls = node_mappings.get(PREVIEW_NODE_CLASS_TYPE)
+    selection_cls = node_mappings.get(SELECTION_NODE_CLASS_TYPE)
+    if preview_cls is None or selection_cls is None:
+        raise AppViewError(
+            f"app.preview needs the editor's preview nodes ({PREVIEW_NODE_CLASS_TYPE}, {SELECTION_NODE_CLASS_TYPE})"
+            " — this installation registers neither"
+        )
+    tail = _resolve_app_node(tail_name, workflow, node_mappings)
+    nodes = workflow.setdefault("nodes", [])
+    links = workflow.setdefault("links", [])
+    next_node = int(workflow.get("last_node_id", max((int(n["id"]) for n in nodes), default=0)))
+    next_link = int(workflow.get("last_link_id", max((int(link[0]) for link in links), default=0)))
+
+    next_node += 1
+    preview: Dict[str, Any] = {
+        "id": next_node,
+        "type": PREVIEW_NODE_CLASS_TYPE,
+        "pos": [tail["pos"][0] + _DEFAULT_SIZE[0] + _MARGIN_X, tail["pos"][1]],
+        "size": list(_DEFAULT_SIZE),
+        "flags": {},
+        "order": next_node,
+        "mode": 0,
+        "inputs": [{"name": "record", "type": RECORD_TYPE, "link": None}],
+        "outputs": _WorkflowBuilder._build_outputs(preview_cls),
+        "properties": {"Node name for S&R": PREVIEW_NODE_CLASS_TYPE},
+        "widgets_values": _widget_defaults(preview_cls),
+    }
+    next_link += 1
+    links.append([next_link, tail["id"], 0, preview["id"], 0, RECORD_TYPE])
+    tail_record = tail["outputs"][0]
+    tail_record["links"] = list(tail_record.get("links") or []) + [next_link]
+    preview["inputs"][0]["link"] = next_link
+    nodes.append(preview)
+
+    next_node += 1
+    leftmost = min(float(n["pos"][0]) for n in nodes)
+    selection: Dict[str, Any] = {
+        "id": next_node,
+        "type": SELECTION_NODE_CLASS_TYPE,
+        "pos": [leftmost - _DEFAULT_SIZE[0] - _MARGIN_X, tail["pos"][1]],
+        "size": list(_DEFAULT_SIZE),
+        "flags": {},
+        "order": next_node,
+        "mode": 0,
+        "inputs": [],
+        "outputs": _WorkflowBuilder._build_outputs(selection_cls),
+        "properties": {"Node name for S&R": SELECTION_NODE_CLASS_TYPE},
+        "widgets_values": _widget_defaults(selection_cls),
+    }
+    nodes.append(selection)
+    workflow["last_node_id"] = next_node
+    workflow["last_link_id"] = next_link
+    return [str(preview["id"]), str(selection["id"])]
 
 
 def _apply_app_view(
@@ -744,6 +828,13 @@ def _apply_app_view(
     # ComfyUI stores output node ids as STRINGS and input ids numerically — matching the shape the
     # frontend writes itself when a user builds an app view by hand.
     outputs = [str(_resolve_app_node(name, workflow, node_mappings)["id"]) for name in spec["outputs"]]
+    if spec.get("preview"):
+        # A PANE graph has no record source, so its named output op can show nothing when the
+        # App's Run button fires. ``preview: true`` places the editor's two workspace-preview
+        # nodes — the selection the page shows, and the chain run over it with the form's
+        # values — and THOSE become the App's outputs; the first named output is the op the
+        # preview hangs on. Regeneration keeps them, which hand-placing never did.
+        outputs = _place_preview_nodes(workflow, spec["outputs"][0], node_mappings)
     workflow["extra"] = {
         **workflow.get("extra", {}),
         "linearMode": True,
@@ -850,6 +941,7 @@ def _flow_document_to_replay(doc: Dict[str, Any]) -> Dict[str, Any]:
             "A linear flow document imports normally."
         )
     replay["__steps__"] = [step.op for step in steps if step.op is not None]
+    replay["__step_names__"] = [step.name for step in steps if step.op is not None]
     return replay
 
 
@@ -927,22 +1019,98 @@ def flow_yaml_to_workflow(
         if res is not None:
             const_nodes[key] = res[0]
 
-    # 2. Replay the steps as a chain: each node is wired from the one before it. A branchy
-    #    document never reaches here (``_flow_document_to_replay`` raises), so there is no
-    #    fan-out to restore and no fan-in node to rebuild.
+    # 2. Replay the steps as a chain — and DRAW its decisions (user design 2026-09-06): a step
+    #    gated on an outcome (``requires: <flag>``, the document's spelling) hangs off the OUTCOME
+    #    socket of the earlier step whose op decides that flag; consecutive steps on one outcome
+    #    chain inside their branch; a step gated on an outcome decided INSIDE the open branch opens
+    #    a nested decision (the radio chain's ``try_linear`` branch decides ``linear``); the first
+    #    ungated step after a run of branches is fed through a ``Join branches`` node from every
+    #    outermost tail. The gate itself is never written on the canvas — the wire is the
+    #    condition, and ``export.fold_branches`` writes the gate back from it. A branchy DOCUMENT
+    #    never reaches here (``_flow_document_to_replay`` raises): the branches drawn here come
+    #    from the gates, which is how a document spells them.
     previous: Optional[int] = None
     op_node_ids: List[int] = []  # real op nodes, in schedule order (last = deepest sink = final output)
+    placed: List[Tuple[Callable[..., Any], int]] = []  # (op class, node id) — what a gate may name
+    # Open decisions, outermost first: {"test": node id, "branches": [[outcome, head, tails]]} —
+    # a branch's tails are its own tail until a decision nested in it closes, then that one's.
+    open_decisions: List[Dict[str, Any]] = []
+    step_names = list(raw.get("__step_names__") or [])
 
-    for marker in raw["__steps__"]:
-        if _target_and_kwargs(marker) is None:
+    def _close_innermost() -> List[int]:
+        """Close the innermost decision WITHOUT a join: its tails become the enclosing branch's."""
+        inner = open_decisions.pop()
+        tails = [tail for _o, _h, tails in inner["branches"] for tail in tails]
+        if open_decisions:
+            open_decisions[-1]["branches"][-1][2] = tails
+        return tails
+
+    for position, marker in enumerate(raw["__steps__"]):
+        spec = _target_and_kwargs(marker)
+        if spec is None:
             continue
+        cls, _is_lazy, kwargs = spec
         res = builder.emit(marker)
         if res is None:
             continue
         nid = res[0]
-        if previous is not None:
-            builder.connect(previous, 0, nid, _RECORD_INPUT, RECORD_TYPE)
-        previous = nid
+        outcome = str(kwargs.get(GATE_PARAM) or "")
+        step = step_names[position] if position < len(step_names) else str(position)
+        if outcome:
+            test = next((pid for pcls, pid in reversed(placed) if outcome in declared_outcomes(pcls)), None)
+            if test is None:
+                decided = "; ".join(
+                    f"{', '.join(declared_outcomes(pcls))} ({pcls.__name__})"
+                    for pcls, _pid in placed
+                    if declared_outcomes(pcls)
+                )
+                raise UnsupportedTopologyError(
+                    f"step {step!r} is gated on the outcome {outcome!r}, which no step before it decides — "
+                    f"the outcomes decided so far: {decided or 'none'}"
+                )
+            # Pop nested decisions closed by returning to an outer test node.
+            while (
+                open_decisions and open_decisions[-1]["test"] != test and any(d["test"] == test for d in open_decisions)
+            ):
+                _close_innermost()
+            current = open_decisions[-1] if open_decisions else None
+            if current is not None and current["test"] != test:
+                open_decisions.append({"test": test, "branches": []})  # nested inside the open branch
+                current = open_decisions[-1]
+            elif current is None:
+                open_decisions.append({"test": test, "branches": []})
+                current = open_decisions[-1]
+            branches = current["branches"]
+            if branches and branches[-1][0] == outcome:
+                builder.connect(branches[-1][2][-1], 0, nid, _RECORD_INPUT, RECORD_TYPE)
+                branches[-1][2] = [nid]
+            else:
+                if len(branches) >= len(JOIN_INPUTS):
+                    raise UnsupportedTopologyError(
+                        f"step {step!r} opens branch {len(branches) + 1} of one decision; Join branches "
+                        f"takes at most {len(JOIN_INPUTS)}"
+                    )
+                slot = next(i for i, out in enumerate(builder.by_id[test]["outputs"]) if out["name"] == outcome)
+                builder.connect(test, slot, nid, _RECORD_INPUT, RECORD_TYPE)
+                branches.append([outcome, nid, [nid]])
+        else:
+            if open_decisions:
+                while len(open_decisions) > 1:
+                    _close_innermost()
+                tails = _close_innermost()
+                if len(tails) > len(JOIN_INPUTS):
+                    raise UnsupportedTopologyError(
+                        f"the decision before step {step!r} ends in {len(tails)} branches; Join branches "
+                        f"takes at most {len(JOIN_INPUTS)}"
+                    )
+                join = builder.spawn(JOIN_CLASS_TYPE)
+                for index, tail in enumerate(tails):
+                    builder.connect(tail, 0, join, JOIN_INPUTS[index], RECORD_TYPE)
+                builder.connect(join, 0, nid, _RECORD_INPUT, RECORD_TYPE)
+            elif previous is not None:
+                builder.connect(previous, 0, nid, _RECORD_INPUT, RECORD_TYPE)
+            previous = nid
+        placed.append((cls, nid))
         op_node_ids.append(nid)
 
     # 3. Wire dotted-!ref free inputs (constant.output -> consumer param) to the constant nodes.
@@ -2077,6 +2245,37 @@ def _normalize_ui_workflow(graph: Dict[str, Any], node_mappings: Dict[str, Any])
     return out
 
 
+def _fold_drawn_branches(pnodes: Dict[str, "_PNode"], node_mappings: Dict[str, Any]) -> Dict[str, "_PNode"]:
+    """The whole-graph exporter's face of :func:`streamstudio.export.fold_branches`.
+
+    The fold speaks the prompt shape; this rebuilds it from the parsed nodes, folds, and parses
+    back — carrying the UI-only export marks across. A graph that draws no decision (no join,
+    no record wire off an outcome socket) is returned as it came.
+    """
+    drawn = any(p.class_type == JOIN_CLASS_TYPE for p in pnodes.values()) or any(
+        slot >= 1 for p in pnodes.values() for name, (_src, slot) in p.links.items() if name == _RECORD_INPUT
+    )
+    if not drawn:
+        return pnodes
+    # A canvas naming Taidal nodes this installation does not register (a stale editor) gets
+    # THAT refusal, by name, from the export proper — folding over unknown nodes would only
+    # report that their branches "decide nothing".
+    if any(p.class_type.startswith(_TAIDAL_NODE_PREFIX) and p.class_type not in node_mappings for p in pnodes.values()):
+        return pnodes
+    prompt = {
+        nid: {
+            "class_type": p.class_type,
+            "inputs": {**p.widgets, **{k: [s, slot] for k, (s, slot) in p.links.items()}},
+        }
+        for nid, p in pnodes.items()
+    }
+    folded = _normalize_prompt(fold_branches(prompt, node_mappings), node_mappings)
+    for nid, pnode in folded.items():
+        pnode.export_skip = pnodes[nid].export_skip
+        pnode.export_target = pnodes[nid].export_target
+    return folded
+
+
 def _normalize_prompt(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> Dict[str, "_PNode"]:
     out: Dict[str, _PNode] = {}
     for node_id, node in graph.items():
@@ -2254,6 +2453,7 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
     export that carries it. A dropped wire into a real config member is noted in the comment block.
     """
     pnodes = _normalize_workflow(graph, node_mappings)
+    pnodes = _fold_drawn_branches(pnodes, node_mappings)
     if not pnodes:
         return _confluid_dump({})
 
@@ -2716,6 +2916,7 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
             key = f"pipeline_{pipeline_count}"
         used_keys.add(key)
         stream_kwargs: Dict[str, Any] = {"ops": _fold_chain(head, key)}
+        check_op_chain(stream_kwargs["ops"], where=key)  # the contract, where the chain is drawn
         if source_nid is not None:
             referenced.add(source_nid)
             stream_kwargs["source"] = Reference(names[source_nid])

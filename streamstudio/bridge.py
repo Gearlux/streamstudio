@@ -66,6 +66,13 @@ from loggair import get_logger
 from recordstream import Record as _Record
 from recordstream.discovery import get_callable_path, resolve_callable, scan_module
 
+#: The editor's two WORKSPACE-PREVIEW nodes (hand-written in ``nodes.py``) and the default address
+#: of the workspace they talk to. Shared with the importer, which PLACES them for a document whose
+#: ``app:`` block says ``preview: true`` — so the class types are spelled in exactly one place.
+PREVIEW_NODE_CLASS_TYPE = "Taidal_PreviewOnSelection"
+SELECTION_NODE_CLASS_TYPE = "Taidal_ShowSelection"
+DEFAULT_WORKSPACE_URL = "http://127.0.0.1:8787"
+
 logger = get_logger(__name__)
 
 
@@ -211,6 +218,27 @@ DEFAULT_WIDGET_CONFIG: Dict[str, Dict[str, Any]] = {
     "STRING": {"default": "", "multiline": False},
     "BOOLEAN": {"default": False},
 }
+
+# The record engine's per-node GATE parameter (``recordstream.ops.contract.check_chain`` reads it
+# by this name): the converter's word for "runs only on this outcome". On the canvas it is
+# NEITHER a widget NOR a socket — the wire from a test node's outcome socket IS the condition
+# (user design 2026-09-06), and the exporter writes the gate from that wire.
+GATE_PARAM = "requires"
+
+
+def declared_outcomes(cls: Any) -> Tuple[str, ...]:
+    """The outcomes a TEST node decides — its class-level ``flags`` (the per-node contract), in order."""
+    if not inspect.isclass(cls):
+        return ()
+    return tuple(str(flag) for flag in (getattr(cls, "flags", None) or ()))
+
+
+def _ctor_param_names(func: Callable) -> Set[str]:
+    try:
+        return set(inspect.signature(func).parameters)
+    except (ValueError, TypeError):  # pragma: no cover - defensive: inspect rejects rare builtins
+        return set()
+
 
 # Types that ride a wire as input sockets (no inline widget config).
 _SOCKET_TYPES = {
@@ -2226,8 +2254,15 @@ def _build_op_node(cls: Callable, name: str, category: str) -> Type:
     # object output. Canonical case: PutField.value fed by a RandomNumber, drawn PER record.
     wired_any_params = [p for p in _wired_value_params(cls) if p not in op_list_params and p not in single_op_params]
     _socketed = set(op_list_params) | set(single_op_params) | set(wired_any_params)
+    # A TEST node's outcomes (user design 2026-09-06 — "branches and test"): an op declaring
+    # `flags` gets one RECORD output per outcome, named by it, after the @outputs. A node wired
+    # from an outcome runs only for the records that took it — on the canvas because the socket
+    # emits None otherwise, in the exported chain because the fold writes the gate from the wire
+    # (`export.fold_branches`). The gate param itself is neither widget nor socket.
+    outcomes = declared_outcomes(cls)
+    gate_params = {GATE_PARAM} if GATE_PARAM in _ctor_param_names(cls) else set()
     required, nullable_opts, _split_map = _build_config_inputs(
-        cls, skip=_socketed or None, strict_typing=cls_marks.strict_typing
+        cls, skip=(_socketed | gate_params) or None, strict_typing=cls_marks.strict_typing
     )
     optional: Dict[str, Any] = {"record": (RECORD_TYPE,), **nullable_opts}
     for pname in wired_any_params:
@@ -2245,6 +2280,15 @@ def _build_op_node(cls: Callable, name: str, category: str) -> Type:
     # Collect any @output properties declared on this op class.
     out_specs = list(output_specs(cast(type, cls)))
     out_sockets = [_output_socket_type(s["name"], _output_return_anno(cls, s["name"]), cls) for s in out_specs]
+    # An outcome that shares a name with a @output stays that @output (a value socket); the
+    # outcome socket exists only where the name is free.
+    outcome_names = [flag for flag in outcomes if flag not in {s["name"] for s in out_specs}]
+
+    def _outcome_fired(op: Any, flag: str) -> bool:
+        try:
+            return bool(getattr(op, flag, False))
+        except Exception:  # noqa: BLE001 - a property that raises simply did not fire
+            return False
 
     def execute(self: Any, record: Any = None, **kwargs: Any) -> Tuple[Any, ...]:
         if op_list_params:
@@ -2281,15 +2325,18 @@ def _build_op_node(cls: Callable, name: str, category: str) -> Type:
                 logger.debug("{}: output {!r} unavailable ({}); emitting None.", name, spec["name"], exc)
                 value = None
             extra_outs.append(_coerce_output_value(value, socket))
-        return (applied, op, *extra_outs)
+        # Each outcome socket carries the record only when THAT outcome fired — a branch node
+        # wired from it receives None otherwise, so a branch not taken computes nothing.
+        outcome_outs = [applied if applied is not None and _outcome_fired(op, flag) else None for flag in outcome_names]
+        return (applied, op, *extra_outs, *outcome_outs)
 
     return _node_class(
         name,
         category,
         required,
-        (RECORD_TYPE, OP_TYPE, *out_sockets),
+        (RECORD_TYPE, OP_TYPE, *out_sockets, *([RECORD_TYPE] * len(outcome_names))),
         execute,
-        return_names=("record", "op", *[s["name"] for s in out_specs]),
+        return_names=("record", "op", *[s["name"] for s in out_specs], *outcome_names),
         optional_inputs=optional,
         kind="op",
         callable_path=_safe_callable_path(cls),

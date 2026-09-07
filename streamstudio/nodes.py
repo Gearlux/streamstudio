@@ -21,8 +21,14 @@ import math as _math_module
 import re
 import string
 import sys
+import tempfile
 import threading
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
+import urllib.error
+import urllib.parse
+import urllib.request
+import uuid
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple, Type, Union, cast
 
 import numpy as np
 import torch
@@ -31,8 +37,11 @@ from loggair import get_logger
 
 from streamstudio.bridge import (
     ARRAY_TYPE,
+    DEFAULT_WORKSPACE_URL,
     OP_TYPE,
+    PREVIEW_NODE_CLASS_TYPE,
     RECORD_TYPE,
+    SELECTION_NODE_CLASS_TYPE,
     SOURCE_TYPE,
     VALUE_TYPE,
     base_item_sockets,
@@ -1341,6 +1350,41 @@ class RecordBuilderNode:
         return (record,)
 
 
+class JoinBranchesNode:
+    """Where the branches of a decision come back together — the record of whichever branch ran.
+
+    A TEST node offers one record output per outcome (its declared ``flags`` — the record
+    engine's per-node contract); the nodes wired from an outcome run only for the records that
+    took it, and they rejoin here before the chain continues (user design 2026-09-06: "the
+    graph should visually represent what is executed with branches and test"). The branches
+    are exclusive, so at most one input carries a record — the join passes it on, nothing else.
+
+    On export the join is a DRAWING, not a step: the branches fold back into the linear, gated
+    chain the record engine runs (``streamstudio.export.fold_branches``), where a branch not
+    taken costs one flag check. Six inputs cover every decision drawn so far; a seventh branch
+    is refused at export naming the limit.
+    """
+
+    __confluid_display_name__ = "Join branches"
+    CATEGORY = _STREAMSTUDIO_CATEGORY
+    RETURN_TYPES = (RECORD_TYPE,)
+    RETURN_NAMES = ("record",)
+    FUNCTION = "join"
+
+    @classmethod
+    def INPUT_TYPES(cls) -> Dict[str, Any]:
+        return {
+            "required": {"branch_1": (RECORD_TYPE,)},
+            "optional": {f"branch_{i}": (RECORD_TYPE,) for i in range(2, 7)},
+        }
+
+    def join(self, **branches: Any) -> Tuple[Any, ...]:
+        for name in sorted(branches, key=lambda key: int(key.rsplit("_", 1)[1])):
+            if branches[name] is not None:
+                return (branches[name],)
+        return (None,)
+
+
 class MixRecordsNode:
     """Build a new record record combining entries from three source records, merging all metadata.
 
@@ -2207,6 +2251,281 @@ def build_item_type_nodes() -> Dict[str, Type]:
     return {**ITEM_TYPE_NODES, **DOMAIN_EXTRACT_NODES}
 
 
+# ---------------------------------------------------------------------------------------------
+# Preview on a workspace selection — what the App view's Run button shows for a PANE graph
+# ---------------------------------------------------------------------------------------------
+# A pane graph has no record source: the annotation workspace feeds the record and fills the
+# window by shape. So the App view's Run button could show nothing for it — until these two
+# OUTPUT nodes. ``Preview on Selection`` compiles the chain feeding it straight from the hidden
+# PROMPT (the same conversion the workspace runs, so the FORM's current, unsaved values ride
+# along), posts that document to the workspace, which runs it over the record and window the
+# page currently shows, and renders the answer — curves, note, step report — as ONE image,
+# because the App view's output panel lists media. ``Selection`` shows what is about to be
+# analysed: the page's record window as the workspace renders it.
+#
+# The PREVIEW PROTOCOL a workspace serves is three routes; nothing here knows any workspace
+# by name, only these routes and the address the launcher hands over (``taidal_workspace``).
+
+#: What the page shows: ``{record, window: {x0, x1, y0, y1}, …}`` (``record`` null = nothing).
+WORKSPACE_STATE_ROUTE = "/api/state"
+#: ``POST {document}`` → ``{record, window, payload}``: the converted document over the selection.
+WORKSPACE_PREVIEW_ROUTE = "/api/preview"
+#: A record window as a PNG (``w``, ``h``, and the four window edges).
+WORKSPACE_THUMBNAIL_ROUTE = "/api/recordings/{record}/thumbnail.png"
+_PREVIEW_TIMEOUT_S = 60.0
+_PREVIEW_BACKGROUND = "#0d1117"
+
+
+class WorkspaceUnavailable(RuntimeError):
+    """The workspace did not answer, or answered with a refusal — the message is the whole story."""
+
+
+def _workspace_request(
+    url: str, route: str, body: Optional[Dict[str, Any]] = None, timeout: float = _PREVIEW_TIMEOUT_S
+) -> bytes:
+    """One request against the workspace; a refusal comes back as its own text, never a traceback."""
+    base = (url or DEFAULT_WORKSPACE_URL).rstrip("/")
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    headers = {"Content-Type": "application/json"} if data is not None else {}
+    request = urllib.request.Request(base + route, data=data, headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as answer:
+            return cast(bytes, answer.read())
+    except urllib.error.HTTPError as exc:
+        text = exc.read().decode("utf-8", "replace")
+        try:
+            text = str(json.loads(text).get("error") or text)
+        except (ValueError, AttributeError):
+            pass
+        raise WorkspaceUnavailable(f"{base} refused {route}: {text}") from exc
+    except (urllib.error.URLError, OSError) as exc:
+        reason = getattr(exc, "reason", exc)
+        raise WorkspaceUnavailable(
+            f"no workspace answers at {base} ({reason}) — start it, or set workspace_url"
+        ) from exc
+
+
+def _workspace_json(url: str, route: str, body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    answer = json.loads(_workspace_request(url, route, body).decode("utf-8"))
+    return cast(Dict[str, Any], answer if isinstance(answer, dict) else {"value": answer})
+
+
+def _preview_dir() -> Path:
+    """ComfyUI's temp directory — what its output panel serves as ``type: temp`` — else a local one."""
+    try:
+        import folder_paths  # type: ignore[import-not-found]
+
+        return Path(folder_paths.get_temp_directory())
+    except ImportError:
+        return Path(tempfile.gettempdir()) / "streamstudio-preview"
+
+
+def _save_preview(image: Union[np.ndarray, bytes], stem: str) -> Dict[str, str]:
+    """Write a PNG where the App view's output panel can list it; the ``ui.images`` entry."""
+    directory = _preview_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    name = f"{stem}-{uuid.uuid4().hex[:8]}.png"
+    path = directory / name
+    if isinstance(image, (bytes, bytearray)):
+        path.write_bytes(bytes(image))
+    else:
+        from PIL import Image
+
+        Image.fromarray(np.asarray(image, dtype=np.uint8)).save(path)
+    return {"filename": name, "subfolder": "", "type": "temp"}
+
+
+def _text_image(lines: Sequence[str], width: int, height: int) -> np.ndarray:
+    """A dark image carrying text — a refusal, or the renderer-less fallback."""
+    from recordstream.ops.image import draw_text
+
+    return draw_text(
+        "\n".join(str(line) for line in lines if line),
+        width=width,
+        height=height,
+        font_size=14,
+        color="#e6edf3",
+        background=_PREVIEW_BACKGROUND,
+    )
+
+
+def _window_label(window: Dict[str, Any]) -> str:
+    try:
+        return (
+            f"x {float(window['x0']):g}–{float(window['x1']):g}  ·  y {float(window['y0']):g}–{float(window['y1']):g}"
+        )
+    except (KeyError, TypeError, ValueError):
+        return ""
+
+
+def render_preview_image(payload: Dict[str, Any], title: str, width: int, height: int) -> np.ndarray:
+    """The pane's payload as an image — the signal domain's renderer when installed, else its text."""
+    try:
+        from waivefront.visualizers import render_pane_payload
+    except ImportError:
+        note = str(payload.get("note") or "") if isinstance(payload, dict) else ""
+        steps = payload.get("steps") if isinstance(payload, dict) else None
+        lines = [title, note]
+        for name, entry in steps.items() if isinstance(steps, dict) else []:
+            if isinstance(entry, dict) and not entry.get("ran", True):
+                lines.append(f"· {name} skipped: {entry.get('because', '')}")
+            elif isinstance(entry, dict):
+                lines.append(f"✓ {name} — {entry.get('detail', entry.get('value', ''))}")
+        return _text_image(lines, width, height)
+    return cast(np.ndarray, render_pane_payload(payload, title=title, width=width, height=height))
+
+
+def _upstream_closure(prompt: Dict[str, Any], start: str) -> List[str]:
+    """Every node reachable UPSTREAM of ``start`` through any input wire, ``start`` excluded.
+
+    Record wires and value wires alike: the converted document needs a wired value producer as
+    much as the ops, and a link into a node the sub-prompt does not carry would not convert.
+    """
+    seen: List[str] = []
+    stack = [str(start)]
+    while stack:
+        nid = stack.pop()
+        node = prompt.get(nid)
+        if node is None or nid in seen:
+            continue
+        seen.append(nid)
+        for value in (node.get("inputs") or {}).values():
+            if isinstance(value, (list, tuple)) and len(value) == 2 and str(value[0]) in prompt:
+                stack.append(str(value[0]))
+    return [nid for nid in seen if nid != str(start)]
+
+
+def pane_document(prompt: Dict[str, Any], unique_id: Any, node_mappings: Optional[Dict[str, Any]] = None) -> str:
+    """The converted document of the chain feeding node ``unique_id`` — the YAML a pane runs.
+
+    The SAME converter the workspace applies to the saved canvas (``workflow_to_yaml``), over
+    the live prompt instead: so the form's current values are in it and nothing was saved.
+    """
+    from streamstudio.graphio import workflow_to_yaml  # lazy: graphio ↔ nodes stay acyclic
+
+    mappings: Dict[str, Any]
+    if node_mappings is not None:
+        mappings = node_mappings
+    else:
+        from streamstudio import NODE_CLASS_MAPPINGS
+
+        mappings = NODE_CLASS_MAPPINGS
+    upstream = _upstream_closure(prompt or {}, str(unique_id))
+    if not upstream:
+        raise WorkspaceUnavailable("nothing feeds this node — wire the pane's last op into its record input")
+    return workflow_to_yaml({nid: prompt[nid] for nid in upstream}, mappings)
+
+
+class PreviewOnSelectionNode:
+    """Run the chain feeding this node over the workspace's selected record — the App view's Run.
+
+    The ``record`` input is LAZY and never requested: compilation reads the static PROMPT (the
+    Extract-as-Op precedent), so the ops upstream never execute inside the editor — the
+    workspace runs them, with the record it holds and the window the page shows.
+    """
+
+    __confluid_display_name__ = "Preview on Selection"
+    CATEGORY = _STREAMSTUDIO_CATEGORY
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("payload",)
+    FUNCTION = "preview"
+    OUTPUT_NODE = True
+
+    @classmethod
+    def INPUT_TYPES(cls) -> Dict[str, Any]:
+        return {
+            "required": {
+                "workspace_url": (
+                    "STRING",
+                    {
+                        "default": DEFAULT_WORKSPACE_URL,
+                        "tooltip": "Where the annotation workspace serves — the launcher fills it in.",
+                    },
+                ),
+                "width": ("INT", {"default": 960, "min": 160, "max": 4096}),
+                "height": ("INT", {"default": 540, "min": 120, "max": 4096}),
+            },
+            "optional": {"record": (RECORD_TYPE, {"lazy": True})},
+            "hidden": {"prompt": "PROMPT", "unique_id": "UNIQUE_ID"},
+        }
+
+    def check_lazy_status(self, **kwargs: Any) -> List[str]:
+        return []  # the upstream ops are compiled from the PROMPT, never executed here
+
+    def preview(
+        self,
+        workspace_url: str = DEFAULT_WORKSPACE_URL,
+        width: int = 960,
+        height: int = 540,
+        record: Any = None,
+        prompt: Any = None,
+        unique_id: Any = None,
+    ) -> Dict[str, Any]:
+        result: Dict[str, Any]
+        try:
+            document = pane_document(prompt or {}, unique_id)
+            answer = _workspace_json(workspace_url, WORKSPACE_PREVIEW_ROUTE, {"document": document})
+            raw_payload = answer.get("payload")
+            payload: Dict[str, Any] = raw_payload if isinstance(raw_payload, dict) else {"value": raw_payload}
+            raw_window = answer.get("window")
+            window: Dict[str, Any] = raw_window if isinstance(raw_window, dict) else {}
+            title = "  ·  ".join(part for part in (str(answer.get("record") or ""), _window_label(window)) if part)
+            image = render_preview_image(payload, title, int(width), int(height))
+            result = {"record": answer.get("record"), "window": window, "payload": payload}
+        except Exception as exc:  # noqa: BLE001 - the App's output must SAY why, never stay blank
+            image = _text_image(["preview failed", str(exc)], int(width), int(height))
+            result = {"error": str(exc)}
+        return {"ui": {"images": [_save_preview(image, "preview")]}, "result": (json.dumps(result, default=str),)}
+
+
+class ShowSelectionNode:
+    """Show what the workspace page currently selects: its record window, as the workspace renders it."""
+
+    __confluid_display_name__ = "Selection"
+    CATEGORY = _STREAMSTUDIO_CATEGORY
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("state",)
+    FUNCTION = "show"
+    OUTPUT_NODE = True
+
+    @classmethod
+    def INPUT_TYPES(cls) -> Dict[str, Any]:
+        return {
+            "required": {
+                "workspace_url": (
+                    "STRING",
+                    {
+                        "default": DEFAULT_WORKSPACE_URL,
+                        "tooltip": "Where the annotation workspace serves — the launcher fills it in.",
+                    },
+                ),
+                "width": ("INT", {"default": 640, "min": 32, "max": 4096}),
+                "height": ("INT", {"default": 240, "min": 16, "max": 4096}),
+            }
+        }
+
+    def show(self, workspace_url: str = DEFAULT_WORKSPACE_URL, width: int = 640, height: int = 240) -> Dict[str, Any]:
+        result: Dict[str, Any]
+        try:
+            state = _workspace_json(workspace_url, WORKSPACE_STATE_ROUTE)
+            record = state.get("record")
+            if not record:
+                raise WorkspaceUnavailable(str(state.get("note") or "no record is selected in the workspace page"))
+            raw_window = state.get("window")
+            window: Dict[str, Any] = raw_window if isinstance(raw_window, dict) else {}
+            query: Dict[str, Any] = {"w": int(width), "h": int(height)}
+            if all(k in window for k in ("x0", "x1", "y0", "y1")):
+                query.update({k: window[k] for k in ("x0", "x1", "y0", "y1")})
+            route = WORKSPACE_THUMBNAIL_ROUTE.format(record=urllib.parse.quote(str(record), safe=""))
+            png = _workspace_request(workspace_url, route + "?" + urllib.parse.urlencode(query))
+            entry = _save_preview(png, "selection")
+            result = state
+        except Exception as exc:  # noqa: BLE001 - say why, never stay blank
+            entry = _save_preview(_text_image(["no selection to show", str(exc)], int(width), int(height)), "selection")
+            result = {"error": str(exc)}
+        return {"ui": {"images": [entry]}, "result": (json.dumps(result, default=str),)}
+
+
 # Statically-defined adapter nodes, merged into the auto-discovered set by streamstudio/__init__.py.
 # Keys are stable workflow identifiers — do not rename them.  Display names come from each class's
 # ``__confluid_display_name__`` attribute (set by ``@configurable(display_name=...)`` or directly).
@@ -2222,12 +2541,15 @@ NODE_CLASS_MAPPINGS: Dict[str, Type] = {
     "Taidal_Retag": RetagObjectNode,
     "Taidal_ComposeRecord": ComposeRecordNode,
     "Taidal_MixRecords": MixRecordsNode,
+    "Taidal_JoinBranches": JoinBranchesNode,
     "Taidal_RecordBuilder": RecordBuilderNode,
     "Taidal_SubgraphOp": SubgraphOpExtractNode,
     "Taidal_YamlDump": YamlDumpNode,
     "Taidal_Math": MathNode,
     "Taidal_ImageGrid": ImageGridNode,
     "Taidal_Value": ValueNode,
+    PREVIEW_NODE_CLASS_TYPE: PreviewOnSelectionNode,
+    SELECTION_NODE_CLASS_TYPE: ShowSelectionNode,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS: Dict[str, str] = {
