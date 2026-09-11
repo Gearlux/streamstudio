@@ -86,9 +86,9 @@ class TestTheRequestedView:
     def test_the_named_path_verifies_the_canvas_holds_the_graph(self) -> None:
         """A late session restore replaced our load and the console still said 'loaded'."""
         js = _JS.read_text()
-        assert "const settled = await settleOpen(workflow, want, view, persisted);" in js
+        assert "const settled = await settleOpen(workflow, want, view, persisted, wantPath);" in js
         body = js.split("async function settleOpen")[1].split("\n}\n")[0]
-        assert "if (fingerprint() !== want)" in body
+        assert "if (!holdsOurGraph(want, wantPath))" in body
         assert (
             "store.openWorkflow(persisted)" in body
             and "app.loadGraphData(workflow, true, true, persisted || null)" in body
@@ -101,7 +101,7 @@ class TestTheRequestedView:
 
     def test_asking_for_a_view_re_navigates_a_graph_already_on_screen(self) -> None:
         js = _JS.read_text()
-        assert "if (fingerprint() === want && !requestedView)" in js
+        assert "if (activeWorkflowPath() === wantPath && !requestedView)" in js
 
     @pytest.mark.skipif(shutil.which("node") is None, reason="needs node to run the extension's decision logic")
     def test_the_settle_loop_behaves(self, tmp_path: Path) -> None:
@@ -125,6 +125,10 @@ class TestTheRequestedView:
                 fn("fingerprint"),
                 fn("requestedViewFor"),
                 fn("currentMode"),
+                # The stub store names no document, so `holdsOurGraph` falls back to the
+                # fingerprint — which is what these four situations were measured against.
+                fn("activeWorkflowPath"),
+                fn("holdsOurGraph"),
                 fn("settleOpen"),
                 "function setup(showing, mode) {",
                 "  nodes = showing; const active = { activeMode: null, initialMode: mode };",
@@ -164,3 +168,94 @@ class TestTheRequestedView:
         assert out["noFaceAsked"] == [True, []], "no view asked: the face is left alone"
         assert out["decide"] == ["app", "graph", "graph", None]
         assert any("declares no App view" in line for line in out["log"])
+
+
+class TestTheAlreadyOpenCheckIsTheDOCUMENT:
+    """ "Is this graph already on screen?" is answered by the DOCUMENT, never by the node types.
+
+    Measured 2026-09-11 across four annotaide workspaces: a graph whose content lives inside a
+    subgraph has only ``Stream`` and one subgraph id at the top level, and those ids are shared
+    between panes AND between workspaces — sixteen different graphs carried one identical
+    node-type list (one workspace's ``view_acf`` and ``view_fft``, another's ``view_fft``, …) and six
+    model graphs of three workspaces carried another. With three annotaide servers running,
+    every second open was skipped as "already shown" and the user was left looking at the
+    previous workspace's graph, whose preview nodes still asked the previous server.
+    """
+
+    def test_the_document_path_decides_it(self) -> None:
+        js = _JS.read_text()
+        assert "if (activeWorkflowPath() === wantPath && !requestedView)" in js
+        assert "const wantPath = workflowPathFor(graphPath);" in js
+
+    def test_the_active_document_is_read_off_the_stores_own_path(self) -> None:
+        body = _JS.read_text().split("function activeWorkflowPath()")[1].split("\n}\n")[0]
+        assert "store.activeWorkflow" in body and "active.path" in body
+
+    def test_a_canvas_only_fallback_still_has_the_fingerprint(self) -> None:
+        """No store, no named document — then the node types are all there is, and a wrong
+        answer there is no worse than before. It must never be preferred when a path exists."""
+        body = _JS.read_text().split("function holdsOurGraph(")[1].split("\n}\n")[0]
+        assert "return path ? path === wantPath : fingerprint() === want;" in body
+
+    def test_the_preview_nodes_are_repointed_even_when_the_open_is_skipped(self) -> None:
+        """The skipped open is EXACTLY the case where the canvas came from another server."""
+        block = _JS.read_text().split("if (activeWorkflowPath() === wantPath")[1].split("return;")[0]
+        assert "pointPreviewNodesAt(workspaceUrl)" in block
+
+    def test_the_repoint_reaches_preview_nodes_inside_a_subgraph(self) -> None:
+        body = _JS.read_text().split("function pointPreviewNodesAt(")[1].split("\n}\n")[0]
+        assert "node.subgraph && node.subgraph.nodes" in body
+
+    @pytest.mark.skipif(shutil.which("node") is None, reason="needs node to run the extension's decision logic")
+    def test_two_graphs_with_one_node_type_list_are_told_apart(self, tmp_path: Path) -> None:
+        """The real shape, run: two workspaces' `view_fft` graphs — identical node types, one
+        subgraph id — are the same to the fingerprint and different to the document path."""
+        js = _JS.read_text()
+
+        def fn(name: str) -> str:
+            marker = f"function {name}("
+            start = js.index(marker)
+            start = js.rfind("\n", 0, start) + 1
+            return js[start : js.index("\n}\n", start) + 3]
+
+        harness = "\n".join(
+            [
+                "let store, app;",
+                fn("fingerprint"),
+                fn("workflowPathFor"),
+                fn("activeWorkflowPath"),
+                fn("holdsOurGraph"),
+                # both graphs: `Stream` + the SAME subgraph id, the measured shape
+                "const TYPES = ['Stream', 'b7e4a1f0-52c9-5d38-9a6e-4f0c2d8b1e73'];",
+                "const want = TYPES.slice().sort().join(',');",
+                "const first = '/Users/x/alpha.workspace.yaml.d/view_fft.json';",
+                "const second = '/Users/x/beta.workspace.yaml.d/view_fft.json';",
+                "function showing(path) {",
+                "  app = { graph: { nodes: TYPES.map((t) => ({ type: t })) },",
+                "    extensionManager: { workflow: { activeWorkflow: path ? { path } : null } } };",
+                "}",
+                "const out = {};",
+                "showing(workflowPathFor(first));",
+                "out.paths = [workflowPathFor(first), workflowPathFor(second)];",
+                "out.fingerprintSaysSame = fingerprint() === want;",
+                "out.documentSaysFirst = holdsOurGraph(want, workflowPathFor(first));",
+                "out.documentSaysSecond = holdsOurGraph(want, workflowPathFor(second));",
+                "showing(null);",
+                "out.noStoreFallsBack = holdsOurGraph(want, workflowPathFor(second));",
+                "process.stdout.write(JSON.stringify(out));",
+            ]
+        )
+        script = tmp_path / "identity.mjs"
+        script.write_text(harness)
+        out = json.loads(subprocess.run(["node", str(script)], capture_output=True, text=True, check=True).stdout)
+
+        assert out["paths"] == [
+            "workflows/taidal/alpha.workspace/view_fft.json",
+            "workflows/taidal/beta.workspace/view_fft.json",
+        ]
+        assert out["fingerprintSaysSame"] is True, "the node types cannot tell the two apart — that was the defect"
+        assert out["documentSaysFirst"] is True
+        assert (
+            out["documentSaysSecond"] is False
+        ), "the second workspace's graph is NOT on screen, so its open must not be skipped"
+        assert out["noStoreFallsBack"] is True, "no named document: the fingerprint is all there is"

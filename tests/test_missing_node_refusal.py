@@ -116,7 +116,9 @@ class TestTheShippedCanvasesConvertWhole:
     """The two canvases the failure was seen on. Gated on the domain package being
     installed; the artifacts ship there."""
 
-    @pytest.mark.parametrize("slot, ops", [("view_repeat", 3), ("view_bte", 12), ("view_cell", 9), ("view_wlan", 10)])
+    # The counts move whenever the domain adds a node to one of these chains — the point of the
+    # pin is that NOTHING is dropped, so a count that drifts is updated, never relaxed away.
+    @pytest.mark.parametrize("slot, ops", [("view_repeat", 3), ("view_bte", 19), ("view_cell", 10), ("view_wlan", 10)])
     def test_the_signal_domain_view_graphs_drop_nothing(self, slot: str, ops: int) -> None:
         import json
 
@@ -127,9 +129,9 @@ class TestTheShippedCanvasesConvertWhole:
         assert exported.count("_target_:") == ops + 1, "every op plus the Stream"
 
     def test_the_same_canvas_on_a_stale_server_refuses_by_name(self) -> None:
-        """The measured case, reproduced whole: the twelve-node Bluetooth canvas against a
-        registry missing the eleven ops added after the server started exported as
-        `WindowSignal` alone. It now refuses, naming them."""
+        """The measured case, reproduced whole: the Bluetooth canvas against a registry
+        missing the ops added after the server started exported as `WindowSignal` alone. It
+        now refuses, naming them."""
         import json
 
         annotation = pytest.importorskip("waivefront.annotation")
@@ -143,7 +145,11 @@ class TestTheShippedCanvasesConvertWhole:
                 if node["type"].startswith(("Taidal_waivefront_op_measure_", "Taidal_waivefront_op_bluetooth_"))
             }
         )
-        assert len(newer) == 11, "the eleven ops added after the stale server started"
+        # Every measure/bluetooth op the canvas names: the stale registry is built without
+        # them, which is the situation the refusal exists for. The COUNT is incidental and
+        # grows with the chain — what matters is that the canvas names some and that the
+        # refusal names them back.
+        assert len(newer) >= 11, "the ops a stale server would be missing"
         with pytest.raises(UnsupportedTopologyError) as caught:
             workflow_to_yaml(canvas, _stale(*newer))
         message = str(caught.value)
