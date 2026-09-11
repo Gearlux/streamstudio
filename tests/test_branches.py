@@ -139,13 +139,18 @@ class TestTheCanvasDrawsTheBranches:
     def _workflow(self) -> Dict[str, Any]:
         return flow_yaml_to_workflow(_bte_yaml(), NODE_CLASS_MAPPINGS, as_="graph", name="bte_view")
 
-    def test_twelve_ops_and_one_join(self) -> None:
-        """The twelve op nodes of the chain plus ONE join (the importer's two preview adapters
-        after the final output are not part of the analysis path)."""
+    def test_every_op_is_drawn_and_each_decision_gets_its_join(self) -> None:
+        """Every op node of the chain, plus ONE join per decision (the importer's two preview
+        adapters after the final output are not part of the analysis path).
+
+        The shipped Bluetooth chain draws TWO decisions — the burst pick's three finders and
+        the classifier's three decoders — so two joins. The op count moves whenever the domain
+        adds a step; it is updated here rather than relaxed, because a DROPPED node is exactly
+        what this file exists to catch."""
         workflow = self._workflow()
         joins = [n for n in workflow["nodes"] if n["type"] == JOIN_CLASS_TYPE]
         ops = [n for n in workflow["nodes"] if str(n["type"]).startswith("Taidal_waivefront")]
-        assert len(ops) == 12 and len(joins) == 1
+        assert len(ops) == 19 and len(joins) == 2
 
     def test_each_branch_hangs_off_its_outcome(self) -> None:
         workflow = self._workflow()
@@ -161,12 +166,21 @@ class TestTheCanvasDrawsTheBranches:
     def test_the_branches_rejoin_before_the_verdict(self) -> None:
         workflow = self._workflow()
         nodes = _nodes_by_class(workflow)
-        join = next(n for n in workflow["nodes"] if n["type"] == JOIN_CLASS_TYPE)
+        # The DECODERS' join, not the burst finders' — the chain draws two decisions, and the
+        # first join in node order is whichever the converter placed first.
+        join = next(
+            n
+            for n in workflow["nodes"]
+            if n["type"] == JOIN_CLASS_TYPE
+            and _link_source(workflow, n, "branch_1")[0] == nodes["DecodeBleAdvertising"]["id"]
+        )
         feeders = [_link_source(workflow, join, f"branch_{i}")[0] for i in (1, 2, 3)]
+        # The third feeder is the DEEP search, not the weak one: the deep search is a decision
+        # NESTED inside the weak branch, and a nested decision's tail joins in its place.
         assert feeders == [
             nodes["DecodeBleAdvertising"]["id"],
             nodes["DecodeClassicAccessCode"]["id"],
-            nodes["CorrelateAccessAddress"]["id"],
+            nodes["SearchAccessAddress"]["id"],
         ]
         assert _link_source(workflow, nodes["BluetoothVerdict"], "record") == (join["id"], "record")
 

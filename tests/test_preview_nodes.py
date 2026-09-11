@@ -213,9 +213,12 @@ class TestTheOpenerPointsTheNodesAtTheLaunchingWorkspace:
         js = _JS.read_text()
         assert 'url.searchParams.get("taidal_workspace")' in js
         assert 'url.searchParams.delete("taidal_workspace")' in js
-        assert js.index("const settled = await settleOpen(") < js.index(
-            "if (workspaceUrl) pointPreviewNodesAt(workspaceUrl);"
-        )
+        # On the LOAD path the re-point comes after the settle — the nodes must exist before
+        # they can be pointed. (The SKIPPED-open path re-points too, earlier in the file and
+        # for the same reason; see TestTheAlreadyOpenCheckIsTheDOCUMENT in
+        # test_open_graph_mirror.py, so this looks at the load path's own occurrence.)
+        settle = js.index("const settled = await settleOpen(")
+        assert settle < js.index("if (workspaceUrl) pointPreviewNodesAt(workspaceUrl);", settle)
 
     def test_only_the_two_workspace_nodes_widget_is_touched(self) -> None:
         body = _JS.read_text().split("function pointPreviewNodesAt")[1].split("\n}\n")[0]

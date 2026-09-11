@@ -445,3 +445,51 @@ refusals say. What must hold: the document form stays the gated linear chain (th
 runtime), the canvas never shows the gate, a nested decision keeps its own gate, and both
 exporters fold through the one function.
 
+
+## A graph that is already open is identified by its DOCUMENT, never by its node types (`open_graph.js`, 2026-09-11)
+
+**Context.** Opening a graph is idempotent by design: the extension re-uses the canvas when it
+already holds the graph it was asked for, rather than stacking a duplicate workflow tab. The
+test for "already holds it" was the sorted list of TOP-LEVEL node types. That test was already
+weak and became worthless once graphs were drawn as subgraphs: the top level of such a document
+is `Stream` plus one subgraph id, and subgraph ids are shared between panes of one workspace
+AND between workspaces that seeded from the same template. Measured on a user's machine across
+four annotation workspaces: SIXTEEN different graphs — every pane of every workspace — carried
+one identical node-type list, and the six model graphs of three workspaces carried another.
+
+With one editor serving three annotation servers at once, the consequence was constant: the
+second open of any graph was skipped as "already shown", the canvas kept the PREVIOUS
+workspace's document, and the user was looking at another server's graph. The preview nodes
+went with it — the step that re-points them at the server that launched the open sat after the
+skip, so they kept asking the previous one for "the selected record". The user's report was
+*"since 3 annotaide servers are running, streamstudio connects to the wrong ones"*, and the
+damage is not only what you see: edit the graph you were handed and save, and the mirror writes
+it into the OTHER workspace's file.
+
+**Decision.** The identity is the ComfyUI document path — `workflows/taidal/<workspace>/<stem>.json`,
+which `workflowPathFor` already builds and the store already reports as `activeWorkflow.path`.
+`activeWorkflowPath()` reads it; `holdsOurGraph(want, wantPath)` prefers it and falls back to the
+node-type fingerprint only when no document is named (a canvas-only load, where the fingerprint
+is all there is). Both the skip test and `settleOpen`'s verification use it. The preview re-point
+now also runs on the skip path — that path is precisely the case where the canvas came from
+another server — and it walks into subgraphs, where a graph drawn as one keeps its preview nodes.
+
+**Consequences.** Two graphs that differ only in their workspace are told apart, which the node
+types cannot do. A canvas-only fallback behaves exactly as before. A skipped open costs one
+extra walk of the graph's nodes to re-point the previews, which is the point of the skip path
+existing at all.
+
+**Example.**
+
+```js
+// both workspaces' `view_fft` graphs: `Stream` + the SAME subgraph id
+fingerprint() === want                                  // true for BOTH — the old test
+holdsOurGraph(want, "workflows/taidal/alpha.workspace/view_fft.json")   // true  — it is on screen
+holdsOurGraph(want, "workflows/taidal/beta.workspace/view_fft.json")    // false — open it
+```
+
+**What you may change.** How the document path is spelled (it comes from one function), and the
+fallback. What must hold: the node types never decide it while a document is named; the preview
+nodes are re-pointed on EVERY path that concludes the canvas shows the asked-for graph. Pins:
+`tests/test_open_graph_mirror.py::TestTheAlreadyOpenCheckIsTheDOCUMENT`,
+`tests/test_preview_nodes.py::TestTheOpenerPointsTheNodesAtTheLaunchingWorkspace`.

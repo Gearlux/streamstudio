@@ -138,6 +138,31 @@ function requestedViewFor(workflow, view) {
     return view;
 }
 
+// WHICH DOCUMENT is on the canvas — its path in ComfyUI's own store, the same string
+// `workflowPathFor` builds. This is the identity a second open is tested against: the node
+// TYPES cannot tell two graphs apart once their content lives inside a subgraph, because the
+// top level is then `Stream` plus one subgraph id and those ids are SHARED — measured
+// 2026-09-11 across four annotaide workspaces, sixteen different graphs (every pane of every
+// workspace) carried the identical two-entry list, and six model graphs of three workspaces
+// carried another. With three annotaide servers running, every second open was skipped as
+// "already shown" and left the previous workspace's canvas — and its preview nodes' server —
+// on screen (user report: "since 3 annotaide servers are running, streamstudio connects to
+// the wrong ones"). Blank when the store cannot answer, which is what makes the callers fall
+// back to the fingerprint rather than trust an empty string.
+function activeWorkflowPath() {
+    const store = app.extensionManager && app.extensionManager.workflow;
+    const active = store && store.activeWorkflow;
+    return (active && active.path) || "";
+}
+
+// Whether the canvas holds the graph we were asked for: by DOCUMENT when the store names one,
+// else by the node-type fingerprint — all a canvas-only fallback (no store, no named document)
+// has to go on.
+function holdsOurGraph(want, wantPath) {
+    const path = activeWorkflowPath();
+    return path ? path === wantPath : fingerprint() === want;
+}
+
 // The face the editor shows for the active workflow — the frontend's own expression
 // (`activeMode ?? initialMode ?? "graph"`), read off the same object its view reads.
 function currentMode() {
@@ -154,10 +179,10 @@ function currentMode() {
 // by loading it outright — and the face is switched with the frontend's OWN toggle, only
 // when the observed face differs from the request: a blind toggle would flip a graph that
 // was already right.
-async function settleOpen(workflow, want, view, persisted) {
+async function settleOpen(workflow, want, view, persisted, wantPath) {
     for (let attempt = 0; attempt < 3; attempt++) {
         await sleep(800);
-        if (fingerprint() !== want) {
+        if (!holdsOurGraph(want, wantPath)) {
             const store = app.extensionManager && app.extensionManager.workflow;
             if (persisted && attempt === 0 && store && store.openWorkflow) await store.openWorkflow(persisted);
             else await app.loadGraphData(workflow, true, true, persisted || null);
@@ -167,7 +192,7 @@ async function settleOpen(workflow, want, view, persisted) {
             await app.extensionManager.command.execute("Comfy.ToggleLinear");
             await sleep(300);
         }
-        if (fingerprint() === want && (!view || currentMode() === view)) return true;
+        if (holdsOurGraph(want, wantPath) && (!view || currentMode() === view)) return true;
     }
     return false;
 }
@@ -178,14 +203,21 @@ async function settleOpen(workflow, want, view, persisted) {
 const WORKSPACE_NODE_TYPES = ["Taidal_PreviewOnSelection", "Taidal_ShowSelection"];
 function pointPreviewNodesAt(workspaceUrl) {
     let pointed = 0;
-    for (const node of (app.graph && app.graph.nodes) || []) {
-        if (!WORKSPACE_NODE_TYPES.includes(node.type)) continue;
-        const widget = (node.widgets || []).find((w) => w.name === "workspace_url");
-        if (widget && widget.value !== workspaceUrl) {
-            widget.value = workspaceUrl;
-            pointed += 1;
+    // Into SUBGRAPHS as well: a graph drawn as one subgraph keeps its preview nodes inside it,
+    // where a walk of the top level alone never reaches them.
+    const walk = (nodes, depth) => {
+        for (const node of nodes || []) {
+            if (WORKSPACE_NODE_TYPES.includes(node.type)) {
+                const widget = (node.widgets || []).find((w) => w.name === "workspace_url");
+                if (widget && widget.value !== workspaceUrl) {
+                    widget.value = workspaceUrl;
+                    pointed += 1;
+                }
+            }
+            if (depth < 8 && node.subgraph && node.subgraph.nodes) walk(node.subgraph.nodes, depth + 1);
         }
-    }
+    };
+    walk((app.graph && app.graph.nodes) || [], 0);
     if (pointed) console.log("Taidal.OpenGraph: pointed", pointed, "preview node(s) at", workspaceUrl);
 }
 
@@ -222,8 +254,13 @@ async function applyOpenParams() {
             return;
         }
         const want = (workflow.nodes || []).map((n) => n.type).sort().join(",");
-        if (fingerprint() === want && !requestedView) {
+        const wantPath = workflowPathFor(graphPath);
+        if (activeWorkflowPath() === wantPath && !requestedView) {
             console.log("Taidal.OpenGraph: the canvas already shows", graphPath);
+            // The re-point happens HERE TOO, never only on the load path: this is exactly the
+            // case where the canvas was opened by a DIFFERENT workspace's server, and leaving
+            // its preview nodes pointed there is what made a preview ask the wrong annotaide.
+            if (workspaceUrl) pointPreviewNodesAt(workspaceUrl);
             return; // never stack a duplicate workflow tab for the graph already on screen
         }
         const view = requestedViewFor(workflow, requestedView);
@@ -236,7 +273,7 @@ async function applyOpenParams() {
             console.warn("Taidal.OpenGraph: could not open it as a named workflow —", err);
         }
         if (!persisted) await loadUntilItSticks(workflow);
-        const settled = await settleOpen(workflow, want, view, persisted);
+        const settled = await settleOpen(workflow, want, view, persisted, wantPath);
         if (workspaceUrl) pointPreviewNodesAt(workspaceUrl);
         console.log("Taidal.OpenGraph:", settled ? "loaded" : "could not settle", graphPath,
             persisted ? "(named workflow)" : "(canvas only)", view ? `as ${view}` : "");
