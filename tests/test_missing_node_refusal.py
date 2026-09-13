@@ -118,7 +118,7 @@ class TestTheShippedCanvasesConvertWhole:
 
     # The counts move whenever the domain adds a node to one of these chains — the point of the
     # pin is that NOTHING is dropped, so a count that drifts is updated, never relaxed away.
-    @pytest.mark.parametrize("slot, ops", [("view_repeat", 3), ("view_bte", 19), ("view_cell", 10), ("view_wlan", 10)])
+    @pytest.mark.parametrize("slot, ops", [("view_repeat", 3), ("view_bte", 22), ("view_cell", 10), ("view_wlan", 11)])
     def test_the_signal_domain_view_graphs_drop_nothing(self, slot: str, ops: int) -> None:
         import json
 
