@@ -9,7 +9,8 @@ The picture, for the shipped Bluetooth chain::
     … → ClassifyBluetooth ├ ble         ─▶ DecodeBleAdvertising ────┐
                           ├ bredr       ─▶ DecodeClassicAccessCode ─┤
                           ├ try_weak    ─▶ CorrelateAccessAddress ──┼─▶ Join branches ─▶ BluetoothVerdict
-                          └ try_classic ─▶ SearchClassicAccessCode ─┘
+                          ├ try_classic ─▶ SearchClassicAccessCode ─┤
+                          └ try_frame   ─▶ FrameConnectionPacket ───┘
 
 What runs is the chain: each branch node carries the flag that opens it, a closed gate passes
 the record through, and no branch is computed "just in case". These tests use the real
@@ -74,8 +75,15 @@ class TestTheOutcomeSockets:
         names = list(node_cls.RETURN_NAMES)
         types = list(node_cls.RETURN_TYPES)
         assert names[:2] == ["record", "op"]
-        assert names[2:] == ["fsk", "ble", "bredr", "try_weak", "try_classic"], "the outcomes, in the class's own order"
-        assert types[2:] == [RECORD] * 5, "an outcome carries the RECORD, so a branch hangs off it"
+        assert names[2:] == [
+            "fsk",
+            "ble",
+            "bredr",
+            "try_weak",
+            "try_classic",
+            "try_frame",
+        ], "the outcomes, in the class's own order"
+        assert types[2:] == [RECORD] * 6, "an outcome carries the RECORD, so a branch hangs off it"
 
     def test_a_branch_node_has_no_gate_to_type(self) -> None:
         """`requires` is the converter's word: no widget, no socket — the wire is the gate."""
@@ -151,7 +159,7 @@ class TestTheCanvasDrawsTheBranches:
         workflow = self._workflow()
         joins = [n for n in workflow["nodes"] if n["type"] == JOIN_CLASS_TYPE]
         ops = [n for n in workflow["nodes"] if str(n["type"]).startswith("Taidal_waivefront")]
-        assert len(ops) == 22 and len(joins) == 2
+        assert len(ops) == 24 and len(joins) == 2
 
     def test_each_branch_hangs_off_its_outcome(self) -> None:
         workflow = self._workflow()
@@ -162,6 +170,7 @@ class TestTheCanvasDrawsTheBranches:
             ("DecodeClassicAccessCode", "bredr"),
             ("CorrelateAccessAddress", "try_weak"),
             ("SearchClassicAccessCode", "try_classic"),
+            ("FrameConnectionPacket", "try_frame"),
         ):
             assert _link_source(workflow, nodes[branch], "record") == (classifier, outcome)
 
@@ -176,7 +185,7 @@ class TestTheCanvasDrawsTheBranches:
             if n["type"] == JOIN_CLASS_TYPE
             and _link_source(workflow, n, "branch_1")[0] == nodes["DecodeBleAdvertising"]["id"]
         )
-        feeders = [_link_source(workflow, join, f"branch_{i}")[0] for i in (1, 2, 3, 4)]
+        feeders = [_link_source(workflow, join, f"branch_{i}")[0] for i in (1, 2, 3, 4, 5)]
         # The third feeder is the DEEP search, not the weak one: the deep search is a decision
         # NESTED inside the weak branch, and a nested decision's tail joins in its place.
         assert feeders == [
@@ -184,6 +193,7 @@ class TestTheCanvasDrawsTheBranches:
             nodes["DecodeClassicAccessCode"]["id"],
             nodes["SearchAccessAddress"]["id"],
             nodes["SearchClassicAccessCode"]["id"],
+            nodes["FrameConnectionPacket"]["id"],
         ]
         assert _link_source(workflow, nodes["BluetoothVerdict"], "record") == (join["id"], "record")
 
@@ -281,6 +291,7 @@ class TestTheChainFoldsBack:
         assert gates["DecodeClassicAccessCode"] == "bredr"
         assert gates["CorrelateAccessAddress"] == "try_weak"
         assert gates["SearchClassicAccessCode"] == "try_classic"
+        assert gates["FrameConnectionPacket"] == "try_frame"
         assert not any(JOIN_CLASS_TYPE in str(name) for name in flow_map), "the join is a drawing, not a step"
 
 
