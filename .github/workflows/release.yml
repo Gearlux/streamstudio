@@ -77,6 +77,13 @@ jobs:
         assert (installed / "config.default.yaml").exists(), "palette config missing from the wheel"
         assert (installed / "py.typed").exists(), "py.typed missing from the wheel"
 
+        # `__version__` is the RELEASED number: read from the wheel's own metadata, which the
+        # tag guard above matched to pyproject.toml. Missing or typed-in-and-stale fails here,
+        # before anything reaches PyPI.
+        import os
+
+        tag = os.environ["GITHUB_REF_NAME"].removeprefix("v")
+        assert streamstudio.__version__ == version("streamstudio") == tag, (streamstudio.__version__, version("streamstudio"), tag)
         print(f"wheel smoke-test OK, version: {version('streamstudio')}, "
               f"nodes: {len(streamstudio.NODE_CLASS_MAPPINGS)}")
         EOF
