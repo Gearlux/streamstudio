@@ -23,6 +23,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **`streamstudio.__version__`** reports the installed version, read from the package metadata
+  (`importlib.metadata.version("streamstudio")`), so it always matches `pyproject.toml`; an uninstalled
+  source tree reports `0.0.0.dev0`.
 - **Item types are socket types, and each gets a passthrough node.** Every registered
   `recordstream` item type (`Image`, `Label`, `Boxes`, `Mask`, `MultiLabel`, plus whatever a
   domain package registers) now has a socket type `RECORDSTREAM_ITEM_<NAME>`, an output on

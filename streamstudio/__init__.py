@@ -31,6 +31,13 @@ from streamstudio.nodes import NODE_CLASS_MAPPINGS as _STATIC_NODE_CLASS_MAPPING
 from streamstudio.nodes import NODE_DISPLAY_NAME_MAPPINGS as _STATIC_NODE_DISPLAY_NAME_MAPPINGS
 from streamstudio.nodes import build_item_type_nodes as _build_item_type_nodes
 
+try:
+    # Single source of truth: the installed distribution's metadata, i.e. pyproject.toml's
+    # `version` (the distribution is `streamstudio`). Never type the number in here as well.
+    __version__ = importlib.metadata.version("streamstudio")
+except importlib.metadata.PackageNotFoundError:  # pragma: no cover - uninstalled source checkout
+    __version__ = "0.0.0.dev0"
+
 logger = get_logger(__name__)
 
 NODE_CLASS_MAPPINGS: Dict[str, Any] = {}
