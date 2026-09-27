@@ -274,7 +274,7 @@ HuggingFaceSource  (path=ylecun/mnist, split=train, input_feature=image, target_
 Walk Dataset (by index)          # Queue Prompt repeatedly to step through records
         │  RECORDSTREAM_RECORD
         ▼
-ToTensor  (normalize=true)         # optional op chain — stack any Taidal op node here
+ToTensor                          # optional op chain — stack any Taidal op node here
         │  RECORDSTREAM_RECORD
         ▼
 Extract from Record (field=image)
