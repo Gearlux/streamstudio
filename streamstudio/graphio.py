@@ -46,6 +46,7 @@ from recordstream import Pipeline, Stream
 from recordstream.discovery import resolve_callable
 from recordstream.items import get_item_type
 from recordstream.ops.configure import ConfigureOp
+from recordstream.ops.contract import GraphContract
 from recordstream.ops.formula import FormulaOp
 
 from streamstudio.bridge import (
@@ -59,6 +60,7 @@ from streamstudio.bridge import (
     SOURCE_TYPE,
     VALUE_TYPE,
     _coerce_kwargs,
+    _object_socket,
     _op_list_params,
     extract_source_for,
     item_socket_types,
@@ -122,6 +124,24 @@ _DECLARE_TITLE = "{name} — graph OUTPUT, fill this in"
 
 #: recordstream's dataset-level class-vocabulary declaration.
 _CLASS_NAMES_OUTPUT_CLASS_TYPE = "Taidal_recordstream_value_contract_ClassNamesOutput"
+
+# --- the per-graph contract, drawn (see :func:`_graph_contract_canvas`) -------------------------
+#: The declaration's own key in the ROOT subgraph definition's ``extra`` — how the export finds the
+#: root again after the canvas was saved, and what it writes the ``delivered`` map beside.
+GRAPH_CONTRACT_MARK = "taidal_graph_contract"
+#: Node property on the root's inner display nodes — canvas glue the export skips QUIETLY (a
+#: "left out" comment for a node the generator itself placed would only puzzle the reader).
+_ROLE_PROPERTY = "taidal_role"
+#: Node colours by ROLE, ``(color, bgcolor)`` — ComfyUI's own green / blue / brown presets, so the
+#: three sides of a graph read apart at a glance: what the host GIVES, what the graph DELIVERS,
+#: what every record CARRIES. Every colour on a generated canvas comes from this table.
+ROLE_COLORS: Dict[str, Tuple[str, str]] = {
+    "gives": ("#232", "#353"),
+    "delivers": ("#223", "#335"),
+    "carries": ("#332922", "#593930"),
+}
+_DISPLAY_ANY_CLASS_TYPE = "Taidal_DisplayAny"
+_GRAPH_CONTRACT_CLASS_NAME = "GraphContract"
 
 _EXTRACT_CLASS_TYPE = "Taidal_ExtractRecord"
 _RECORD_BUILDER_CLASS_TYPE = "Taidal_RecordBuilder"
@@ -924,6 +944,14 @@ def yaml_to_workflow(
         if _is_flow_document(raw):
             return flow_yaml_to_workflow(raw, node_mappings, as_=as_, name=name)
 
+    # A document declaring a ``GraphContract`` asked for the pipeline packaging is DRAWN from that
+    # declaration — the root, the record boundary, the Stream — rather than replayed node by node.
+    if as_ == "pipeline":
+        declared = doc if isinstance(doc, dict) else raw
+        spec = _graph_contract_entry(declared)
+        if spec is not None:
+            return _graph_contract_canvas(spec, node_mappings)
+
     # instantiate=True → live-but-inert objects (load parses the file/string THEN materialises with
     # the expensive solidify suppressed); else → the un-instantiated broadcast-resolved marker graph.
     graph = _confluid_load(doc, solidify=False) if instantiate else _confluid_load(doc, until="settled")
@@ -1454,6 +1482,7 @@ def _contract_pipeline(
     contract: "Dict[str, str]",
     name: str,
     node_mappings: Dict[str, Any],
+    declaration: bool = True,
 ) -> Dict[str, Any]:
     """Build the canvas a workspace opens on: a CONTRACT subgraph beside a ``Stream``.
 
@@ -1627,19 +1656,19 @@ def _contract_pipeline(
     #    a declaration the document carries, hoisted to its own top-level key because the class
     #    is ``constant=True``, and read from there by whatever opens the document.
     declaration_cls = node_mappings.get(_CLASS_NAMES_OUTPUT_CLASS_TYPE)
-    if declaration_cls is not None and _declares_a_class_vocabulary(contract):
+    if declaration and declaration_cls is not None and _declares_a_class_vocabulary(contract):
         last_node += 1
-        declaration = _node(
+        declaration_node = _node(
             last_node,
             _CLASS_NAMES_OUTPUT_CLASS_TYPE,
             declaration_cls,
             [_MARGIN_X + 2 * _COL_DX, _MARGIN_Y + 2 * _ROW_DY],
             [""],  # EMPTY: the graph author is the only one who knows the answer
         )
-        declaration["title"] = _DECLARE_TITLE.format(name="class_names")
-        declaration["color"] = _DECLARE_COLOR
-        declaration["bgcolor"] = _DECLARE_BGCOLOR
-        envelope["nodes"].append(declaration)
+        declaration_node["title"] = _DECLARE_TITLE.format(name="class_names")
+        declaration_node["color"] = _DECLARE_COLOR
+        declaration_node["bgcolor"] = _DECLARE_BGCOLOR
+        envelope["nodes"].append(declaration_node)
 
     envelope["last_node_id"] = last_node
     envelope["last_link_id"] = 1
@@ -1683,6 +1712,238 @@ def _inner_link(link: Any) -> Optional[Dict[str, Any]]:
         "target_slot": six[4],
         "type": six[5],
     }
+
+
+def _graph_contract_entry(raw: Any) -> Optional[Dict[str, Any]]:
+    """The one top-level ``GraphContract`` a raw document declares, as a plain spec — or ``None``.
+
+    Matched by CLASS, never by key name: a workspace keys the entry after its graph slot
+    (``source``), a hand-written document may call it anything. The key travels in the spec as
+    ``graph`` so the export writes the entry back under the same name. Two contracts in one
+    document are refused — a canvas has one root.
+    """
+    if not isinstance(raw, dict):
+        return None
+    found: List[Dict[str, Any]] = []
+    for key, value in raw.items():
+        parsed = _target_and_kwargs(value)
+        if parsed is None:
+            continue
+        cls, _lazy, kwargs = parsed
+        if getattr(cls, "__name__", "") != _GRAPH_CONTRACT_CLASS_NAME:
+            continue
+        if not str(getattr(cls, "__module__", "")).startswith("recordstream"):
+            continue
+        found.append(
+            {
+                "graph": str(key),
+                "name": str(kwargs.get("name") or key),
+                "inputs": dict(kwargs.get("inputs") or {}),
+                "outputs": dict(kwargs.get("outputs") or {}),
+                "records": dict(kwargs.get("records") or {}),
+            }
+        )
+    if len(found) > 1:
+        keys = ", ".join(spec["graph"] for spec in found)
+        raise UnsupportedTopologyError(
+            f"the document declares {len(found)} graph contracts ({keys}) — a canvas has ONE root"
+        )
+    return found[0] if found else None
+
+
+def _slot_socket_type(kind: str) -> str:
+    """The editor socket a contract slot KIND rides — the contract is declared in the socket's own words."""
+    fixed: Dict[str, str] = {
+        "Stream": SOURCE_TYPE,
+        "Source": SOURCE_TYPE,
+        "Op": OP_TYPE,
+        "Record": RECORD_TYPE,
+        "Sink": _object_socket("sink"),
+        "List[str]": "STRING",
+        "str": "STRING",
+        "int": "INT",
+        "float": "FLOAT",
+        "bool": "BOOLEAN",
+    }
+    if kind in fixed:
+        return fixed[kind]
+    sockets = item_socket_types()
+    if kind in sockets:
+        return sockets[kind]
+    raise UnsupportedTopologyError(
+        f"no socket for the slot type {kind!r} — a contract declares one of {', '.join(fixed)}, "
+        f"or a registered item type ({', '.join(sockets)})"
+    )
+
+
+def _open_socket_hint(kind: str) -> str:
+    """What the label of a root socket left OPEN tells the author to do."""
+    if kind == "List[str]":
+        return "wire a class_names output (a HuggingFace source has one) or a Value list"
+    if kind in ("Stream", "Source"):
+        return "wire a Stream fed by your dataset"
+    return f"wire a {kind}"
+
+
+def _graph_contract_canvas(spec: Dict[str, Any], node_mappings: Dict[str, Any]) -> Dict[str, Any]:
+    """The canvas a workspace opens on, DRAWN from a ``GraphContract`` — never hand-drawn.
+
+    Three roles, three colours (:data:`ROLE_COLORS`), every title and socket label taken from the
+    declaration so the canvas cannot drift from the contract:
+
+    * **carries** (brown) — the ``records`` map as the typed boundary subgraph
+      :func:`_contract_pipeline` already builds: ``record`` in, one typed output per entry, ``op``
+      out, pre-wired into a ``Stream`` whose ``source`` is left open and LABELLED as the wire to draw;
+    * **delivers** (blue) — the ROOT: a subgraph with one typed INPUT socket per ``outputs`` entry
+      (a Display Any inside each, so Queue shows what arrives) and no outputs — it is the end of the
+      graph. The Stream is pre-wired into the first ``Stream``-kind slot; every other socket stays
+      open with a label saying what to wire. Its definition carries the declaration under
+      :data:`GRAPH_CONTRACT_MARK`, which is how the export finds it again;
+    * **gives** (green) — the ``inputs`` map. Not drawn yet: a source graph declares none, and the
+      first graph that does (dropped file paths) is refused here by name rather than half-drawn.
+
+    One group box, titled with the graph's name, holds all of it.
+    """
+    from recordstream.ops.contract import ContractError, GraphContract
+
+    contract = GraphContract(name=spec["name"], inputs=spec["inputs"], outputs=spec["outputs"], records=spec["records"])
+    try:
+        contract.check_declaration()
+    except ContractError as exc:
+        raise UnsupportedTopologyError(str(exc)) from exc
+    if contract.inputs:
+        raise UnsupportedTopologyError(
+            f"host inputs ({', '.join(contract.inputs)}) are not drawn yet — a source graph declares none"
+        )
+    display_cls = node_mappings.get(_DISPLAY_ANY_CLASS_TYPE)
+    stream_cls = node_mappings.get(_STREAM_CLASS_TYPE)
+    if display_cls is None or stream_cls is None:
+        raise UnsupportedTopologyError(
+            "the graph-contract canvas needs nodes that are not registered: "
+            f"{_DISPLAY_ANY_CLASS_TYPE}, {_STREAM_CLASS_TYPE}"
+        )
+    name = contract.label
+    stream_slots = [slot for slot, kind in contract.outputs.items() if kind == "Stream"]
+
+    # -- carries: the record boundary and the Stream, from the existing blueprint generator.
+    stream: Optional[Dict[str, Any]] = None
+    if contract.records:
+        workflow = _contract_pipeline(contract.records, name, node_mappings, declaration=False)
+        boundary = workflow["nodes"][0]
+        boundary["title"] = "every record carries: " + ", ".join(f"{k}: {v}" for k, v in contract.records.items())
+        boundary["color"], boundary["bgcolor"] = ROLE_COLORS["carries"]
+        stream = workflow["nodes"][1]
+    else:
+        workflow = {
+            "last_node_id": 0,
+            "last_link_id": 0,
+            "nodes": [],
+            "links": [],
+            "groups": [],
+            "config": {},
+            "extra": {},
+            "version": _WORKFLOW_VERSION,
+            "definitions": {"subgraphs": []},
+        }
+        if stream_slots:
+            stream_spec: Dict[str, Any] = getattr(stream_cls, "INPUT_TYPES", dict)() or {}
+            stream_widgets = list(stream_spec.get("required") or {})
+            stream = _node(
+                1,
+                _STREAM_CLASS_TYPE,
+                stream_cls,
+                [_MARGIN_X + 2 * _COL_DX, _MARGIN_Y],
+                [0 if w == "chunk_size" else "" for w in stream_widgets],
+            )
+            stream["inputs"] = [{"name": "source", "type": SOURCE_TYPE, "link": None}]
+            workflow["nodes"].append(stream)
+            workflow["last_node_id"] = 1
+    if stream is not None:
+        stream["title"] = "records — Stream"
+        source_socket = next(i for i in stream["inputs"] if i["name"] == "source")
+        source_socket["label"] = "source ← connect your dataset here (required for this graph)"
+
+    # -- delivers: the root, one typed input per output, a Display Any behind each.
+    root_name = f"graph delivers — {name}"
+    inner_nodes: List[Dict[str, Any]] = []
+    inner_links: List[Any] = []
+    input_defs: List[Dict[str, Any]] = []
+    for slot_i, (slot, kind) in enumerate(contract.outputs.items()):
+        socket = _slot_socket_type(str(kind))
+        shown = _node(
+            slot_i + 1, _DISPLAY_ANY_CLASS_TYPE, display_cls, [_MARGIN_X, _MARGIN_Y + slot_i * _ROW_DY], ["raw value"]
+        )
+        shown["inputs"].append({"name": "value", "type": socket, "link": slot_i + 1})
+        shown["title"] = f"{slot}: {kind}"
+        shown["properties"][_ROLE_PROPERTY] = "delivers"
+        inner_nodes.append(shown)
+        inner_links.append([slot_i + 1, -10, slot_i, slot_i + 1, 0, socket])
+        input_defs.append(_boundary_slot(slot, socket, slot_i, [slot_i + 1], _sg_uuid(root_name, "in", slot)))
+    envelope = _subgraph_envelope(
+        root_name,
+        _sg_uuid(root_name),
+        input_defs,
+        [],
+        inner_nodes,
+        inner_links,
+        last_node_id=len(inner_nodes),
+        last_link_id=len(inner_links),
+    )
+    definition = envelope["definitions"]["subgraphs"][0]
+    definition["extra"] = {GRAPH_CONTRACT_MARK: dict(spec)}
+    root = envelope["nodes"][0]
+    root["id"] = int(workflow["last_node_id"]) + 1
+    root["pos"] = [_MARGIN_X + 3 * _COL_DX, _MARGIN_Y]
+    root["title"] = root_name
+    root["color"], root["bgcolor"] = ROLE_COLORS["delivers"]
+    workflow["nodes"].append(root)
+    workflow.setdefault("definitions", {}).setdefault("subgraphs", []).append(definition)
+    workflow["last_node_id"] = root["id"]
+
+    # -- the wire the generator CAN draw: the Stream into the first Stream-kind slot.
+    if stream is not None and stream_slots:
+        slot_i = list(contract.outputs).index(stream_slots[0])
+        link_id = int(workflow["last_link_id"]) + 1
+        workflow["links"].append([link_id, stream["id"], 0, root["id"], slot_i, SOURCE_TYPE])
+        stream["outputs"][0].setdefault("links", []).append(link_id)
+        root["inputs"][slot_i]["link"] = link_id
+        workflow["last_link_id"] = link_id
+    # -- every socket says what it is; an OPEN one says what to do.
+    for socket_def, (slot, kind) in zip(root["inputs"], contract.outputs.items()):
+        socket_def["label"] = f"{slot}: {kind}"
+        if socket_def.get("link") is None:
+            socket_def["label"] += f" ← required: {_open_socket_hint(str(kind))}"
+    return _wrap_in_group(workflow, name)
+
+
+def _graph_contract_roots(graph: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Every ROOT instance on a saved canvas with what was wired into it — read BEFORE the
+    subgraphs are inlined for export, because inlining replaces the instance by its inner nodes.
+
+    Returns ``[{"key", "spec", "wires": {slot: (source node id, source slot)}}]``.
+    """
+    definitions = (graph.get("definitions") or {}).get("subgraphs") or []
+    roots_by_type = {d["id"]: d for d in definitions if GRAPH_CONTRACT_MARK in (d.get("extra") or {})}
+    if not roots_by_type:
+        return []
+    link_src: Dict[Any, Tuple[str, int]] = {}
+    for link in graph.get("links", []) or []:
+        six = _link_six(link)
+        if six is not None:
+            link_src[six[0]] = (str(six[1]), int(six[2]))
+    roots: List[Dict[str, Any]] = []
+    for node in graph.get("nodes", []) or []:
+        definition = roots_by_type.get(node.get("type"))
+        if definition is None:
+            continue
+        spec = dict(definition["extra"][GRAPH_CONTRACT_MARK])
+        wires: Dict[str, Tuple[str, int]] = {}
+        for socket_def in node.get("inputs", []) or []:
+            link_id = socket_def.get("link")
+            if link_id is not None and link_id in link_src:
+                wires[str(socket_def["name"])] = link_src[link_id]
+        roots.append({"key": str(spec.get("graph") or "graph"), "spec": spec, "wires": wires})
+    return roots
 
 
 def _node(node_id: int, key: str, node_cls: Any, pos: List[int], widgets: Optional[List[Any]] = None) -> Dict[str, Any]:
@@ -2231,7 +2492,7 @@ def _normalize_workflow(graph: Dict[str, Any], node_mappings: Dict[str, Any]) ->
 
 
 class _PNode:
-    __slots__ = ("class_type", "widgets", "links", "export_skip", "export_target")
+    __slots__ = ("class_type", "widgets", "links", "export_skip", "export_target", "quiet")
 
     def __init__(self, class_type: str) -> None:
         self.class_type = class_type
@@ -2239,6 +2500,7 @@ class _PNode:
         self.links: Dict[str, Tuple[str, int]] = {}  # input_name -> (src_node_id, src_slot)
         self.export_skip = False  # properties["taidal_export"] == "skip" (UI workflows only)
         self.export_target = False  # properties["taidal_export"] == "target" (UI workflows only)
+        self.quiet = False  # properties["taidal_role"]: glue the generator placed — skipped without a comment
 
 
 def _normalize_ui_workflow(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> Dict[str, "_PNode"]:
@@ -2257,6 +2519,7 @@ def _normalize_ui_workflow(graph: Dict[str, Any], node_mappings: Dict[str, Any])
         mark = (node.get("properties") or {}).get(_EXPORT_SKIP_PROPERTY)
         pnode.export_skip = mark == _EXPORT_SKIP_VALUE
         pnode.export_target = mark == _EXPORT_TARGET_VALUE
+        pnode.quiet = bool((node.get("properties") or {}).get(_ROLE_PROPERTY))
         node_cls = node_mappings.get(class_type)
         if node_cls is not None:
             widget_names, _ = _widget_and_socket_params(node_cls)
@@ -2495,6 +2758,9 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
     than unfinished — a branchy graph has no flat spelling, and ``export_flow_yamls`` is the
     export that carries it. A dropped wire into a real config member is noted in the comment block.
     """
+    # A graph drawn from a contract has a ROOT; what was wired into it is read off the saved canvas
+    # HERE, before the subgraphs are inlined (inlining replaces the root by its inner nodes).
+    roots = _graph_contract_roots(graph) if isinstance(graph, dict) else []
     pnodes = _normalize_workflow(graph, node_mappings)
     pnodes = _fold_drawn_branches(pnodes, node_mappings)
     if not pnodes:
@@ -2729,6 +2995,8 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
         elif node_cls is None:
             logger.debug(f"workflow_to_yaml: skipping node {nid} ({pnode.class_type}) — native ComfyUI node.")
             skipped.append((nid, pnode.class_type, "native ComfyUI node"))
+        elif pnode.quiet:
+            logger.debug(f"workflow_to_yaml: node {nid} ({pnode.class_type}) is the contract root's own glue.")
         else:
             logger.debug(f"workflow_to_yaml: skipping node {nid} ({pnode.class_type}) — canvas-only adapter.")
             skipped.append((nid, pnode.class_type, "canvas-only Taidal adapter (no Confluid form)"))
@@ -2755,7 +3023,7 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
     # belongs in the flow export instead.
     chain_specs, chain_heads, op_succs = _collect_op_chains(pnodes, specs, node_mappings, output_captures)
 
-    names = _assign_ref_names(pnodes, specs, node_mappings)
+    names = _assign_ref_names(pnodes, specs, node_mappings, reserved={root["key"] for root in roots})
 
     def _node_reference(src_id: str, src_slot: int) -> Any:
         """The VALUE a wire from ``src_id``'s output ``src_slot`` becomes: a ``!ref:`` or a literal.
@@ -2983,6 +3251,36 @@ def workflow_to_yaml(graph: Dict[str, Any], node_mappings: Dict[str, Any]) -> st
         document.setdefault(cname, cval)
     for key, value in chain_entries:  # pipelines last — they are the roots of the config
         document[key] = value
+    # The graph's ROOT (a GraphContract drawn as the canvas's end): written back as the contract's
+    # own entry, ``delivered`` holding what the author wired into each socket — a Value node's
+    # literal inline, a declared @output folded to its value, any other node by the name it was
+    # given above. What is NOT wired is simply absent: the consuming workspace's own check names it.
+    for root in roots:
+        delivered: Dict[str, Any] = {}
+        for slot, (src_id, src_slot) in root["wires"].items():
+            literal = _primitive_literal(src_id, pnodes)
+            if literal is not _MISSING:
+                delivered[slot] = literal
+            elif src_id in names:
+                delivered[slot] = _node_reference(src_id, src_slot)
+            else:
+                dropped_wires.append(
+                    (
+                        f"root {root['key']}",
+                        slot,
+                        "wired from a node the export left out",
+                        "wire a node with a Confluid form",
+                    )
+                )
+        spec = root["spec"]
+        document[root["key"]] = Target(
+            GraphContract,
+            name=spec.get("name", ""),
+            inputs=dict(spec.get("inputs") or {}),
+            outputs=dict(spec.get("outputs") or {}),
+            records=dict(spec.get("records") or {}),
+            delivered=delivered,
+        )
     return _skipped_comment_block(skipped, dropped_wires, sg_notes) + _confluid_dump(document)
 
 
@@ -3112,11 +3410,15 @@ def _assign_ref_names(
     pnodes: Dict[str, "_PNode"],
     specs: Dict[str, Tuple[type, bool, Dict[str, Any]]],
     node_mappings: Dict[str, Any],
+    reserved: Optional[Set[str]] = None,
 ) -> Dict[str, str]:
     """Assign each node a stable top-level YAML key: the param it feeds, else its class name.
 
     On collision, disambiguate with a numeric suffix (``model_2``). (Subgraph path-prefixing is
-    applied by :mod:`streamstudio.subgraphio` when nodes are nested.)
+    applied by :mod:`streamstudio.subgraphio` when nodes are nested.) ``reserved`` names are keys
+    the document already spends on something that is not a node — a graph contract's root entry,
+    keyed after its graph (``source``) — so a node feeding a ``source`` socket takes its class name
+    (``files_source``) instead of a key that would silently overwrite the root and loop the document.
     """
     # Preferred base name = the CONFIG input socket this node feeds (model / train_set / …) —
     # only on an exported consumer: a skipped node's sockets (a YamlDump `object`, a PreviewAny
@@ -3154,6 +3456,7 @@ def _assign_ref_names(
                 fed_as[src_id] = base
     names: Dict[str, str] = {}
     used: Dict[str, int] = {}
+    taken = set(reserved or ())
     for nid in specs:
         cls = specs[nid][0]
         # A runnable root is named by its confluid role (trainer / evaluator) — the config
@@ -3163,6 +3466,8 @@ def _assign_ref_names(
             base = role
         else:
             base = fed_as.get(nid) or _snake(cls.__name__)
+        if base in taken:
+            base = _snake(cls.__name__)
         n = used.get(base, 0)
         used[base] = n + 1
         names[nid] = base if n == 0 else f"{base}_{n + 1}"
