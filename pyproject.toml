@@ -37,8 +37,9 @@ dependencies = [
     "confluid[pydantic]>=0.3.0",
     # The pre-release segment is REQUIRED, not cosmetic: under PEP 440 a plain `>=0.1.0`
     # excludes every pre-release of 0.1.0, so it would refuse the only recordstream that
-    # exists and resolve to nothing.
-    "recordstream>=0.1.0a1",
+    # exists and resolve to nothing. 0.1.0a2 is the first release carrying the op-chain
+    # contract this package imports (RecordContract, check_chain, ChainContractError).
+    "recordstream>=0.1.0a2",
     "datasets",
     # PEP-593 range marks: the bridge reads Annotated[..., Interval/Ge/Le] into widget
     # min/max. Already transitive via confluid[pydantic]->pydantic; declared because

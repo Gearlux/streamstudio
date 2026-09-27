@@ -30,7 +30,7 @@ CONVERT = "Taidal_recordstream_op_image_ConvertToImage"
 _JS = Path(__file__).resolve().parents[1] / "streamstudio" / "web" / "open_graph.js"
 
 PROMPT: Dict[str, Any] = {
-    "10": {"class_type": TOTENSOR, "inputs": {"normalize": True, "mode": "", "field": "image", "output": ""}},
+    "10": {"class_type": TOTENSOR, "inputs": {"field": "image", "output": ""}},
     "11": {"class_type": CONVERT, "inputs": {"record": ["10", 0], "field": "image", "output": ""}},
     "77": {
         "class_type": PREVIEW_NODE_CLASS_TYPE,
@@ -87,9 +87,9 @@ class TestTheDocumentIsThePanesOwnConversion:
     def test_the_forms_current_value_rides_along(self) -> None:
         """The document is built from the LIVE prompt — an unsaved widget value is in it."""
         changed = json.loads(json.dumps(PROMPT))
-        changed["10"]["inputs"]["normalize"] = False
-        assert "normalize: false" in pane_document(changed, "77")
-        assert "normalize: false" not in pane_document(PROMPT, "77")
+        changed["10"]["inputs"]["output"] = "pixels"
+        assert "output: pixels" in pane_document(changed, "77")
+        assert "output: pixels" not in pane_document(PROMPT, "77")
 
     def test_an_unwired_node_says_what_to_wire(self) -> None:
         with pytest.raises(WorkspaceUnavailable, match="wire the pane's last op"):
