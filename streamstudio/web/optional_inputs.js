@@ -39,6 +39,10 @@ function markOptionalSlots(node, optionalNames) {
     if (!node.inputs) return;
     for (const input of node.inputs) {
         if (!input || !optionalNames.has(input.name)) continue;
+        // A socket the CANVAS labelled itself is not optional on that canvas: a generated graph
+        // labels the one wire its author must draw ("source ← connect your dataset here …"), and
+        // suffixing that with "(optional)" would say the opposite of what the graph requires.
+        if (input.label && input.label !== input.name && !input.label.endsWith(OPTIONAL_SUFFIX)) continue;
         // Suffix the DISPLAY label (never the functional `name`, which serialisation/linking use).
         // Guard on the suffix itself — idempotent even if litegraph serialised the suffixed label
         // into a saved workflow (so a reload never double-appends).
