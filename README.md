@@ -4,13 +4,14 @@ Auto-generating [ComfyUI](https://github.com/comfyanonymous/ComfyUI) nodes from 
 
 StreamStudio is the GUI layer of [Taidal](https://github.com/Gearlux). Rather than ship its own editor, it runs as a ComfyUI **custom node** package: every callable already exposed by RecordStream, Waivefront, or HuggingFace `datasets` is auto-wrapped into a ComfyUI node, so you compose and run pipelines visually on ComfyUI's canvas with no StreamStudio-specific ops to maintain.
 
-## The rewrite (phase 2 landed): editing a graph document without ComfyUI
+## The rewrite (phases 2-3 landed): editing a graph document without ComfyUI
 
 StreamStudio is being rebuilt as a Flask app over the confluid YAML graph document, with no ComfyUI
-underneath — [`docs/rewrite.md`](docs/rewrite.md) is the scope; phase 2 of its six phases landed on
-2026-09-28: the document model and the HTTP surface, no page yet. **The canvas page arrives in phase 3.**
-Everything from [Installation](#installation) down describes the ComfyUI extension, which still runs —
-and is still what a consuming annotation workspace opens — until phase 4 replaces it.
+underneath — [`docs/rewrite.md`](docs/rewrite.md) is the scope. Phases 2 and 3 of its six landed on
+2026-09-28: the document model with its HTTP surface, and the canvas page that draws a document and edits it
+through those routes. Everything from [Installation](#installation) down describes the ComfyUI extension, which
+still runs — and is still what a consuming annotation workspace opens — until phase 4 replaces it
+([what is not there yet](#what-is-not-there-yet)).
 
 **The YAML is the truth.** `streamstudio.document.Document` opens a graph file and derives a model
 from it — nodes with typed sockets, wires, located problems — by reading declarations that already
@@ -27,7 +28,21 @@ set_param(size, max_band_hz, 30e6):  1 line differs; 148 comment lines kept; $DA
 
 An edit that makes the document stop loading, or gain a problem (a wire whose types do not meet), is refused
 with a message naming `file:line:col`, and nothing is written. An accepted edit is saved at once; `undo`/`redo`
-walk one text history per document. Positions live in a sidecar, `<graph>.layout.yaml`, keyed by node name.
+walk one text history per document. What the canvas draws that the pipeline does not do — where each node sits,
+the boxes around groups of nodes — lives in a sidecar, `<graph>.layout.yaml`, keyed by node name; delete it and the
+graph still loads and runs:
+
+```yaml
+# streamstudio layout sidecar — where the canvas draws each node ({node name: [x, y]} in canvas pixels) and …
+positions:
+  decode: [40.0, 40.0]
+  stream.ops[1]: [380.0, 240.0]
+groups:
+- id: g1
+  title: front end
+  color: '#3b82f6'
+  nodes: [decode, 'stream.ops[1]']
+```
 
 **Node names** are one scheme shared by the model, the engine, the sidecar and the routes: a `flow:` step by its
 key (`floor`), a list member by `path[i]` (`stream.ops[1]`), a nested marker by its document path (`processor.stream`),
@@ -39,15 +54,17 @@ the located message, a name that does not exist is `404 {error}` listing what th
 | verb | path | what it does |
 | --- | --- | --- |
 | GET | `/api/graphs` | every `*.yaml` of the directory as `{name, path, kind}` — `flow`, `graph` or `contract` |
-| GET | `/api/graphs/<name>` | `{name, path, kind, text, model, positions, history_depth}` |
+| GET | `/api/graphs/<name>` | `{name, path, kind, text, model, positions, groups, history_depth}` |
 | PUT | `/api/graphs/<name>` | `{text}` replaces the whole document; refused when it gains a problem; the history starts over |
 | POST | `/api/graphs/<name>/param` | `{node, param, value}` — patch one value on its own line, or insert it when the file left the default |
 | POST | `/api/graphs/<name>/steps` | `{name, after, class_path, params}` — insert a `flow:` step; what read `after` now reads the new step |
 | DELETE | `/api/graphs/<name>/steps/<node>` | remove a step; what read it now reads what it read from |
-| POST | `/api/graphs/<name>/rename` | `{node, new}` — the key, every `from:` / `merge_from:` / `bind:` / `!ref:` / `outputs:` naming it, and the sidecar entry |
+| POST | `/api/graphs/<name>/rename` | `{node, new}` — the key, every `from:` / `merge_from:` / `bind:` / `!ref:` / `outputs:` naming it, its sidecar position and every group listing it |
 | POST | `/api/graphs/<name>/undo`, `…/redo` | one step of the text history; `changed` says whether there was one |
 | PUT | `/api/graphs/<name>/positions` | `{positions: {node: [x, y]}}` — written to the sidecar |
 | POST | `/api/graphs/<name>/layout` | lay the graph out afresh (longest-path layering) and save it |
+| PUT | `/api/graphs/<name>/groups` | `{groups: [{id, title, color, nodes}, …]}` — the sidecar's `groups:` block, stored as sent; the document is untouched |
+| GET | `/api/types` | `{socket type: [the types it may be wired into]}` — the meet rule the canvas applies while you drag |
 | GET | `/api/graphs/<name>/form` | `{node: JSON-schema properties}` from `confluid.to_pydantic` — the settings form |
 | GET | `/api/palette` | every configurable class as a typed node spec; `?refresh=1` rescans the registry |
 | POST | `/api/graphs/<name>/trace` | `{record, until}` — run record `#record` of the graph's own source through it, pausing before `until` |
@@ -61,8 +78,104 @@ the located message, a name that does not exist is `404 {error}` listing what th
 streamstudio editor path/to/graphs --port 8190     # -p 8190; a taken port is refused before anything starts
 ```
 
-A consuming Flask app mounts the same routes instead — `app.register_blueprint(streamstudio.app.editor_blueprint(graph_dir))`;
-the editor's state lives on `app.extensions["streamstudio"]`, so two apps in one process are two editors.
+A consuming Flask app mounts the API and the page under ONE prefix instead — the page calls `api/…` relative to
+its own address, so the two must sit side by side:
+
+```python
+from streamstudio.app import editor_blueprint, page_blueprint, web_dist
+
+app.register_blueprint(editor_blueprint(graph_dir), url_prefix="/editor")   # the routes above, at /editor/api/…
+app.register_blueprint(page_blueprint(web_dist()), url_prefix="/editor")    # the built page, at /editor/
+```
+
+```
+API at /editor, page_blueprint(web_dist()):   GET /editor/ -> the built page     GET /editor/api/graphs -> 200
+API at the root, page_blueprint():            GET /editor/ -> the placeholder    GET /editor/api/graphs -> 404
+```
+
+The editor's state lives on `app.extensions["streamstudio"]`, so two apps in one process are two editors.
+
+### Building the canvas page
+
+The page's source is `frontend/` (vite + React Flow + TypeScript, committed). Building it needs node and npm, which
+`pyproject.toml` declares as a system dependency. Build it once:
+
+```bash
+cd frontend
+npm install      # once, and again after package.json changes
+npm run build    # tsc --noEmit && vite build  ->  frontend/dist
+npm test         # the page's unit tests (vitest)
+npm run dev      # optional: a hot-reloading copy on vite's own port, proxying api/ to an editor on port 8190
+```
+
+`frontend/dist` is a build product: gitignored, not inside the wheel, not built by CI. `streamstudio editor` serves
+it at `/` when it is there. Until then — and after `pip install --pre streamstudio`, which carries no page — `/` answers a
+placeholder that says what to do:
+
+```
+streamstudio editor
+The canvas page is not built. Build it once — cd streamstudio/frontend && npm install && npm run build — and
+reload; the page lands in frontend/dist beside the package. The API is up:
+  GET /api/graphs
+  GET /api/graphs/<name>
+  …
+```
+
+The browser tests of the page (`tests/test_canvas.py`, headless chromium) skip when `frontend/dist/index.html` is
+absent, and the skip reason is that same build command.
+
+### What the canvas does
+
+The page draws the document and writes only through the routes above — what it shows after an edit is the server's
+answer, and a refusal is a toast carrying the server's located message:
+
+| you do | the page calls | what the document says afterwards |
+| --- | --- | --- |
+| change a widget on a node, or in the **settings** tab | `POST …/param` | the value on its own line (a refused value reverts) |
+| double-click empty canvas, pick a class | `POST …/steps` after the selected node (else the flow's output) | a new `flow:` step, `from:` the anchor; a `Stream`'s `ops:` list is refused — no route adds to it yet |
+| drag a wire out of a socket and drop it on nothing | the same list, narrowed to classes that take (or give) that type | the step inserted after that node — wired by the order, as every step is |
+| drag a wire between two sockets | nothing — a dashed proposal | unchanged: no route writes a wire yet; a mismatch is refused while dragging |
+| double-click a node's name, type, Enter | `POST …/rename` | the key and every reference to it |
+| select nodes, press **G** (or *group*) | `PUT …/groups` | unchanged — a group lives in the sidecar only |
+| drag a node or a group's title bar | `PUT …/positions` | unchanged — positions live in the sidecar |
+| *arrange* (dagre, left to right by the cards' sizes) / *columns* (the server's layout) | `PUT …/positions` / `POST …/layout` | unchanged |
+| Ctrl/Cmd+C, then Ctrl/Cmd+V | `POST …/steps` per copied node, same class and values, after the selection | new steps; refused on a document with no step list |
+| Ctrl/Cmd+Z, Shift+Ctrl/Cmd+Z (or *undo* / *redo*) | a document edit: `POST …/undo` / `…/redo`; a move, an arrange, a group: the page writes the old layout back | the text history is the server's — an agent's edit is undone the same way |
+| **run** tab: *run* (record #N, pausing before the selected node), *step*, click a node | `POST …/trace`, `GET/POST /api/runs/<run>…` | unchanged — each traced node shows its status, wall time and generation; its entry lists what came in and went out |
+| in a node's entry: change a value, *rerun this node* | `POST /api/runs/<run>/rerun` with the values that differ from what ran | unchanged — the value is a trial; the node and what follows it are recomputed |
+
+A graph with no source of its own (a view pane, a `flow:` alone) is refused by *run* in the server's words — a host
+supplies its record. The catalogue the palette lists is `GET /api/palette` (447 classes measured in this workspace;
+200 rows are drawn and typing narrows them; the list opens in ~6 ms).
+
+### What it refuses, and how it says so
+
+A refused edit writes nothing, and the message is the server's, verbatim (measured on small synthetic graphs; the
+temporary directory is shortened to `…`):
+
+| you try | what you see |
+| --- | --- |
+| drag an `Image` output onto a `Label` input | the wire does not attach while you drag — no edge, no message, nothing written |
+| drag between two sockets whose types meet, where the document has no such wire | a dashed wire and a warning: `wires.yaml: the wire decode.image → boost.image is drawn as a proposal, not written — on boost it would be spelled 'from: decode' (a record wire) or 'bind: {image: decode.image}' (a value), and no route writes those yet. The editor writes parameters, positions, names, groups and steps.` The dashed wire is gone after the next edit. |
+| type a value the class refuses (`limit` → `-1`) | `clip.limit = -1 refused at …/clip.yaml:5:9: clip: Failed to construct Clip at …/clip.yaml:5:9: limit must be positive, got -1` — the widget shows the old value again |
+| add, paste or drop a step on a document that is one `Stream` | `'stream.ops[1]' is not a flow step (the steps are: [])` |
+| rename a node to a name in use | `'gain' is already a node (the nodes are: ['gain', 'clip', '<host>'])` — the title goes back |
+| *run* a graph with no source of its own | `clip.yaml: this graph has no source to draw a record from — a host supplies the record (mount the editor in one) or wire a source` |
+| *rerun this node* with a trial value the class refuses | `…/pets.yaml:stream:stream.ops[1]: limit must be positive, got -1` — the run stays as it was |
+| undo with nothing to undo | `wires.yaml: nothing to undo — the editor holds no earlier edit of this document` |
+
+### What is not there yet
+
+- **The flip.** A consuming annotation workspace still opens the ComfyUI canvases — the JSON workflows, through
+  bare `streamstudio` — not this editor. Mounting the editor in their place is phase 4, and the ComfyUI extension
+  described from [Installation](#installation) down is deleted in the same phase.
+- **Writing a wire.** A drawn wire stays a dashed proposal until a route can write `from:`, `bind:` or `!ref:`.
+- **Adding a step to a `Stream`'s `ops:` list.** Steps go into `flow:` documents only; a Stream refuses (above).
+- **Collapse to subgraph** — one node standing for an `include:` file, opened in place.
+- **The HuggingFace pickers and the directory chooser** of the ComfyUI nodes. The settings tab lists every parameter
+  of every node; it does not yet narrow to a pane's `app:` field list.
+- **The page inside the wheel.** `pip install --pre streamstudio` serves the placeholder until a release builds the page in.
+- **Undoing a rename** restores the text, but the node loses its saved position.
 
 ## Installation
 
