@@ -1,24 +1,79 @@
 [build-system]
-requires = ["setuptools>=68.0", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "fluxstudio"
-version = "0.2.0"
-description = "Auto-generating ComfyUI nodes from DataFlux/HuggingFace operations."
-authors = [{name = "Taidal"}]
-license = {text = "MIT"}
+name = "streamstudio"
+version = "0.1.0a1"
+description = "Auto-generating ComfyUI nodes from RecordStream/HuggingFace operations."
+readme = "README.md"
+authors = [{ name = "Gert Behiels" }]
+license = "MIT"
+license-files = ["LICENSE"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Web Environment",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Multimedia :: Graphics :: Editors",
+    "Typing :: Typed",
+]
 dependencies = [
-    "liquifai>=0.1.0",
-    "log-flow>=0.1.0",
-    "confluid>=0.1.0",
-    "data-flux>=0.1.0",
+    # 0.3.0 is the floor for `strict_flags=True` (cli.py) and the declared `short=`
+    # options every command carries — both absent from 0.2.0, and both used at MODULE
+    # level, so an older liquifai is not a degraded CLI but an ImportError-equivalent:
+    # `LiquifyApp.__init__() got an unexpected keyword argument 'strict_flags'` at
+    # import, taking every entry point with it (measured 2026-09-03, when the workspace
+    # resolved the PyPI 0.2.0 wheel). 0.3.0 is NOT on PyPI yet — until it is, this
+    # package needs liquifai from a checkout or from git.
+    "liquifai>=0.3.0",
+    "loggair>=0.2.0",
+    # [pydantic] extra: bridge.py enumerates fields via confluid.to_pydantic.
+    "confluid[pydantic]>=0.3.0",
+    # The pre-release segment is REQUIRED, not cosmetic: under PEP 440 a plain `>=0.1.0`
+    # excludes every pre-release of 0.1.0, so it would refuse the only recordstream that
+    # exists and resolve to nothing. 0.1.0a2 is the first release carrying the op-chain
+    # contract this package imports (RecordContract, check_chain, ChainContractError).
+    "recordstream>=0.1.0a2",
     "datasets",
+    # PEP-593 range marks: the bridge reads Annotated[..., Interval/Ge/Le] into widget
+    # min/max. Already transitive via confluid[pydantic]->pydantic; declared because
+    # bridge.py imports it directly.
+    "annotated-types",
+    # Imported at MODULE scope by nodes.py, which __init__.py imports: the adapter nodes
+    # speak ComfyUI's tensor protocols (IMAGE `[1,H,W,3]`, MASK `[1,H,W]`) and read record
+    # payloads as arrays. Undeclared, `pip install streamstudio` produced a package that
+    # raised ModuleNotFoundError on import; ComfyUI itself cannot run without torch either.
+    "torch",
+    "numpy",
+    # Imported at MODULE scope by cli.py: `stop` / `restart` locate the running studio by the port
+    # it holds, and the only unprivileged way to do that is a per-process connection scan (the
+    # whole-system psutil.net_connections() raises AccessDenied on macOS). Already required by
+    # ComfyUI itself (its requirements.txt, synced on every launch), so this costs nothing in a
+    # working environment; declared because a `pip install streamstudio` must stand on its own.
+    "psutil",
+    # Imported at MODULE scope by document.py / _yamltext.py: the document model composes the YAML
+    # text with PyYAML's own node tree (yaml.compose) to locate the line a marker came from, and
+    # spells patched values with yaml.safe_dump. Already transitive via confluid; declared because
+    # a module-scope import is a hard dependency whatever else happens to install it.
+    "pyyaml",
+    # Imported at MODULE scope by app.py: the graph editor is a Flask blueprint (mounted by a consuming
+    # Flask app, or served standalone by `streamstudio editor`) — docs/rewrite.md.
+    "flask",
 ]
 requires-python = ">=3.12"
 
 [project.optional-dependencies]
 dev = [
+    # Release tooling: `python -m build` produces the sdist + wheel, `twine check`
+    # validates the metadata PyPI will re-validate on upload.
+    "build>=1.0.0",
+    "twine>=5.0.0",
     "black>=24.0.0,<25.0.0",
     "isort>=5.13.0,<6.0.0",
     "flake8>=6.0.0,<8.0.0",
@@ -26,17 +81,50 @@ dev = [
     "pytest>=7.0.0,<9.0.0",
     "pytest-cov>=4.0.0,<7.0.0",
 ]
+
+# The signal-domain node set — a PLUGIN, never a requirement: every use of it in this
+# package is a guarded import with a working fallback (a viridis-only colormap list, a
+# placeholder IMAGE), and its nodes reach the palette through entry-point discovery, so
+# installing it by ANY means is what switches them on. The extra names it and nothing
+# more: PyPI rejects a requirement carrying a URL (warehouse refuses "direct dependency"),
+# so a git-pinned transitive cannot be restated here. See the README for how to obtain it.
 waivefront = ["waivefront"]
 
+[project.urls]
+Homepage = "https://github.com/Gearlux/streamstudio"
+Repository = "https://github.com/Gearlux/streamstudio.git"
+Issues = "https://github.com/Gearlux/streamstudio/issues"
+Changelog = "https://github.com/Gearlux/streamstudio/blob/main/CHANGELOG.md"
+
 [project.scripts]
-fluxstudio = "fluxstudio.cli:main"
+streamstudio = "streamstudio.cli:main"
+
+# Liquifai app registration: lets `liquifai-install-completions` discover this CLI via an
+# entry-point metadata read instead of executing the binary. Name = the binary name;
+# value = the LiquifyApp instance. Entry-point changes need an editable reinstall.
+[project.entry-points."liquifai.apps"]
+streamstudio = "streamstudio.cli:app"
+
+# Custom-node repos the launcher installs into ComfyUI's custom_nodes/ on every launch
+# ("generally available" — no flags or env vars needed). ANY installed package may declare
+# this group; the target must resolve to a git-URL str or an iterable of them. streamstudio's
+# own declaration bundles ComfyUI-Manager (see streamstudio/custom_nodes.py). NOTE: editable
+# installs freeze entry-point metadata — after adding/renaming an entry point here, reinstall
+# (`uv pip install -e ./streamstudio`); editing the URL tuple in custom_nodes.py needs no reinstall.
+[project.entry-points."streamstudio.custom_nodes"]
+streamstudio = "streamstudio.custom_nodes:CUSTOM_NODE_URLS"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["fluxstudio*"]
+include = ["streamstudio*"]
 
 [tool.setuptools.package-data]
-fluxstudio = ["py.typed"]
+# `web/*.js` is CODE, not an asset: ComfyUI loads the frontend extension from the directory
+# named by `WEB_DIRECTORY` in streamstudio/__init__.py. `web/` has no __init__.py, so
+# packages.find skips it and this is the ONLY thing that puts it in the wheel — omitted, the
+# package installs, registers every node, and has no UI. `config.default.yaml` is the palette
+# fallback read at runtime by streamstudio.bridge; `py.typed` marks the package as typed.
+streamstudio = ["py.typed", "config.default.yaml", "web/*.js"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

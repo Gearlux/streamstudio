@@ -1,6 +1,6 @@
 """Build a ComfyUI node from a plain Python callable and run it.
 
-Demonstrates the core FluxStudio bridge: ``create_comfy_node`` turns any callable
+Demonstrates the core StreamStudio bridge: ``create_comfy_node`` turns any callable
 into a ComfyUI node class whose ``INPUT_TYPES`` / ``RETURN_TYPES`` are derived
 from the signature and whose ``execute`` method invokes the wrapped function.
 
@@ -12,11 +12,11 @@ import sys
 
 import datasets
 
-from fluxstudio.bridge import create_comfy_node
+from streamstudio.bridge import create_comfy_node
 
 
 def add_offset(dataset: datasets.Dataset, amount: int = 1) -> datasets.Dataset:
-    """Sample op: add ``amount`` to every row's ``val`` column."""
+    """Record op: add ``amount`` to every row's ``val`` column."""
     return dataset.map(lambda row: {"val": row["val"] + amount})
 
 
@@ -35,7 +35,9 @@ def main() -> int:
     # Instantiate and execute exactly as ComfyUI would.
     node = node_cls()
     dataset = datasets.Dataset.from_dict({"val": [1, 2, 3]})
-    (result,) = node.execute(dataset=dataset, amount=10)
+    # node.execute() returns {"ui": {...timing...}, "result": (dataset,)}
+    response = node.execute(dataset=dataset, amount=10)
+    (result,) = response["result"]
 
     print(f"# executed node -> val={result['val']}", file=sys.stderr)
     if result["val"] != [11, 12, 13]:
