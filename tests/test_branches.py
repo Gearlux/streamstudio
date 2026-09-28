@@ -26,7 +26,7 @@ import streamstudio  # noqa: F401  (populates NODE_CLASS_MAPPINGS)
 from streamstudio import NODE_CLASS_MAPPINGS
 from streamstudio.bridge import _build_op_node
 from streamstudio.export import JOIN_CLASS_TYPE, UnsupportedTopologyError, compile_flow_documents, fold_branches
-from streamstudio.graphio import flow_yaml_to_workflow, workflow_to_yaml
+from streamstudio.graphio import flow_yaml_to_workflow, workflow_to_yaml, yaml_to_workflow
 
 waivefront = pytest.importorskip("waivefront")
 confluid = pytest.importorskip("confluid")
@@ -210,13 +210,17 @@ class TestTheCanvasDrawsTheBranches:
         assert "'nope'" in message and "ble" in message and "ClassifyBluetooth" in message
 
     def test_an_ungated_chain_draws_no_join(self) -> None:
-        """CON case: the sixteen plotting templates stay the straight chains they were."""
+        """CON case: the sixteen plotting templates stay the straight chains they were.
+
+        The YAML beside a template is a ``flow:`` SOURCE or a converter-produced TWIN (the
+        whole-graph form); the dispatcher draws either, the flow importer only the first.
+        """
         from waivefront.annotation import templates
 
         source = Path(templates()["signal"]["view_fft"]).with_suffix(".yaml")
         if not source.is_file():
             pytest.skip("the fft template ships no YAML source")
-        workflow = flow_yaml_to_workflow(source.read_text(), NODE_CLASS_MAPPINGS, as_="graph", name="fft")
+        workflow = yaml_to_workflow(source.read_text(), NODE_CLASS_MAPPINGS, as_="graph", name="fft")
         assert not [n for n in workflow["nodes"] if n["type"] == JOIN_CLASS_TYPE]
 
 

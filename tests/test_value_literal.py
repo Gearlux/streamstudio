@@ -65,13 +65,18 @@ class TestTheImportPlacesAValueNode:
         assert value["widgets_values"] == [repr(WINDOWS)]
 
     def test_a_document_without_such_a_param_places_no_value_node(self) -> None:
-        """CON case: a chain of scalar-widget nodes draws exactly what it drew before."""
+        """CON case: a chain of scalar-widget nodes draws exactly what it drew before.
+
+        The YAML beside a template is a ``flow:`` SOURCE for the canvases drawn from one and a
+        converter-produced TWIN (the whole-graph form) for the rest, so the import goes through the
+        dispatcher that accepts both; the fft pane ships the twin (2026-09-28).
+        """
         from waivefront.annotation import templates
 
         source = Path(templates()["signal"]["view_fft"]).with_suffix(".yaml")
         if not source.is_file():
             pytest.skip("the fft template ships no YAML source")
-        workflow = flow_yaml_to_workflow(source.read_text(), NODE_CLASS_MAPPINGS, as_="graph", name="fft")
+        workflow = yaml_to_workflow(source.read_text(), NODE_CLASS_MAPPINGS, as_="graph", name="fft")
         assert not [n for n in workflow["nodes"] if n["type"] == VALUE_NODE]
 
 
