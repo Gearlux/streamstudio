@@ -23,6 +23,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **The graph editor without ComfyUI — phase 2 of the rewrite (`docs/rewrite.md`).** `streamstudio.document`
+  derives a typed node/wire model from a confluid graph document and edits it by patching the marker's own line
+  (`set_param`, `add_step`, `remove_step`, `rename_node`, undo/redo) — comments and `$VAR` survive, a refused edit
+  writes nothing; `streamstudio.palette` describes every configurable class as a node spec read off its declarations;
+  `streamstudio.layout` keeps positions in a `<graph>.layout.yaml` sidecar keyed by node name; `streamstudio.app`
+  serves them as a Flask blueprint (`/api/graphs…`, `/api/palette`, `/api/runs…`) — standalone through the new
+  **`streamstudio editor <dir> --port 8190`** verb, or mounted by a consuming Flask app. The canvas page is phase 3.
 - **`streamstudio.__version__`** reports the installed version, read from the package metadata
   (`importlib.metadata.version("streamstudio")`), so it always matches `pyproject.toml`; an uninstalled
   source tree reports `0.0.0.dev0`.

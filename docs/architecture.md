@@ -493,3 +493,65 @@ fallback. What must hold: the node types never decide it while a document is nam
 nodes are re-pointed on EVERY path that concludes the canvas shows the asked-for graph. Pins:
 `tests/test_open_graph_mirror.py::TestTheAlreadyOpenCheckIsTheDOCUMENT`,
 `tests/test_preview_nodes.py::TestTheOpenerPointsTheNodesAtTheLaunchingWorkspace`.
+
+
+## The graph document is the truth; the canvas is derived and edits are located text patches (`streamstudio.document`, 2026-09-28)
+
+**Context.** The ComfyUI extension kept TWO documents of every graph: the canvas (`workflow.json`)
+and the confluid YAML a converter produced from it, re-checked on every start. Three things went
+wrong, each measured before the rewrite was scoped (`docs/rewrite.md` §2.1, §6, §9):
+
+- **A canvas stores a node's values by POSITION.** `widgets_values = [25000000.0, 0.025, 'a Bluetooth
+  packet …']` carries no names, so when `Refuse(max_band_hz, max_duration_s, hint)` gained `note` as its
+  FIRST parameter every saved canvas re-opened one slot off — `{'note': 25000000.0, 'max_band_hz': 0.025,
+  'max_duration_s': 'a Bluetooth packet …'}`, the hint lost — while the YAML, keyed by name, shifted nothing.
+- **Re-dumping a loaded document loses what the loader never kept.** `confluid.dump` of the shipped
+  24-step Bluetooth pane: 275 lines with 148 comment lines → 179 lines with 0, and
+  `root: $DATA_ROOT/pets` → the resolved path, the variable baked in.
+- **A graph's boundary needs a root key that collides with nothing.** A top-level `source:` / `files:` /
+  `sink:` key beside a class whose constructor has that parameter is BROADCAST into it — a root named
+  `source` next to a source-less `Stream` made `Stream.source` the contract object, and a `class_names`
+  slot wired to a producer landed in `Stream.class_names` and refused to load. So the root key is
+  `contract`, the class-vocabulary slot is `classes` (`recordstream.ops.contract.CLASS_VOCABULARY_SLOT`),
+  and the contract refuses a slot named after a parameter of any class the graph uses.
+
+**Decision.** One document. `Document` opens the YAML text and derives a `Model` — nodes with typed
+sockets, wires, located problems — from `confluid.load(text, until="document")` (markers kept, each
+stamped `file:line:col`) and the declarations that already exist: `recordstream.algorithm_spec`, an
+op's `consumes`/`produces`/`flags`/`reports`, `confluid.input_specs`/`output_specs`/`to_pydantic`,
+`GraphContract.inputs`/`outputs`, and the `recordstream.items` registry for socket types. Every edit is
+a patch of the TEXT at the marker's location through `_yamltext.YamlText`: PyYAML's composed tree
+(`yaml.compose` with the SafeLoader — any tag is tolerated, no constructor runs) has a start mark per
+node, and those marks coincide with confluid's stamps, so a marker's `file:line:col` names exactly one
+composed node and the edit is expressed against its spans (a kwarg's value, a step's lines, a `!ref:`
+tag). The patched text is re-derived; if it no longer loads or `check()` gains a problem, the edit is
+refused with the located message and nothing is written. Positions never enter the document: they
+live in a sidecar `<graph>.layout.yaml` keyed by node NAME, and the graph loads and runs with the
+sidecar deleted. Node names are the engine's (`recordstream.flow.Tracer`): a `flow:` step by its key,
+a list member `path[i]`, a nested marker by its document path, the contract root by its key.
+
+**Consequences.** Comments, `$VAR` spellings, key order and number formats survive every edit (one
+line differs per `set_param`; 148 comment lines before and after, pinned). Values are keyed by name,
+so a constructor change moves nothing. A refusal is located. The costs are the patcher's own: a
+multi-line block VALUE is replaced by one flow-style line, so a comment INSIDE that value is the one
+thing a patch may lose; and a node's rename must re-key the sidecar in the same operation, or its
+entry is orphaned (`layout.stale_positions` reports what is left). The undo history is a ring of
+whole texts per document, shared by canvas edits and agent edits, because both are text patches.
+
+**Example.**
+
+```python
+doc = Document.open("pane.yaml")                  # reads the text; parses nothing yet
+doc.model.node("size").params["max_band_hz"]      # Param(value=25000000.0, spelled=True, …)
+doc.set_param("size", "max_band_hz", 30e6)        # ONE line: '      max_band_hz: 25.0e6' -> '      max_band_hz: 30000000.0'
+doc.save()                                        # 148 comment lines still 148; '$DATA_ROOT' still spelled
+doc.set_param("count", "field", "image")          # ValueError: cannot wire decode.image (Image) into count.label (Label)
+                                                  #             at pane.yaml:4:9: the types do not meet   (file untouched)
+```
+
+**What you may change.** The patcher's spellings (block or flow form, how an inserted step is laid
+out), which declaration a socket type is read from as long as it is a recordstream or confluid
+declaration, the first-layout algorithm. What must hold: the file is never re-emitted from the loaded
+object graph; a refused edit writes nothing; node names are the engine's names; positions stay out of
+the YAML. Pins: `tests/test_document.py::TestSetParam::test_the_bluetooth_pane_keeps_its_148_comment_lines`,
+`tests/test_document.py::TestProblems`, `tests/test_layout.py`.

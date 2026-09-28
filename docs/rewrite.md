@@ -256,7 +256,7 @@ on (LangGraph has one shared state); one node can be rerun alone with its cached
 | project | new | deleted |
 | --- | --- | --- |
 | recordstream | `flow/trace.py` (the tracer, 797 lines) | nothing |
-| streamstudio | `app.py` (blueprint + `create_app`), `document.py` (derive, patch, history, sidecar), `palette.py` (registry → node specs), `layout.py`, `cli.py` (`streamstudio run` standalone), `frontend/` (vite + React Flow), tests | `bridge.py`, `graphio.py`, `export.py`, `nodes.py`, `web/*.js`, the ComfyUI clone and launch, 12,857 Python lines and 3,705 JS lines. The HuggingFace pickers and the directory chooser are ported as Flask routes. |
+| streamstudio | `app.py` (blueprint + `create_app`), `document.py` (derive, patch, history, sidecar), `palette.py` (registry → node specs), `layout.py`, `cli.py` (`streamstudio editor` standalone), `frontend/` (vite + React Flow), tests | `bridge.py`, `graphio.py`, `export.py`, `nodes.py`, `web/*.js`, the ComfyUI clone and launch, 12,857 Python lines and 3,705 JS lines. The HuggingFace pickers and the directory chooser are ported as Flask routes. |
 | annotaide | mounts the blueprint; *set source…*, *graph*, *settings* open it in a pane | the resident converter, seeding through the CLI, the graph-copy re-check, the waiting room, tab naming: 743 lines and 30 rules |
 | navigaitor | registers the graph tools once and the per-node tools of any graph a session opens | nothing |
 | the op author | writes the op class only | |
@@ -290,6 +290,19 @@ runs `check()` on every one, and keeps JSON and YAML side by side until the flip
   `__lo`/`__hi` names go.
 - A `Stream` with an `ops:` list is drawn as a chain of record wires between the ops.
 - Two datasets in one graph are the existing `JointStream`, drawn with one socket per stream.
+
+Taken while landing phase 2 (2026-09-28):
+
+- The standalone verb is `streamstudio editor <graph_dir> --port 8190`, not `run`: bare `streamstudio`
+  still launches ComfyUI until the flip, and the two servers coexist on one machine (8188 beside 8190).
+- The HuggingFace pickers and the directory chooser arrive in phase 3 as routes beside the page that
+  calls them; phase 2 ships no route without a caller.
+- The first layout is streamstudio's own layered one (`layout.py`: longest-path layering along the
+  wires, one column per layer; a node the sidecar names keeps its place, a new node lands below the
+  lowest kept one), not dagre on the server — the page may still run dagre client-side.
+- The settings form is `confluid.to_pydantic(cls).model_json_schema()` per node
+  (`GET /api/graphs/<name>/form`): an `Interval` is already `minimum`/`maximum` and a `Literal` already
+  `enum`, so the form, the palette's widgets and the phase-5 tool schemas cannot disagree.
 
 ## 6. The one decision: the class names of a source graph
 
@@ -335,7 +348,7 @@ Each phase ends with its gates green and the previous path still working.
 | --- | --- | --- | --- |
 | 0 templates | every converted YAML loads, carries its contract, passes `check()` | the 17 conversions | in progress 2026-09-28 |
 | 1 engine, landed 2026-09-28 | `recordstream/tests/test_trace.py`: 39 tests — overhead bound, rerun recomputes only downstream, refused parameter leaves the trace untouched, gated chain runs whole, in-place edit is flagged, lazy constructor | `recordstream/flow/trace.py`, exported as `recordstream.flow.Tracer`, user page `docs/trace.md` | tests in progress 2026-09-28 |
-| 2 document and app | `streamstudio/tests/test_document.py`: bte_view derives 24 nodes and 49 wires, patch keeps comments and `$VAR`, new parameter shifts nothing, wire mismatch refused, rename is atomic, sidecar round trip; `test_app.py`: every route through Flask's test client | `document.py`, `palette.py`, `layout.py`, `app.py`, `cli.py` |
+| 2 document and app, landed 2026-09-28 | `streamstudio/tests/test_document.py` (58): bte_view derives 24 nodes and 49 wires, patch keeps comments and `$VAR`, new parameter shifts nothing, wire mismatch refused, rename is atomic, sidecar round trip; `test_app.py` (47): every route through Flask's test client; `test_palette.py` (72); `test_layout.py` (28) | `document.py`, `_yamltext.py`, `palette.py`, `layout.py`, `app.py`, `cli.py` (`editor`) | 205 tests green; whole suite `730 passed, 1 skipped in 30.83s`; mypy `Success: no issues found in 50 source files` |
 | 3 canvas | the playwright proof turned into `tests/test_canvas.py` against the built page: sockets refuse a mismatch, palette of the real 419 types, save produces the same YAML the model came from | `frontend/` |
 | 4 annotaide | its existing suite, with the converter and seeding pins deleted and the mount pinned | the mount, the deletions |
 | 5 agent tools | the transcript of §2.4 as a test against the generated tools | navigaitor registration |
@@ -350,7 +363,7 @@ tools for Algorithms without a run; any change to confluid's grammar.
 
 ## 9. Status
 
-Landed on 2026-09-28, nothing committed. Phase 0 and phase 1 are complete.
+Landed on 2026-09-28, nothing committed. Phase 0, phase 1 and phase 2 are complete.
 
 | project | what landed | gate |
 | --- | --- | --- |
@@ -358,6 +371,7 @@ Landed on 2026-09-28, nothing committed. Phase 0 and phase 1 are complete.
 | annotaide | `classification.yaml` delivers `classes`; seven YAML twins under `workspaces/classification/` and `workspaces/detection/`, each rooted in a `contract:` entry; `tests/test_template_twins.py` pins each twin's `check()` outcome; the type-workspace mandate amended | `2056 passed`; mypy clean |
 | waivefront | ten YAML twins under `waivefront/annotation/`; `write_annotations.yaml` carries the `app:` block and round-trips it; `tests/test_template_twins.py` | `111 passed`; mypy clean in touched files |
 | streamstudio | the ComfyUI contract canvas pins `classes` and the collision refusal; this page; the phases in the root `TASKS.md` | `93 passed`; mypy clean |
+| streamstudio, phase 2 | `document.py` (derive, located patches, undo ring, sidecar), `_yamltext.py` (the patcher over PyYAML's composed tree), `palette.py` (registry → node specs, `to_pydantic` widgets), `layout.py` (layered first layout + sidecar), `app.py` (`editor_blueprint` + `create_app`, `Studio` on `app.extensions`), the `editor` verb in `cli.py`; `pyproject.toml` declares `flask` and `pyyaml`; `tests/test_document.py` 58, `test_app.py` 47, `test_palette.py` 72, `test_layout.py` 28 | isort/black `left unchanged`; flake8 clean; `mypy streamstudio`: `Success: no issues found in 50 source files`; `pytest -q`: `730 passed, 1 skipped in 30.83s`; `test_packaging.py`: `12 passed`; red run before implementing (modules moved aside): `1 error in 6.04s` |
 
 Two things measured while doing it, both recorded in the root `TASKS.md`:
 
