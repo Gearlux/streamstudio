@@ -4,6 +4,66 @@ Auto-generating [ComfyUI](https://github.com/comfyanonymous/ComfyUI) nodes from 
 
 StreamStudio is the GUI layer of [Taidal](https://github.com/Gearlux). Rather than ship its own editor, it runs as a ComfyUI **custom node** package: every callable already exposed by RecordStream, Waivefront, or HuggingFace `datasets` is auto-wrapped into a ComfyUI node, so you compose and run pipelines visually on ComfyUI's canvas with no StreamStudio-specific ops to maintain.
 
+## The rewrite (phase 2 landed): editing a graph document without ComfyUI
+
+StreamStudio is being rebuilt as a Flask app over the confluid YAML graph document, with no ComfyUI
+underneath — [`docs/rewrite.md`](docs/rewrite.md) is the scope; phase 2 of its six phases landed on
+2026-09-28: the document model and the HTTP surface, no page yet. **The canvas page arrives in phase 3.**
+Everything from [Installation](#installation) down describes the ComfyUI extension, which still runs —
+and is still what a consuming annotation workspace opens — until phase 4 replaces it.
+
+**The YAML is the truth.** `streamstudio.document.Document` opens a graph file and derives a model
+from it — nodes with typed sockets, wires, located problems — by reading declarations that already
+exist (`recordstream.algorithm_spec`, an op's `consumes`/`produces`, `confluid.input_specs` /
+`output_specs` / `to_pydantic`, `GraphContract.inputs`/`outputs`) and the `recordstream.items`
+registry for socket types. Nothing is written per class. An edit — `set_param`, `add_step`,
+`remove_step`, `rename_node` — patches the line the marker came from; the file is never re-dumped:
+
+```
+re-dump of a shipped 24-step pane:   275 lines / 148 comment lines  ->  179 lines / 0 comments
+                                     root: $DATA_ROOT/pets           ->  the resolved path, the variable gone
+set_param(size, max_band_hz, 30e6):  1 line differs; 148 comment lines kept; $DATA_ROOT kept
+```
+
+An edit that makes the document stop loading, or gain a problem (a wire whose types do not meet), is refused
+with a message naming `file:line:col`, and nothing is written. An accepted edit is saved at once; `undo`/`redo`
+walk one text history per document. Positions live in a sidecar, `<graph>.layout.yaml`, keyed by node name.
+
+**Node names** are one scheme shared by the model, the engine, the sidecar and the routes: a `flow:` step by its
+key (`floor`), a list member by `path[i]` (`stream.ops[1]`), a nested marker by its document path (`processor.stream`),
+a contract root by its key (`contract`), and — for a graph without a contract — the host's side as one node, `<host>`.
+
+**The routes**, one call on the document each — JSON in, JSON out; a refusal is `400 {error}` with
+the located message, a name that does not exist is `404 {error}` listing what there is:
+
+| verb | path | what it does |
+| --- | --- | --- |
+| GET | `/api/graphs` | every `*.yaml` of the directory as `{name, path, kind}` — `flow`, `graph` or `contract` |
+| GET | `/api/graphs/<name>` | `{name, path, kind, text, model, positions, history_depth}` |
+| PUT | `/api/graphs/<name>` | `{text}` replaces the whole document; refused when it gains a problem; the history starts over |
+| POST | `/api/graphs/<name>/param` | `{node, param, value}` — patch one value on its own line, or insert it when the file left the default |
+| POST | `/api/graphs/<name>/steps` | `{name, after, class_path, params}` — insert a `flow:` step; what read `after` now reads the new step |
+| DELETE | `/api/graphs/<name>/steps/<node>` | remove a step; what read it now reads what it read from |
+| POST | `/api/graphs/<name>/rename` | `{node, new}` — the key, every `from:` / `merge_from:` / `bind:` / `!ref:` / `outputs:` naming it, and the sidecar entry |
+| POST | `/api/graphs/<name>/undo`, `…/redo` | one step of the text history; `changed` says whether there was one |
+| PUT | `/api/graphs/<name>/positions` | `{positions: {node: [x, y]}}` — written to the sidecar |
+| POST | `/api/graphs/<name>/layout` | lay the graph out afresh (longest-path layering) and save it |
+| GET | `/api/graphs/<name>/form` | `{node: JSON-schema properties}` from `confluid.to_pydantic` — the settings form |
+| GET | `/api/palette` | every configurable class as a typed node spec; `?refresh=1` rescans the registry |
+| POST | `/api/graphs/<name>/trace` | `{record, until}` — run record `#record` of the graph's own source through it, pausing before `until` |
+| GET | `/api/runs/<run>` | the trace: per node its params, inputs, outputs, status and milliseconds |
+| POST | `/api/runs/<run>/rerun` | `{node, params}` — rebuild one node through its constructor and rerun from it |
+
+**Serving it** standalone, over a directory of graph documents (`editor` is the verb until the flip —
+`streamstudio` alone still launches ComfyUI):
+
+```bash
+streamstudio editor path/to/graphs --port 8190     # -p 8190; a taken port is refused before anything starts
+```
+
+A consuming Flask app mounts the same routes instead — `app.register_blueprint(streamstudio.app.editor_blueprint(graph_dir))`;
+the editor's state lives on `app.extensions["streamstudio"]`, so two apps in one process are two editors.
+
 ## Installation
 
 StreamStudio is on PyPI as a pre-release, so `pip` needs `--pre` to see it:
