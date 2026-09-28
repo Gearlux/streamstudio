@@ -31,6 +31,5 @@ lightning_logs/
 logs/
 checkpoints/
 runs/
-frontend/
 .vscode/
 /pyrightconfig.json

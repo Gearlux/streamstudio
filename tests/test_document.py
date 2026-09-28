@@ -23,6 +23,7 @@ from recordstream import Algorithm, Image, Input, Label, Mask, Output, Param, Re
 
 import streamstudio
 from streamstudio.document import Document, Model
+from streamstudio.layout import Group, read_groups, read_sidecar, write_sidecar
 
 MOD = __name__
 
@@ -271,11 +272,17 @@ outputs: mask
 """
 
 # The same flow rooted in a contract: the host's record is declared, so the chain can be REFUSED by name.
-CONTRACT_FLOW_TEXT = f"""\
+# The root is APPENDED after the flow, the shape that builds: placed before it, the flow's own top-level
+# ``outputs: mask`` line is a GraphContract parameter too and confluid gives it to the contract (the
+# document is resolved in order, last spec wins) — CONTRACT_FIRST_TEXT below is that shape.
+_CONTRACT_ROOT = """\
 contract: !class:recordstream.ops.contract.GraphContract
   name: doc view
-  inputs: {{image: Image}}
-  outputs: {{}}
+  inputs: {image: Image}
+  outputs: {}
+"""
+CONTRACT_FLOW_TEXT = (
+    f"""\
 flow:
   gain:
     op: !class:{MOD}.DocGain {{gain: 2.0}}
@@ -298,6 +305,11 @@ flow:
     bind: {{threshold: floor.background}}
 outputs: mask
 """
+    + _CONTRACT_ROOT
+)
+
+# The shape that does NOT build (measured 2026-09-28 on the shipped Bluetooth pane).
+CONTRACT_FIRST_TEXT = _CONTRACT_ROOT + CONTRACT_FLOW_TEXT[: -len(_CONTRACT_ROOT)]
 
 # A contract-rooted SOURCE graph in the twins' shape: the root keyed `contract`, never after the slot.
 SOURCE_TEXT = f"""\
@@ -345,6 +357,9 @@ flow:
 """
 
 
+_GROUP: Group = {"id": "g1", "title": "front end", "color": "#335", "nodes": ["gain", "floor"]}
+
+
 def _write(tmp_path: Path, text: str, name: str = "graph.yaml") -> Path:
     path = tmp_path / name
     path.write_text(text)
@@ -381,7 +396,8 @@ def fake_layout(monkeypatch: pytest.MonkeyPatch) -> types.ModuleType:
     """A stand-in ``streamstudio.layout`` with the exact API the parallel agent ships.
 
     The document imports it lazily, so these tests never depend on the real module existing;
-    the sidecar is a plain YAML ``{name: [x, y]}`` file.
+    the sidecar is a plain YAML ``{name: [x, y]}`` file with no ``groups:`` block (the real
+    module's groups are pinned in ``test_layout.py`` and through the routes in ``test_app.py``).
     """
     mod = types.ModuleType("streamstudio.layout")
 
@@ -394,8 +410,17 @@ def fake_layout(monkeypatch: pytest.MonkeyPatch) -> types.ModuleType:
         loaded = yaml.safe_load(path.read_text()) or {}
         return {str(k): (float(v[0]), float(v[1])) for k, v in loaded.items()}
 
-    def write_sidecar(path: Path, positions: Dict[str, Tuple[float, float]]) -> None:
+    def write_sidecar(
+        path: Path, positions: Dict[str, Tuple[float, float]], groups: Optional[List[Any]] = None
+    ) -> None:
+        assert not groups, "the stand-in's sidecar holds positions only"
         path.write_text(yaml.safe_dump({k: [x, y] for k, (x, y) in positions.items()}, sort_keys=False))
+
+    def read_groups(path: Path) -> List[Any]:  # the stand-in's sidecar has no groups block
+        return []
+
+    def rename_member(groups: List[Any], old: str, new: str) -> List[Any]:
+        return list(groups)
 
     def positions(model: Model, sidecar: Path) -> Dict[str, Tuple[float, float]]:
         kept = read_sidecar(sidecar)
@@ -406,6 +431,8 @@ def fake_layout(monkeypatch: pytest.MonkeyPatch) -> types.ModuleType:
     mod.read_sidecar = read_sidecar  # type: ignore[attr-defined]
     mod.write_sidecar = write_sidecar  # type: ignore[attr-defined]
     mod.positions = positions  # type: ignore[attr-defined]
+    mod.read_groups = read_groups  # type: ignore[attr-defined]
+    mod.rename_member = rename_member  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "streamstudio.layout", mod)
     monkeypatch.setattr(streamstudio, "layout", mod, raising=False)
     return mod
@@ -560,16 +587,19 @@ class TestDerive:
         with pytest.raises(KeyError, match="decode.*count"):
             model.node("nope")
 
-    def test_the_bluetooth_pane_derives_24_nodes_and_49_wires(self) -> None:
-        """Measured 2026-09-27 and again today on the shipped ``bte_view.yaml``: 24 steps, 23 ``from:``
-        record wires, 9 gate wires (one per ``requires:``), 17 entry wires (who produced what a
-        node reads), and no host wire — the head node (``WindowSignal``) declares nothing.
+    def test_the_bluetooth_pane_derives_25_nodes_and_49_wires(self) -> None:
+        """Measured 2026-09-27 on the shipped ``bte_view.yaml``: 24 steps, 23 ``from:`` record wires,
+        9 gate wires (one per ``requires:``), 17 entry wires (who produced what a node reads), and no
+        host wire — the head node (``WindowSignal``) declares nothing. Measured again 2026-09-28, the
+        day the pane gained its ``contract:`` root: 25 nodes — the 24 steps plus the root, whose
+        outputs are the host's two entries — and the same 49 wires (no step reads ``input`` or
+        ``regions`` by name, so the root wires to nothing and no ``<host>`` node is drawn).
 
         This pins the waivefront file's declarations from here; a change there shows up here first.
         """
         path = _bte_path()
         model = Document.open(path).model
-        assert len(model.nodes) == 24
+        assert len(model.nodes) == 25
         assert len(model.wires) == 49
         kinds: Dict[str, int] = {}
         for wire in model.wires:
@@ -579,12 +609,57 @@ class TestDerive:
         gates = {(w.source, w.source_socket, w.target) for w in model.wires if w.kind == "gate"}
         assert ("pick", "plain", "burst") in gates
         assert ("classify", "ble", "ble") in gates
+        root = model.node("contract")
+        assert root.kind == "contract"
+        assert [(s.name, s.type) for s in root.outputs] == [("input", "Signal"), ("regions", "Regions")]
+        assert not any(node.kind == "host" for node in model.nodes)
+
+    def test_a_step_whose_entry_nothing_produces_is_refused_on_the_shipped_bluetooth_pane(self, tmp_path: Path) -> None:
+        """The PRO case the pane's ``contract:`` root exists for (2026-09-28): ``NoiseFloorEstimate``
+        reads ``spectrogram``, which no step of the Bluetooth pane writes and the host does not provide
+        (its inputs are ``input`` and ``regions``), so inserting it is REFUSED with recordstream's
+        located message and the text is left as it was. The CON case beside it: the same pane with the
+        root cut off is fed by a synthetic ``<host>`` that supplies anything, so the same insert is
+        ACCEPTED and the host grows a ``spectrogram`` output — measured 2026-09-27, before the root.
+        """
+        source = _bte_path().read_text()
+        rooted = tmp_path / "bte_view.yaml"
+        rooted.write_text(source)
+        doc = Document.open(rooted)
+        step: Dict[str, Any] = dict(
+            name="floor_db",
+            after="floor",
+            class_path="waivefront.processing.NoiseFloorEstimate",
+            params={"percentile": 30},
+        )
+        with pytest.raises(ValueError) as refusal:
+            doc.add_step(**step)
+        message = str(refusal.value)
+        anchor = f"{rooted}:{_line_of(source, 'MeasureNoiseFloor')}:9"
+        assert message.startswith(f"add_step 'floor_db' after 'floor' refused at {anchor}: {rooted}:floor_db: ")
+        assert (
+            "NoiseFloorEstimate needs the record entry 'spectrogram', which nothing before it produces — "
+            "the chain has input, regions at that point" in message
+        )
+        assert doc.text == source
+        assert not any(node.kind == "host" for node in doc.model.nodes)
+
+        mark = "# The graph's ROOT"
+        assert mark in source, "the shipped pane carries its contract block (appended after its last entry)"
+        unrooted = tmp_path / "bte_view_without_its_root.yaml"
+        unrooted.write_text(source[: source.index(mark)])
+        doc = Document.open(unrooted)
+        doc.add_step(**step)
+        host = doc.model.node("<host>")
+        assert [(s.name, s.type) for s in host.outputs] == [("spectrogram", "Spectrogram")]
+        assert doc.check() == []
 
     def test_the_psd_twin_derives_a_stream_and_two_ops(self) -> None:
         pytest.importorskip("waivefront.processing")  # registers the twin's registry-key classes
         path = _bte_path().with_name("psd_slice_view.yaml")
         model = Document.open(path).model
-        assert [node.name for node in model.nodes] == ["stream", "stream.ops[0]", "stream.ops[1]"]
+        # The twin's `contract:` root (2026-09-28) is its last entry, so it derives as the last node.
+        assert [node.name for node in model.nodes] == ["stream", "stream.ops[0]", "stream.ops[1]", "contract"]
         assert model.node("stream.ops[1]").class_path.endswith("PsdSlice")
         assert _wires(model, "record") == [("stream.ops[0]", "record", "stream.ops[1]", "record")]
         assert model.problems == []
@@ -687,6 +762,19 @@ class TestProblems:
         )
         assert problems[0].message.startswith(f"{path}:spec: ")
         assert problems[0].loc == f"{path}:{_line_of(text, 'DocNeedsSpectrogram')}:9"
+
+    def test_a_document_that_derives_but_does_not_build_is_one_located_problem(self, tmp_path: Path) -> None:
+        """The contract placed BEFORE the flow derives (the document stage keeps the markers) but does not
+        BUILD: the flow's own ``outputs: mask`` is a GraphContract parameter too, so the contract is handed
+        a string where a mapping belongs. Measured before the fix: ``check()`` answered ``[]`` for a
+        document every consumer refuses to load. CON: the same root appended after the flow builds, and
+        ``test_check_never_raises_and_passes_a_sound_graph`` pins that ``check()`` stays ``[]`` for it."""
+        path = _write(tmp_path, CONTRACT_FIRST_TEXT)
+        problems = Document.open(path).check()
+        assert len(problems) == 1
+        assert problems[0].message.startswith(f"{path}: does not build: ")
+        assert "Failed to construct GraphContract" in problems[0].message
+        assert problems[0].loc == f"{path}:1:11"
 
     def test_check_never_raises_and_passes_a_sound_graph(self, tmp_path: Path) -> None:
         assert _open(tmp_path, CONTRACT_FLOW_TEXT).check() == []
@@ -791,18 +879,19 @@ class TestSetParam:
             "hint": "a Bluetooth packet",
         }
 
-    def test_the_bluetooth_pane_keeps_its_148_comment_lines(self, tmp_path: Path) -> None:
-        """Measured on the shipped file: 275 lines, 148 of them comments; ``set_param`` on
+    def test_the_bluetooth_pane_keeps_its_152_comment_lines(self, tmp_path: Path) -> None:
+        """Measured on the shipped file: 275 lines, 148 of them comments — 152 since 2026-09-28, when the
+        pane gained its ``contract:`` root under a four-line comment; ``set_param`` on
         ``size.max_band_hz`` changes ONE line and every comment survives."""
         source = _bte_path()
         path = tmp_path / source.name
         path.write_text(source.read_text())
         doc = Document.open(path)
         before = doc.text
-        assert _comment_lines(before) == 148
+        assert _comment_lines(before) == 152
         doc.set_param("size", "max_band_hz", 30.0e6)
         after = doc.text
-        assert _comment_lines(after) == 148
+        assert _comment_lines(after) == 152
         differing = [(a, b) for a, b in zip(before.splitlines(), after.splitlines()) if a != b]
         assert differing == [("      max_band_hz: 25.0e6", "      max_band_hz: 30000000.0")]
         assert len(after.splitlines()) == len(before.splitlines())
@@ -879,7 +968,7 @@ class TestSteps:
     def test_remove_step_of_the_output_step_moves_the_output_back(self, tmp_path: Path) -> None:
         doc = _open(tmp_path, CONTRACT_FLOW_TEXT)
         doc.remove_step("mask")
-        assert doc.text.endswith("    from: decide\noutputs: bright\n")
+        assert "    from: decide\noutputs: bright\n" in doc.text  # the root follows the flow
         assert doc.model.outputs == ["bright"]
 
 
@@ -923,7 +1012,7 @@ class TestRename:
     def test_rename_moves_the_output_step(self, tmp_path: Path) -> None:
         doc = _open(tmp_path, CONTRACT_FLOW_TEXT)
         doc.rename_node("mask", "masked")
-        assert doc.text.endswith("outputs: masked\n")
+        assert "\noutputs: masked\n" in doc.text  # the root follows the flow
         assert doc.model.outputs == ["masked"]
 
     def test_a_name_in_use_is_refused(self, tmp_path: Path) -> None:
@@ -964,6 +1053,46 @@ class TestHistory:
         assert doc.redo() and doc.text == t3
         assert doc.redo() is False
         assert [n.name for n in doc.model.nodes] == ["contract", "gain", "floor2", "floor", "test", "bright", "mask"]
+
+    def test_undoing_a_rename_restores_the_old_names_position_and_group(self, tmp_path: Path) -> None:
+        """Measured before the fix: undo restored the TEXT only — the sidecar stayed keyed by the new name,
+        so the node was laid out afresh, its saved position was dropped and its group named a member that
+        no longer exists. Each history entry now carries the rename it made; undo and redo re-key."""
+        doc = _open(tmp_path, CONTRACT_FLOW_TEXT)
+        write_sidecar(doc.sidecar_path, {"gain": (500.0, 500.0)}, groups=[_GROUP])
+        doc.rename_node("gain", "amp")
+        assert doc.positions["amp"] == (500.0, 500.0)
+        assert doc.undo()
+        assert doc.positions["gain"] == (500.0, 500.0) and "amp" not in doc.positions
+        assert doc.groups[0].get("nodes") == ["gain", "floor"]
+        doc.save()
+        assert read_sidecar(doc.sidecar_path)["gain"] == (500.0, 500.0)
+        assert "amp" not in read_sidecar(doc.sidecar_path)
+        assert read_groups(doc.sidecar_path)[0].get("nodes") == ["gain", "floor"]
+        assert doc.redo()
+        assert doc.positions["amp"] == (500.0, 500.0)
+        assert doc.groups[0].get("nodes") == ["amp", "floor"]
+
+    def test_a_move_made_after_a_rename_survives_the_renames_undo(self, tmp_path: Path) -> None:
+        """Positions are the page's state, not the document's: undo re-keys the CURRENT positions rather
+        than restoring old ones, so a node moved after the rename keeps its new place under its old name."""
+        doc = _open(tmp_path, CONTRACT_FLOW_TEXT)
+        write_sidecar(doc.sidecar_path, {"gain": (500.0, 500.0)})
+        doc.rename_node("gain", "amp")
+        doc.set_positions({**doc.positions, "amp": (700.0, 700.0)})
+        assert doc.undo()
+        assert doc.positions["gain"] == (700.0, 700.0)
+
+    def test_undoing_an_edit_that_renames_nothing_leaves_positions_and_groups_alone(self, tmp_path: Path) -> None:
+        """CON case: only a rename's undo re-keys; undoing a parameter edit moves nothing."""
+        doc = _open(tmp_path, CONTRACT_FLOW_TEXT)
+        write_sidecar(doc.sidecar_path, {"gain": (500.0, 500.0)}, groups=[_GROUP])
+        doc.set_positions({**doc.positions, "floor": (900.0, 100.0)})
+        before = doc.positions
+        doc.set_param("floor", "percentile", 40.0)
+        assert doc.undo()
+        assert doc.positions == before
+        assert doc.groups[0].get("nodes") == ["gain", "floor"]
 
     def test_the_ring_holds_fifty_edits(self, tmp_path: Path) -> None:
         doc = _open(tmp_path, CONTRACT_FLOW_TEXT)

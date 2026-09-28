@@ -44,6 +44,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from types import ModuleType
 from typing import (
+    TYPE_CHECKING,
     Any,
     Dict,
     Iterable,
@@ -71,10 +72,13 @@ from recordstream.algorithm import Algorithm, algorithm_spec
 from recordstream.flow.graph import FlowGraph
 from recordstream.flow.steps import RESERVED_STEP_KEYS
 from recordstream.flow.trace import Tracer
-from recordstream.items import item_type_names, item_types
+from recordstream.items import get_item_type, item_type_names, item_types
 from recordstream.ops.contract import GRAPH_SLOT_KINDS, ChainContractError, ContractError, GraphContract
 
 from streamstudio._yamltext import Edit, YamlText, spell_mapping
+
+if TYPE_CHECKING:  # the annotation only: layout is imported on first use (`_layout`), a separate concern
+    from streamstudio.layout import Group
 
 # ================================================================================================
 # the vocabulary
@@ -424,14 +428,36 @@ def _meets(source: SocketType, target: SocketType) -> bool:
         return True
     registered = item_type_names()
     if source in registered and target in registered:
-        from recordstream.items import get_item_type
-
         return issubclass(get_item_type(source), get_item_type(target))
     return target in _SUBTYPES.get(source, ())
 
 
 def _meets_any(source: SocketType, targets: Iterable[SocketType]) -> bool:
     return any(_meets(source, target) for target in targets)
+
+
+def supertypes() -> Dict[SocketType, List[SocketType]]:
+    """Every socket type that has supertypes, with the types it may be wired INTO — the meet rule of
+    :func:`_meets` as a table, for a page that cannot call ``issubclass``.
+
+    A registered item lists its registered bases (``issubclass`` between registered items is the one
+    subtyping rule; an unregistered class between them, like ``NDArrayItem``, is never a socket type
+    and so never appears); ``Stream`` lists ``Source`` and ``integer`` lists ``number`` (:data:`_SUBTYPES`).
+    Every registered item appears, with ``[]`` when it has no registered base, so a consumer can tell
+    "no ancestors" from "not a type". Identity and the ``*`` wildcard are not listed: they hold for
+    every type and the consumer applies them itself.
+    """
+    table: Dict[SocketType, List[SocketType]] = {
+        name: [
+            other
+            for other in item_type_names()
+            if other != name and issubclass(get_item_type(name), get_item_type(other))
+        ]
+        for name in item_type_names()
+    }
+    for source, targets in _SUBTYPES.items():
+        table.setdefault(source, []).extend(targets)
+    return table
 
 
 def _split_loc(loc: str) -> Tuple[str, int, int]:
@@ -1194,11 +1220,15 @@ def _anchor_entry(entry: Any, base_dir: Path) -> Any:  # one include entry: a pa
     return str(found) if found.exists() else entry
 
 
-def _load_document(path: Path, texts: Mapping[Path, str]) -> Tuple[Any, List[Path]]:
+def _load_document(path: Path, texts: Mapping[Path, str], *, build: bool = False) -> Tuple[Any, List[Path]]:
     """``confluid.load(until="document")`` of the IN-MEMORY texts: the main text parsed with the
     file's real name (so every marker's location names the file), an included file's pending text
     staged on disk for the duration of the load and restored right after — nothing this returns
-    depends on what a ``save()`` has not yet written."""
+    depends on what a ``save()`` has not yet written.
+
+    ``build=True`` runs the load to the OBJECTS stage instead (without ``solidify``: constructors do
+    no work, and the expensive finish is not what is being checked) — the stage every consumer loads
+    to, and the only one where a top-level key is handed to a same-named constructor parameter."""
     main = path.resolve()
     stream = io.StringIO(texts[main])
     stream.name = str(path)
@@ -1209,7 +1239,10 @@ def _load_document(path: Path, texts: Mapping[Path, str]) -> Tuple[Any, List[Pat
     try:
         for p, text in staged.items():
             p.write_text(text)
-        doc, paths = confluid.load(raw, until="document", return_paths=True)
+        if build:
+            doc, paths = confluid.load(raw, until="objects", solidify=False, return_paths=True)
+        else:
+            doc, paths = confluid.load(raw, until="document", return_paths=True)
     finally:
         for p, original in originals.items():
             if original is None:
@@ -1219,8 +1252,8 @@ def _load_document(path: Path, texts: Mapping[Path, str]) -> Tuple[Any, List[Pat
     return doc, [Path(p).resolve() for p in paths]
 
 
-def _load_problem(path: Path, exc: BaseException) -> Problem:
-    """A document that does not load is ONE located problem, never an exception."""
+def _load_problem(path: Path, exc: BaseException, verb: str = "does not load") -> Problem:
+    """A document that does not load (or does not build) is ONE located problem, never an exception."""
     loc = str(path)
     mark = getattr(exc, "problem_mark", None)
     if mark is not None:
@@ -1230,7 +1263,7 @@ def _load_problem(path: Path, exc: BaseException) -> Problem:
         if located:
             loc = located.group(1)
     message = " ".join(str(exc).split())
-    return Problem(f"{path}: does not load: {type(exc).__name__}: {message}", loc)
+    return Problem(f"{path}: {verb}: {type(exc).__name__}: {message}", loc)
 
 
 def derive(path: Path, texts: Mapping[Path, str]) -> _Derivation:
@@ -1241,6 +1274,15 @@ def derive(path: Path, texts: Mapping[Path, str]) -> _Derivation:
         return _Derivation(Model(problems=[_load_problem(path, exc)]), {}, None, [], None, (), [path.resolve()])
     derivation = _Builder(path).derive(doc)
     files = [path.resolve()] + [p for p in included if p != path.resolve()]
+    if not derivation.model.problems:
+        # The document stage keeps the markers, so it can derive a document that does not BUILD — a
+        # top-level key handed to a same-named constructor parameter, measured 2026-09-28 on a contract
+        # placed before a flow whose ``outputs:`` line the contract then received. Only when deriving
+        # found nothing, so one defect is one message.
+        try:
+            _load_document(path, texts, build=True)
+        except Exception as exc:  # noqa: BLE001 — every failure to build is reported as a problem
+            derivation.model.problems.append(_load_problem(path, exc, "does not build"))
     return derivation._replace(files=files)
 
 
@@ -1371,6 +1413,13 @@ def _trace_problems(
 _Texts = Dict[Path, str]
 
 
+class _Entry(NamedTuple):
+    """One step of the document's history: the texts before an edit, and the rename it made."""
+
+    texts: _Texts
+    rename: Optional[Tuple[str, str]]
+
+
 class Document:
     """A confluid YAML document on disk, its derived model, and the edits that patch it in place.
 
@@ -1386,10 +1435,15 @@ class Document:
         self.history_depth = int(history_depth)
         self._texts: _Texts = dict(texts)
         self._saved: _Texts = dict(texts)
-        self._history: List[_Texts] = []
-        self._redo: List[_Texts] = []
+        # Each entry is the texts BEFORE an edit and the rename that edit made (``None`` for any other
+        # edit): positions and groups are the page's state, not the document's, so undoing a rename
+        # re-keys the CURRENT ones instead of restoring old ones — a node moved after the rename keeps
+        # its place (measured before: undo restored the text only and left them under the new name).
+        self._history: List[_Entry] = []
+        self._redo: List[_Entry] = []
         self._cache: Optional[Tuple[Tuple[Tuple[Path, str], ...], _Derivation, Optional[List[Problem]]]] = None
         self._positions: Optional[Dict[str, Tuple[float, float]]] = None
+        self._groups: Optional[List["Group"]] = None
 
     @classmethod
     def open(cls, path: Union[str, Path], *, history_depth: int = 50) -> "Document":
@@ -1520,7 +1574,7 @@ class Document:
 
     def rename_node(self, old: str, new: str) -> None:
         """Rename a node in ONE operation: its key, every ``from:`` / ``merge_from:`` / ``bind:`` /
-        ``!ref:`` / ``outputs:`` that names it, and its sidecar entry."""
+        ``!ref:`` / ``outputs:`` that names it, its sidecar entry and every group that lists it."""
         model = self.model
         node = model.node(old)
         if new in model.names():
@@ -1534,36 +1588,50 @@ class Document:
         if node.source_file and Path(node.source_file).resolve() != self.path.resolve():
             raise ValueError(f"{old} comes from {node.source_file}; rename it in that file")
         renamed = YamlText(self.text).rename(old, new)
-        self._commit({self.path.resolve(): renamed}, f"rename {old!r} to {new!r}", node.loc)
-        if self._positions is None and self.sidecar_path.exists():
-            self._positions = dict(_layout().read_sidecar(self.sidecar_path))
-        if self._positions is not None and old in self._positions:
-            self._positions[new] = self._positions.pop(old)
+        self._commit({self.path.resolve(): renamed}, f"rename {old!r} to {new!r}", node.loc, rename=(old, new))
+        self._rekey(old, new)
 
     def undo(self) -> bool:
-        """Step back one edit; ``False`` when there is none."""
+        """Step back one edit; ``False`` when there is none. Undoing a rename renames the node's
+        position and its group memberships back."""
         if not self._history:
             return False
-        self._redo.append(dict(self._texts))
-        self._texts = self._history.pop()
+        entry = self._history.pop()
+        self._redo.append(_Entry(dict(self._texts), entry.rename))
+        self._texts = entry.texts
+        if entry.rename is not None:
+            old, new = entry.rename
+            self._rekey(new, old)
         return True
 
     def redo(self) -> bool:
         """Step forward one undone edit; ``False`` when there is none."""
         if not self._redo:
             return False
-        self._history.append(dict(self._texts))
-        self._texts = self._redo.pop()
+        entry = self._redo.pop()
+        self._history.append(_Entry(dict(self._texts), entry.rename))
+        self._texts = entry.texts
+        if entry.rename is not None:
+            old, new = entry.rename
+            self._rekey(old, new)
         return True
 
     def save(self) -> None:
-        """Write every file whose text changed, and the sidecar when positions were set."""
+        """Write every file whose text changed, and the sidecar when positions or groups were set.
+
+        The sidecar is written WHOLE, so each block keeps what the other one did not set: positions set
+        here are every node's (the laid-out ones frozen with the moved ones, as before groups existed),
+        positions NOT set here are what the file already held — a grouping never freezes a layout nobody
+        arranged — and the groups are this document's, or the file's when none were set.
+        """
         for key, text in self._texts.items():
             if self._saved.get(key) != text:
                 key.write_text(text)
                 self._saved[key] = text
-        if self._positions is not None:
-            _layout().write_sidecar(self.sidecar_path, self.positions)
+        if self._positions is not None or self._groups is not None:
+            layout = _layout()
+            kept = self.positions if self._positions is not None else layout.read_sidecar(self.sidecar_path)
+            layout.write_sidecar(self.sidecar_path, kept, groups=self.groups)
 
     # -- positions ---------------------------------------------------------------------------
 
@@ -1580,6 +1648,23 @@ class Document:
 
     def set_positions(self, mapping: Mapping[str, Tuple[float, float]]) -> None:
         self._positions = {str(name): (float(xy[0]), float(xy[1])) for name, xy in mapping.items()}
+
+    # -- groups ------------------------------------------------------------------------------
+
+    @property
+    def groups(self) -> List["Group"]:
+        """The boxes the canvas draws around nodes: the ones set on this document, else the sidecar's.
+
+        Opaque (``streamstudio.layout.Group``): stored as the page spelled them, a member the model no
+        longer has included — the document has no group spelling, so nothing here can refuse one.
+        """
+        if self._groups is not None:
+            return list(self._groups)
+        return list(_layout().read_groups(self.sidecar_path))
+
+    def set_groups(self, groups: Sequence["Group"]) -> None:
+        """Replace every group; written to the sidecar by :meth:`save`, never to the document."""
+        self._groups = [group for group in groups]
 
     # -- internals ---------------------------------------------------------------------------
 
@@ -1608,7 +1693,19 @@ class Document:
                 return [text.replace_scalar_edit(outputs[1], new)]
         return []
 
-    def _commit(self, changes: _Texts, what: str, loc: str) -> None:
+    def _rekey(self, old: str, new: str) -> None:
+        """Move a node's position and group memberships from ``old`` to ``new`` — in memory, written by
+        :meth:`save`; the sidecar is read first when nothing was set here yet."""
+        if self._positions is None and self.sidecar_path.exists():
+            self._positions = dict(_layout().read_sidecar(self.sidecar_path))
+        if self._positions is not None and old in self._positions:
+            self._positions[new] = self._positions.pop(old)
+        if self._groups is None and self.sidecar_path.exists():
+            self._groups = list(_layout().read_groups(self.sidecar_path))
+        if self._groups:
+            self._groups = _layout().rename_member(self._groups, old, new)
+
+    def _commit(self, changes: _Texts, what: str, loc: str, *, rename: Optional[Tuple[str, str]] = None) -> None:
         """Validate a candidate text, then make it the document's — or refuse it, unwritten."""
         before = {problem.message for problem in self.check()}
         candidate: _Texts = {**self._texts, **changes}
@@ -1618,7 +1715,7 @@ class Document:
         if gained:
             where = f" at {loc}" if loc else ""
             raise ValueError(f"{what} refused{where}: " + "; ".join(problem.message for problem in gained))
-        self._history.append(dict(self._texts))
+        self._history.append(_Entry(dict(self._texts), rename))
         del self._history[: -self.history_depth]
         self._redo.clear()
         self._texts = candidate

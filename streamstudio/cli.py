@@ -731,8 +731,9 @@ def editor(graph_dir: Optional[Path] = None, port: int = EDITOR_PORT) -> None:
 
     Every ``*.yaml`` in the directory is a graph the editor lists, draws, patches in place and runs
     one record through (the Flask app of streamstudio.app, served standalone; a consuming Flask app
-    mounts the same blueprint under its own prefix instead). The page itself arrives in phase 3 of
-    the rewrite; until then the root URL lists the API routes.
+    mounts the same blueprints under its own prefix instead). The root URL is the canvas page when it
+    is built (``cd frontend && npm install && npm run build``), else a placeholder that says so and
+    lists the API routes.
 
     Args:
         graph_dir: Directory holding the graph documents (default: the current directory).

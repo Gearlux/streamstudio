@@ -1,0 +1,122 @@
+/**
+ * The palette: a searchable list of every class `GET api/palette` describes, opened by a double-click on empty
+ * canvas or by a wire dropped on empty canvas (then narrowed to the classes that can take — or give — the
+ * dragged type, by the model's meet rule). The catalogue is hundreds of classes, so at most `PALETTE_ROWS` rows
+ * are drawn and the line under the search box says how many there are and to type to narrow; filtering the
+ * whole list on every keystroke is cheap, drawing it is not.
+ *
+ * A pick is handed to the app, which inserts the class as a step after the anchor named on the meta line
+ * (`POST …/steps`). `data-opened-ms` on the root is the time from the gesture to the list being in the DOM,
+ * measured in the page — what the tests print.
+ */
+import { useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import type { NodeSpec } from "../api";
+import type { Supertypes } from "../model";
+import { PALETTE_ROWS, paletteMatches, searchMatches, type PaletteFilter } from "../steps";
+
+export interface PaletteRequest {
+  /** Where the gesture happened, in screen pixels — the list opens there. */
+  screen: { x: number; y: number };
+  /** The node the pick is inserted after; `undefined` when there is none (the pick is then refused). */
+  anchor: string | undefined;
+  /** Why there is no anchor, in words — shown instead of "after …". */
+  noAnchor?: string;
+  /** A dropped wire's type and side; absent for a double-click. */
+  filter?: PaletteFilter;
+  /** `performance.now()` at the gesture. */
+  openedAt: number;
+}
+
+interface PaletteProps {
+  request: PaletteRequest;
+  specs: NodeSpec[] | null;
+  types: Supertypes;
+  onPick: (spec: NodeSpec) => void;
+  onClose: () => void;
+}
+
+const WIDTH = 380;
+const HEIGHT = 420;
+
+export function Palette({ request, specs, types, onPick, onClose }: PaletteProps) {
+  const [query, setQuery] = useState("");
+  const [active, setActive] = useState(0);
+  const root = useRef<HTMLDivElement>(null);
+  const { filter, anchor } = request;
+
+  const matching = useMemo(
+    () => (specs ?? []).filter((spec) => paletteMatches(spec, filter, types) && searchMatches(spec, query)),
+    [specs, filter, types, query],
+  );
+  const shown = matching.slice(0, PALETTE_ROWS);
+
+  // The list is in the DOM when this runs (before paint): the open time is the gesture-to-DOM time.
+  useLayoutEffect(() => {
+    if (root.current && specs !== null && root.current.dataset.openedMs === undefined)
+      root.current.dataset.openedMs = (performance.now() - request.openedAt).toFixed(1);
+  }, [specs, request.openedAt]);
+
+  const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    event.stopPropagation(); // the page's shortcuts are not for a query being typed
+    if (event.key === "Escape") onClose();
+    else if (event.key === "Enter" && shown[active]) onPick(shown[active]);
+    else if (event.key === "ArrowDown") setActive((index) => Math.min(index + 1, shown.length - 1));
+    else if (event.key === "ArrowUp") setActive((index) => Math.max(index - 1, 0));
+    else return;
+    event.preventDefault();
+  };
+
+  const parts: string[] = [];
+  if (specs === null) parts.push("loading the catalogue…");
+  else {
+    parts.push(`${shown.length} of ${specs.length} classes`);
+    if (matching.length > shown.length) parts.push(`${matching.length} match — type to narrow`);
+  }
+  if (filter) parts.push(`${filter.side === "inputs" ? "an input taking" : "an output giving"} ${filter.type}`);
+  parts.push(anchor !== undefined ? `added after ${anchor}` : (request.noAnchor ?? "nothing to add after"));
+
+  return (
+    <>
+      <div className="palette-backdrop" onMouseDown={onClose} />
+      <div
+        ref={root}
+        className="palette"
+        data-palette
+        style={{
+          left: Math.max(8, Math.min(request.screen.x, window.innerWidth - WIDTH - 8)),
+          top: Math.max(48, Math.min(request.screen.y, window.innerHeight - HEIGHT - 8)),
+        }}
+        onKeyDown={onKeyDown}
+      >
+        <input
+          autoFocus
+          data-palette-search
+          placeholder="search classes…"
+          value={query}
+          onChange={(event) => {
+            setQuery(event.target.value);
+            setActive(0);
+          }}
+        />
+        <div className="palette-meta" data-palette-meta>
+          {parts.join(" · ")}
+        </div>
+        <ul data-palette-list>
+          {shown.map((spec, index) => (
+            <li
+              key={spec.class_path}
+              data-class={spec.class_path}
+              className={index === active ? "active" : undefined}
+              title={spec.problem || spec.doc}
+              onMouseEnter={() => setActive(index)}
+              onClick={() => onPick(spec)}
+            >
+              <b>{spec.name}</b>
+              <span>{spec.class_path}</span>
+            </li>
+          ))}
+        </ul>
+      </div>
+    </>
+  );
+}

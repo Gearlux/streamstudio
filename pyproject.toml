@@ -114,6 +114,16 @@ streamstudio = "streamstudio.cli:app"
 [project.entry-points."streamstudio.custom_nodes"]
 streamstudio = "streamstudio.custom_nodes:CUSTOM_NODE_URLS"
 
+# `npm` builds the canvas page (`cd frontend && npm install && npm run build` -> `frontend/dist`, which
+# `streamstudio.app.web_dist` serves when present). macOS: brew's `node` formula bundles npm; Linux:
+# aisland fetches the official Node LTS tarball into aisland/tools/ (its USERSPACE_TOOLS registry) and
+# symlinks node/npm/npx into aisland/bin/ — no sudo. The page is a build artifact beside the package,
+# gitignored (frontend/.gitignore) and NOT in package-data: an install without it serves the API and a
+# placeholder naming the build command.
+[tool.aisland.sys-dependencies]
+brew      = ["node"]
+userspace = ["node"]
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["streamstudio*"]
