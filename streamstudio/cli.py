@@ -24,6 +24,10 @@ entry-point discovery, so the converters work WITHOUT a running ComfyUI):
 * ``export-workflow``: convert a WHOLE ``workflow.json`` (UI or API form) into a hoisted-``!ref:``
   YAML (``streamstudio export-workflow workflow.json -o config.yaml``) — the twin of the canvas
   "Export Graph → Taidal YAML". Uses :func:`streamstudio.graphio.workflow_to_yaml`.
+* ``editor``: serve the graph EDITOR (``docs/rewrite.md``) over the confluid documents of a
+  directory (``streamstudio editor <graph_dir> --port 8190``) — the Flask app of
+  :mod:`streamstudio.app`, standalone; a consuming Flask app mounts the same blueprint instead.
+  Refuses a taken port before serving, the way ``run`` does.
 """
 
 import json
@@ -57,6 +61,9 @@ CUSTOM_NODES_ENV_VAR = "STREAMSTUDIO_CUSTOM_NODES"
 # the address BEFORE doing any launch work and (b) print the URL of whatever is already there.
 DEFAULT_PORT = 8188
 STUDIO_HOST = "127.0.0.1"
+#: The graph editor's own default port: beside ComfyUI's 8188 (which ``run`` still serves) and past the
+#: 8189 the busy-port message offers for a second studio, so the two servers coexist on one machine.
+EDITOR_PORT = 8190
 
 
 def default_comfy_dir() -> Path:
@@ -164,19 +171,23 @@ def _report_stopped(port: int, pid: Optional[int]) -> None:
         print(f"Stopped StreamStudio on port {port} (pid {pid}).")
 
 
-def _report_port_in_use(port: int) -> None:
+def _report_port_in_use(port: int, command: str = "") -> None:
     """Say what holds the port and hand over a clickable way in, then stop the launch.
 
     Printed PLAIN (not through loggair) and on its own line: a terminal linkifies a bare ``http://``
     URL, and a log prefix in front of it buries the one thing the reader came for. Without this
     check ComfyUI discovers the clash only at the end of its own boot — measured 2026-08-26, 23
     seconds and 91 lines to reach one ERROR line on line 85, followed by exit code 0.
+
+    ``command`` names the subcommand the suggested alternative must carry (``editor``); blank for
+    the default ``run``, whose suggestion is the bare ``streamstudio --port``.
     """
     print(f"Port {port} is already in use — StreamStudio may already be running there.")
     print()
     print(f"    Open it:  http://{STUDIO_HOST}:{port}")
     print()
-    print(f"If that is a different program, run StreamStudio elsewhere:  streamstudio --port {port + 1}")
+    spelled = f"streamstudio {command}" if command else "streamstudio"
+    print(f"If that is a different program, run StreamStudio elsewhere:  {spelled} --port {port + 1}")
 
 
 def _as_list(value: Union[str, Sequence[str], None]) -> List[str]:
@@ -712,6 +723,35 @@ def convert_server() -> None:
             answer({"ok": True})
         except Exception as exc:  # noqa: BLE001 - every failure answers the requester, never kills the server
             answer({"error": f"{type(exc).__name__}: {exc}"})
+
+
+@app.command(positionals=["graph_dir"], short={"p": "port"})
+def editor(graph_dir: Optional[Path] = None, port: int = EDITOR_PORT) -> None:
+    """Serve the graph editor over the confluid documents of a directory.
+
+    Every ``*.yaml`` in the directory is a graph the editor lists, draws, patches in place and runs
+    one record through (the Flask app of streamstudio.app, served standalone; a consuming Flask app
+    mounts the same blueprint under its own prefix instead). The page itself arrives in phase 3 of
+    the rewrite; until then the root URL lists the API routes.
+
+    Args:
+        graph_dir: Directory holding the graph documents (default: the current directory).
+        port: Port the editor listens on. A port already in use is refused before anything starts,
+            with the address of what is there printed as a clickable URL.
+    """
+    # liquifai binds CLI values VERBATIM as strings (see `_run`), so coerce once, here.
+    directory = Path(graph_dir) if graph_dir is not None else Path.cwd()
+    port = int(port)
+    if not directory.is_dir():
+        raise SystemExit(f"Graph directory not found: {directory}")
+    if _port_in_use(port):
+        _report_port_in_use(port, command="editor")
+        raise SystemExit(1)
+    # Imported here, not at module top: the app pulls in the document model and the palette, which
+    # every other command (a converter, `stop`) has no use for.
+    from streamstudio.app import create_app
+
+    create_app(directory).run(host=STUDIO_HOST, port=port)
 
 
 def main() -> None:
