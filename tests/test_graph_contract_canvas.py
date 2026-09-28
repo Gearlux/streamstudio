@@ -15,17 +15,22 @@ from typing import Any, Dict, List, Optional
 
 import confluid
 import pytest
-from recordstream.ops.contract import GraphContract
+from recordstream.ops.contract import CLASS_VOCABULARY_SLOT, ContractError, GraphContract
 
 import streamstudio
 from streamstudio import graphio
 from streamstudio.export import UnsupportedTopologyError
 from streamstudio.graphio import workflow_to_yaml, yaml_to_workflow
 
+# The vocabulary slot is ``classes`` (``recordstream.ops.contract.CLASS_VOCABULARY_SLOT``), never
+# ``class_names``: that name is a constructor parameter of ``Stream``, and confluid pushes a key under
+# ``delivered:`` into every sibling whose constructor takes it — the wired producer then fails to LOAD
+# and a typed list lands in the Stream without a word. ``check_declaration`` refuses the collision by
+# name; ``TestTheExportWritesWhatWasWired`` pins that refusal through the canvas export.
 CLASSIFICATION = """\
 source: !class:recordstream.ops.contract.GraphContract
   name: classification source
-  outputs: {stream: Stream, class_names: "List[str]"}
+  outputs: {stream: Stream, classes: "List[str]"}
   records: {input: Image, target: Label}
 """
 
@@ -75,7 +80,7 @@ class TestTheRootIsDrawnFromTheDeclaration:
             "graph": "source",
             "name": "classification source",
             "inputs": {},
-            "outputs": {"stream": "Stream", "class_names": "List[str]"},
+            "outputs": {"stream": "Stream", "classes": "List[str]"},
             "records": {"input": "Image", "target": "Label"},
         }
 
@@ -83,7 +88,7 @@ class TestTheRootIsDrawnFromTheDeclaration:
         root = _root_definition(_build())
         assert [(i["name"], i["type"]) for i in root["inputs"]] == [
             ("stream", "RECORDSTREAM_SOURCE"),
-            ("class_names", "STRING"),
+            ("classes", "STRING"),
         ]
 
     def test_the_root_is_titled_and_coloured_as_the_delivering_side(self) -> None:
@@ -97,8 +102,8 @@ class TestTheRootIsDrawnFromTheDeclaration:
         instance = _instance_of(workflow, _root_definition(workflow))
         labels = {i["name"]: i["label"] for i in instance["inputs"]}
         assert labels["stream"] == "stream: Stream"
-        assert labels["class_names"].startswith("class_names: List[str]")
-        assert "required" in labels["class_names"]  # the one socket left open says what to do
+        assert labels["classes"].startswith("classes: List[str]")
+        assert "required" in labels["classes"]  # the one socket left open says what to do
 
     def test_the_root_has_no_outputs_it_is_the_end_of_the_graph(self) -> None:
         workflow = _build()
@@ -113,7 +118,7 @@ class TestTheStreamAndTheBoundary:
         wire = _link_into(workflow, root, "stream")
         assert wire is not None and wire[1] == stream["id"]
         assert _link_into(workflow, stream, "source") is None
-        assert _link_into(workflow, root, "class_names") is None
+        assert _link_into(workflow, root, "classes") is None
 
     def test_the_streams_source_socket_says_it_is_required_here(self) -> None:
         stream = _node(_build(), STREAM)
@@ -160,7 +165,7 @@ class TestRefusals:
 
     def test_an_unknown_slot_kind_is_refused_by_the_contract_itself(self) -> None:
         document = CLASSIFICATION.replace('"List[str]"', "Widget")
-        with pytest.raises(UnsupportedTopologyError, match=r"output 'class_names' declares the type 'Widget'"):
+        with pytest.raises(UnsupportedTopologyError, match=r"output 'classes' declares the type 'Widget'"):
             _build(document)
 
     def test_a_document_without_records_gets_a_root_and_a_stream_and_no_boundary(self) -> None:
@@ -195,10 +200,10 @@ class TestTheExportWritesWhatWasWired:
         document = confluid.load(text)
         contract = document["source"]
         assert isinstance(contract, GraphContract)
-        assert contract.outputs == {"stream": "Stream", "class_names": "List[str]"}
+        assert contract.outputs == {"stream": "Stream", "classes": "List[str]"}
         assert contract.records == {"input": "Image", "target": "Label"}
         assert type(contract.delivered["stream"]).__name__ == "Stream"
-        assert contract.missing() == ["class_names"]  # the workspace's refusal, not the exporter's
+        assert contract.missing() == ["classes"]  # the workspace's refusal, not the exporter's
 
     def test_a_wired_source_and_a_value_list_land_in_delivered(self) -> None:
         workflow = _build()
@@ -207,12 +212,13 @@ class TestTheExportWritesWhatWasWired:
         source = _add(workflow, FILES_SOURCE, ["", "", "", "", "", ""])
         names = _add(workflow, VALUE, ['["cat", "dog"]'])
         _wire(workflow, source, 0, stream, "source")
-        _wire(workflow, names, 0, root, "class_names")
+        _wire(workflow, names, 0, root, "classes")
 
         text = workflow_to_yaml(workflow, streamstudio.NODE_CLASS_MAPPINGS)
         document = confluid.load(text)
         contract = document["source"]
-        assert contract.delivered["class_names"] == ["cat", "dog"]
+        assert contract.delivered[CLASS_VOCABULARY_SLOT] == ["cat", "dog"]
+        assert contract.class_names == ["cat", "dog"]  # the contract reads the vocabulary from its slot
         delivered_stream = contract.delivered["stream"]
         assert type(delivered_stream.source).__name__ == "FilesSource"
         contract.check()  # the workspace's own verification passes on this document
@@ -226,3 +232,19 @@ class TestTheExportWritesWhatWasWired:
         workflow = json.loads(json.dumps(_build()))
         document = confluid.load(workflow_to_yaml(workflow, streamstudio.NODE_CLASS_MAPPINGS))
         assert isinstance(document["source"], GraphContract)
+
+    def test_a_slot_named_class_names_beside_the_delivered_stream_is_refused_by_name(self) -> None:
+        """The CON case of the ``classes`` convention: the canvas still DRAWS (nothing is delivered at
+        draw time, so there is no object to collide with) and the export still writes the document,
+        but the workspace's check refuses it — ``class_names`` is a parameter of the delivered Stream."""
+        document = CLASSIFICATION.replace("classes:", "class_names:")
+        text = workflow_to_yaml(_build(document), streamstudio.NODE_CLASS_MAPPINGS)
+        contract = confluid.load(text)["source"]
+        assert type(contract.delivered["stream"]).__name__ == "Stream"
+        with pytest.raises(ContractError) as refused:
+            contract.check()
+        assert str(refused.value) == (
+            "classification source: output 'class_names' shares its name with a parameter of Stream "
+            "(delivered as 'stream'); confluid would push the slot's value into that parameter "
+            "— rename the slot (the class vocabulary slot is 'classes')"
+        )
