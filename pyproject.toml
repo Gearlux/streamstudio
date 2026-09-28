@@ -57,6 +57,14 @@ dependencies = [
     # ComfyUI itself (its requirements.txt, synced on every launch), so this costs nothing in a
     # working environment; declared because a `pip install streamstudio` must stand on its own.
     "psutil",
+    # Imported at MODULE scope by document.py / _yamltext.py: the document model composes the YAML
+    # text with PyYAML's own node tree (yaml.compose) to locate the line a marker came from, and
+    # spells patched values with yaml.safe_dump. Already transitive via confluid; declared because
+    # a module-scope import is a hard dependency whatever else happens to install it.
+    "pyyaml",
+    # Imported at MODULE scope by app.py: the graph editor is a Flask blueprint (mounted by a consuming
+    # Flask app, or served standalone by `streamstudio editor`) — docs/rewrite.md.
+    "flask",
 ]
 requires-python = ">=3.12"
 
