@@ -1,7 +1,9 @@
 """Node positions: a deterministic layered layout, and a sidecar that remembers where the user put things.
 
 The document holds no positions (``docs/rewrite.md`` §2.1: positions live in a NAMED sidecar,
-``<document>.layout.yaml``, keyed by node name). ``layered_layout`` draws a graph nobody has arranged
+``<document>.layout.yaml``, a ``positions:`` block keyed by node name beside a ``groups:`` block the
+canvas draws — a group is a title, a colour and member names, stored as the page spells it).
+``layered_layout`` draws a graph nobody has arranged
 yet — longest-path layering along the wires, one column per layer, one row per node within a layer,
 in the order the model lists them. ``positions`` merges the two: a node named in the sidecar keeps its
 place, the rest are laid out BELOW the lowest kept row so they never land on top of something the user
@@ -13,7 +15,7 @@ The tests build tiny stand-ins for the model — ``layout`` depends only on the 
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, cast
 
 import pytest
 
@@ -21,9 +23,12 @@ from streamstudio.layout import (
     COLUMN_DX,
     MARGIN,
     ROW_DY,
+    Group,
     layered_layout,
     positions,
+    read_groups,
     read_sidecar,
+    rename_member,
     sidecar_path,
     stale_positions,
     write_sidecar,
@@ -146,7 +151,7 @@ class TestSidecar:
         lines = side.read_text().splitlines()
         assert lines[0].startswith("# ")
         assert "streamstudio.layout" in lines[0]
-        assert lines[1:] == ["a: [40.0, 40.0]", "b: [380.0, 40.0]"]
+        assert lines[1:] == ["positions:", "  a: [40.0, 40.0]", "  b: [380.0, 40.0]"]
 
     def test_a_missing_sidecar_reads_as_empty(self, tmp_path: Path) -> None:
         assert read_sidecar(tmp_path / "absent.layout.yaml") == {}
@@ -161,11 +166,13 @@ class TestSidecar:
     @pytest.mark.parametrize(
         "text, where, why",
         [
-            ("a: 7\n", "2:4", "not a [x, y] pair"),
-            ("a: [1, 2, 3]\n", "2:4", "not a [x, y] pair"),
-            ("a: [x, 1]\n", "2:5", "not a number"),
+            ("positions: {a: 7}\n", "2:16", "not a [x, y] pair"),
+            ("positions: {a: [1, 2, 3]}\n", "2:16", "not a [x, y] pair"),
+            ("positions: {a: [x, 1]}\n", "2:17", "not a number"),
+            ("positions: [1, 2]\n", "2:12", "not a mapping"),
+            ("a: [1, 2]\n", "2:1", "no block 'a'"),
             ("- 1\n- 2\n", "1:1", "not a mapping"),
-            ("a: [1, 2\nb: 3\n", "3:2", "expected ',' or ']'"),
+            ("positions: {a: [1, 2\nb: 3\n", "3:2", "expected ',' or ']'"),
         ],
     )
     def test_a_malformed_sidecar_is_refused_by_file_line_and_column(
@@ -183,6 +190,92 @@ class TestSidecar:
         side = tmp_path / "nowhere" / "g.layout.yaml"
         with pytest.raises(ValueError, match=str(tmp_path / "nowhere")):
             write_sidecar(side, {"a": (0.0, 0.0)})
+
+
+GROUPS: List[Group] = [
+    {"id": "g1", "title": "front end", "color": "#3b82f6", "nodes": ["a", "stream.ops[1]"]},
+]
+
+
+class TestGroups:
+    """The ``groups:`` block: what the canvas draws around nodes, kept beside the positions and interpreted by
+    the server ONLY to re-key a renamed member — everything else in a group is the page's own."""
+
+    def test_groups_round_trip_beside_the_positions_byte_stable(self, tmp_path: Path) -> None:
+        side = tmp_path / "g.layout.yaml"
+        write_sidecar(side, {"a": (40.0, 40.0), "stream.ops[1]": (380.0, 240.0)}, groups=GROUPS)
+        first = side.read_bytes()
+        assert read_groups(side) == GROUPS
+        assert read_sidecar(side) == {"a": (40.0, 40.0), "stream.ops[1]": (380.0, 240.0)}
+        write_sidecar(side, read_sidecar(side), groups=read_groups(side))
+        assert side.read_bytes() == first
+        assert side.read_text().splitlines()[1:] == [
+            "positions:",
+            "  a: [40.0, 40.0]",
+            "  stream.ops[1]: [380.0, 240.0]",
+            "groups:",
+            "- id: g1",
+            "  title: front end",
+            "  color: '#3b82f6'",
+            "  nodes: [a, 'stream.ops[1]']",
+        ]
+
+    def test_a_sidecar_without_a_groups_block_reads_as_no_groups(self, tmp_path: Path) -> None:
+        side = tmp_path / "g.layout.yaml"
+        write_sidecar(side, {"a": (40.0, 40.0)})
+        assert "groups" not in side.read_text()
+        assert read_groups(side) == []
+        assert read_groups(tmp_path / "absent.layout.yaml") == []
+
+    def test_groups_alone_write_no_positions_block(self, tmp_path: Path) -> None:
+        side = tmp_path / "g.layout.yaml"
+        write_sidecar(side, {}, groups=GROUPS)
+        assert side.read_text().splitlines()[1] == "groups:"
+        assert read_sidecar(side) == {}
+        assert read_groups(side) == GROUPS
+
+    def test_a_group_is_stored_as_the_page_spelled_it(self, tmp_path: Path) -> None:
+        """Opaque: a member the model may not have and a key the server never reads both come back as given."""
+        side = tmp_path / "g.layout.yaml"
+        # a key Group does not declare: cast, because that is exactly what the page may send
+        odd: List[Group] = [
+            cast(Group, {"id": "g2", "title": "x", "color": "red", "nodes": ["nosuch"], "note": "kept"})
+        ]
+        write_sidecar(side, {}, groups=odd)
+        assert read_groups(side) == odd
+
+    @pytest.mark.parametrize(
+        "text, where, why",
+        [
+            ("groups: {a: 1}\n", "2:9", "not a list of groups"),
+            ("groups: [1]\n", "2:10", "a group is not a mapping"),
+        ],
+    )
+    def test_a_malformed_groups_block_is_refused_by_file_line_and_column(
+        self, tmp_path: Path, text: str, where: str, why: str
+    ) -> None:
+        side = tmp_path / "g.layout.yaml"
+        side.write_text("# header\n" + text)
+        with pytest.raises(ValueError) as caught:
+            read_groups(side)
+        message = str(caught.value)
+        assert message.startswith(f"{side}:{where}: "), message
+        assert why in message
+
+    def test_rename_member_re_keys_every_group_naming_the_node_and_nothing_else(self) -> None:
+        groups: List[Group] = [
+            {"id": "g1", "title": "front", "color": "#111", "nodes": ["a", "b"]},
+            {"id": "g2", "title": "back", "color": "#222", "nodes": ["c"]},
+            {"id": "g3", "title": "odd", "color": "#333"},  # no member list: left as it is
+        ]
+        renamed = rename_member(groups, "a", "z")
+        assert renamed == [
+            {"id": "g1", "title": "front", "color": "#111", "nodes": ["z", "b"]},
+            {"id": "g2", "title": "back", "color": "#222", "nodes": ["c"]},
+            {"id": "g3", "title": "odd", "color": "#333"},
+        ]
+        assert groups[0]["nodes"] == ["a", "b"]  # the input is not edited in place
+        assert rename_member(groups, "nosuch", "z") == groups
 
 
 class TestPositions:
@@ -231,8 +324,37 @@ class TestPositions:
         assert positions(g, side) == positions(g, side)
 
 
+def test_a_node_without_wires_goes_below_the_wired_ones_in_its_column() -> None:
+    """An unwired node (a graph's contract root whose host inputs no step names) must not push the
+    chain down a row: within a column the wired nodes take the top rows, the unwired ones follow, each
+    group in the model's order. Measured before this rule on the shipped Bluetooth pane: the contract
+    root took row 0 of the first column and the first step dropped to row 1 while the rest stayed up."""
+    g = Graph([Node("root"), Node("a"), Node("b"), Node("c")], [Wire("a", "b"), Wire("b", "c")])
+    pos = layered_layout(g)
+    assert pos["a"] == (column(0), row(0))
+    assert pos["root"] == (column(0), row(1))
+    assert [pos[n][1] for n in "abc"] == [row(0)] * 3
+
+
+def test_positions_without_a_sidecar_place_the_unwired_node_below_too(tmp_path: Path) -> None:
+    """The server's merge (``positions``) lays out fresh nodes by the SAME row rule as
+    ``layered_layout`` — measured before: the rule lived only in ``layered_layout``, so the page, which
+    asks the server, still drew the Bluetooth pane's contract root above its first step."""
+    g = Graph([Node("root"), Node("a"), Node("b"), Node("c")], [Wire("a", "b"), Wire("b", "c")])
+    assert positions(g, tmp_path / "absent.layout.yaml") == layered_layout(g)
+
+
+def test_a_column_of_only_unwired_nodes_keeps_the_models_order() -> None:
+    """CON case: with no wires at all nothing is reordered — the column reads top to bottom as the model."""
+    g = Graph([Node("z"), Node("y"), Node("x")], [])
+    pos = layered_layout(g)
+    assert [pos[n] for n in "zyx"] == [(column(0), row(0)), (column(0), row(1)), (column(0), row(2))]
+
+
 def test_bte_view_derives_into_twenty_four_layers_one_column_apart() -> None:
-    """The shipped Bluetooth pane is a 24-step chain: every step is its own layer, 340 px from the last."""
+    """The shipped Bluetooth pane is a 24-step chain plus its contract root (the host's inputs, which no
+    step names by entry, so it carries no wire): the steps stay one row, 340 px apart, and the root sits
+    under the first step."""
     waivefront = pytest.importorskip("waivefront")
     try:
         from streamstudio.document import Document
@@ -241,7 +363,9 @@ def test_bte_view_derives_into_twenty_four_layers_one_column_apart() -> None:
     path = Path(waivefront.__file__).parent / "annotation" / "bte_view.yaml"
     model = Document.open(path).model
     pos = layered_layout(model)
-    assert len(pos) == 24
-    xs = sorted(x for x, _ in pos.values())
+    assert len(pos) == 25
+    steps = {name: xy for name, xy in pos.items() if name != "contract"}
+    xs = sorted(x for x, _ in steps.values())
     assert xs == [column(i) for i in range(24)]
-    assert {y for _, y in pos.values()} == {row(0)}
+    assert {y for _, y in steps.values()} == {row(0)}
+    assert pos["contract"] == (column(0), row(1))

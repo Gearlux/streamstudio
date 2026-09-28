@@ -34,11 +34,15 @@ import numpy as np
 import pytest
 from confluid import configurable, parse_param_docs
 from flask import Flask
-from recordstream import Algorithm, Image, Input, Label, Output, Record
+from recordstream import Algorithm, Image, Input, Label, Output, Record, items
+from recordstream.items import item_type_names
 from recordstream.ops.contract import ClassNamesOutput
 
-from streamstudio import cli, layout
-from streamstudio.app import EXTENSION, GRAPH_KINDS, create_app, editor_blueprint
+from streamstudio import app as app_module
+from streamstudio import cli
+from streamstudio import document as document_module
+from streamstudio import layout
+from streamstudio.app import EXTENSION, GRAPH_KINDS, create_app, editor_blueprint, web_dist
 from streamstudio.document import Document
 
 MOD = __name__
@@ -147,11 +151,16 @@ flow:
 outputs: mask
 """
 
-STUDY_TEXT = f"""\
+# The contract root follows the flow: placed before it, the flow's top-level ``outputs: mask`` is handed
+# to the contract's own ``outputs`` parameter and the document does not build (STUDY_FIRST_TEXT).
+_STUDY_ROOT = """\
 contract: !class:recordstream.ops.contract.GraphContract
   name: app study
-  inputs: {{image: Image}}
-  outputs: {{}}
+  inputs: {image: Image}
+  outputs: {}
+"""
+STUDY_TEXT = (
+    f"""\
 flow:
   gain:
     op: !class:{MOD}.TinyGain {{gain: 2.0}}
@@ -160,6 +169,9 @@ flow:
     from: gain
 outputs: mask
 """
+    + _STUDY_ROOT
+)
+STUDY_FIRST_TEXT = _STUDY_ROOT + STUDY_TEXT[: -len(_STUDY_ROOT)]
 
 SOURCE_TEXT = f"""\
 stream: !class:recordstream.core.stream.Stream
@@ -356,7 +368,7 @@ class TestEdits:
         assert body["model"]["outputs"] == ["mask2"]
         text = (graph_dir / "study.yaml").read_text()
         assert "  mask2:\n    op: !class:recordstream.ops.numpy.Threshold {low_level: 0.7}\n    from: mask\n" in text
-        assert text.endswith("outputs: mask2\n")
+        assert "\noutputs: mask2\n" in text  # the root follows the flow
 
     def test_add_step_whose_input_nothing_produces_is_refused_and_the_file_unchanged(
         self, client: Any, graph_dir: Path
@@ -419,6 +431,26 @@ class TestEdits:
         assert redone.get_json()["changed"] is True
         assert "low_level: 0.9" in (graph_dir / "pets.yaml").read_text()
 
+    def test_undoing_a_rename_through_the_routes_gives_the_position_back_to_the_old_name(
+        self, client: Any, graph_dir: Path
+    ) -> None:
+        """Measured before the fix: the sidecar kept the NEW name after the undo, so the node was laid out
+        afresh and its saved position was lost."""
+        assert client.put("/api/graphs/study/positions", json={"positions": {"gain": [10, 20]}}).status_code == 200
+        assert client.post("/api/graphs/study/rename", json={"node": "gain", "new": "amp"}).status_code == 200
+        assert client.get("/api/graphs/study").get_json()["positions"]["amp"] == [10.0, 20.0]
+        assert client.post("/api/graphs/study/undo").get_json()["changed"] is True
+        positions = client.get("/api/graphs/study").get_json()["positions"]
+        assert positions["gain"] == [10.0, 20.0] and "amp" not in positions
+
+    def test_a_text_that_derives_but_does_not_build_is_refused_and_not_written(
+        self, client: Any, graph_dir: Path
+    ) -> None:
+        response = client.put("/api/graphs/study", json={"text": STUDY_FIRST_TEXT})
+        assert response.status_code == 400
+        assert "does not build" in _error(response) and "Failed to construct GraphContract" in _error(response)
+        assert (graph_dir / "study.yaml").read_text() == STUDY_TEXT
+
     def test_undo_with_nothing_to_undo_changes_nothing(self, client: Any, graph_dir: Path) -> None:
         response = client.post("/api/graphs/pets/undo")
         assert response.status_code == 200
@@ -458,6 +490,61 @@ class TestPositions:
         expected = layout.layered_layout(Document.open(graph_dir / "pets.yaml").model)
         assert response.get_json() == {name: [x, y] for name, (x, y) in expected.items()}
         assert layout.read_sidecar(graph_dir / "pets.layout.yaml") == expected
+
+
+# ------------------------------------------------------------------------------------------------
+# groups: a sidecar block the canvas draws and the server stores as given
+# ------------------------------------------------------------------------------------------------
+
+
+class TestGroups:
+    GROUPS = [{"id": "g1", "title": "front end", "color": "#3b82f6", "nodes": ["gain", "mask"]}]
+
+    def test_a_graph_without_a_sidecar_has_no_groups(self, client: Any) -> None:
+        assert client.get("/api/graphs/flow").get_json()["groups"] == []
+
+    def test_put_groups_writes_the_sidecar_block_and_keeps_the_positions(self, client: Any, graph_dir: Path) -> None:
+        assert client.put("/api/graphs/flow/positions", json={"positions": {"gain": [10, 20]}}).status_code == 200
+        response = client.put("/api/graphs/flow/groups", json={"groups": self.GROUPS})
+        assert response.status_code == 200
+        assert response.get_json() == {"groups": self.GROUPS}
+        body = client.get("/api/graphs/flow").get_json()
+        assert body["groups"] == self.GROUPS
+        assert body["positions"]["gain"] == [10.0, 20.0]
+        sidecar = graph_dir / "flow.layout.yaml"
+        assert layout.read_groups(sidecar) == self.GROUPS
+        assert layout.read_sidecar(sidecar)["gain"] == (10.0, 20.0)
+        assert (graph_dir / "flow.yaml").read_text() == FLOW_TEXT  # a group never touches the document
+        # a later positions write keeps the groups, and the other way round
+        client.put("/api/graphs/flow/positions", json={"positions": {"gain": [30, 40]}})
+        assert layout.read_groups(sidecar) == self.GROUPS
+        client.put("/api/graphs/flow/groups", json={"groups": []})
+        assert layout.read_sidecar(sidecar)["gain"] == (30.0, 40.0)
+        assert client.get("/api/graphs/flow").get_json()["groups"] == []
+
+    def test_a_group_is_stored_as_the_page_spelled_it(self, client: Any) -> None:
+        """Opaque: a member the model may not have and a key the server never reads both come back as given."""
+        groups = [{"id": "g9", "title": "x", "color": "red", "nodes": ["nosuch"], "note": "kept"}]
+        response = client.put("/api/graphs/flow/groups", json={"groups": groups})
+        assert response.status_code == 200
+        assert response.get_json()["groups"] == groups
+
+    @pytest.mark.parametrize("body", [{"groups": {"g1": {}}}, {"groups": [1]}, {"groups": "g1"}, {}])
+    def test_groups_that_are_not_a_list_of_objects_are_400(self, client: Any, graph_dir: Path, body: Any) -> None:
+        response = client.put("/api/graphs/flow/groups", json=body)
+        assert response.status_code == 400
+        assert "groups" in _error(response)
+        assert not (graph_dir / "flow.layout.yaml").exists()
+
+    def test_renaming_a_member_re_keys_the_group_like_the_sidecar_entry(self, client: Any, graph_dir: Path) -> None:
+        client.put("/api/graphs/flow/groups", json={"groups": self.GROUPS})
+        response = client.post("/api/graphs/flow/rename", json={"node": "gain", "new": "amp"})
+        assert response.status_code == 200
+        assert response.get_json()["groups"] == [{**self.GROUPS[0], "nodes": ["amp", "mask"]}]
+        assert layout.read_groups(graph_dir / "flow.layout.yaml")[0]["nodes"] == ["amp", "mask"]
+
+    def test_groups_of_an_unknown_graph_are_404(self, client: Any) -> None:
+        assert client.put("/api/graphs/nosuch/groups", json={"groups": []}).status_code == 404
 
 
 # ------------------------------------------------------------------------------------------------
@@ -613,13 +700,95 @@ class TestMounting:
         assert client.get("/editor/api/graphs/nosuch").status_code == 404
         assert client.get("/api/graphs").status_code == 404
 
-    def test_the_placeholder_page_says_the_editor_arrives_in_phase_3_and_lists_the_routes(self, client: Any) -> None:
+    def test_without_a_built_page_the_root_says_how_to_build_it_and_lists_the_routes(
+        self, graph_dir: Path, tmp_path: Path
+    ) -> None:
+        """``web_dist`` names a directory with no ``index.html``: the placeholder, never a 404."""
+        client = create_app(graph_dir, web_dist=tmp_path / "not-built").test_client()
         response = client.get("/")
         assert response.status_code == 200
         page = response.get_data(as_text=True)
-        assert "phase 3" in page
+        assert "npm run build" in page and "frontend" in page
         for route in ("/api/graphs", "/api/palette", "/api/runs/<run>/rerun", "/api/graphs/<name>/trace"):
             assert route in page
+        assert client.get("/assets/app.js").status_code == 404
+
+    def test_a_built_page_is_served_at_the_root_with_its_assets(self, graph_dir: Path, tmp_path: Path) -> None:
+        """A directory holding ``index.html`` IS the page: ``/`` serves it, ``/<file>`` its assets."""
+        dist = tmp_path / "dist"
+        (dist / "assets").mkdir(parents=True)
+        (dist / "index.html").write_text("<!doctype html><title>built</title><script src=./assets/app.js></script>")
+        (dist / "assets" / "app.js").write_text("console.log('built')")
+        client = create_app(graph_dir, web_dist=dist).test_client()
+        assert client.get("/").get_data(as_text=True).startswith("<!doctype html><title>built</title>")
+        assert client.get("/assets/app.js").get_data(as_text=True) == "console.log('built')"
+        assert client.get("/assets/missing.js").status_code == 404
+        assert client.get("/api/graphs").status_code == 200  # the API is not shadowed by the page
+
+    def test_the_default_page_is_the_checkouts_frontend_dist_when_built(self) -> None:
+        """``web_dist()`` resolves ``<repo>/frontend/dist`` beside the package (navigaitor's shape) — the
+        directory itself when its ``index.html`` exists, ``None`` when the page is not built."""
+        expected = Path(app_module.__file__).resolve().parent.parent / "frontend" / "dist"
+        found = web_dist()
+        assert found == (expected if (expected / "index.html").is_file() else None)
+
+
+# ------------------------------------------------------------------------------------------------
+# the socket types: what the page's `compatible(a, b)` asks the server, so both use ONE meet rule
+# ------------------------------------------------------------------------------------------------
+
+
+class TestTypes:
+    def test_the_types_route_lists_what_a_socket_type_may_be_wired_into(self, client: Any) -> None:
+        response = client.get("/api/types")
+        assert response.status_code == 200
+        types = response.get_json()
+        assert types["Stream"] == ["Source"]  # a Stream IS a Source (document.py's _SUBTYPES)
+        assert types["integer"] == ["number"]
+        assert "Image" not in types.get("Label", []) and "Label" not in types.get("Image", [])
+        for registered in item_type_names():
+            assert registered in types, f"{registered} is a registered item and must appear, even with no ancestors"
+        assert all(isinstance(ancestors, list) for ancestors in types.values())
+
+    def test_a_registered_item_subclass_lists_its_registered_bases_and_nothing_else(
+        self, client: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The page cannot know subclasses: ``issubclass`` between REGISTERED items is the one rule, so a
+        subclass names its registered bases — and the unregistered base between them (``NDArrayItem``) never."""
+
+        class TinyPhoto(Image):
+            pass
+
+        monkeypatch.setitem(items._ITEM_TYPES, "TinyPhoto", TinyPhoto)
+        types = client.get("/api/types").get_json()
+        assert types["TinyPhoto"] == ["Image"]
+        assert types["Image"] == []
+        assert "NDArrayItem" not in types
+
+    def test_the_route_agrees_with_the_documents_own_meet_rule(
+        self, client: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        class TinyPhoto(Image):
+            pass
+
+        monkeypatch.setitem(items._ITEM_TYPES, "TinyPhoto", TinyPhoto)
+        types = client.get("/api/types").get_json()
+
+        def compatible(a: str, b: str) -> bool:  # the page's rule, in Python
+            return a == b or "*" in (a, b) or b in types.get(a, [])
+
+        cases = [
+            ("TinyPhoto", "Image"),
+            ("Image", "TinyPhoto"),
+            ("Stream", "Source"),
+            ("Source", "Stream"),
+            ("integer", "number"),
+            ("Image", "Label"),
+            ("*", "Label"),
+            ("Record", "Record"),
+        ]
+        for a, b in cases:
+            assert compatible(a, b) == document_module._meets(a, b), (a, b)
 
 
 # ------------------------------------------------------------------------------------------------
@@ -713,6 +882,4 @@ class TestEditorCommand:
 
 def test_magic_mock_is_not_left_installed() -> None:
     """The ``patch`` contexts above are scoped — the real factory is what the module exports afterwards."""
-    from streamstudio import app as app_module
-
     assert not isinstance(app_module.create_app, MagicMock)

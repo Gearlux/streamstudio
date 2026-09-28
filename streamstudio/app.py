@@ -42,17 +42,21 @@ from typing import Any, Dict, List, Literal, Mapping, Optional, Tuple, get_args
 
 import confluid
 import yaml
-from flask import Blueprint, Flask, Response, current_app, jsonify, request
+from flask import Blueprint, Flask, Response, abort, current_app, jsonify, request, send_from_directory
 from recordstream.core.stream import Stream
 from recordstream.flow import Tracer
 from recordstream.ops.contract import ChainContractError
 
+from streamstudio import document as document_module
 from streamstudio import layout, palette
 from streamstudio._yamltext import YamlText
 from streamstudio.document import Document, Model, Node
 
 #: The key under ``app.extensions`` where the :class:`Studio` of an app lives.
 EXTENSION = "streamstudio"
+
+#: The command that builds the canvas page — printed by the placeholder, so the fix is on the page that needs it.
+BUILD_COMMAND = "cd streamstudio/frontend && npm install && npm run build"
 
 #: What a document's root says it is: a ``flow:`` graph, a contract-rooted graph (a template twin),
 #: or any other configuration (a ``Stream``, a processor …).
@@ -245,7 +249,7 @@ class Studio:
         return [{"name": name, "path": str(self.path_of(name)), "kind": self.kind(name)} for name in self.names()]
 
     def graph(self, name: str) -> Dict[str, Any]:
-        """``{name, path, kind, text, model, positions, history_depth}`` of one graph."""
+        """``{name, path, kind, text, model, positions, groups, history_depth}`` of one graph."""
         document = self.document(name)
         return {
             "name": name,
@@ -254,6 +258,7 @@ class Studio:
             "text": document.text,
             "model": _model_dict(document.model),
             "positions": _positions_dict(document.positions),
+            "groups": document.groups,
             "history_depth": document.history_depth,
         }
 
@@ -325,6 +330,23 @@ class Studio:
         document.set_positions(layout.layered_layout(document.model))
         document.save()
         return _positions_dict(document.positions)
+
+    # -- groups ------------------------------------------------------------------------------
+
+    def set_groups(self, name: str, groups: Any) -> Dict[str, List[layout.Group]]:  # groups: the request's JSON
+        """Replace the graph's groups (the sidecar's ``groups:`` block) and answer ``{groups}``.
+
+        Only the shape is checked — a list of JSON objects; what a group holds is the page's, stored as
+        sent (``streamstudio.layout.Group``). The document is never touched: it has no group spelling.
+        """
+        document = self.document(name)
+        if not isinstance(groups, list) or not all(isinstance(group, dict) for group in groups):
+            raise ValueError(
+                f"{name}.yaml: 'groups' must be a list of group objects ({{id, title, color, nodes}}), got {groups!r}"
+            )
+        document.set_groups(groups)
+        document.save()
+        return {"groups": document.groups}
 
     # -- the settings form -------------------------------------------------------------------
 
@@ -554,6 +576,16 @@ def editor_blueprint(graph_dir: Path, *, history_depth: int = 50) -> Blueprint:
     def relayout(name: str) -> Response:
         return jsonify(_studio().relayout(name))
 
+    @blueprint.put("/api/graphs/<name>/groups")
+    def set_groups(name: str) -> Response:
+        return jsonify(_studio().set_groups(name, _field(_body(), "groups")))
+
+    @blueprint.get("/api/types")
+    def types() -> Response:
+        """``{socket type: [the types it may be wired into]}`` — the page's ``compatible(a, b)`` reads this so
+        it applies the SAME meet rule the model does (:func:`streamstudio.document.supertypes`)."""
+        return jsonify(document_module.supertypes())
+
     @blueprint.get("/api/palette")
     def palette_route() -> Response:
         refresh = request.args.get("refresh", "") not in ("", "0", "false")
@@ -584,27 +616,84 @@ def editor_blueprint(graph_dir: Path, *, history_depth: int = 50) -> Blueprint:
     return blueprint
 
 
-def create_app(graph_dir: Path, *, history_depth: int = 50) -> Flask:
-    """The standalone editor: the blueprint at ``/``, and a placeholder page until the canvas lands (phase 3)."""
-    app = Flask(__name__)
-    app.register_blueprint(editor_blueprint(Path(graph_dir), history_depth=history_depth))
+def web_dist() -> Optional[Path]:
+    """``<repo>/frontend/dist`` when the canvas page is built there, else ``None``.
 
-    @app.get("/")
-    def index() -> str:
+    The page is a build artifact beside the package, never in it (navigaitor's shape): ``frontend/`` is
+    the committed source, ``frontend/dist`` is gitignored and produced by :data:`BUILD_COMMAND`, and an
+    install without it still serves the API and a placeholder that says how to build. ``index.html`` is
+    the test — a ``dist/`` left over from an interrupted build must not be mistaken for a page.
+    """
+    dist = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+    return dist if (dist / "index.html").is_file() else None
+
+
+_default_web_dist = web_dist  # create_app's keyword of the same name shadows the function inside it
+
+
+def page_blueprint(dist: Optional[Path] = None) -> Blueprint:
+    """The canvas page: ``/`` is ``index.html`` and ``/<file>`` an asset of ``dist``, or — when ``dist`` holds
+    no ``index.html`` — a placeholder naming the build command and listing the API routes.
+
+    Separate from :func:`editor_blueprint` so a consuming app can mount the API alone, or both under one
+    prefix (``url_prefix="/editor"``): the page is built with ``base: './'``, so its asset URLs resolve
+    against whatever path serves it.
+    """
+    blueprint = Blueprint(f"{EXTENSION}_page", __name__)
+    built = dist if dist is not None and (dist / "index.html").is_file() else None
+
+    @blueprint.get("/")
+    def index() -> Any:  # flask.Response from send_from_directory, or the placeholder str
+        if built is not None:
+            return send_from_directory(built, "index.html")
         rules = sorted(
             (rule.rule, ", ".join(sorted((rule.methods or set()) - {"HEAD", "OPTIONS"})))
-            for rule in app.url_map.iter_rules()
-            if rule.rule.startswith("/api")
+            for rule in current_app.url_map.iter_rules()
+            if "/api/" in rule.rule
         )
         items = "".join(f"<li><code>{methods} {path}</code></li>" for path, methods in rules)
         return (
             "<!doctype html><title>streamstudio editor</title>"
-            f"<h1>streamstudio editor</h1><p>Graphs in <code>{graph_dir}</code>. "
-            "The editor page arrives in phase 3 (<code>docs/rewrite.md</code> §7); the API is up:</p>"
+            "<h1>streamstudio editor</h1>"
+            f"<p>The canvas page is not built. Build it once — <code>{BUILD_COMMAND}</code> — and reload; "
+            f"the page lands in <code>frontend/dist</code> beside the package. The API is up:</p>"
             f"<ul>{items}</ul>"
         )
 
+    @blueprint.get("/<path:filename>")
+    def asset(filename: str) -> Response:
+        if built is None:
+            abort(404)
+        return send_from_directory(built, filename)
+
+    return blueprint
+
+
+def create_app(graph_dir: Path, *, history_depth: int = 50, web_dist: Optional[Path] = None) -> Flask:
+    """The standalone editor: the API blueprint and the page blueprint at ``/``.
+
+    Args:
+        graph_dir: The directory whose ``*.yaml`` files are the graphs.
+        history_depth: How many edits each document's ``undo`` can walk back.
+        web_dist: Where the built page is; ``None`` looks beside the package (:func:`web_dist`). A directory
+            without ``index.html`` serves the placeholder — which is how a test asks for it deterministically
+            whatever the checkout holds.
+    """
+    app = Flask(__name__)
+    app.register_blueprint(editor_blueprint(Path(graph_dir), history_depth=history_depth))
+    app.register_blueprint(page_blueprint(_default_web_dist() if web_dist is None else Path(web_dist)))
     return app
 
 
-__all__ = ["EXTENSION", "GRAPH_KINDS", "GraphKind", "Run", "Studio", "create_app", "editor_blueprint"]
+__all__ = [
+    "BUILD_COMMAND",
+    "EXTENSION",
+    "GRAPH_KINDS",
+    "GraphKind",
+    "Run",
+    "Studio",
+    "create_app",
+    "editor_blueprint",
+    "page_blueprint",
+    "web_dist",
+]
