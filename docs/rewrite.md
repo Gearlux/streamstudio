@@ -289,14 +289,40 @@ runs `check()` on every one, and keeps JSON and YAML side by side until the flip
 - The `app:` block in 7 shipped pane files stays as the settings form's field list; the
   `__lo`/`__hi` names go.
 - A `Stream` with an `ops:` list is drawn as a chain of record wires between the ops.
+- A hand-drawn wire is a PROPOSAL until a route can spell it (phase 3 part 1, 2026-09-28): no phase-2 route writes
+  a wire — a Stream's record wires ARE its `ops:` order, a flow's are `from:` / `bind:`, a contract's `!ref:` — so
+  a drop whose types meet stays dashed on the canvas, a toast names the spelling the document would need, the file
+  is untouched, and the next model refresh drops it. A mismatch is refused WHILE dragging and never becomes an edge.
 - Two datasets in one graph are the existing `JointStream`, drawn with one socket per stream.
+- Taken while landing phase 3 part 2 (2026-09-28): undo is TWO histories under one gesture — a document edit is
+  undone by the document's own text history on the server (`POST …/undo`, shared with an agent's edits), a move, an
+  arrange or a group by the page, which recorded its before and after; groups live in the sidecar's `groups:` block
+  only, stored as the page spelled them (`docs/architecture.md` has both records). A rerun from the run panel sends
+  only the values that differ from what the run's node holds, and a value typed there is a trial, never written.
+- Taken while closing phase 3 (2026-09-28), gathered from what landed:
+  - **The wire rule** stands as written above for EVERY document edit the canvas cannot route: a drawn wire, and a
+    step into a `Stream`'s `ops:` list (the palette, a dropped wire and paste all refuse there with the server's
+    `'stream.ops[1]' is not a flow step (the steps are: [])`). The page never writes a spelling the document did not
+    state; each is a missing route in `streamstudio/TASKS.md`.
+  - **Groups live in the sidecar only**, stored as the page spelled them; the server reads inside a group only to
+    follow a rename.
+  - **Positions and the layout history are the page's.** The server stores what the page sends (`PUT …/positions`,
+    `…/groups`); the before/after of a move, an arrange or a group lives in the page's timeline for as long as the
+    page is open, and never enters the document's text history.
+  - **The built page is not in the wheel.** `frontend/dist` is gitignored, outside `package-data`, not built by CI
+    (navigaitor's precedent); an install without it serves the API and a placeholder naming the build command.
+    Shipping it is a release item for the flip (`streamstudio/TASKS.md`).
+  - **The palette draws at most 200 rows**; typing narrows them. Paste is `add_step` per copied node with the values
+    the document spells, so a whole float arrives as an integer (`2.0` → `2`, tracked).
 
 Taken while landing phase 2 (2026-09-28):
 
 - The standalone verb is `streamstudio editor <graph_dir> --port 8190`, not `run`: bare `streamstudio`
   still launches ComfyUI until the flip, and the two servers coexist on one machine (8188 beside 8190).
 - The HuggingFace pickers and the directory chooser arrive in phase 3 as routes beside the page that
-  calls them; phase 2 ships no route without a caller.
+  calls them; phase 2 ships no route without a caller. **Not landed with phase 3** (2026-09-28): no node of the page
+  calls one yet, so the same rule keeps them out; they are deferred to `streamstudio/TASKS.md` and must land before
+  phase 4 deletes the ComfyUI versions.
 - The first layout is streamstudio's own layered one (`layout.py`: longest-path layering along the
   wires, one column per layer; a node the sidecar names keeps its place, a new node lands below the
   lowest kept one), not dagre on the server — the page may still run dagre client-side.
@@ -349,7 +375,7 @@ Each phase ends with its gates green and the previous path still working.
 | 0 templates | every converted YAML loads, carries its contract, passes `check()` | the 17 conversions | in progress 2026-09-28 |
 | 1 engine, landed 2026-09-28 | `recordstream/tests/test_trace.py`: 39 tests — overhead bound, rerun recomputes only downstream, refused parameter leaves the trace untouched, gated chain runs whole, in-place edit is flagged, lazy constructor | `recordstream/flow/trace.py`, exported as `recordstream.flow.Tracer`, user page `docs/trace.md` | tests in progress 2026-09-28 |
 | 2 document and app, landed 2026-09-28 | `streamstudio/tests/test_document.py` (58): bte_view derives 24 nodes and 49 wires, patch keeps comments and `$VAR`, new parameter shifts nothing, wire mismatch refused, rename is atomic, sidecar round trip; `test_app.py` (47): every route through Flask's test client; `test_palette.py` (72); `test_layout.py` (28) | `document.py`, `_yamltext.py`, `palette.py`, `layout.py`, `app.py`, `cli.py` (`editor`) | 205 tests green; whole suite `730 passed, 1 skipped in 30.83s`; mypy `Success: no issues found in 50 source files` |
-| 3 canvas | the playwright proof turned into `tests/test_canvas.py` against the built page: sockets refuse a mismatch, palette of the real 419 types, save produces the same YAML the model came from | `frontend/` |
+| 3 canvas, landed 2026-09-28 | the playwright proof turned into `tests/test_canvas.py` against the built page: sockets refuse a mismatch, palette of the real 419 types, save produces the same YAML the model came from | `frontend/` | landed 2026-09-28 in two parts — part 1, the scaffold: 14 playwright + 9 vitest; part 2 (palette of the real 447 classes, groups, undo/redo, copy/paste, arrange, rename, run panel, settings): `tests/test_canvas.py` 44 + vitest 57, with `test_app.py` 61, `test_layout.py` 37, `test_document.py` 59. Deferred to `streamstudio/TASKS.md`: collapse to subgraph, a step into a `Stream`'s `ops:`, a route that writes a wire, the HuggingFace pickers and directory chooser |
 | 4 annotaide | its existing suite, with the converter and seeding pins deleted and the mount pinned | the mount, the deletions |
 | 5 agent tools | the transcript of §2.4 as a test against the generated tools | navigaitor registration |
 
@@ -363,15 +389,20 @@ tools for Algorithms without a run; any change to confluid's grammar.
 
 ## 9. Status
 
-Landed on 2026-09-28, nothing committed. Phase 0, phase 1 and phase 2 are complete.
+Landed on 2026-09-28, nothing committed. Phase 0, phase 1, phase 2 and phase 3 are complete (phase 3 without
+collapse to subgraph, deferred).
 
 | project | what landed | gate |
 | --- | --- | --- |
 | recordstream | option A in `ops/contract.py` (`CLASS_VOCABULARY_SLOT = "classes"`, the collision refusal, a wired producer accepted); 62 contract tests; `docs/graph-contract.md`; `flow/trace.py` (the engine: check, run, step, resume, rerun_from, value, to_dict) with `docs/trace.md`, an architecture record and 39 passing tests | whole suite green; mypy clean |
 | annotaide | `classification.yaml` delivers `classes`; seven YAML twins under `workspaces/classification/` and `workspaces/detection/`, each rooted in a `contract:` entry; `tests/test_template_twins.py` pins each twin's `check()` outcome; the type-workspace mandate amended | `2056 passed`; mypy clean |
 | waivefront | ten YAML twins under `waivefront/annotation/`; `write_annotations.yaml` carries the `app:` block and round-trips it; `tests/test_template_twins.py` | `111 passed`; mypy clean in touched files |
+| waivefront, the panes rooted (2026-09-28) | every one of the 16 VIEW documents (8 hand-written sources + 8 converted twins) ends in a `contract:` root — `GraphContract(name="<pane> view", inputs={input: Signal, regions: Regions}, outputs={})`, the host's side declared — so `Document.add_step` of a node whose entry nothing produces is REFUSED (`bte_view.yaml:69:9: … NoiseFloorEstimate needs the record entry 'spectrogram', which nothing before it produces — the chain has input, regions at that point`) where a synthetic `<host>` used to accept it; appended after the last entry because the pane's own `outputs: <step>` line broadcasts into `GraphContract.outputs` when the root comes first (measured: `confluid.load` fails); the old importer drops it and regenerates a byte-identical canvas on all 16 | waivefront `147 passed` (`test_template_twins.py` + `test_annotation_templates.py`), `mypy waivefront`: `Success: no issues found in 200 source files`; streamstudio `test_document.py` `59 passed`, `mypy streamstudio`: `Success: no issues found in 51 source files` |
 | streamstudio | the ComfyUI contract canvas pins `classes` and the collision refusal; this page; the phases in the root `TASKS.md` | `93 passed`; mypy clean |
 | streamstudio, phase 2 | `document.py` (derive, located patches, undo ring, sidecar), `_yamltext.py` (the patcher over PyYAML's composed tree), `palette.py` (registry → node specs, `to_pydantic` widgets), `layout.py` (layered first layout + sidecar), `app.py` (`editor_blueprint` + `create_app`, `Studio` on `app.extensions`), the `editor` verb in `cli.py`; `pyproject.toml` declares `flask` and `pyyaml`; `tests/test_document.py` 58, `test_app.py` 47, `test_palette.py` 72, `test_layout.py` 28 | isort/black `left unchanged`; flake8 clean; `mypy streamstudio`: `Success: no issues found in 50 source files`; `pytest -q`: `730 passed, 1 skipped in 30.83s`; `test_packaging.py`: `12 passed`; red run before implementing (modules moved aside): `1 error in 6.04s` |
+| streamstudio, phase 3 part 1 | `frontend/` — `src/api.ts` (one function per route), `src/model.ts` (the model's JSON, `modelToFlow`, `compatible` over `GET /api/types`), `src/canvas/GenericNode.tsx` (the one node component), `src/canvas/Canvas.tsx` (React Flow, `isValidConnection`, positions on drag stop, proposals, the status bar), `src/App.tsx` (picker, sidebar text, toasts); `app.py` gains `GET /api/types` (`document.supertypes()`), `web_dist()`, `page_blueprint()`, `create_app(web_dist=)`; `pyproject.toml` declares `node` as a system dependency; the root `.gitignore` no longer ignores `frontend/`; `tests/test_canvas.py` 14 (playwright, real mouse drags), `frontend/src/__tests__/model.test.ts` 9, `test_app.py` 52 | `npm run build`: `338.47 kB │ gzip: 109.55 kB`, `built in 491ms`; `gzip -c dist/assets/*.js \| wc -c`: `109506`; `pytest -q tests/test_canvas.py`: `14 passed in 18.15s` (skipped `1 skipped in 7.76s` before the build — the red run); `npm test`: `9 passed`; `mypy streamstudio`: `Success: no issues found in 51 source files`; `streamstudio editor <dir> --port 8199` → `GET /` `200 text/html` serving the built page, its asset `200 338479 bytes` |
+| streamstudio, phase 3 part 2 | `frontend/src/` — `canvas/Palette.tsx` + `steps.ts` (the palette, the step anchor and name), `groups.ts` + `canvas/GroupNode.tsx` (boxes derived from their members), `history.ts` (the layout timeline beside the server's text history), `layout.ts` (`arrange`, dagre), `run.ts` + `panels/RunPanel.tsx` (run, step, inspect, rerun), `panels/SettingsForm.tsx`, `canvas/ParamWidget.tsx` (the one widget of the node, the form and the rerun form), `App.tsx` (toolbar, tabs, shortcuts); `layout.py` gains the `groups:` block (`Group`, `read_groups`, `rename_member`), `document.py` keeps and re-keys groups, `app.py` gains `PUT /api/graphs/<name>/groups`; `tests/test_canvas.py` 44, vitest 57, `test_layout.py` 37, `test_app.py` 61 | `npm run build`: `411.68 kB │ gzip: 134.81 kB` (part 1: `338.47 kB │ gzip: 109.55 kB`); `pytest -q tests/test_canvas.py tests/test_app.py tests/test_layout.py tests/test_packaging.py`: `1 failed, 153 passed` — the one failure is the 24-node bte layer pin the pane's new `contract:` root outdated (another session; tracked); whole suite `1 failed, 797 passed, 1 skipped`; `mypy streamstudio`: `Success: no issues found in 51 source files`; red run before implementing: `8 failed, 35 deselected` |
+| streamstudio, phase 3 closed (2026-09-28) | the documentation checklist, no code: README `The rewrite (phases 2-3 landed)` (the build commands, the gestures, every refusal verbatim, what is not there yet, and the mount corrected to one prefix — measured: the old snippet served the placeholder at `/editor/` and `404` at `/editor/api/graphs`), an AGENTS invariants block, the architecture record *The canvas is a React Flow page over the document routes*, CHANGELOG, this page; the root phase-3 item deleted and its deferred parts moved to `streamstudio/TASKS.md`; no environment variable was introduced (`web_dist()` resolves off `__file__`, the port is `--port`) | `pytest -q tests/test_canvas.py`: `44 passed in 41.93s`; `npm test`: `Tests  57 passed (57)`; `gzip -c dist/assets/*.js \| wc -c`: `134831` (`411743` bytes raw); whole suite `1 failed, 797 passed, 1 skipped in 65.89s` — the failure is still the 24-node bte layer pin (`test_layout.py:337`, `assert 25 == 24`, tracked); `mypy streamstudio`: `Success: no issues found in 51 source files`; `test_packaging.py`: `12 passed in 0.47s` (it checks the README's links) |
 
 Two things measured while doing it, both recorded in the root `TASKS.md`:
 

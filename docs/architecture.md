@@ -553,5 +553,199 @@ doc.set_param("count", "field", "image")          # ValueError: cannot wire deco
 out), which declaration a socket type is read from as long as it is a recordstream or confluid
 declaration, the first-layout algorithm. What must hold: the file is never re-emitted from the loaded
 object graph; a refused edit writes nothing; node names are the engine's names; positions stay out of
-the YAML. Pins: `tests/test_document.py::TestSetParam::test_the_bluetooth_pane_keeps_its_148_comment_lines`,
+the YAML. Pins: `tests/test_document.py::TestSetParam::test_the_bluetooth_pane_keeps_its_152_comment_lines`,
 `tests/test_document.py::TestProblems`, `tests/test_layout.py`.
+
+## The canvas page is a build artifact beside the package, and a drawn wire is a proposal until a route can spell it (`frontend/`, `streamstudio.app.page_blueprint`, 2026-09-28)
+
+**Context.** Phase 3 of the rewrite (`docs/rewrite.md` §2.3) puts a React Flow page over the phase-2
+routes. Two things had to be decided before the first line: where the built page LIVES — inside the
+wheel (every install has it, every build changes the package) or beside it (an install may lack it) —
+and what a wire the user DRAWS means, when no route writes one (a Stream's record wires ARE its `ops:`
+order, a flow's are `from:` / `bind:`, a contract's are `!ref:`; phase 2 writes parameters, positions,
+names and steps). The May-2026 attempt had gitignored the whole `frontend/` tree, so even the source
+was invisible to git; the workspace's other vite frontend commits its source, ignores `dist/`, and
+serves the build when it is there.
+
+**Decision.** The source is committed under `frontend/`, the build (`frontend/dist`) is gitignored, not
+in `package-data`, and not built by CI. `web_dist()` resolves `<repo>/frontend/dist` off `__file__` and
+answers it only when `index.html` is there; `page_blueprint(dist)` serves `/` and `/<file>` from it, or a
+placeholder that names the build command and lists the API routes; `create_app(graph_dir, web_dist=…)`
+takes the directory so a test asks for either page deterministically. The page is built with
+`base: './'` and reaches the API through RELATIVE paths (`api/graphs`), so one bundle serves at `/` and
+under any mount prefix. The type test the page applies while dragging is the model's own: `GET /api/types`
+serves `document.supertypes()` — the `_meets` rule as a table — and the page's `compatible(a, b)` is
+identity, the wildcard, or `types[a]` containing `b`; a mismatch never becomes an edge. A drop whose types
+meet becomes a dashed PROPOSAL edge with a toast naming the spelling the document would need; nothing is
+written and the next model refresh drops it.
+
+**Consequences.** `pip install streamstudio` gives the API and the placeholder, never a page that is out
+of step with its routes; a developer builds once and the checkout serves it. The wheel does not carry
+the page — the deferred item in `TASKS.md` is to build it in the release workflow, which needs node on
+the runner. Every element the page renders is addressable by `data-*` (`data-node`, `data-socket`,
+`data-type`, `data-kind`, `data-param`, `data-problem`, `data-toast`, `data-saves`), so the playwright
+suite reads the SPEC and never a class name. The proposal rule means the canvas can show one thing the
+document does not have — visibly dashed, and only until the next edit; the alternative (adding the wire
+to the document by guessing a spelling) would invent semantics the document never stated.
+
+**Example.**
+
+```python
+app = create_app(graph_dir)                          # web_dist() -> <repo>/frontend/dist when built, else None
+client.get("/")                                      # the built index.html, or the placeholder naming the build command
+client.get("/api/types").get_json()["Stream"]        # ["Source"]  — the page's compatible("Stream", "Source") is True
+```
+
+```
+drag decode.image -> count.label  : isValidConnection False -> no edge, no toast, file unchanged
+drag decode.image -> boost.image  : one dashed edge; toast "wires.yaml: the wire decode.image → boost.image is drawn as a
+                                    proposal, not written — on boost it would be spelled 'from: decode' …"; file unchanged
+```
+
+**What you may change.** Where the build lands (as long as `web_dist()` and the build command agree),
+the toolchain versions, the widget mapping, the toast wording. What must hold: the page is derived from
+the model the routes serve and writes only through them; the type test is `document.supertypes()`, never
+a table typed into the page; a wire the document cannot spell is never written; the source is committed
+and the build is not. Pins: `tests/test_canvas.py`, `tests/test_app.py::TestTypes`,
+`tests/test_app.py::TestMounting`, `frontend/src/__tests__/model.test.ts`.
+
+## Undo is two histories under one gesture: the document's text history on the server, the layout's on the page (`frontend/src/history.ts`, 2026-09-28)
+
+**Context.** The canvas changes two different things. A parameter, a step, a rename change the DOCUMENT — the YAML,
+which already keeps a ring of whole texts per open document (`Document.undo`), shared by every client of the routes,
+an agent's tools included. A move, an arrange, a group change the LAYOUT — the sidecar, which the document never
+sees and which has no history anywhere. The prototype undid both by snapshotting React Flow's two arrays on the page;
+that cannot serve here: a page-side copy of the text would restore a document out of step with the file an agent just
+edited, and the server cannot undo a move it never recorded as an edit.
+
+**Decision.** One gesture, two histories. A document edit is recorded on the page as a bare MARKER (`{kind:
+"document"}`); undoing it is `POST …/undo`, which answers the text the document's own history holds. A layout change
+is recorded with its before and after (`{kind: "positions" | "groups", before, after}`); undoing it is the page
+writing the before back (`PUT …/positions` / `…/groups`). The page's `Timeline` orders the two so Ctrl/Cmd+Z reverses
+the latest thing the person did, whichever kind. When the page holds no entry — after a reload, or for an edit an
+agent made — undo still asks the server. A new entry drops the PAGE's redo side; the server keeps its own until its
+next edit.
+
+**Consequences.** An agent's `set_param` and a canvas edit sit in one text history, and either side's undo reaches
+both. A move is undoable without ever touching the document's history (pinned: one Ctrl+Z restores the moved node
+and leaves the edit made before it; the next restores the text and moves nothing). The cost is the seam between the
+two: an operation that changes BOTH — a rename re-keys the sidecar — is undone on the server as text only, so the
+sidecar keeps the new name (measured, tracked in `TASKS.md`); the page re-keys its own layout entries on a rename so
+its half stays consistent.
+
+**Example.**
+
+```
+set low_level 0.9 (POST …/param)   timeline: [document]
+drag stream.ops[2] by (120, 80)    timeline: [document, positions{before (720, 40), after (840, 120)}]
+Ctrl+Z                             PUT …/positions {stream.ops[2]: [720, 40]}      text unchanged
+Ctrl+Z                             POST …/undo → low_level 0.5                      sidecar unchanged
+Shift+Ctrl+Z, Shift+Ctrl+Z         POST …/redo, then PUT …/positions {… [840, 120]}
+```
+
+**Update, 2026-09-28.** The server's history entries carry the RENAME an edit made, beside the texts before
+it. Undo and redo re-key the current positions and groups by that rename rather than restoring a stored
+layout, because the layout is the page's state: restoring would throw away a move made after the rename.
+Measured before: undo restored the text only, the renamed node was laid out afresh and its group named a
+member that no longer existed.
+
+**What you may change.** The page's depth (`HISTORY_DEPTH`), which layout changes are recorded, the shortcuts. What
+must hold: the page never restores document text of its own; a layout change never enters the document's history.
+Pins: `tests/test_canvas.py::TestUndoRedo`, `::TestArrange`, `::TestGroups::test_ctrl_z_undoes_a_grouping_on_the_pages_side_and_redo_puts_it_back`,
+`frontend/src/__tests__/history.test.ts`.
+
+## A group lives in the layout sidecar only, stored as the page spelled it (`streamstudio.layout.Group`, `PUT /api/graphs/<name>/groups`, 2026-09-28)
+
+**Context.** A group — a titled, coloured box that carries its members when dragged — is how a person arranges a
+drawing; the pipeline does nothing different because two nodes are boxed. The document has no spelling for it, and
+giving it one would make boxing two nodes a document edit (an undo entry, a re-validation, a diff in a pipeline
+file) and make two graphs that RUN identically differ as files.
+
+**Decision.** The sidecar holds two blocks, `positions:` and `groups:`; a group is `{id, title, color, nodes}` plus
+any key the page adds, written as sent and read back as written (the shape — a list of mappings — is checked by line,
+nothing else). The server reads inside a group in ONE place, `layout.rename_member`: a rename is one operation over
+every reference to a node, its group membership included. On the page the box is DERIVED from its members on every
+draw (`groups.withGroups`: their absolute positions and measured sizes, the corner on the 10-px grid) and the
+members are React Flow children with RELATIVE positions, so dragging the box moves them for free; the sidecar keeps
+ABSOLUTE positions, so ungrouping moves nothing.
+
+**Consequences.** A graph runs, exports and diffs the same with or without its groups, and deleting the sidecar
+loses the drawing, never the pipeline. A group naming a node the model no longer has is kept and not drawn. Members
+are NOT clamped into their box (`extent: "parent"`): measured, the clamp drew members up to 37 px off their saved
+place for 0.1–0.8 s after a load, because the box is sized from assumed card heights until React Flow measures
+them — the box follows the members instead, and a member dragged past the edge grows it.
+
+**Example.**
+
+```python
+layout.write_sidecar(side, {"a": (40.0, 40.0)}, groups=[{"id": "g1", "title": "front end", "color": "#3b82f6", "nodes": ["a"]}])
+layout.read_groups(side)                       # the same list, keys and order as written
+layout.rename_member(layout.read_groups(side), "a", "z")[0]["nodes"]   # ["z"]
+```
+
+**What you may change.** The group's page-side fields, the colours, the padding. What must hold: groups never enter
+the document; the server stores them as sent and interprets them only to follow a rename. Pins:
+`tests/test_layout.py::TestGroups`, `tests/test_app.py::TestGroups`, `tests/test_canvas.py::TestGroups`,
+`frontend/src/__tests__/groups.test.ts`.
+
+## The canvas is a React Flow page over the document routes; every ComfyUI-era behaviour is rebuilt on the document, not on a second model (`frontend/`, 2026-09-28)
+
+**Context.** The ComfyUI canvas was a second model of every graph: LiteGraph's own JSON (`workflow.json`, values by
+position), kept in step with the YAML by converters in both directions (the record "The graph document is the truth"
+above lists what that cost). Retiring it needed a canvas that brings the behaviours people used there — typed sockets
+refused while dragging, widgets on the node, a search palette on double-click and on a dropped wire, groups, undo/redo,
+pan/zoom/minimap/snap/multi-select/copy-paste, auto-layout, titles and colours, JSON in and out — WITHOUT bringing a
+document model of its own. Fourteen libraries were measured on 2026-09-27 (licence, release and commit activity,
+framework, and those nine behaviours one by one, `docs/rewrite.md` §2.3). The ones with the most behaviours built in
+are the ones that carry a model:
+
+- **litegraph** has 8 of the 9 (it IS ComfyUI's base), but its last commit is 2024-01-08, and the ComfyUI fork is
+  archived and npm-deprecated ("Package no longer supported").
+- **Rete v2** keeps its own editor state across 11 separately versioned packages; four were last released 2024-08-30.
+- **Baklava** has native subgraphs, but is Vue-only in a React toolchain; **reaflow** lets ELK own every position, so
+  the sidecar could not.
+
+**Decision.** React Flow (`@xyflow/react` 12.12: MIT, 13.5 million weekly downloads, 112 commits in the 90 days before
+the choice, React 18 — the vite toolchain the workspace's other frontend already builds with). It is a diagram
+toolkit, not an editor: it draws two plain arrays, `nodes` and `edges`, and calls back on every gesture; there is no
+model inside it to keep in step. The page REDRAWS those arrays from the model the server answers after every document
+edit (`modelToFlow`, node id = the document's node name), and each ComfyUI-era behaviour is rebuilt as a route call on
+the document:
+
+| behaviour | the prototype (2026-09-27, a document of its own) | the page (2026-09-28, the document) |
+| --- | --- | --- |
+| typed sockets | a rule typed into the page (identical, or `Any`) | `isValidConnection` over `GET /api/types` = `document.supertypes()` (subtypes meet) |
+| widgets | values held in node data | `POST …/param` — one located line patch; the widget shows the server's value |
+| palette, wire dropped on nothing | a node pushed into the arrays | `POST …/steps`, wired by the order the insert creates |
+| groups | a parent node in the arrays | the sidecar's `groups:` block; the box derived from its members every draw |
+| undo/redo | snapshots of the two arrays | the document's text history on the server + the page's layout timeline |
+| copy/paste | a copy of array entries | `add_step` per copied node, with the values the document spells |
+| auto-layout | dagre over the arrays | dagre on the page (*arrange*) or the server's layering (*columns*), saved as positions |
+| save/load | `toDoc`/`load`, a JSON of its own (round trip 2278 bytes in, 2278 out) | none — each route call saves the YAML; `serialize.ts` has no successor |
+
+**Consequences.** Measured, the prototype (685 lines, one generic node component, a synthetic catalogue): palette of
+400 entries open in 6.9 ms, typing narrows it; dagre on 40 nodes / 39 edges in 9 ms; 60 nodes loaded in 72 ms; 392 KB
+of JS, 128 KB gzipped; build 1.2 s. The page as landed, against the real registry: 447 classes, 200 rows drawn,
+6.2 ms from gesture to DOM; 411.7 kB of JS, 134.8 kB gzipped (`gzip -c dist/assets/*.js | wc -c` → `134831`); 44
+browser tests and 57 unit tests, every browser test pinned to zero console errors (bar the one `400` line of a
+refusal provoked on purpose). The cost of the library: what React
+Flow leaves to the caller — the palette, the widget mapping, undo, copy/paste — is ours, about the size the
+evaluation estimated; React Flow 12 has no double-click event on the pane, so the page listens itself and
+zoom-on-double-click is off. The cost of the document: a gesture the document cannot spell is not available on the
+canvas — a drawn wire stays a proposal, a step cannot enter a `Stream`'s `ops:` list, a pasted `2.0` becomes `2` —
+and each is a missing ROUTE, tracked in `TASKS.md`, never a page-side model. Collapse to subgraph is a convention in
+React Flow (a node standing for an `include:` file) and is deferred.
+
+**Example.**
+
+```ts
+// the page never edits its arrays itself: it asks the document, then redraws what the server answered
+const graph = await setParam(name, "stream.ops[1]", "low_level", 0.9);   // POST …/param → {model, text, positions, …}
+const { nodes, edges } = modelToFlow(graph.model, graph.positions);      // node ids are the document's node names
+```
+
+**What you may change.** The library version, the widget mapping, the palette's layout, dagre's options, the bundle's
+shape. What must hold: the page keeps no document of its own — no serializer, no page-side text history, no wire or
+step it invents without a route — and one generic node component renders every class. A library that carries its own
+graph model (LiteGraph, Rete's editor state) is the rejected alternative, not an upgrade path. Pins:
+`tests/test_canvas.py`, `frontend/src/__tests__/*.test.ts`.

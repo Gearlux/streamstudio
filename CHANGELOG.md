@@ -8,6 +8,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **The editor's check reports a document that derives but does not build.** A top-level key that confluid
+  hands to a same-named constructor parameter used to pass `check()`; it is now one located problem,
+  `does not build`, and an edit or a PUT producing such a text is refused and not written.
+- **Undoing a rename gives the position and the group memberships back to the old name.** The history
+  restored the text only, so the node was laid out afresh and its group kept a member that no longer existed.
 - **A chained op's op-list fan-in survives the whole-graph export.** The folded-chain
   path of `workflow_to_yaml` assigned each `op_N` wire to the same kwarg — last wire
   wins — so an op with several nested compute ops (a `ConfigureOp` drawn with two)
@@ -29,7 +34,28 @@ All notable changes to this project are documented here. The format follows
   writes nothing; `streamstudio.palette` describes every configurable class as a node spec read off its declarations;
   `streamstudio.layout` keeps positions in a `<graph>.layout.yaml` sidecar keyed by node name; `streamstudio.app`
   serves them as a Flask blueprint (`/api/graphs…`, `/api/palette`, `/api/runs…`) — standalone through the new
-  **`streamstudio editor <dir> --port 8190`** verb, or mounted by a consuming Flask app. The canvas page is phase 3.
+  **`streamstudio editor <dir> --port 8190`** verb, or mounted by a consuming Flask app.
+- **The canvas page — phase 3, part 1.** `frontend/` (vite + React Flow + TypeScript) draws the document's nodes
+  and wires from the model the routes serve — one component for every class, typed coloured sockets, widgets from
+  the constructor's schema — edits parameters through `POST …/param` (a refused value shows the located message and
+  reverts), saves node positions to the sidecar on drag, and keeps a hand-drawn wire the document cannot spell yet as
+  a dashed proposal that is never written. Built with `cd frontend && npm install && npm run build`, served at `/`
+  by `streamstudio editor` when the build exists (a placeholder names the command otherwise), mountable beside the
+  API through `streamstudio.app.page_blueprint`. `GET /api/types` lists what each socket type may be wired into,
+  so the page's type test is the model's meet rule.
+- **The canvas page — phase 3, part 2: the gestures of a graph editor, each a route call.** Double-click the canvas
+  (or drop a dragged wire on nothing) for a searchable list of every class the palette describes, narrowed to the
+  ones that fit the wire; a pick inserts a `flow:` step after the selected node. Select nodes and press G for a titled,
+  coloured group that moves its members with it. Ctrl/Cmd+Z / Shift+Z undo and redo — a document edit through the
+  document's own text history (so an agent's edit is undone the same way), a move, an arrange or a group on the page.
+  Ctrl/Cmd+C / V paste a node as a new step with the same values. *arrange* lays the graph out left to right by the
+  cards' sizes; *columns* asks the server's layout. Double-click a node's name to rename it everywhere. The **run**
+  tab traces one record of the graph's own source — every node shows its status, wall time and generation, *step*
+  pauses one node further, a node's entry lists what came in and went out, and *rerun this node* recomputes it and
+  what follows with trial values the document never sees. The **settings** tab is the form of every node, through
+  the same write as the widgets. `PUT /api/graphs/<name>/groups` stores the groups.
+- **The layout sidecar holds two blocks**, `positions:` (`{node name: [x, y]}`) and `groups:` (`[{id, title, color,
+  nodes}]`); a rename re-keys both.
 - **`streamstudio.__version__`** reports the installed version, read from the package metadata
   (`importlib.metadata.version("streamstudio")`), so it always matches `pyproject.toml`; an uninstalled
   source tree reports `0.0.0.dev0`.
