@@ -50,6 +50,7 @@ mapping, so renaming an outer ``grey`` never touches an inner ``from: grey``.
 """
 
 import copy
+import errno
 import importlib
 import inspect
 import io
@@ -1430,86 +1431,110 @@ def _split_bind(ref: str) -> Tuple[str, str, str]:
 # ================================================================================================
 
 
-def _anchor_includes(data: Any, base_dir: Path) -> None:  # the raw parse: dicts, lists, markers
+def _anchor_includes(data: Any, base_dir: Path, held: Collection[Path]) -> None:  # the raw parse: dicts, lists, markers
     """Rewrite every relative ``include:`` entry to the file found beside the document.
 
     The text is parsed in memory, so confluid would otherwise resolve a relative include against
     the process's working directory (``load()`` anchors text at ``cwd/string.yaml``); the document
-    lives in a directory of its own, and an include is written relative to THAT.
+    lives in a directory of its own, and an include is written relative to THAT. ``held`` are the
+    files the editor holds (resolved): an entry naming one of those is anchored to it even when it is
+    not on disk (:func:`_anchor_entry`).
     """
     if isinstance(data, list):
         for item in data:
-            _anchor_includes(item, base_dir)
+            _anchor_includes(item, base_dir, held)
     elif isinstance(data, Fluid):
-        _anchor_includes(data.kwargs, base_dir)
+        _anchor_includes(data.kwargs, base_dir, held)
     elif isinstance(data, ScopeBlock):
-        _anchor_includes(data.contents, base_dir)
+        _anchor_includes(data.contents, base_dir, held)
     elif isinstance(data, dict):
         for value in data.values():
-            _anchor_includes(value, base_dir)
+            _anchor_includes(value, base_dir, held)
         entries = data.get("include")
         if isinstance(entries, str):
-            data["include"] = _anchor_entry(entries, base_dir)
+            data["include"] = _anchor_entry(entries, base_dir, held)
         elif isinstance(entries, list):
-            data["include"] = [_anchor_entry(entry, base_dir) for entry in entries]
+            data["include"] = [_anchor_entry(entry, base_dir, held) for entry in entries]
 
 
-def _anchor_entry(entry: Any, base_dir: Path) -> Any:  # one include entry: a path string, or malformed
+def _anchor_entry(entry: Any, base_dir: Path, held: Collection[Path]) -> Any:  # a path string, or malformed
+    """One include entry, anchored: the file beside the document when the editor HOLDS it — a steps file Move to its
+    own file… made exists only in the editor until Save, so the disk cannot say it is there — else the file confluid's
+    own search finds on disk (``base_dir`` is that search's first place, so a held file beside the document is where
+    confluid itself would look first), else the entry as written, for confluid's own not-found message."""
     if not isinstance(entry, str) or not entry.strip():
         return entry
+    beside = (base_dir / Path(entry).expanduser()).resolve()
+    if beside in held:
+        return str(beside)
     found = resolve_config_path(entry, base_dir=base_dir)
     return str(found) if found.exists() else entry
 
 
-#: Held around every read and write of a document's files — above all around a load that STAGES an
-#: included file's held text on disk (:func:`_load_document`). The files on disk are shared by every
-#: document and every request of the process (the editor serves requests on threads), so the lock is the
-#: process's, not a document's: measured before it existed, four threads tracing one graph overlapped —
-#: the second load read the first one's STAGED text as the file's original and "restored" it, leaving an
-#: unsaved edit on disk (Save then refused it as a change someone else made), and a trace read a steps file
-#: half-written (``Subgraph: steps is empty``). Re-entrant: a save reads before it writes.
+#: Held around every read and every write of a file on disk. A write (:meth:`Document.save`, :meth:`Document.save_as`,
+#: :meth:`Document.create`) empties the file before it writes the new text, and the files are shared by every document
+#: and every request of the process (the editor serves requests on threads — a page and an agent's tool; two graphs
+#: may include one steps file), so a read overlapping a write would see the file half-written. Measured 2026-09-30,
+#: loads writing nothing: graph A saved a steps file 300 times while graph B, which includes it without holding it,
+#: was checked 352 times — without the lock 4 of B's loads read the file half-written (``Subgraph: steps is empty``,
+#: a ``ParserError``), with it none. The reads it covers: Open, :meth:`Document.disk_state`, the changed-on-disk check
+#: of a save, a file the editor does not hold (:meth:`Document._text_of`) — and every load (:func:`_load_document`),
+#: because confluid reads each included file the editor does NOT hold from disk. A load writes nothing: a held text
+#: reaches confluid as ``texts=``.
 _DISK_LOCK = threading.RLock()
 
 
 def _load_document(
     path: Path, texts: Mapping[Path, str], *, build: bool = False, solidify: bool = False
 ) -> Tuple[Any, List[Path]]:
-    """``confluid.load(until="document")`` of the IN-MEMORY texts: the main text parsed with the
-    file's real name (so every marker's location names the file), an included file's pending text
-    staged on disk for the duration of the load and restored right after — nothing this returns
-    depends on what a ``save()`` has not yet written.
+    """``confluid.load(until="document")`` of the IN-MEMORY texts: the main text parsed with the file's real name (so
+    every marker's location names the file), and every other file the editor holds handed to confluid as ``texts=`` —
+    an ``include:`` naming one is parsed from the held text, never read from disk, so nothing this returns depends on
+    what a ``save()`` has not yet written, and nothing is written: a steps file Move to its own file… made stays in
+    the editor until Save, even in a folder that cannot be written. ``texts=`` is passed only when the editor holds a
+    file besides the graph, so only such a graph needs a confluid whose ``load`` takes it.
 
     ``build=True`` runs the load to the OBJECTS stage instead (without ``solidify`` by default:
     constructors do no work, and the expensive finish is not what is being checked) — the stage every
     consumer loads to, and the only one where a top-level key is handed to a same-named constructor
     parameter. ``solidify=True`` adds the finish, which is what a RUN needs (:meth:`Document.load`).
 
-    The whole stage → load → restore runs under :data:`_DISK_LOCK`, so no other load, save or read of a
-    file sees a staged text."""
+    The load runs under :data:`_DISK_LOCK`: an included file the editor does not hold is read from disk, and a save
+    (of another graph including the same file) is never read half-written."""
     main = path.resolve()
+    held = {key: text for key, text in texts.items() if key != main}
+    stream = io.StringIO(texts[main])
+    stream.name = str(path)
+    raw = yaml.load(stream, Loader=ConfluidLoader)
+    _anchor_includes(raw, path.parent, held)
+    until: Literal["objects", "document"] = "objects" if build else "document"  # ``solidify`` acts at "objects" only
     with _DISK_LOCK:
-        staged = {p: t for p, t in texts.items() if p != main and (not p.exists() or p.read_text() != t)}
-        originals = {p: (p.read_text() if p.exists() else None) for p in staged}
-        try:
-            for p, text in staged.items():
-                p.write_text(text)
-            # Parsed and anchored AFTER staging: an include naming a file the editor holds but has not saved
-            # yet (a subgraph's steps just moved to their own file) is anchored only when it exists on disk.
-            stream = io.StringIO(texts[main])
-            stream.name = str(path)
-            raw = yaml.load(stream, Loader=ConfluidLoader)
-            _anchor_includes(raw, path.parent)
-            if build:
-                doc, paths = confluid.load(raw, until="objects", solidify=solidify, return_paths=True)
-            else:
-                doc, paths = confluid.load(raw, until="document", return_paths=True)
-        finally:
-            for p, original in originals.items():
-                if original is None:
-                    p.unlink(missing_ok=True)
-                else:
-                    p.write_text(original)
+        # ``texts=`` only when there is something to hand over: the released confluid (0.3.1, what CI installs) has no
+        # such keyword, and measured with it (2026-09-30) EVERY graph stopped loading while each load passed
+        # ``texts={}`` — ``does not load: TypeError: load() got an unexpected keyword argument 'texts'``.
+        if held:
+            doc, paths = confluid.load(raw, until=until, solidify=solidify, return_paths=True, texts=held)
+        else:
+            doc, paths = confluid.load(raw, until=until, solidify=solidify, return_paths=True)
     return doc, [Path(p).resolve() for p in paths]
+
+
+def _unwritable(path: Path) -> Optional[int]:
+    """The ``errno`` a write of ``path`` would fail with, as far as the disk can tell BEFORE writing — else None.
+
+    Checked for every file of a save before the first one is written (:meth:`Document._refuse_unwritable`): an
+    existing file must be writable itself (overwriting needs no write permission on its folder), a new one needs a
+    folder that exists and can be written. What no check can foresee (a full disk) still fails at the write."""
+    if path.exists():
+        if path.is_dir():
+            return errno.EISDIR
+        return None if os.access(path, os.W_OK) else errno.EACCES
+    folder = path.parent
+    if not folder.exists():
+        return errno.ENOENT
+    if not folder.is_dir():
+        return errno.ENOTDIR
+    return None if os.access(folder, os.W_OK | os.X_OK) else errno.EACCES
 
 
 def _load_problem(path: Path, exc: BaseException, verb: str = "does not load") -> Problem:
@@ -2526,19 +2551,23 @@ class Document:
         Refused — nothing written, not even the sidecar — when a file about to be written changed on disk
         since the editor read or wrote it (:data:`CHANGED_ON_DISK`, :data:`CHANGED_ON_DISK_INCLUDED`): the
         editor never overwrites what someone else wrote. A file gone from disk meanwhile is written again —
-        there is nothing to overwrite, and it is what Revert's refusal promises.
+        there is nothing to overwrite, and it is what Revert's refusal promises. Refused the same way when the
+        disk will not take one of the files (:meth:`_refuse_unwritable`), and the graph's own file is written
+        LAST — so the graph on disk never names a steps file this save did not write.
 
         The sidecar is written WHOLE, so each block keeps what the other one did not set: positions set
         here are every node's (the laid-out ones frozen with the moved ones, as before groups existed),
         positions NOT set here are what the file already held — a grouping never freezes a layout nobody
         arranged — and the groups are this document's, or the file's when none were set.
         """
+        main = self.path.resolve()
         pending = {key: text for key, text in self._texts.items() if self._saved.get(key) != text}
         with _DISK_LOCK:
             self._refuse_changed_on_disk(pending)
-            for key, text in pending.items():
-                self._write(key, text)
-                self._saved[key] = text
+            self._refuse_unwritable(pending)
+            for key in sorted(pending, key=lambda key: key == main):  # the graph's own file last (False sorts first)
+                self._write(key, pending[key])
+                self._saved[key] = pending[key]
         if self._positions is not None or self._groups is not None:
             layout = _layout()
             kept = self.positions if self._positions is not None else layout.read_sidecar(self.sidecar_path)
@@ -2552,8 +2581,9 @@ class Document:
         file from the new place (:func:`rebase_includes`) — in the held text and in every history entry,
         so undo keeps walking the edits made before. The new sidecar holds the positions and groups the
         editor shows when any were set, else a byte copy of the old sidecar. A pending edit of an INCLUDED
-        file is written to that file, under the same changed-on-disk refusal as :meth:`save`. Refused when
-        ``target`` exists and ``overwrite`` is not asked.
+        file is written to that file, under the same changed-on-disk and cannot-be-written refusals as
+        :meth:`save`, and before ``target`` — a new graph never names a steps file that was not written. Refused
+        when ``target`` exists and ``overwrite`` is not asked.
         """
         target = Path(target)
         old_main, new_main = self.path.resolve(), target.resolve()
@@ -2565,6 +2595,7 @@ class Document:
         others = {key: text for key, text in self._texts.items() if key != old_main and self._saved.get(key) != text}
         with _DISK_LOCK:
             self._refuse_changed_on_disk(others)
+            self._refuse_unwritable([*others, target])
             self._save_as_write(target, old_main, new_main, others)
 
     def _save_as_write(self, target: Path, old_main: Path, new_main: Path, others: _Texts) -> None:
@@ -2580,9 +2611,9 @@ class Document:
         held = moved(self._texts)
         old_sidecar, new_sidecar = self.sidecar_path, target.with_suffix(".layout.yaml")
         blocks = (self.positions, self.groups) if self._positions is not None or self._groups is not None else None
-        self._write(target, held[new_main])
-        for key, text in others.items():
+        for key, text in others.items():  # the included files first: a write cut short never leaves a graph naming them
             self._write(key, text)
+        self._write(target, held[new_main])
         if blocks is not None:
             _layout().write_sidecar(new_sidecar, blocks[0], groups=blocks[1])
         elif old_sidecar.is_file():
@@ -2756,6 +2787,18 @@ class Document:
             if text != self._saved.get(key):
                 changed.append(key)
         return changed
+
+    @staticmethod
+    def _refuse_unwritable(keys: Iterable[Path]) -> None:
+        """Refuse a save BEFORE it writes anything when the disk will not take one of ``keys``, in the words a failed
+        write gives (``<path> cannot be written: Permission denied``, ``… No such file or directory``). A save writes
+        several files, and a refusal changes nothing: measured before (2026-09-30), a Save whose new steps file sat in
+        a read-only folder wrote the graph first, then refused — leaving a graph on disk that includes a file that is
+        not there (a fresh ``confluid.load`` of it: ``ConfigFileNotFoundError``)."""
+        for key in keys:
+            reason = _unwritable(key)
+            if reason is not None:
+                raise ValueError(f"{key} cannot be written: {os.strerror(reason)}")
 
     @staticmethod
     def _write(key: Path, text: str) -> None:
@@ -3185,9 +3228,9 @@ class Document:
         """The text of ``key`` as the editor holds it — its held text, else the disk's, read NOW.
 
         Reading never makes the editor HOLD a file: a read-only operation (Copy, Save as template, the level
-        an edit looks at) would otherwise pin a copy the canvas then keeps showing, and a trace stages over
-        what a teammate wrote since (measured before: after a Copy, the canvas said ``mode L`` while the file
-        said RGB). Only an edit that changes the file makes the editor hold it (:meth:`_commit`), with the
+        an edit looks at) would otherwise pin a copy the canvas then keeps showing and a trace keeps running,
+        whatever a teammate wrote since (measured before: after a Copy, the canvas said ``mode L`` while the
+        file said RGB). Only an edit that changes the file makes the editor hold it (:meth:`_commit`), with the
         text read here as its baseline."""
         if key in self._texts:
             return self._texts[key]

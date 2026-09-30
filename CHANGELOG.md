@@ -20,6 +20,20 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **A steps file you have not saved never touches the disk.** After Move to its own file…, every check, edit and
+  run wrote `prep.steps.yaml` into the graph folder for the length of the load and removed it after, and with the
+  folder read-only every edit was refused (`does not load: PermissionError: [Errno 13] Permission denied:
+  '…/prep.steps.yaml'`). The editor now hands the files it holds to confluid as text (`confluid.load(...,
+  texts=)`): during 5 checks and 5 edits the folder lists `['demo.yaml']` only, a read-only folder checks, edits and
+  runs, and Save writes `prep.steps.yaml`. Only a graph in which you have edited an included steps file, or moved
+  steps to a file of their own, needs a confluid whose `load` takes `texts=`; every other graph loads with the
+  released confluid. The `confluid` requirement is raised when confluid releases it. On a disk that ignores case, an
+  include respelling a steps file not saved yet (`PREP.steps.yaml` for `prep.steps.yaml`) is refused until Save.
+- **A Save the disk refuses for a steps file no longer rewrites the graph.** After Move to its own file… into a
+  read-only `parts/`, Save answered `…/parts/prep.steps.yaml cannot be written: Permission denied` — with `run.yaml`
+  already rewritten to include that file, so the graph on disk no longer loaded (`ConfigFileNotFoundError`); Save As
+  wrote the new graph the same way. Save and Save As now check the graph and every steps file first and write none of
+  them when one cannot be written, and the graph's own file is written last.
 - **An edit is no longer refused for a problem that was already there.** A step inserted above an existing problem
   (a broken `bind:`) moved it from `flow.yaml:6:9` to `flow.yaml:9:9`, and the edit was refused as if it had made
   that problem; problems are now compared without their locations, and counted — a second copy is still refused.

@@ -189,6 +189,18 @@ read is refused the same way, since the editor cannot compare it with what it re
 /home/me/graphs/demo.yaml cannot be read: Permission denied — the editor never writes over a file it cannot compare with what it read; make it readable, or Save As to write the graph elsewhere
 ```
 
+Before it writes anything, Save checks that the disk will take every file it is about to write — the graph and each
+steps file it changed. When one cannot be written — a steps file Move to its own file… put in a folder you may not
+write — nothing is written, the graph stays ● and the message names the file:
+
+```
+/home/me/graphs/parts/prep.steps.yaml cannot be written: Permission denied
+```
+
+The graph on disk keeps its old text; Save again once the folder can be written. The graph's own file is written
+last, so even a write the disk cuts short (a full disk) never leaves a graph that includes a steps file that is not
+there. Save As refuses the same way and writes no new graph.
+
 **File ▸ Save As…** writes the graph to another `.yaml` and the list entry follows it: its name becomes the new
 file's (`copy`), the old file is left as it was, the positions sidecar comes along, and a relative `include:` is
 rewritten so it still names the same steps file. An existing file makes the dialog's button read **Replace**. A
@@ -460,8 +472,10 @@ scaled:
 
 **3. Include a steps file.** **Move to its own file…** (a subgraph node's menu) moves the steps to
 `<graph folder>/prep.steps.yaml` — a bare steps mapping, the same grammar as `flow:` — and writes `steps: {include:
-prep.steps.yaml}` in their place; the new file is written with the graph on Save. **Insert steps file…** (the
-empty-canvas menu) adds a subgraph step that includes an existing one:
+prep.steps.yaml}` in their place; the new file is written with the graph on Save. Until then it exists only in the
+editor: a check, an edit or a run reads it from there and writes nothing into the folder, so in a folder you
+cannot write they all keep working — only Save needs the folder. **Insert steps file…** (the empty-canvas menu) adds a subgraph step that
+includes an existing one:
 
 ```yaml
 flow:
@@ -538,10 +552,13 @@ A refused edit changes nothing. The message is the server's, verbatim (paths sho
   adding it and deleting the ones before it. Paste, Insert template and Insert steps file place by the older rule:
   after the selected node — into an empty `ops: []` with nothing selected they are refused.
 - **Adding to, or removing from, a list written in an included steps file.** Edit that file's list there.
+- **An include that spells a steps file you have not saved in another case.** On a disk that ignores case (macOS,
+  Windows), `include: PREP.steps.yaml` finds `prep.steps.yaml` once it is saved; before Save the edit that writes it
+  is refused: `…/run.yaml: does not load: ConfigFileNotFoundError: … includes PREP.steps.yaml: Not found:
+  PREP.steps.yaml`. Spell it as Move to its own file… wrote it, or Save first. A steps file already on disk is found
+  whatever the case.
 - **Unsaved work that ends without a stop.** A crash, a `kill -9` or closing the editor's terminal loses it
   ([what a stop cannot keep](#unsaved-work-survives-a-stop)).
-- **A steps file made by Move to its own file… and not saved yet** is written into the graph folder for the length
-  of each load (a trace, a check) and removed afterwards; the list and Save never see it.
 - **A subgraph held in another op's slot** (`RandomApply(op=Subgraph(…))`) is drawn and edited as a subgraph node
   (`maybe.op`), but the run tab shows no rows for its inside.
 - **The HuggingFace pickers and the directory chooser** of the ComfyUI nodes. The settings tab lists every
@@ -679,7 +696,13 @@ StreamStudio is not on PyPI yet; install it from GitHub:
 pip install git+https://github.com/Gearlux/streamstudio.git@main
 ```
 
-The canvas editor needs nothing more (plus a built page — [Building the canvas page](#building-the-canvas-page)).
+The canvas editor needs nothing more (plus a built page — [Building the canvas page](#building-the-canvas-page)),
+except a confluid whose `load` accepts `texts=`. The editor keeps every steps file you edit, and each one Move to
+its own file… makes, in memory, and hands them to confluid as text instead of writing them to disk. No confluid
+release carries `texts=` yet: with the released confluid a graph in which you have edited an included steps file, or
+moved steps to a file of their own, since you opened it does not load (`does not load: TypeError: load() got an
+unexpected keyword argument 'texts'`); every other graph works. Until a release carries it, install confluid from
+its repository too; the requirement is raised with that release.
 ComfyUI itself is **not** a Python dependency — `streamstudio --editor comfy` clones it on first run (see below).
 
 ### Domain node sets are plugins, not requirements
