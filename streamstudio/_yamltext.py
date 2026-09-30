@@ -18,9 +18,17 @@ Two spellings are handled for a marker's kwargs — the block form (keys on thei
 and the one-line flow form (``{a: 1, b: 2}``) — plus the bare tag with no kwargs at all. A
 multi-line block VALUE is replaced by one flow-style line, so a comment inside that value is
 the one thing a patch may lose; everything outside the patched span survives byte for byte.
+
+A step name is SCOPED to the steps mapping it is a key of: the ``steps:`` of a ``Subgraph`` marker is
+a flow of its own, whose ``from:`` / ``merge_from:`` / ``bind:`` name ITS steps. So every walk that
+follows a step name (a rename, the references to a step) skips the ``steps:`` value of a subgraph
+marker it passes through (:func:`is_subgraph_marker`) — measured before this rule: renaming an outer
+step ``grey`` also rewrote a subgraph's inner ``from: grey``, and the saved file stopped running. A
+``!ref:`` names a top-level key, which a subgraph's inside may use too, so the ``!ref:`` walk is not
+scoped.
 """
 
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Collection, Dict, List, Optional, Sequence, Tuple
 
 import yaml
 
@@ -30,6 +38,21 @@ _FROM_KEYS = ("from", "merge_from")
 _BIND_KEY = "bind"
 _REF_KEY = "_ref_"
 _OUTPUTS_KEY = "outputs"
+#: A subgraph marker's inner flow (``recordstream.flow.subgraph.Subgraph(steps, result)``): its short class
+#: name as the ``!class:`` tag spells it, and the key holding the steps — the two things the scoping reads.
+_SUBGRAPH_CLASS = "Subgraph"
+_STEPS_KEY = "steps"
+
+
+def is_subgraph_marker(node: yaml.Node) -> bool:
+    """A ``!class:…Subgraph`` marker, told by the class's SHORT name in its tag — this module reads text and
+    imports no engine code (the engine's own test is the class attribute ``Subgraph.FLOW_SUBGRAPH``).
+
+    The ``!class:`` tag is the spelling the editor writes and the one recognised; a ``_target_:`` mapping
+    naming a Subgraph is not scoped (a documented limit, not a second rule)."""
+    tag = str(node.tag or "")
+    return tag.startswith("!class:") and tag[len("!class:") :].rsplit(".", 1)[-1] == _SUBGRAPH_CLASS
+
 
 #: One text edit: replace ``text[start:stop]`` by ``replacement``.
 Edit = Tuple[int, int, str]
@@ -123,6 +146,30 @@ class YamlText:
     def line_count(self) -> int:
         return len(self.text.splitlines())
 
+    def lines(self, start: int, stop: int) -> str:
+        """The text of 0-based lines ``start`` up to (not including) ``stop``, line ends kept."""
+        return self.text[self.line_start(start) : self.line_start(stop)]
+
+    def nodes(self) -> List[yaml.Node]:
+        """Every node of the tree, parents before children, in document order."""
+        return _walk(self.root)
+
+    def item_stop_line(self, sequence: yaml.SequenceNode, index: int) -> int:
+        """The first 0-based line AFTER item ``index`` of a BLOCK sequence — where the next item's ``- `` is.
+
+        The same rule as :meth:`pair_stop_line`: a comment between two items travels with the one above
+        it, a multi-line last item ends where the next token starts, a one-line last item is its line.
+        """
+        item = sequence.value[index]
+        if index + 1 < len(sequence.value):
+            return int(sequence.value[index + 1].start_mark.line)
+        end = item.end_mark
+        if end.index >= len(self.text):
+            return self.line_count()
+        if end.line > item.start_mark.line:
+            return int(end.line)
+        return int(item.start_mark.line) + 1
+
     def pair_stop_line(self, key: yaml.ScalarNode, value: yaml.Node) -> int:
         """The first 0-based line AFTER a mapping pair — where the next sibling begins.
 
@@ -195,6 +242,19 @@ class YamlText:
         """The edit removing a mapping pair's lines (its key line through the end of its value)."""
         return (self.line_start(key.start_mark.line), self.line_start(self.pair_stop_line(key, value)), "")
 
+    def drop_pair_edit(self, mapping: yaml.MappingNode, key: str) -> Edit:
+        """The edit removing the pair ``key`` of ``mapping``, in either spelling: its lines in block form, its
+        text and ONE separating comma in a one-line flow mapping (``{op: x, from: a}`` → ``{op: x}``)."""
+        index = next(i for i, (k, _v) in enumerate(mapping.value) if isinstance(k, yaml.ScalarNode) and k.value == key)
+        key_node, value = mapping.value[index]
+        if not mapping.flow_style:
+            return self.remove_pair_edit(key_node, value)
+        if index > 0:
+            return (mapping.value[index - 1][1].end_mark.index, value.end_mark.index, "")
+        if len(mapping.value) > 1:
+            return (key_node.start_mark.index, mapping.value[1][0].start_mark.index, "")
+        return (key_node.start_mark.index, value.end_mark.index, "")
+
     def insert_lines_edit(self, line: int, lines: Sequence[str]) -> Edit:
         """The edit inserting ``lines`` (no newlines) BEFORE 0-based ``line``."""
         at = self.line_start(line)
@@ -204,7 +264,7 @@ class YamlText:
     def replace_scalar_edit(node: yaml.ScalarNode, replacement: str) -> Edit:
         return (node.start_mark.index, node.end_mark.index, replacement)
 
-    def rename_edits(self, old: str, new: str, *, flow_key: str = "flow") -> List[Edit]:
+    def rename_edits(self, old: str, new: str, *, flow_key: Optional[str] = "flow") -> List[Edit]:
         """Every edit that renames the node ``old`` to ``new`` across the text.
 
         The key itself (a step under ``flow:``, or a top-level key), every ``from:`` /
@@ -212,12 +272,15 @@ class YamlText:
         (``old.attr`` / ``old[key]`` / ``old``), the root ``outputs:``, every ``!ref:old`` tag
         and every ``_ref_: old`` value. A slot KEY that happens to equal the name (a
         ``delivered: {stream: !ref:stream}`` entry) is a parameter name, not a node, and stays.
+        ``flow_key=None`` is a text whose ROOT is the steps mapping (a steps file, a clipboard).
+        The step references inside a subgraph's ``steps:`` name ITS steps and are never followed (the
+        module docstring); a ``!ref:`` there names a top-level key like any other and is.
         """
         edits: List[Edit] = []
         root = self.root
         if not isinstance(root, yaml.MappingNode):
             return edits
-        for container in (self.path(flow_key), root):
+        for container in (self.path(flow_key) if flow_key is not None else None, root):
             if isinstance(container, yaml.MappingNode):
                 found = self.pair(container, old)
                 if found is not None:
@@ -233,21 +296,66 @@ class YamlText:
             if not isinstance(node, yaml.MappingNode):
                 continue
             for key_node, value in node.value:
-                if not isinstance(key_node, yaml.ScalarNode):
-                    continue
-                key = key_node.value
-                if key in _FROM_KEYS or key == _REF_KEY:
-                    for scalar in _scalars_of(value):
-                        if scalar.value == old:
-                            edits.append(self.replace_scalar_edit(scalar, new))
-                elif key == _BIND_KEY and isinstance(value, yaml.MappingNode):
-                    for _param, ref in value.value:
-                        if isinstance(ref, yaml.ScalarNode) and _bind_step(ref.value) == old:
-                            edits.append(self.replace_scalar_edit(ref, new + ref.value[len(old) :]))
+                if isinstance(key_node, yaml.ScalarNode) and key_node.value == _REF_KEY:
+                    edits.extend(self.replace_scalar_edit(s, new) for s in _scalars_of(value) if s.value == old)
+        edits.extend(self._step_reference_edits(_walk(root, scoped=True), old, new))
         return _dedupe(edits)
 
     def rename(self, old: str, new: str, *, flow_key: str = "flow") -> str:
         return self.apply(self.rename_edits(old, new, flow_key=flow_key))
+
+    def reference_edits(
+        self, steps: yaml.MappingNode, old: str, new: str, *, only: Optional[Collection[str]] = None
+    ) -> List[Edit]:
+        """Every edit re-pointing a reference to the step ``old`` of ONE steps mapping at ``new``: the
+        ``from:`` / ``merge_from:`` values and the step half of the ``bind:`` references of its steps
+        (only the steps named in ``only``, when given) — never inside a nested subgraph's ``steps:``."""
+        nodes: List[yaml.Node] = []
+        for key_node, value in steps.value:
+            if isinstance(key_node, yaml.ScalarNode) and (only is None or key_node.value in only):
+                nodes.extend(_walk(value, scoped=True))
+        return _dedupe(self._step_reference_edits(nodes, old, new))
+
+    def step_rename_edits(self, steps: yaml.MappingNode, old: str, new: str) -> List[Edit]:
+        """Every edit renaming the step ``old`` of ONE steps mapping (a subgraph's ``steps:``, a steps file):
+        its key and every reference to it among that mapping's steps (:meth:`reference_edits`)."""
+        edits: List[Edit] = []
+        found = self.pair(steps, old)
+        if found is not None:
+            edits.append(self.replace_scalar_edit(found[0], new))
+        return _dedupe(edits + self.reference_edits(steps, old, new))
+
+    def _step_reference_edits(self, nodes: Sequence[yaml.Node], old: str, new: str) -> List[Edit]:
+        """The ``from:`` / ``merge_from:`` / ``bind:`` values among ``nodes`` that name the step ``old``."""
+        edits: List[Edit] = []
+        for node in nodes:
+            if not isinstance(node, yaml.MappingNode):
+                continue
+            for key_node, value in node.value:
+                if not isinstance(key_node, yaml.ScalarNode):
+                    continue
+                if key_node.value in _FROM_KEYS:
+                    edits.extend(self.replace_scalar_edit(s, new) for s in _scalars_of(value) if s.value == old)
+                elif key_node.value == _BIND_KEY and isinstance(value, yaml.MappingNode):
+                    for _param, ref in value.value:
+                        if isinstance(ref, yaml.ScalarNode) and _bind_step(ref.value) == old:
+                            edits.append(self.replace_scalar_edit(ref, new + ref.value[len(old) :]))
+        return edits
+
+
+def dedent(block: str, by: int) -> str:
+    """``block`` with up to ``by`` leading spaces taken off every line — a line indented less (a comment
+    written further left) loses what it has, so the relative indentation of the rest is kept."""
+    out: List[str] = []
+    for line in block.splitlines(keepends=True):
+        spaces = len(line) - len(line.lstrip(" "))
+        out.append(line[min(spaces, by) :])
+    return "".join(out)
+
+
+def indent_lines(block: str, prefix: str) -> List[str]:
+    """``block``'s lines (no line ends) with ``prefix`` in front of each — a blank line stays empty."""
+    return [prefix + line if line.strip() else "" for line in block.splitlines()]
 
 
 def _bind_step(ref: str) -> str:
@@ -267,16 +375,20 @@ def _scalars_of(node: yaml.Node) -> List[yaml.ScalarNode]:
     return []
 
 
-def _walk(node: yaml.Node) -> List[yaml.Node]:
-    """Every node of the tree, parents before children, in document order."""
+def _walk(node: yaml.Node, *, scoped: bool = False) -> List[yaml.Node]:
+    """Every node of the tree, parents before children, in document order — with ``scoped``, never the
+    ``steps:`` value of a subgraph marker (a flow of its own; the module docstring)."""
     out: List[yaml.Node] = [node]
     if isinstance(node, yaml.MappingNode):
+        inner_flow = scoped and is_subgraph_marker(node)
         for key, value in node.value:
-            out.extend(_walk(key))
-            out.extend(_walk(value))
+            out.extend(_walk(key, scoped=scoped))
+            if inner_flow and isinstance(key, yaml.ScalarNode) and key.value == _STEPS_KEY:
+                continue
+            out.extend(_walk(value, scoped=scoped))
     elif isinstance(node, yaml.SequenceNode):
         for item in node.value:
-            out.extend(_walk(item))
+            out.extend(_walk(item, scoped=scoped))
     return out
 
 

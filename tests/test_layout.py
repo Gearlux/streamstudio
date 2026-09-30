@@ -277,6 +277,45 @@ class TestGroups:
         assert groups[0]["nodes"] == ["a", "b"]  # the input is not edited in place
         assert rename_member(groups, "nosuch", "z") == groups
 
+    def test_bounds_and_parent_are_declared_and_round_trip_as_sent(self, tmp_path: Path) -> None:
+        """An EMPTY box (Add Group) or a resized one carries ``bounds: [x, y, w, h]``; a box drawn inside a
+        subgraph names its level in ``parent`` (``""`` = the top). Both are typed on ``Group`` and stored as
+        the page sent them — the server still reads nothing in a group but its member list."""
+        side = tmp_path / "g.layout.yaml"
+        boxes: List[Group] = [
+            {"id": "g1", "title": "empty", "color": "#111", "nodes": [], "bounds": [10.0, 20.0, 300.0, 200.0]},
+            {"id": "g2", "title": "inside", "color": "#222", "nodes": ["prep/grey"], "parent": "prep"},
+            {"id": "g3", "title": "top", "color": "#333", "nodes": ["a"], "parent": "", "bounds": [0.0, 0.0, 1.5, 2.5]},
+        ]
+        write_sidecar(side, {"a": (40.0, 40.0)}, groups=boxes)
+        assert read_groups(side) == boxes
+        assert set(Group.__annotations__) >= {"bounds", "parent"}
+
+    def test_rename_member_keeps_every_key_it_does_not_read(self) -> None:
+        """CON case of the one place the server reads a group: renaming a member rewrites ``nodes`` and
+        leaves ``bounds``, ``parent`` and any key the page invents exactly as they were."""
+        group = cast(
+            Group,
+            {"id": "g1", "title": "t", "color": "#111", "nodes": ["a"], "bounds": [1.0, 2.0, 3.0, 4.0], "parent": "p"},
+        )
+        group_with_extra = cast(Group, {**group, "note": "kept"})
+        assert rename_member([group_with_extra], "a", "b") == [{**group_with_extra, "nodes": ["b"]}]
+
+    def test_renaming_a_subgraph_re_keys_the_members_inside_it_and_the_level_a_box_lives_on(self) -> None:
+        """A node inside a subgraph is named ``prep/grey`` and a box drawn inside names its level ``prep`` in
+        ``parent``: renaming the subgraph ``prep`` renames every name UNDER it (a step name holds no ``/``, so
+        ``prep/`` can only mean inside ``prep``) — and a sibling that merely starts with the same letters stays."""
+        groups: List[Group] = [
+            {"id": "g1", "title": "in", "color": "#111", "nodes": ["prep/grey", "prep/inner/x"], "parent": "prep"},
+            {"id": "g2", "title": "deeper", "color": "#222", "nodes": ["prep/inner/x"], "parent": "prep/inner"},
+            {"id": "g3", "title": "top", "color": "#333", "nodes": ["prep", "prepare", "prepare/x"], "parent": ""},
+        ]
+        assert rename_member(groups, "prep", "pre") == [
+            {"id": "g1", "title": "in", "color": "#111", "nodes": ["pre/grey", "pre/inner/x"], "parent": "pre"},
+            {"id": "g2", "title": "deeper", "color": "#222", "nodes": ["pre/inner/x"], "parent": "pre/inner"},
+            {"id": "g3", "title": "top", "color": "#333", "nodes": ["pre", "prepare", "prepare/x"], "parent": ""},
+        ]
+
 
 class TestPositions:
     def test_without_a_sidecar_the_layout_is_the_layered_one(self, tmp_path: Path) -> None:

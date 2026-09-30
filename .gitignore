@@ -33,3 +33,8 @@ checkpoints/
 runs/
 .vscode/
 /pyrightconfig.json
+
+# The streamstudio canvas editor's recovery file — what a stop (streamstudio stop / restart, Ctrl+C, a closed terminal) kept of the
+# unsaved work, written into the folder it served: `.streamstudio-workspace.json`, the `.broken.json` a discard
+# moved aside, and the `.writing.json` it is written through. Per machine and per session: never committed.
+.streamstudio-workspace*.json

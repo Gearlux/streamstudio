@@ -1,4 +1,4 @@
-"""The editor's HTTP surface (``streamstudio.app``) and the ``streamstudio editor`` command.
+"""The editor's HTTP surface (``streamstudio.app``).
 
 Every route is driven once through Flask's test client over a temporary graph directory holding
 four synthetic documents — a ``Stream`` with a two-record source (the one that can be TRACED), a
@@ -10,36 +10,35 @@ name pytest imported this file under, the way ``test_document.py`` does it.
 
 What is pinned, and why it is pinned at the HTTP layer rather than only on ``Document``:
 
+* **an edit changes the editor's copy, never the file** — explicit Save (the user's decision 1): every
+  editing route answers the edited graph with ``dirty: true`` while the file on disk stays byte for byte
+  what it was; ``POST …/save`` is what writes (``test_app_save.py`` pins the save, save-as and revert);
 * a refusal reaches the caller as ``400 {error}`` carrying the LOCATED message (``file:line:col``),
   an unknown graph / node / run as ``404 {error}`` naming what there is — a page and an LLM tool
   read these, so the status and the text are the contract;
-* a refused ``PUT`` writes nothing, a refused ``add_step`` leaves the file byte-identical, a refused
-  rerun leaves the trace identical — measured on the files and the JSON, not inferred;
+* a refused ``PUT`` changes nothing, a refused ``add_step`` leaves the editor's text identical, a refused
+  rerun leaves the trace identical — measured on the JSON and the files, not inferred;
 * a trace names nodes the way the document does (``stream.ops[1]``, never the engine's ``ops[1]``),
   pauses where asked, and a rerun recomputes only what is downstream;
 * the blueprint answers under a prefix in a second Flask app, with its own state — the mount a
   consuming workspace needs.
 
-The command is pinned through the liquifai app object (its registration, shorts, positionals and
-the ``Args:`` block liquifai renders as help), never by running ``--help`` — the workspace rule.
+The command that serves this app is pinned in ``test_cli_editor.py``.
 """
 
-import socket
-import sys
 from pathlib import Path
-from typing import Any, Dict, Iterator, List
-from unittest.mock import MagicMock, patch
+from typing import Any, Dict, Iterator
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
-from confluid import configurable, parse_param_docs
+from confluid import configurable
 from flask import Flask
 from recordstream import Algorithm, Image, Input, Label, Output, Record, items
 from recordstream.items import item_type_names
 from recordstream.ops.contract import ClassNamesOutput
 
 from streamstudio import app as app_module
-from streamstudio import cli
 from streamstudio import document as document_module
 from streamstudio import layout
 from streamstudio.app import EXTENSION, GRAPH_KINDS, create_app, editor_blueprint, web_dist
@@ -229,8 +228,11 @@ def _error(response: Any) -> str:
 
 
 class TestGraphs:
-    def test_every_document_is_listed_with_its_kind_and_a_sidecar_is_not(self, client: Any, graph_dir: Path) -> None:
+    def test_every_document_is_listed_with_its_kind_and_a_sidecar_or_steps_file_is_not(
+        self, client: Any, graph_dir: Path
+    ) -> None:
         layout.write_sidecar(graph_dir / "pets.layout.yaml", {"stream": (1.0, 2.0)})
+        (graph_dir / "prep.steps.yaml").write_text("grey:\n  op: !class:recordstream.ops.numpy.Threshold {}\n")
         response = client.get("/api/graphs")
         assert response.status_code == 200
         listed = response.get_json()
@@ -243,6 +245,13 @@ class TestGraphs:
         }
         assert all(entry["kind"] in GRAPH_KINDS for entry in listed)
         assert listed[1]["path"] == str(graph_dir / "pets.yaml")
+        assert set(listed[1]) == {"name", "path", "kind", "dirty"}
+        assert [entry["dirty"] for entry in listed] == [False] * 4
+
+    def test_an_edited_graph_is_listed_dirty_and_the_others_are_not(self, client: Any) -> None:
+        client.post("/api/graphs/pets/param", json={"node": "stream.ops[1]", "param": "low_level", "value": 0.9})
+        listed = {entry["name"]: entry["dirty"] for entry in client.get("/api/graphs").get_json()}
+        assert listed == {"flow": False, "pets": True, "source": False, "study": False}
 
     def test_a_graph_answers_its_text_model_positions_and_history_depth(self, client: Any) -> None:
         response = client.get("/api/graphs/pets")
@@ -251,6 +260,7 @@ class TestGraphs:
         assert body["name"] == "pets" and body["kind"] == "graph"
         assert body["text"] == PETS_TEXT
         assert body["history_depth"] == 50
+        assert body["dirty"] is False
         names = [node["name"] for node in body["model"]["nodes"]]
         assert names == ["stream", "stream.source", "stream.ops[0]", "stream.ops[1]", "stream.ops[2]"]
         assert body["model"]["problems"] == []
@@ -286,15 +296,25 @@ class TestGraphs:
 
 
 class TestPutText:
-    def test_a_sound_text_is_written_and_its_model_returned(self, client: Any, graph_dir: Path) -> None:
+    def test_a_sound_text_replaces_the_editors_copy_dirty_and_the_file_waits_for_save(
+        self, client: Any, graph_dir: Path
+    ) -> None:
         text = PETS_TEXT.replace("low_level: 0.5", "low_level: 0.7")
         response = client.put("/api/graphs/pets", json={"text": text})
         assert response.status_code == 200
         body = response.get_json()
-        assert body["text"] == text
-        assert (graph_dir / "pets.yaml").read_text() == text
+        assert body["text"] == text and body["dirty"] is True
+        assert (graph_dir / "pets.yaml").read_text() == PETS_TEXT
         threshold = next(node for node in body["model"]["nodes"] if node["name"] == "stream.ops[1]")
         assert threshold["params"]["low_level"]["value"] == 0.7
+        assert client.post("/api/graphs/pets/save").status_code == 200
+        assert (graph_dir / "pets.yaml").read_text() == text
+
+    def test_a_put_starts_the_history_over(self, client: Any) -> None:
+        client.post("/api/graphs/pets/param", json={"node": "stream.ops[1]", "param": "low_level", "value": 0.9})
+        client.put("/api/graphs/pets", json={"text": PETS_TEXT.replace("low_level: 0.5", "low_level: 0.7")})
+        undone = client.post("/api/graphs/pets/undo").get_json()
+        assert undone["changed"] is False and "low_level: 0.7" in undone["text"]
 
     def test_a_text_that_does_not_load_is_refused_with_the_located_message_and_not_written(
         self, client: Any, graph_dir: Path
@@ -305,6 +325,8 @@ class TestPutText:
         assert "does not load" in message
         assert f"{graph_dir / 'pets.yaml'}" in message and "line 3, column 1" in message
         assert (graph_dir / "pets.yaml").read_text() == PETS_TEXT
+        body = client.get("/api/graphs/pets").get_json()
+        assert body["text"] == PETS_TEXT and body["dirty"] is False
 
     def test_a_wire_whose_types_do_not_meet_is_refused_and_not_written(self, client: Any, graph_dir: Path) -> None:
         response = client.put("/api/graphs/flow", json={"text": MISMATCH_TEXT})
@@ -331,15 +353,21 @@ class TestPutText:
 
 
 class TestEdits:
-    def test_set_param_patches_the_located_line_keeps_the_comment_and_saves(self, client: Any, graph_dir: Path) -> None:
+    """Every edit answers the edited graph and leaves the file alone: the editor holds it until Save."""
+
+    def test_set_param_patches_the_located_line_keeps_the_comment_and_waits_for_save(
+        self, client: Any, graph_dir: Path
+    ) -> None:
         response = client.post(
             "/api/graphs/pets/param", json={"node": "stream.ops[1]", "param": "low_level", "value": 0.9}
         )
         assert response.status_code == 200
-        text = (graph_dir / "pets.yaml").read_text()
+        body = response.get_json()
+        text = body["text"]
         assert "    - !class:recordstream.ops.numpy.Threshold {low_level: 0.9}   # the mask" in text
         assert text.count("\n") == PETS_TEXT.count("\n")
-        assert response.get_json()["text"] == text
+        assert body["dirty"] is True
+        assert (graph_dir / "pets.yaml").read_text() == PETS_TEXT  # nothing written before Save
 
     def test_set_param_on_an_unknown_node_is_404(self, client: Any) -> None:
         response = client.post("/api/graphs/pets/param", json={"node": "nosuch", "param": "x", "value": 1})
@@ -350,7 +378,7 @@ class TestEdits:
         response = client.post("/api/graphs/pets/param", json={"node": "stream.ops[1]", "param": "nosuch", "value": 1})
         assert response.status_code == 400
         assert "has no parameter 'nosuch'" in _error(response)
-        assert (graph_dir / "pets.yaml").read_text() == PETS_TEXT
+        assert client.get("/api/graphs/pets").get_json()["dirty"] is False
 
     def test_add_step_inserts_after_the_anchor_and_moves_the_output(self, client: Any, graph_dir: Path) -> None:
         response = client.post(
@@ -366,11 +394,12 @@ class TestEdits:
         body = response.get_json()
         assert "mask2" in [node["name"] for node in body["model"]["nodes"]]
         assert body["model"]["outputs"] == ["mask2"]
-        text = (graph_dir / "study.yaml").read_text()
+        text = body["text"]
         assert "  mask2:\n    op: !class:recordstream.ops.numpy.Threshold {low_level: 0.7}\n    from: mask\n" in text
         assert "\noutputs: mask2\n" in text  # the root follows the flow
+        assert (graph_dir / "study.yaml").read_text() == STUDY_TEXT
 
-    def test_add_step_whose_input_nothing_produces_is_refused_and_the_file_unchanged(
+    def test_add_step_whose_input_nothing_produces_is_refused_and_the_text_unchanged(
         self, client: Any, graph_dir: Path
     ) -> None:
         response = client.post(
@@ -385,6 +414,8 @@ class TestEdits:
         assert response.status_code == 400
         message = _error(response)
         assert "NeedsSpectrogram needs the record entry 'spectrogram', which nothing before it produces" in message
+        body = client.get("/api/graphs/study").get_json()
+        assert body["text"] == STUDY_TEXT and body["dirty"] is False
         assert (graph_dir / "study.yaml").read_text() == STUDY_TEXT
 
     def test_add_step_after_an_unknown_node_is_404(self, client: Any) -> None:
@@ -400,36 +431,47 @@ class TestEdits:
         body = response.get_json()
         assert "mask" not in [node["name"] for node in body["model"]["nodes"]]
         assert body["model"]["outputs"] == ["gain"]
-        assert "mask" not in (graph_dir / "study.yaml").read_text()
+        assert "mask" not in body["text"] and body["dirty"] is True
+        assert (graph_dir / "study.yaml").read_text() == STUDY_TEXT
 
     def test_remove_step_of_an_unknown_node_is_404(self, client: Any) -> None:
         assert client.delete("/api/graphs/study/steps/nosuch").status_code == 404
 
+    def test_the_node_segment_of_a_url_may_carry_a_slash(self, client: Any) -> None:
+        """``<path:node>``: a qualified inner name (``prep/grey``) reaches the document whole — here it names
+        no node, so the answer is the document's own 404, never Flask's route miss."""
+        response = client.delete("/api/graphs/study/steps/prep/grey")
+        assert response.status_code == 404
+        assert "prep/grey" in _error(response)
+
     def test_rename_node_renames_the_key_and_every_reference_at_once(self, client: Any, graph_dir: Path) -> None:
         response = client.post("/api/graphs/study/rename", json={"node": "mask", "new": "masked"})
         assert response.status_code == 200
-        text = (graph_dir / "study.yaml").read_text()
+        text = response.get_json()["text"]
         assert "  masked:\n" in text and "outputs: masked\n" in text and "mask:" not in text
         assert response.get_json()["model"]["outputs"] == ["masked"]
+        assert (graph_dir / "study.yaml").read_text() == STUDY_TEXT
 
     def test_rename_to_an_existing_name_is_400(self, client: Any) -> None:
         response = client.post("/api/graphs/study/rename", json={"node": "mask", "new": "gain"})
         assert response.status_code == 400
         assert "'gain' is already a node" in _error(response)
 
-    def test_undo_after_set_param_restores_the_text_on_disk_and_redo_reapplies_it(
+    def test_undo_back_to_the_saved_text_clears_dirty_and_redo_sets_it_again(
         self, client: Any, graph_dir: Path
     ) -> None:
-        client.post("/api/graphs/pets/param", json={"node": "stream.ops[1]", "param": "low_level", "value": 0.9})
-        assert "low_level: 0.9" in (graph_dir / "pets.yaml").read_text()
+        edited = client.post(
+            "/api/graphs/pets/param", json={"node": "stream.ops[1]", "param": "low_level", "value": 0.9}
+        ).get_json()
+        assert "low_level: 0.9" in edited["text"] and edited["dirty"] is True
         undone = client.post("/api/graphs/pets/undo")
         assert undone.status_code == 200
         assert undone.get_json()["changed"] is True
         assert undone.get_json()["text"] == PETS_TEXT
-        assert (graph_dir / "pets.yaml").read_text() == PETS_TEXT
-        redone = client.post("/api/graphs/pets/redo")
-        assert redone.get_json()["changed"] is True
-        assert "low_level: 0.9" in (graph_dir / "pets.yaml").read_text()
+        assert undone.get_json()["dirty"] is False
+        redone = client.post("/api/graphs/pets/redo").get_json()
+        assert redone["changed"] is True and "low_level: 0.9" in redone["text"] and redone["dirty"] is True
+        assert (graph_dir / "pets.yaml").read_text() == PETS_TEXT  # none of it reached the file
 
     def test_undoing_a_rename_through_the_routes_gives_the_position_back_to_the_old_name(
         self, client: Any, graph_dir: Path
@@ -450,11 +492,13 @@ class TestEdits:
         assert response.status_code == 400
         assert "does not build" in _error(response) and "Failed to construct GraphContract" in _error(response)
         assert (graph_dir / "study.yaml").read_text() == STUDY_TEXT
+        assert client.get("/api/graphs/study").get_json()["text"] == STUDY_TEXT
 
     def test_undo_with_nothing_to_undo_changes_nothing(self, client: Any, graph_dir: Path) -> None:
         response = client.post("/api/graphs/pets/undo")
         assert response.status_code == 200
         assert response.get_json()["changed"] is False
+        assert response.get_json()["dirty"] is False
         assert (graph_dir / "pets.yaml").read_text() == PETS_TEXT
 
 
@@ -464,14 +508,18 @@ class TestEdits:
 
 
 class TestPositions:
-    def test_put_then_get_round_trips_through_the_sidecar(self, client: Any, graph_dir: Path) -> None:
+    def test_put_then_get_round_trips_and_the_sidecar_waits_for_save(self, client: Any, graph_dir: Path) -> None:
         response = client.put("/api/graphs/pets/positions", json={"positions": {"stream.ops[0]": [10, 20]}})
         assert response.status_code == 200
         assert response.get_json()["stream.ops[0]"] == [10.0, 20.0]
-        assert client.get("/api/graphs/pets").get_json()["positions"]["stream.ops[0]"] == [10.0, 20.0]
+        body = client.get("/api/graphs/pets").get_json()
+        assert body["positions"]["stream.ops[0]"] == [10.0, 20.0]
+        assert body["dirty"] is True  # a move is a change the editor holds, like a text edit
         sidecar = graph_dir / "pets.layout.yaml"
-        assert sidecar.exists()
+        assert not sidecar.exists()
+        assert client.post("/api/graphs/pets/save").get_json()["dirty"] is False
         assert layout.read_sidecar(sidecar)["stream.ops[0]"] == (10.0, 20.0)
+        assert (graph_dir / "pets.yaml").read_text() == PETS_TEXT  # a move never touches the document
 
     def test_positions_of_an_unknown_node_are_404(self, client: Any) -> None:
         response = client.put("/api/graphs/pets/positions", json={"positions": {"nosuch": [1, 2]}})
@@ -483,12 +531,16 @@ class TestPositions:
         assert response.status_code == 400
         assert "stream" in _error(response)
 
-    def test_layout_lays_the_graph_out_again_and_saves(self, client: Any, graph_dir: Path) -> None:
+    def test_layout_lays_the_graph_out_again_in_the_editor_and_save_writes_it(
+        self, client: Any, graph_dir: Path
+    ) -> None:
         client.put("/api/graphs/pets/positions", json={"positions": {"stream.ops[0]": [999, 999]}})
         response = client.post("/api/graphs/pets/layout")
         assert response.status_code == 200
         expected = layout.layered_layout(Document.open(graph_dir / "pets.yaml").model)
         assert response.get_json() == {name: [x, y] for name, (x, y) in expected.items()}
+        assert not (graph_dir / "pets.layout.yaml").exists()
+        client.post("/api/graphs/pets/save")
         assert layout.read_sidecar(graph_dir / "pets.layout.yaml") == expected
 
 
@@ -503,28 +555,37 @@ class TestGroups:
     def test_a_graph_without_a_sidecar_has_no_groups(self, client: Any) -> None:
         assert client.get("/api/graphs/flow").get_json()["groups"] == []
 
-    def test_put_groups_writes_the_sidecar_block_and_keeps_the_positions(self, client: Any, graph_dir: Path) -> None:
+    def test_put_groups_is_held_until_save_which_writes_the_block_beside_the_positions(
+        self, client: Any, graph_dir: Path
+    ) -> None:
         assert client.put("/api/graphs/flow/positions", json={"positions": {"gain": [10, 20]}}).status_code == 200
         response = client.put("/api/graphs/flow/groups", json={"groups": self.GROUPS})
         assert response.status_code == 200
-        assert response.get_json() == {"groups": self.GROUPS}
+        assert response.get_json() == {"groups": self.GROUPS, "dirty": True}
         body = client.get("/api/graphs/flow").get_json()
         assert body["groups"] == self.GROUPS
         assert body["positions"]["gain"] == [10.0, 20.0]
         sidecar = graph_dir / "flow.layout.yaml"
+        assert not sidecar.exists()
+        client.post("/api/graphs/flow/save")
         assert layout.read_groups(sidecar) == self.GROUPS
         assert layout.read_sidecar(sidecar)["gain"] == (10.0, 20.0)
         assert (graph_dir / "flow.yaml").read_text() == FLOW_TEXT  # a group never touches the document
         # a later positions write keeps the groups, and the other way round
         client.put("/api/graphs/flow/positions", json={"positions": {"gain": [30, 40]}})
+        client.post("/api/graphs/flow/save")
         assert layout.read_groups(sidecar) == self.GROUPS
         client.put("/api/graphs/flow/groups", json={"groups": []})
+        client.post("/api/graphs/flow/save")
         assert layout.read_sidecar(sidecar)["gain"] == (30.0, 40.0)
         assert client.get("/api/graphs/flow").get_json()["groups"] == []
 
     def test_a_group_is_stored_as_the_page_spelled_it(self, client: Any) -> None:
         """Opaque: a member the model may not have and a key the server never reads both come back as given."""
-        groups = [{"id": "g9", "title": "x", "color": "red", "nodes": ["nosuch"], "note": "kept"}]
+        groups = [
+            {"id": "g9", "title": "x", "color": "red", "nodes": ["nosuch"], "note": "kept"},
+            {"id": "g10", "title": "empty", "color": "red", "nodes": [], "bounds": [1, 2, 3, 4], "parent": ""},
+        ]
         response = client.put("/api/graphs/flow/groups", json={"groups": groups})
         assert response.status_code == 200
         assert response.get_json()["groups"] == groups
@@ -534,13 +595,14 @@ class TestGroups:
         response = client.put("/api/graphs/flow/groups", json=body)
         assert response.status_code == 400
         assert "groups" in _error(response)
-        assert not (graph_dir / "flow.layout.yaml").exists()
+        assert client.get("/api/graphs/flow").get_json()["dirty"] is False
 
     def test_renaming_a_member_re_keys_the_group_like_the_sidecar_entry(self, client: Any, graph_dir: Path) -> None:
         client.put("/api/graphs/flow/groups", json={"groups": self.GROUPS})
         response = client.post("/api/graphs/flow/rename", json={"node": "gain", "new": "amp"})
         assert response.status_code == 200
         assert response.get_json()["groups"] == [{**self.GROUPS[0], "nodes": ["amp", "mask"]}]
+        client.post("/api/graphs/flow/save")
         assert layout.read_groups(graph_dir / "flow.layout.yaml")[0]["nodes"] == ["amp", "mask"]
 
     def test_groups_of_an_unknown_graph_are_404(self, client: Any) -> None:
@@ -671,6 +733,14 @@ class TestTrace:
         assert body["statuses"] == {"stream.ops[0]": "ok"}
         assert body["trace"]["nodes"][0]["input"]["class"] == {"type": "Label", "value": "dog"}
 
+    def test_the_trace_runs_what_the_editor_shows_not_the_file_on_disk(self, client: Any, graph_dir: Path) -> None:
+        """Explicit Save makes the two differ: an edited, UNSAVED value is the one the run uses. Measured
+        before the change: the trace loaded the FILE, so it ran ``low_level: 0.5`` while the canvas said 0.9."""
+        client.post("/api/graphs/pets/param", json={"node": "stream.ops[1]", "param": "low_level", "value": 0.9})
+        assert (graph_dir / "pets.yaml").read_text() == PETS_TEXT
+        body = client.post("/api/graphs/pets/trace", json={}).get_json()
+        assert body["trace"]["nodes"][1]["params"]["low_level"] == 0.9
+
     def test_every_run_is_kept_on_the_app_never_on_the_module(self, graph_dir: Path) -> None:
         first, second = create_app(graph_dir), create_app(graph_dir)
         run = first.test_client().post("/api/graphs/pets/trace", json={}).get_json()["run"]
@@ -791,95 +861,6 @@ class TestTypes:
             assert compatible(a, b) == document_module._meets(a, b), (a, b)
 
 
-# ------------------------------------------------------------------------------------------------
-# the CLI command
-# ------------------------------------------------------------------------------------------------
-
-
-@pytest.fixture
-def busy_port() -> Iterator[int]:
-    """A really-listening socket on a free port — the probe is exercised, never mocked."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as held:
-        held.bind((cli.STUDIO_HOST, 0))
-        held.listen(1)
-        yield int(held.getsockname()[1])
-
-
-@pytest.fixture
-def free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-        probe.bind((cli.STUDIO_HOST, 0))
-        return int(probe.getsockname()[1])
-
-
-class TestEditorCommand:
-    def test_editor_is_registered_and_its_help_names_every_parameter(self) -> None:
-        assert cli.app._commands["editor"] is cli.editor
-        documented = parse_param_docs(cli.editor)
-        import inspect
-
-        assert list(documented) == list(inspect.signature(cli.editor).parameters) == ["graph_dir", "port"]
-        assert all(documented.values())
-        assert cli.editor.__liquifai_short__ == {"p": "port"}  # type: ignore[attr-defined]
-        assert cli.editor.__liquifai_positionals__ == ["graph_dir"]  # type: ignore[attr-defined]
-        assert cli.EDITOR_PORT != cli.DEFAULT_PORT
-
-    def test_editor_serves_the_directory_on_the_port_as_an_int(
-        self, graph_dir: Path, free_port: int, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(sys, "argv", ["streamstudio", "editor", str(graph_dir), "-p", str(free_port)])
-        with patch("streamstudio.app.create_app") as create_app_mock:
-            cli.main()
-        create_app_mock.assert_called_once_with(graph_dir)
-        create_app_mock.return_value.run.assert_called_once_with(host=cli.STUDIO_HOST, port=free_port)
-
-    def test_editor_defaults_to_the_current_directory(
-        self, graph_dir: Path, free_port: int, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.chdir(graph_dir)
-        monkeypatch.setattr(sys, "argv", ["streamstudio", "editor", "--port", str(free_port)])
-        with patch("streamstudio.app.create_app") as create_app_mock:
-            cli.main()
-        create_app_mock.assert_called_once_with(Path.cwd())
-
-    def test_editor_refuses_a_missing_directory(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        missing = tmp_path / "nowhere"
-        monkeypatch.setattr(sys, "argv", ["streamstudio", "editor", str(missing)])
-        with patch("streamstudio.app.create_app") as create_app_mock:
-            with pytest.raises(SystemExit) as exit_info:
-                cli.main()
-        assert str(missing) in str(exit_info.value)
-        create_app_mock.assert_not_called()
-
-    def test_editor_on_a_busy_port_refuses_before_serving_and_offers_a_command_the_cli_accepts(
-        self, graph_dir: Path, busy_port: int, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        monkeypatch.setattr(sys, "argv", ["streamstudio", "editor", str(graph_dir), "--port", str(busy_port)])
-        with patch("streamstudio.app.create_app") as create_app_mock:
-            with pytest.raises(SystemExit) as exit_info:
-                cli.main()
-        assert exit_info.value.code == 1
-        create_app_mock.assert_not_called()
-        out = capsys.readouterr().out
-        assert f"http://{cli.STUDIO_HOST}:{busy_port}" in out
-        suggested = [line for line in out.splitlines() if "streamstudio editor --port" in line]
-        assert len(suggested) == 1, out
-        argv: List[str] = suggested[0].split("streamstudio", 1)[1].split()
-        assert argv[0] == "editor"
-        # the positional goes right after the command: liquifai binds positionals up to the first flag
-        monkeypatch.setattr(sys, "argv", ["streamstudio", "editor", str(graph_dir), *argv[1:]])
-        monkeypatch.setattr(cli, "_port_in_use", lambda port, host=cli.STUDIO_HOST: False)
-        with patch("streamstudio.app.create_app") as create_app_mock:
-            cli.main()
-        create_app_mock.return_value.run.assert_called_once_with(host=cli.STUDIO_HOST, port=busy_port + 1)
-
-    def test_run_still_offers_its_own_command_on_a_busy_port(self, capsys: pytest.CaptureFixture[str]) -> None:
-        cli._report_port_in_use(8188)
-        assert "streamstudio --port 8189" in capsys.readouterr().out
-        cli._report_port_in_use(8190, command="editor")
-        assert "streamstudio editor --port 8191" in capsys.readouterr().out
-
-
 def test_magic_mock_is_not_left_installed() -> None:
-    """The ``patch`` contexts above are scoped — the real factory is what the module exports afterwards."""
+    """No test here patches the factory — the real one is what the module exports."""
     assert not isinstance(app_module.create_app, MagicMock)

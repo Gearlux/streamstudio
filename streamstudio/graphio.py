@@ -2730,7 +2730,7 @@ def _missing_node_refusal(missing: List[Tuple[str, str]]) -> str:
         f"this StreamStudio does not register {len(missing)} node(s) the canvas names: {names}. "
         "A Taidal node the canvas names but this installation has no class for is normally an op "
         "added AFTER the editor started — the node registry is read once at startup. Restart it "
-        "(`streamstudio restart`) and convert again; if the op really is gone from this "
+        "(`streamstudio restart --editor comfy`) and convert again; if the op really is gone from this "
         "installation, the canvas is older than the code and needs redrawing."
     )
 

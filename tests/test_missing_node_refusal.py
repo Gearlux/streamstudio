@@ -72,7 +72,9 @@ class TestAnUnregisteredTaidalNodeRefuses:
         message = str(caught.value)
         assert "Taidal_waivefront_op_measure_TuneToBand" in message
         assert "node 2" in message, "the canvas's own node id, so it can be found"
-        assert "restart" in message.lower()
+        # the COMFYUI editor is the one holding the stale registry; a bare `streamstudio restart` restarts the
+        # canvas editor on 8190 (measured: dropping its unsaved edits) and leaves the stale ComfyUI running
+        assert "(`streamstudio restart --editor comfy`)" in message
 
     def test_several_missing_nodes_are_all_named(self) -> None:
         """Eleven were missing in the case this exists for; naming one and hiding ten would

@@ -15,7 +15,9 @@ raises ``AccessDenied`` unprivileged on this platform, while iterating processes
 its own connections does not.
 
 Every listener in this file is a REAL child process on a real ephemeral port that signals readiness
-over a pipe — no mocked sockets, and no sleeping to wait for one.
+over a pipe — no mocked sockets, and no sleeping to wait for one. A listener accepts but never answers HTTP, so
+the question ``stop`` asks a canvas editor first (which graphs hold unsaved work) times out on it — the case of
+a port held by something else — and the stop goes on saying nothing extra; the wait is shortened here.
 """
 
 import socket
@@ -59,6 +61,31 @@ def _spawn_listener(port: int, *, ignore_sigterm: bool = False) -> subprocess.Po
     assert proc.stdout is not None
     assert proc.stdout.readline().strip() == "ready", "listener failed to start"
     return proc
+
+
+@pytest.fixture(autouse=True)
+def _a_home_of_its_own(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Every test here gets a temporary home, so a ``--background`` launch writes its per-port log
+    (``~/.streamstudio/logs/studio-<port>.log``) there. Measured before 2026-09-30: one run of this file left 3 empty
+    ``studio-<port>.log`` files in the person's real ``~/.streamstudio/logs`` (259 → 262; 262 had piled up). Scoped to
+    THIS file on purpose: the browser tests find headless chromium through the real home."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))  # what Path.home() reads on Windows
+    return home
+
+
+def test_a_background_log_of_a_test_lands_in_the_tests_own_home(_a_home_of_its_own: Path) -> None:
+    """The guard for the fixture above: remove it and this fails, instead of the person's logs folder filling up."""
+    assert _a_home_of_its_own in cli.studio_log_path(8188).parents
+    assert Path("~").expanduser() == _a_home_of_its_own
+
+
+@pytest.fixture(autouse=True)
+def _short_question(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The listeners never answer the unsaved-work question: wait 0.2 s for that answer, not the 5 s a stop waits."""
+    monkeypatch.setattr(cli, "ASK_TIMEOUT", 0.2)
 
 
 @pytest.fixture
@@ -143,6 +170,46 @@ def test_stop_command_names_the_port_and_the_pid(
     assert str(port) in out and str(proc.pid) in out
 
 
+#: A listener that answers every connection with an SSH banner — a program that speaks, but not HTTP.
+_BANNER_LISTENER = """
+import socket, time
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.bind(("{host}", {port}))
+s.listen(8)
+print("ready", flush=True)
+held = []
+while True:
+    connection, _ = s.accept()
+    connection.sendall(b"SSH-2.0-OpenSSH_9.6\\r\\n")
+    held.append(connection)
+"""
+
+
+def test_stop_stops_a_listener_that_does_not_speak_http_and_says_nothing_extra(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Measured before (R7): the question ``stop`` asks first crashed on the banner (``http.client.BadStatusLine:
+    SSH-2.0-OpenSSH_9.6``), the command exited 1 and the listener kept running. The question is best effort: any
+    answer that is not a canvas editor's is "nothing extra", and the stop goes on."""
+    port = _free_port()
+    proc = subprocess.Popen(
+        [sys.executable, "-c", _BANNER_LISTENER.format(host=cli.STUDIO_HOST, port=port)],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert proc.stdout is not None and proc.stdout.readline().strip() == "ready"
+        assert cli._unsaved_work(port) is None
+        monkeypatch.setattr(sys, "argv", ["streamstudio", "stop", "--port", str(port)])
+        cli.main()
+        assert capsys.readouterr().out.splitlines() == [f"Stopped StreamStudio on port {port} (pid {proc.pid})."]
+        assert proc.wait(timeout=10) is not None
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=10)
+
+
 def test_stop_command_says_so_when_nothing_is_running(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -175,7 +242,19 @@ def test_restart_stops_the_running_studio_then_launches(
     port = _free_port()
     proc = _spawn_listener(port)
     monkeypatch.setattr(
-        sys, "argv", ["streamstudio", "--comfy-dir", str(comfy_dir), "--port", str(port), "--install-", "restart"]
+        sys,
+        "argv",
+        [
+            "streamstudio",
+            "--editor",
+            "comfy",
+            "--comfy-dir",
+            str(comfy_dir),
+            "--port",
+            str(port),
+            "--install-",
+            "restart",
+        ],
     )
     try:
         with patch("subprocess.run") as run_mock:
@@ -194,7 +273,19 @@ def test_restart_with_nothing_running_still_launches(comfy_dir: Path, monkeypatc
     """ "Restart" means "make it running" — an idle port is not an error."""
     port = _free_port()
     monkeypatch.setattr(
-        sys, "argv", ["streamstudio", "--comfy-dir", str(comfy_dir), "--port", str(port), "--install-", "restart"]
+        sys,
+        "argv",
+        [
+            "streamstudio",
+            "--editor",
+            "comfy",
+            "--comfy-dir",
+            str(comfy_dir),
+            "--port",
+            str(port),
+            "--install-",
+            "restart",
+        ],
     )
     with patch("subprocess.run") as run_mock:
         cli.main()
@@ -208,7 +299,11 @@ def test_restart_with_nothing_running_still_launches(comfy_dir: Path, monkeypatc
 
 def test_the_default_launch_blocks_in_the_foreground(comfy_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     port = _free_port()
-    monkeypatch.setattr(sys, "argv", ["streamstudio", "--comfy-dir", str(comfy_dir), "--port", str(port), "--install-"])
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["streamstudio", "--editor", "comfy", "--comfy-dir", str(comfy_dir), "--port", str(port), "--install-"],
+    )
     with patch("subprocess.run") as run_mock, patch("subprocess.Popen") as popen_mock:
         cli.main()
     assert len(_launch_calls(run_mock)) == 1  # subprocess.run == blocking
@@ -222,7 +317,17 @@ def test_background_detaches_and_writes_a_per_port_log(
     monkeypatch.setattr(
         sys,
         "argv",
-        ["streamstudio", "--comfy-dir", str(comfy_dir), "--port", str(port), "--install-", "--background"],
+        [
+            "streamstudio",
+            "--editor",
+            "comfy",
+            "--comfy-dir",
+            str(comfy_dir),
+            "--port",
+            str(port),
+            "--install-",
+            "--background",
+        ],
     )
     with patch("subprocess.run") as run_mock, patch("subprocess.Popen") as popen_mock:
         cli.main()
@@ -249,7 +354,9 @@ def test_background_is_spelled_in_full(comfy_dir: Path, monkeypatch: pytest.Monk
 
     port = _free_port()
     monkeypatch.setattr(
-        sys, "argv", ["streamstudio", "-d", "--comfy-dir", str(comfy_dir), "--port", str(port), "--bg", "run"]
+        sys,
+        "argv",
+        ["streamstudio", "-d", "--editor", "comfy", "--comfy-dir", str(comfy_dir), "--port", str(port), "--bg", "run"],
     )
     with patch("subprocess.run"), patch("subprocess.Popen"):
         with pytest.raises(UnknownFlagError) as exc:
@@ -272,7 +379,20 @@ def test_the_short_spelling_reaches_background(comfy_dir: Path, monkeypatch: pyt
     """
     port = _free_port()
     monkeypatch.setattr(
-        sys, "argv", ["streamstudio", "--comfy-dir", str(comfy_dir), "-p", str(port), "--install-", "-b", "run"]
+        sys,
+        "argv",
+        [
+            "streamstudio",
+            "--editor",
+            "comfy",
+            "--comfy-dir",
+            str(comfy_dir),
+            "-p",
+            str(port),
+            "--install-",
+            "-b",
+            "run",
+        ],
     )
     with patch("subprocess.run") as run_mock, patch("subprocess.Popen") as popen_mock:
         cli.main()
@@ -285,7 +405,20 @@ def test_the_short_spelling_works_after_the_command_too(comfy_dir: Path, monkeyp
     """The placement that was refused outright before the migration."""
     port = _free_port()
     monkeypatch.setattr(
-        sys, "argv", ["streamstudio", "restart", "--comfy-dir", str(comfy_dir), "-p", str(port), "--install-", "-b"]
+        sys,
+        "argv",
+        [
+            "streamstudio",
+            "restart",
+            "--editor",
+            "comfy",
+            "--comfy-dir",
+            str(comfy_dir),
+            "-p",
+            str(port),
+            "--install-",
+            "-b",
+        ],
     )
     with patch("subprocess.run"), patch("subprocess.Popen") as popen_mock:
         cli.main()

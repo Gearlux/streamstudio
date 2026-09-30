@@ -4,20 +4,41 @@
  * coloured handle; each constructor parameter is a row with a widget (`ParamWidget`) AND a small target handle
  * (a `bind:` wire lands on a parameter). Nothing is per class — a new op class needs no page change (§2.3).
  *
+ * Inside a subgraph a node's name is QUALIFIED (`prep/grey`, DESIGN §2.6): the title shows the step's own name
+ * (`grey`) and every hook and every edit keeps the qualified one. Two kinds are drawn their own way by the same
+ * component: a SUBGRAPH node (a `Subgraph` step drawn as one node) lists the steps inside it under an "open" button
+ * — the button, a double-click on the card (the canvas) or Open in its menu shows its inside; a BOUNDARY node is a
+ * subgraph's `<in>` / `<out>`, where the record enters and leaves it — a small pill, never renamed.
+ *
  * Double-clicking the name edits it in place: Enter is `POST …/rename` (the key, every reference, the sidecar
- * entry and group membership in ONE edit); a refused name (one in use, a list member) leaves the old name and the
- * page shows the server's message. After a run, the node carries its status (`data-run-status`: ok / paused /
- * error / dropped / not reached — coloured), its wall time and its generation, read from the latest run.
+ * entry and group membership in ONE edit), the typed name kept on the node's level (`mono` inside prep is sent
+ * as `prep/mono`); a refused name (one in use, a list member) leaves the old name and the page shows the server's
+ * message. After a run, the node carries its status (`data-run-status`: ok / paused / error / dropped / not
+ * reached — coloured), its wall time and its generation, read from the latest run.
  *
  * Every element a test needs is addressable by `data-*`: the root by `data-node` / `data-kind` / `data-class`
  * (and `data-run-status` / `data-generation` after a run), a handle by `data-node` / `data-socket` / `data-type` /
- * `data-kind`, a widget by `data-param`, the rename field by `data-rename`.
+ * `data-kind`, a widget by `data-param`, the rename field by `data-rename`, a subgraph's open button by
+ * `data-open-subgraph` and its step list by `data-inner-steps`.
  */
-import { useState, type KeyboardEvent } from "react";
+import { useEffect, useState, type KeyboardEvent } from "react";
 import { Handle, Position, type NodeProps } from "@xyflow/react";
 import { useEditor } from "../context";
+import { isBoundary, levelOfNode, renamedTo, shortName } from "../levels";
 import { handleId, shortClass, socketColor, type GenericNode, type HandleKind, type ModelNode } from "../model";
 import { ParamWidget } from "./ParamWidget";
+
+/** What the class line says for a node without a class of its own. */
+function classLine(node: ModelNode): string {
+  const cls = shortClass(node.class_path);
+  if (cls) return cls;
+  if (node.kind === "host") return "what the host provides";
+  if (isBoundary(node))
+    return shortName(node.name) === "<out>"
+      ? `the record ${levelOfNode(node.name)} returns`
+      : `the record ${levelOfNode(node.name)} receives`;
+  return "";
+}
 
 export function GenericNodeView({ data, selected }: NodeProps<GenericNode>) {
   const { form, run, setParam } = useEditor();
@@ -41,8 +62,9 @@ export function GenericNodeView({ data, selected }: NodeProps<GenericNode>) {
       <div className="title">
         <NodeName node={node} />
         <span className="badge">{node.kind}</span>
-        <div className="cls">{shortClass(node.class_path) || (node.kind === "host" ? "what the host provides" : "")}</div>
+        <div className="cls">{classLine(node)}</div>
       </div>
+      {node.kind === "subgraph" && <SubgraphBar node={node} />}
       {status && (
         <div className="run-badge" title={traced && typeof traced.error === "string" ? traced.error : status}>
           <span className="run-dot" />
@@ -90,35 +112,61 @@ export function GenericNodeView({ data, selected }: NodeProps<GenericNode>) {
   );
 }
 
-/** The name in the title; a double-click edits it in place. */
+/** A subgraph node's own look: the steps it holds, and the button that shows them (a double-click does the same). */
+function SubgraphBar({ node }: { node: ModelNode }) {
+  const { openSubgraph, innerSteps } = useEditor();
+  const steps = innerSteps(node.name);
+  return (
+    <div className="sub-bar">
+      <span className="sub-steps" data-inner-steps={steps.join(",")} title={steps.join(" → ")}>
+        {steps.length === 0 ? "no steps" : steps.join(" → ")}
+      </span>
+      <button
+        type="button"
+        className="sub-open nodrag"
+        data-open-subgraph={node.name}
+        title="show its inside (double-click the card does the same)"
+        onDoubleClick={(event) => event.stopPropagation()}
+        onClick={() => openSubgraph(node.name)}
+      >
+        open ▸
+      </button>
+    </div>
+  );
+}
+
+/** The name in the title; a double-click, F2 or Rename… edits it in place (the editor context says which title). */
 function NodeName({ node }: { node: ModelNode }) {
-  const { rename } = useEditor();
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState(node.name);
+  const { rename, editing: which, setEditing } = useEditor();
+  const editing = which === `node:${node.name}`;
+  const own = shortName(node.name);
+  const [draft, setDraft] = useState(own);
+  useEffect(() => {
+    if (editing) setDraft(own);
+  }, [editing, own]);
+  if (isBoundary(node)) return <span className="name">{own}</span>;
   if (!editing) {
     return (
       <span
         className="name"
-        title="double-click to rename"
-        onDoubleClick={() => {
-          setDraft(node.name);
-          setEditing(true);
+        title={own === node.name ? "double-click to rename (F2)" : `${node.name} — double-click to rename (F2)`}
+        onDoubleClick={(event) => {
+          event.stopPropagation(); // a double-click on the name renames; on the card it opens a subgraph
+          setEditing(`node:${node.name}`);
         }}
       >
-        {node.name}
+        {own}
       </span>
     );
   }
   const onKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
     event.stopPropagation(); // the page's shortcuts (g, Ctrl+Z …) are not for a text being typed
-    if (event.key === "Escape") setEditing(false);
+    if (event.key === "Escape") setEditing(null);
     if (event.key !== "Enter") return;
     const wanted = draft.trim();
-    if (wanted === "" || wanted === node.name) return setEditing(false);
+    if (wanted === "" || wanted === own) return setEditing(null);
     // on success the graph answers with the node under its new name, and this component is drawn afresh
-    void rename(node.name, wanted).then((taken) => {
-      if (!taken) setEditing(false);
-    });
+    void rename(node.name, renamedTo(node.name, wanted)).then(() => setEditing(null));
   };
   return (
     <input
@@ -129,7 +177,8 @@ function NodeName({ node }: { node: ModelNode }) {
       onFocus={(event) => event.currentTarget.select()}
       onChange={(event) => setDraft(event.target.value)}
       onKeyDown={onKeyDown}
-      onBlur={() => setEditing(false)}
+      onDoubleClick={(event) => event.stopPropagation()}
+      onBlur={() => setEditing(null)}
     />
   );
 }

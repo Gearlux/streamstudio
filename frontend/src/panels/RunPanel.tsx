@@ -13,12 +13,17 @@
  * it and everything downstream; the canvas repaints the statuses and generations. A value the constructor refuses
  * shows its message here and leaves the run as it was. A graph with no source of its own is refused by the
  * server in words — a view chain is fed by a host — and that text is what the panel shows.
+ *
+ * A subgraph is traced INTO (DESIGN §1.3): its inner nodes are rows of their own, named qualified (`prep/grey`),
+ * listed right under the subgraph's row and indented one step per level (`run.runRows`); each carries
+ * `data-run-parent` (the subgraph it sits in) and `data-depth`. "step" goes through them in that order.
  */
 import { useEffect, useState } from "react";
 import type { Run, TraceNode } from "../api";
 import { ParamWidget } from "../canvas/ParamWidget";
+import { shortName } from "../levels";
 import type { Form, Json, ModelNode, Param } from "../model";
-import { changedParams, nextNode, plainParams, summaryCells } from "../run";
+import { changedParams, nextNode, plainParams, runRows, summaryCells } from "../run";
 
 export interface RunPanelProps {
   file: string;
@@ -75,9 +80,19 @@ export function RunPanel(props: RunPanelProps) {
           </div>
           <table className="run-nodes">
             <tbody>
-              {run.trace.nodes.map((node) => (
-                <tr key={node.node} data-run-row={node.node} className={`run-${node.status.replace(" ", "-")}`}>
-                  <td>{node.node}</td>
+              {runRows(run.trace.nodes).map(({ node, depth, parent }) => (
+                <tr
+                  key={node.node}
+                  data-run-row={node.node}
+                  data-run-parent={parent}
+                  data-depth={depth}
+                  className={`run-${node.status.replace(" ", "-")}${depth > 0 ? " run-inner" : ""}`}
+                >
+                  <td className="run-name" style={depth > 0 ? { paddingLeft: 6 + depth * 14 } : undefined} title={node.node}>
+                    {depth > 0 ? <span className="run-indent">└ </span> : null}
+                    {depth > 0 ? shortName(node.node) : node.node}
+                    {Array.isArray(node.inner) && <span className="run-sub"> subgraph</span>}
+                  </td>
                   <td data-field="status">{node.status}</td>
                   <td data-field="ms">{typeof node.ms === "number" ? `${node.ms.toFixed(2)} ms` : ""}</td>
                   <td data-field="generation">{run.generations[node.node] ?? ""}</td>

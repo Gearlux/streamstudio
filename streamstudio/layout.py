@@ -4,7 +4,9 @@ The confluid document is the only truth of a graph (``docs/rewrite.md`` §2.1) a
 about pixels — adding ``x:``/``y:`` keys to it would turn a pipeline file into a drawing file and
 make every drag a document edit. Positions therefore live in a SIDECAR, ``<document>.layout.yaml``,
 a mapping ``{node name: [x, y]}``. It is keyed by the node NAME (a flow step's key, ``stream.ops[1]``,
-``contract`` — the one naming scheme the engine, the tools and the canvas share), never by an id
+``contract``, ``prep/grey`` for a node inside the subgraph ``prep`` — the one naming scheme the engine,
+the tools and the canvas share; each subgraph's inside is a model of its own, laid out on its own by the
+same rule), never by an id
 written into the YAML: a sidecar is a convenience, and a graph must load, run and export with the
 sidecar deleted. The known cost, measured on the prototypes, is that RENAMING a node orphans its
 entry — the editor's rename re-keys the sidecar in the same operation, and :func:`stale_positions`
@@ -34,7 +36,7 @@ Only the model's SHAPE is read (``.nodes`` with a ``.name``, ``.wires`` with ``.
 """
 
 from pathlib import Path
-from typing import Dict, List, Mapping, NotRequired, Optional, Protocol, Sequence, Tuple, TypedDict, cast
+from typing import Callable, Dict, List, Mapping, NotRequired, Optional, Protocol, Sequence, Tuple, TypedDict, cast
 
 import yaml
 
@@ -64,13 +66,19 @@ class Group(TypedDict):
     """One box the canvas draws around nodes, as the page spells it.
 
     ``nodes`` names the members by node name (the one naming scheme); a member the model no longer has
-    is kept and simply not drawn. Every other key is the page's own and comes back as given.
+    is kept and simply not drawn. ``bounds`` (``[x, y, w, h]`` in canvas pixels) is the box of a group the
+    page does not derive from its members — an EMPTY box dropped by *Add Group*, or one the user resized;
+    ``parent`` names the level the box is drawn on (a subgraph's node name, ``""`` = the top level). Both
+    are declared so a reader of this type sees them, and stored exactly as sent: the server reads neither.
+    Every other key is the page's own and comes back as given.
     """
 
     id: str
     title: str
     color: str
     nodes: NotRequired[List[str]]
+    bounds: NotRequired[List[float]]
+    parent: NotRequired[str]
 
 
 class Named(Protocol):
@@ -277,33 +285,76 @@ def write_sidecar(path: Path, positions: Mapping[str, Position], groups: Optiona
     path.write_text(f"{SIDECAR_HEADER}\n{body}")
 
 
+def rename_key(name: str, old: str, new: str) -> str:
+    """``name`` after the node ``old`` is renamed ``new``: ``old`` itself, and every name DERIVED from it — a
+    node inside the subgraph ``old`` (``old/…``: ``prep/grey``, ``prep/inner/x``), a nested marker in one of its
+    slots (``old.…``: ``stream.source``, ``maybe.op/grey``) and a member of a list it holds at the top level
+    (``old[…``: ``ops[1]``). A step name holds no ``/``, ``.`` or ``[`` (the engine refuses the first two, YAML
+    keys of the third are not steps), so each can only mean under ``old``; ``prepare`` is not under ``prep``,
+    and ``stream.ops[10]`` is not under ``stream.ops[1]`` (measured before: renaming ``stream`` re-laid
+    ``stream.ops[0]`` and ``stream.ops[1]/scaled`` out and left a group naming the old names)."""
+    if name == old:
+        return new
+    if name.startswith((f"{old}/", f"{old}.", f"{old}[")):
+        return new + name[len(old) :]
+    return name
+
+
 def rename_member(groups: Sequence[Group], old: str, new: str) -> List[Group]:
-    """``groups`` with every member named ``old`` renamed to ``new`` — new dicts, the input left as it is.
+    """``groups`` with every member named ``old`` (or under it, :func:`rename_key`) renamed — and the level a
+    box is drawn on (``parent``) when it is ``old`` or under it. New dicts; the input is left as it is.
 
     The one place the server reads inside a group: a rename is ONE operation over every reference to a
-    node (its key, its wires, its position, its group), so a group must not keep naming a node that is gone.
+    node (its key, its wires, its position, its group), so a group must not keep naming a node that is gone
+    — nor a level: renaming the subgraph ``prep`` moves the boxes drawn inside it along with its nodes.
     """
     renamed: List[Group] = []
     for group in groups:
         copy = dict(group)
         members = copy.get("nodes")
         if isinstance(members, list):
-            copy["nodes"] = [new if member == old else member for member in members]
+            copy["nodes"] = [rename_key(member, old, new) if isinstance(member, str) else member for member in members]
+        parent = copy.get("parent")
+        if isinstance(parent, str) and parent:
+            copy["parent"] = rename_key(parent, old, new)
         renamed.append(cast(Group, copy))
     return renamed
+
+
+def map_members(groups: Sequence[Group], moved: Callable[[str], Optional[str]]) -> List[Group]:
+    """``groups`` with every member name — and the level a box is drawn on (``parent``) — passed through
+    ``moved``: a new name, the same one, or ``None`` for a node that is gone (dropped from ``nodes``; a
+    ``parent`` that is gone is kept as it was, the page draws the box where it can). New dicts, input untouched.
+
+    The shift of a list's positional member names (a Convert or a Paste of ``ops`` members) goes through here,
+    as a rename goes through :func:`rename_member`."""
+    mapped: List[Group] = []
+    for group in groups:
+        copy = dict(group)
+        members = copy.get("nodes")
+        if isinstance(members, list):
+            kept = [moved(member) if isinstance(member, str) else member for member in members]
+            copy["nodes"] = [member for member in kept if member is not None]
+        parent = copy.get("parent")
+        if isinstance(parent, str) and parent:
+            copy["parent"] = moved(parent) or parent
+        mapped.append(cast(Group, copy))
+    return mapped
 
 
 # ----------------------------------------------------------------------------------------------
 # the merge
 # ----------------------------------------------------------------------------------------------
-def positions(model: GraphLike, sidecar: Path) -> Dict[str, Position]:
+def positions(model: GraphLike, sidecar: Path, *, kept: Optional[Mapping[str, Position]] = None) -> Dict[str, Position]:
     """Every node's position, in the model's order: the sidecar's where it names the node, laid out otherwise.
 
     Fresh nodes keep their layer's column and take rows among THEMSELVES, starting one row below the
     lowest kept node — never on top of an arranged one. A sidecar name the model no longer has is
-    left out; :func:`stale_positions` names it.
+    left out; :func:`stale_positions` names it. ``kept`` replaces the sidecar's positions when the caller
+    holds a whole set of its own (the editor's, after a list's members were re-keyed — the sidecar then
+    places a member under a name another member had).
     """
-    kept = read_sidecar(sidecar)
+    kept = read_sidecar(sidecar) if kept is None else dict(kept)
     names = [node.name for node in model.nodes]
     fresh = [name for name in names if name not in kept]
     placed: Dict[str, Position] = {}

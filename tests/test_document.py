@@ -422,8 +422,13 @@ def fake_layout(monkeypatch: pytest.MonkeyPatch) -> types.ModuleType:
     def rename_member(groups: List[Any], old: str, new: str) -> List[Any]:
         return list(groups)
 
-    def positions(model: Model, sidecar: Path) -> Dict[str, Tuple[float, float]]:
-        kept = read_sidecar(sidecar)
+    def rename_key(name: str, old: str, new: str) -> str:  # the real rule: the node, and every name under it
+        return new + name[len(old) :] if name == old or name.startswith(f"{old}/") else name
+
+    def positions(
+        model: Model, sidecar: Path, *, kept: Optional[Dict[str, Tuple[float, float]]] = None
+    ) -> Dict[str, Tuple[float, float]]:
+        kept = read_sidecar(sidecar) if kept is None else dict(kept)
         laid = layered_layout(model)
         return {node.name: kept.get(node.name, laid[node.name]) for node in model.nodes}
 
@@ -433,6 +438,7 @@ def fake_layout(monkeypatch: pytest.MonkeyPatch) -> types.ModuleType:
     mod.positions = positions  # type: ignore[attr-defined]
     mod.read_groups = read_groups  # type: ignore[attr-defined]
     mod.rename_member = rename_member  # type: ignore[attr-defined]
+    mod.rename_key = rename_key  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "streamstudio.layout", mod)
     monkeypatch.setattr(streamstudio, "layout", mod, raising=False)
     return mod

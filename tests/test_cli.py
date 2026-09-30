@@ -1,6 +1,7 @@
-"""Tests for ``streamstudio.cli.main`` — the ComfyUI bootstrap + launch flow.
+"""Tests for ``streamstudio.cli.main`` — the ComfyUI bootstrap + launch flow (``--editor comfy``).
 
-``main`` does four things on each run: clone ComfyUI if missing, install custom
+Bare ``streamstudio`` serves the new canvas editor (``test_cli_editor.py``); every launch here asks for
+the ComfyUI editor explicitly, which does four things on each run: clone ComfyUI if missing, install custom
 nodes (entry-point-declared / env / flags), (re)point the ``custom_nodes/streamstudio``
 symlink at this package, then launch ``main.py`` under the active interpreter.
 ``subprocess.run`` is always mocked so no real clone / pip install / ComfyUI launch
@@ -101,7 +102,7 @@ def _preinstall_manager(comfy_dir: Path) -> Path:
 def test_main_clones_when_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, logger_mock: MagicMock) -> None:
     # No --comfy-dir -> the default is built from Path.home(); point it at tmp.
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    monkeypatch.setattr(sys, "argv", ["streamstudio"])
+    monkeypatch.setattr(sys, "argv", ["streamstudio", "--editor", "comfy"])
     comfy = tmp_path / ".streamstudio" / "ComfyUI"
 
     with patch("subprocess.run") as run_mock:
@@ -135,7 +136,7 @@ def test_main_uses_existing_and_updates_stale_symlink(
     stale_target.mkdir()
     os.symlink(stale_target, link)  # pre-existing symlink pointing at the wrong place
 
-    monkeypatch.setattr(sys, "argv", ["streamstudio", "--comfy-dir", str(comfy)])
+    monkeypatch.setattr(sys, "argv", ["streamstudio", "--editor", "comfy", "--comfy-dir", str(comfy)])
 
     with patch("subprocess.run") as run_mock:
         cli.main()
@@ -158,7 +159,7 @@ def test_main_leaves_correct_symlink_untouched(
     link = custom / "streamstudio"
     os.symlink(SOURCE, link)  # already correct
 
-    monkeypatch.setattr(sys, "argv", ["streamstudio", "--comfy-dir", str(comfy)])
+    monkeypatch.setattr(sys, "argv", ["streamstudio", "--editor", "comfy", "--comfy-dir", str(comfy)])
 
     with patch("subprocess.run"), patch("streamstudio.cli.os.symlink") as symlink_mock:
         cli.main()
@@ -177,7 +178,7 @@ def test_main_warns_on_non_symlink_path(
     link = custom / "streamstudio"
     link.mkdir()  # a real directory squatting where the symlink should go
 
-    monkeypatch.setattr(sys, "argv", ["streamstudio", "--comfy-dir", str(comfy)])
+    monkeypatch.setattr(sys, "argv", ["streamstudio", "--editor", "comfy", "--comfy-dir", str(comfy)])
 
     with patch("subprocess.run"), patch("streamstudio.cli.os.symlink") as symlink_mock:
         cli.main()
@@ -194,7 +195,7 @@ def test_main_handles_keyboard_interrupt(
     comfy = tmp_path / "ComfyUI"
     comfy.mkdir()
     _preinstall_manager(comfy)  # exists -> the requirements sync fires first (and is interrupted)
-    monkeypatch.setattr(sys, "argv", ["streamstudio", "--comfy-dir", str(comfy)])
+    monkeypatch.setattr(sys, "argv", ["streamstudio", "--editor", "comfy", "--comfy-dir", str(comfy)])
 
     with patch("subprocess.run", side_effect=KeyboardInterrupt):
         cli.main()  # Ctrl-C during launch must be swallowed, not propagated
@@ -210,7 +211,7 @@ def test_main_default_nodes_shown_exports_env_zero(
     # STREAMSTUDIO_HIDE_DEFAULT_NODES="0" (explicit, so the flag wins over any ambient shell export).
     comfy = tmp_path / "ComfyUI"
     comfy.mkdir()
-    monkeypatch.setattr(sys, "argv", ["streamstudio", "--comfy-dir", str(comfy)])
+    monkeypatch.setattr(sys, "argv", ["streamstudio", "--editor", "comfy", "--comfy-dir", str(comfy)])
     # An ambient export of the var must NOT leak through when the flag defaults to shown.
     monkeypatch.setenv("STREAMSTUDIO_HIDE_DEFAULT_NODES", "1")
 
@@ -229,7 +230,9 @@ def test_main_no_default_nodes_exports_env_one(
     # streamstudio import inside ComfyUI prunes the defaults and surfaces Taidal nodes at the root.
     comfy = tmp_path / "ComfyUI"
     comfy.mkdir()
-    monkeypatch.setattr(sys, "argv", ["streamstudio", "--comfy-dir", str(comfy), "--default-nodes-"])
+    monkeypatch.setattr(
+        sys, "argv", ["streamstudio", "--editor", "comfy", "--comfy-dir", str(comfy), "--default-nodes-"]
+    )
 
     with patch("subprocess.run") as run_mock:
         cli.main()
@@ -252,7 +255,9 @@ def test_main_config_exports_config_env(
     comfy.mkdir()
     cfg = tmp_path / "palette.yaml"
     cfg.write_text("keep_nodes: [MaskToImage]\n")
-    monkeypatch.setattr(sys, "argv", ["streamstudio", "--comfy-dir", str(comfy), "--palette-config", str(cfg)])
+    monkeypatch.setattr(
+        sys, "argv", ["streamstudio", "--editor", "comfy", "--comfy-dir", str(comfy), "--palette-config", str(cfg)]
+    )
     with patch("subprocess.run") as run_mock:
         cli.main()
     assert run_mock.call_args.kwargs["env"]["STREAMSTUDIO_CONFIG"] == str(cfg)
@@ -266,7 +271,7 @@ def test_main_no_palette_config_clears_config_env(
     comfy = tmp_path / "ComfyUI"
     comfy.mkdir()
     monkeypatch.setenv("STREAMSTUDIO_CONFIG", "/ambient/leak.yaml")
-    monkeypatch.setattr(sys, "argv", ["streamstudio", "--comfy-dir", str(comfy)])
+    monkeypatch.setattr(sys, "argv", ["streamstudio", "--editor", "comfy", "--comfy-dir", str(comfy)])
     with patch("subprocess.run") as run_mock:
         cli.main()
     assert run_mock.call_args.kwargs["env"]["STREAMSTUDIO_CONFIG"] == ""
@@ -279,7 +284,9 @@ def test_main_only_taidal_nodes_exports_both_envs(
     # (STREAMSTUDIO_HIDE_DEFAULT_NODES=1) so the backend prunes defaults + the palette roots.
     comfy = tmp_path / "ComfyUI"
     comfy.mkdir()
-    monkeypatch.setattr(sys, "argv", ["streamstudio", "--comfy-dir", str(comfy), "--only-taidal-nodes"])
+    monkeypatch.setattr(
+        sys, "argv", ["streamstudio", "--editor", "comfy", "--comfy-dir", str(comfy), "--only-taidal-nodes"]
+    )
     with patch("subprocess.run") as run_mock:
         cli.main()
     env = run_mock.call_args.kwargs["env"]
@@ -295,7 +302,9 @@ def test_module_run_as_script_invokes_main(tmp_path: Path, monkeypatch: pytest.M
     comfy.mkdir()
     # run_path re-executes cli.py as ``__main__``, a module identity the autouse ``_port_always_free``
     # fixture cannot reach — so give this one a genuinely free port rather than the shared default.
-    monkeypatch.setattr(sys, "argv", ["streamstudio", "--comfy-dir", str(comfy), "--port", str(_free_port())])
+    monkeypatch.setattr(
+        sys, "argv", ["streamstudio", "--editor", "comfy", "--comfy-dir", str(comfy), "--port", str(_free_port())]
+    )
 
     with patch("loggair.get_logger", return_value=MagicMock()), patch("subprocess.run"), patch("os.symlink"):
         runpy.run_path(cli.__file__, run_name="__main__")
@@ -316,7 +325,7 @@ def test_main_installs_comfyui_manager_by_default(
 ) -> None:
     comfy = tmp_path / "ComfyUI"
     comfy.mkdir()
-    monkeypatch.setattr(sys, "argv", ["streamstudio", "--comfy-dir", str(comfy)])
+    monkeypatch.setattr(sys, "argv", ["streamstudio", "--editor", "comfy", "--comfy-dir", str(comfy)])
 
     with patch("subprocess.run") as run_mock:
         cli.main()
@@ -335,7 +344,7 @@ def test_main_no_manager_skips_manager_install(
 ) -> None:
     comfy = tmp_path / "ComfyUI"
     comfy.mkdir()
-    monkeypatch.setattr(sys, "argv", ["streamstudio", "--comfy-dir", str(comfy), "--manager-"])
+    monkeypatch.setattr(sys, "argv", ["streamstudio", "--editor", "comfy", "--comfy-dir", str(comfy), "--manager-"])
 
     with patch("subprocess.run") as run_mock:
         cli.main()
@@ -351,7 +360,7 @@ def test_main_skips_already_installed_custom_node(
     comfy = tmp_path / "ComfyUI"
     comfy.mkdir()
     _preinstall_manager(comfy)
-    monkeypatch.setattr(sys, "argv", ["streamstudio", "--comfy-dir", str(comfy)])
+    monkeypatch.setattr(sys, "argv", ["streamstudio", "--editor", "comfy", "--comfy-dir", str(comfy)])
 
     with patch("subprocess.run") as run_mock:
         cli.main()
@@ -372,7 +381,15 @@ def test_custom_node_flag_and_env_combine(
     monkeypatch.setattr(
         sys,
         "argv",
-        ["streamstudio", "--comfy-dir", str(comfy), "--custom-node", "https://github.com/c/FlagNode"],
+        [
+            "streamstudio",
+            "--editor",
+            "comfy",
+            "--comfy-dir",
+            str(comfy),
+            "--custom-node",
+            "https://github.com/c/FlagNode",
+        ],
     )
 
     with patch("subprocess.run") as run_mock:
@@ -391,7 +408,7 @@ def test_custom_node_requirements_installed_after_clone(
     # A cloned custom node that ships a requirements.txt gets it pip-installed into this env.
     comfy = tmp_path / "ComfyUI"
     comfy.mkdir()
-    monkeypatch.setattr(sys, "argv", ["streamstudio", "--comfy-dir", str(comfy)])
+    monkeypatch.setattr(sys, "argv", ["streamstudio", "--editor", "comfy", "--comfy-dir", str(comfy)])
 
     def fake_run(cmd: list[str], **kwargs: object) -> MagicMock:
         if cmd[:2] == ["git", "clone"]:  # simulate the clone materializing the repo
@@ -418,7 +435,11 @@ def test_custom_node_clone_failure_warns_and_launch_continues(
     comfy = tmp_path / "ComfyUI"
     comfy.mkdir()
     bad = "https://github.com/nowhere/Missing"
-    monkeypatch.setattr(sys, "argv", ["streamstudio", "--comfy-dir", str(comfy), "--manager-", "--custom-node", bad])
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["streamstudio", "--editor", "comfy", "--comfy-dir", str(comfy), "--manager-", "--custom-node", bad],
+    )
 
     def fake_run(cmd: list[str], **kwargs: object) -> MagicMock:
         if cmd[:2] == ["git", "clone"]:
@@ -438,7 +459,7 @@ def test_custom_node_pip_failure_warns_and_launch_continues(
 ) -> None:
     comfy = tmp_path / "ComfyUI"
     comfy.mkdir()
-    monkeypatch.setattr(sys, "argv", ["streamstudio", "--comfy-dir", str(comfy)])
+    monkeypatch.setattr(sys, "argv", ["streamstudio", "--editor", "comfy", "--comfy-dir", str(comfy)])
 
     def fake_run(cmd: list[str], **kwargs: object) -> MagicMock:
         if cmd[:2] == ["git", "clone"]:
@@ -518,7 +539,7 @@ def test_main_installs_declared_nodes_from_any_package(
         _FakeEntryPoint("acme", ["https://github.com/acme/AcmeNodes"]),
     ]
     monkeypatch.setattr(cli, "entry_points", lambda group: eps)
-    monkeypatch.setattr(sys, "argv", ["streamstudio", "--comfy-dir", str(comfy)])
+    monkeypatch.setattr(sys, "argv", ["streamstudio", "--editor", "comfy", "--comfy-dir", str(comfy)])
 
     with patch("subprocess.run") as run_mock:
         cli.main()
@@ -544,6 +565,8 @@ def test_main_no_declared_nodes_skips_package_declared_tier(
         "argv",
         [
             "streamstudio",
+            "--editor",
+            "comfy",
             "--comfy-dir",
             str(comfy),
             "--declared-nodes-",
@@ -565,7 +588,9 @@ def test_main_dedups_urls_across_tiers(tmp_path: Path, monkeypatch: pytest.Monke
     comfy.mkdir()
     monkeypatch.setenv(cli.CUSTOM_NODES_ENV_VAR, cli.COMFYUI_MANAGER_URL)
     monkeypatch.setattr(
-        sys, "argv", ["streamstudio", "--comfy-dir", str(comfy), "--custom-node", cli.COMFYUI_MANAGER_URL]
+        sys,
+        "argv",
+        ["streamstudio", "--editor", "comfy", "--comfy-dir", str(comfy), "--custom-node", cli.COMFYUI_MANAGER_URL],
     )
 
     with patch("subprocess.run") as run_mock:
@@ -585,7 +610,16 @@ def test_no_manager_filters_declared_tier_only(
     monkeypatch.setattr(
         sys,
         "argv",
-        ["streamstudio", "--comfy-dir", str(comfy), "--manager-", "--custom-node", cli.COMFYUI_MANAGER_URL],
+        [
+            "streamstudio",
+            "--editor",
+            "comfy",
+            "--comfy-dir",
+            str(comfy),
+            "--manager-",
+            "--custom-node",
+            cli.COMFYUI_MANAGER_URL,
+        ],
     )
 
     with patch("subprocess.run") as run_mock:
@@ -697,7 +731,7 @@ def test_main_syncs_requirements_for_an_existing_checkout(
     comfy.mkdir()
     (comfy / "requirements.txt").write_text("comfy_aimdo\n")
     _preinstall_manager(comfy)
-    monkeypatch.setattr(sys, "argv", ["streamstudio", "--comfy-dir", str(comfy)])
+    monkeypatch.setattr(sys, "argv", ["streamstudio", "--editor", "comfy", "--comfy-dir", str(comfy)])
     with patch("subprocess.run") as run_mock:
         cli.main()
     (install,) = _pip_install_calls(run_mock, comfy)
@@ -714,7 +748,7 @@ def test_main_no_install_skips_the_sync(
     comfy.mkdir()
     (comfy / "requirements.txt").write_text("comfy_aimdo\n")
     _preinstall_manager(comfy)
-    monkeypatch.setattr(sys, "argv", ["streamstudio", "--comfy-dir", str(comfy), "--install-"])
+    monkeypatch.setattr(sys, "argv", ["streamstudio", "--editor", "comfy", "--comfy-dir", str(comfy), "--install-"])
     with patch("subprocess.run") as run_mock:
         cli.main()
     assert _pip_install_calls(run_mock, comfy) == []
@@ -725,7 +759,7 @@ def test_main_installs_exactly_once_after_a_clone(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, logger_mock: MagicMock
 ) -> None:
     comfy = tmp_path / "ComfyUI"
-    monkeypatch.setattr(sys, "argv", ["streamstudio", "--comfy-dir", str(comfy)])
+    monkeypatch.setattr(sys, "argv", ["streamstudio", "--editor", "comfy", "--comfy-dir", str(comfy)])
 
     def fake_run(args: Any, **kwargs: Any) -> MagicMock:
         if list(args)[:2] == ["git", "clone"]:

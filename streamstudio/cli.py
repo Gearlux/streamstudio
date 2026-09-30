@@ -1,15 +1,26 @@
 """CLI for StreamStudio.
 
-Subcommands (all offline — importing :mod:`streamstudio` populates ``NODE_CLASS_MAPPINGS`` via
-entry-point discovery, so the converters work WITHOUT a running ComfyUI):
+Subcommands (the converters are offline — importing :mod:`streamstudio` populates
+``NODE_CLASS_MAPPINGS`` via entry-point discovery, so they work WITHOUT a running ComfyUI):
 
-* ``run`` (the default — bare ``streamstudio`` still works): launch ComfyUI with the Taidal
-  nodes auto-configured. Also seeds ComfyUI custom nodes from three tiers — the
-  ``streamstudio.custom_nodes`` entry-point group (nodes DECLARED by installed packages,
-  including streamstudio's own bundled ComfyUI-Manager; ``--no-manager`` filters the manager,
-  ``--no-declared-nodes`` skips the tier), the ``STREAMSTUDIO_CUSTOM_NODES`` env var
-  (comma-separated git URLs), and the repeatable ``--custom-node <git-url>`` flag —
-  idempotently: a repo already present under ``custom_nodes/`` is left alone.
+* ``run`` (the default — bare ``streamstudio``): serve an editor, chosen by ``--editor`` (a closed
+  ``Literal``, the user's decision of 2026-09-29):
+
+  - ``canvas`` (the default): the graph EDITOR (``docs/rewrite.md``) over the confluid documents of a
+    folder — ``streamstudio [graph_dir] [--port 8190] [--templates-dir DIR]``, the Flask app of
+    :mod:`streamstudio.app`, standalone (a consuming Flask app mounts the same blueprint instead);
+  - ``comfy``: the ComfyUI editor with the Taidal nodes auto-configured, port 8188. It also seeds
+    ComfyUI custom nodes from three tiers — the ``streamstudio.custom_nodes`` entry-point group
+    (nodes DECLARED by installed packages, including streamstudio's own bundled ComfyUI-Manager;
+    ``--manager-`` filters the manager, ``--declared-nodes-`` skips the tier), the
+    ``STREAMSTUDIO_CUSTOM_NODES`` env var (comma-separated git URLs), and ``--custom-node`` —
+    idempotently: a repo already present under ``custom_nodes/`` is left alone.
+
+  The port default FOLLOWS the editor, and an option of the other editor is refused naming it
+  (``--comfy-dir only applies to --editor comfy``). Both refuse a taken port before any work.
+* ``stop`` / ``restart``: the server on the editor's port (``--editor`` as above). The canvas editor stops by the
+  same way out for SIGTERM (what they send) as for Ctrl+C, keeping its unsaved work in the folder's hidden
+  ``.streamstudio-workspace.json``; ``stop`` names what was kept, and the next start offers it.
 * ``export``: compile a saved ComfyUI **API-format** graph into Confluid ``flow:`` document(s)
   (``streamstudio export graph.json -o flow.yaml``) — the offline twin of the canvas Export-Flow
   button. Shares :func:`streamstudio.export.export_flow_yamls`; a graph with several disconnected
@@ -24,20 +35,22 @@ entry-point discovery, so the converters work WITHOUT a running ComfyUI):
 * ``export-workflow``: convert a WHOLE ``workflow.json`` (UI or API form) into a hoisted-``!ref:``
   YAML (``streamstudio export-workflow workflow.json -o config.yaml``) — the twin of the canvas
   "Export Graph → Taidal YAML". Uses :func:`streamstudio.graphio.workflow_to_yaml`.
-* ``editor``: serve the graph EDITOR (``docs/rewrite.md``) over the confluid documents of a
-  directory (``streamstudio editor <graph_dir> --port 8190``) — the Flask app of
-  :mod:`streamstudio.app`, standalone; a consuming Flask app mounts the same blueprint instead.
-  Refuses a taken port before serving, the way ``run`` does.
 """
 
+import http.client
 import json
 import os
+import shlex
+import signal
 import socket
 import subprocess
 import sys
+import urllib.request
+from datetime import datetime
 from importlib.metadata import entry_points
 from pathlib import Path
-from typing import List, Optional, Sequence, Union
+from types import FrameType
+from typing import Any, Dict, List, Literal, NamedTuple, Optional, Sequence, Set, Tuple, Union, cast, get_args
 
 import psutil
 from liquifai import LiquifyApp
@@ -61,9 +74,18 @@ CUSTOM_NODES_ENV_VAR = "STREAMSTUDIO_CUSTOM_NODES"
 # the address BEFORE doing any launch work and (b) print the URL of whatever is already there.
 DEFAULT_PORT = 8188
 STUDIO_HOST = "127.0.0.1"
-#: The graph editor's own default port: beside ComfyUI's 8188 (which ``run`` still serves) and past the
-#: 8189 the busy-port message offers for a second studio, so the two servers coexist on one machine.
+#: The graph editor's own default port: beside ComfyUI's 8188 (which ``--editor comfy`` serves) and past the
+#: 8189 the busy-port message offers for a second ComfyUI, so the two servers coexist on one machine.
 EDITOR_PORT = 8190
+
+#: Which editor ``run`` / ``stop`` / ``restart`` mean: the new canvas editor, or the ComfyUI one.
+EditorName = Literal["canvas", "comfy"]
+EDITORS: Tuple[str, ...] = get_args(EditorName)
+#: Each editor's default port — ``--port`` left out means this one.
+EDITOR_PORTS: Dict[EditorName, int] = {"canvas": EDITOR_PORT, "comfy": DEFAULT_PORT}
+#: How long ``stop`` / ``restart`` wait for the canvas editor to say which graphs hold unsaved work before stopping
+#: it anyway (seconds). It answers in milliseconds; something on the port that is not a canvas editor may not answer.
+ASK_TIMEOUT = 5.0
 
 
 def default_comfy_dir() -> Path:
@@ -83,7 +105,10 @@ def default_comfy_dir() -> Path:
 #: warning only speaks when something was materialized, and a launcher materializes nothing).
 app = LiquifyApp(
     name="streamstudio",
-    description="StreamStudio — ComfyUI with the Taidal nodes.",
+    description=(
+        "StreamStudio — the canvas graph editor (default, port 8190) over a folder of YAML graphs; "
+        "--editor comfy launches the ComfyUI editor with the Taidal nodes (port 8188)."
+    ),
     strict_flags=True,
 )
 
@@ -163,15 +188,99 @@ def _stop_studio(port: int, grace: float = 10.0) -> Optional[int]:
     return pid
 
 
-def _report_stopped(port: int, pid: Optional[int]) -> None:
-    """Say what was stopped, in the same plain voice as the port-in-use message."""
+def _shown(path: Path, folder: Path) -> str:
+    """How a message names a graph's file: by its way from the workspace folder — ``flow.yaml``, ``sub/x.yaml``,
+    ``../other/flow.yaml`` for a file of another folder (measured before: two kept graphs named ``flow.yaml, flow.yaml``
+    could not be told apart). The absolute path when there is no way (another drive)."""
+    try:
+        return os.path.relpath(path, folder)
+    except ValueError:  # pragma: no cover - Windows: another drive has no relative path
+        return str(path)
+
+
+class _Unsaved(NamedTuple):
+    """What a canvas editor said before it was stopped: the folder it serves (its recovery file is there, and a
+    ``restart`` without a folder serves it again) and the files of the graphs holding unsaved work."""
+
+    folder: Path
+    paths: List[Path]
+
+    @property
+    def file(self) -> Path:
+        """The recovery file the editor's stop writes."""
+        from streamstudio.app import RECOVERY_FILE  # ~20 ms (measured): importing the package loads what the app needs
+
+        return self.folder / RECOVERY_FILE
+
+    @property
+    def names(self) -> List[str]:
+        """The files as a message names them (:func:`_shown`)."""
+        return [_shown(path, self.folder) for path in self.paths]
+
+
+def _get_json(url: str) -> Any:  # the route's JSON answer, of any shape
+    with urllib.request.urlopen(url, timeout=ASK_TIMEOUT) as response:
+        return json.loads(response.read())
+
+
+def _unsaved_work(port: int) -> Optional[_Unsaved]:
+    """Ask the canvas editor on ``port`` — ``GET /api/workspace`` (its folder) and ``GET /api/graphs`` (``dirty``
+    per graph) — which graphs hold unsaved work; ``None`` when nothing there answers like a canvas editor (nothing
+    listening, a ComfyUI editor, another program), so the stop goes on and says nothing extra. Best effort: ANY
+    failure to get that answer is "nothing extra" — measured before, a listener that answered with an SSH banner
+    (``http.client.BadStatusLine``) crashed ``stop`` with a traceback and left the listener running."""
+    base = f"http://{STUDIO_HOST}:{port}"
+    try:
+        workspace, graphs = _get_json(f"{base}/api/workspace"), _get_json(f"{base}/api/graphs")
+    except (OSError, ValueError, http.client.HTTPException):  # refused, timed out, HTTP error; not JSON; not HTTP
+        return None
+    if not isinstance(workspace, dict) or not isinstance(workspace.get("folder"), str) or not isinstance(graphs, list):
+        return None
+    paths = [
+        Path(str(entry["path"]))
+        for entry in graphs
+        if isinstance(entry, dict) and entry.get("dirty") is True and "path" in entry
+    ]
+    return _Unsaved(Path(workspace["folder"]), paths)
+
+
+def _kept_in(file: Path) -> Set[Path]:
+    """The files of the graphs a recovery file holds, resolved — empty when it is not there or cannot be read."""
+    try:
+        data = json.loads(file.read_text(encoding="utf-8"))
+        return {Path(str(entry["path"])).resolve() for entry in data["graphs"]}
+    except (OSError, ValueError, KeyError, TypeError):  # absent, unreadable, not JSON, not the editor's shape
+        return set()
+
+
+def _report_stopped(port: int, pid: Optional[int], unsaved: Optional[_Unsaved] = None) -> None:
+    """Say what was stopped, in the same plain voice as the port-in-use message — and, for a canvas editor that
+    held unsaved work, where that work is now: checked in the recovery file its stop wrote, never assumed."""
     if pid is None:
         print(f"Nothing is listening on port {port} — no StreamStudio to stop.")
-    else:
-        print(f"Stopped StreamStudio on port {port} (pid {pid}).")
+        return
+    line = f"Stopped StreamStudio on port {port} (pid {pid})."
+    if unsaved is not None and unsaved.paths:
+        shown = ", ".join(unsaved.names)
+        if {path.resolve() for path in unsaved.paths} <= _kept_in(unsaved.file):
+            line += f" Its unsaved work ({shown}) is kept in {unsaved.file} — the next start asks what to do."
+        else:
+            line += f" Its unsaved work ({shown}) was not kept — the editor did not write it to {unsaved.file}."
+    print(line)
 
 
-def _report_port_in_use(port: int, command: str = "") -> None:
+def _stop_and_report(port: int, editor: EditorName) -> Optional[_Unsaved]:
+    """``stop`` and the first half of ``restart``: ask a canvas editor what it holds unsaved, stop the server on
+    ``port``, say what happened; answer what the canvas editor said (its folder is what a ``restart`` without one
+    serves again). A ComfyUI editor is not asked — it keeps no unsaved work of this kind."""
+    unsaved = _unsaved_work(port) if editor == "canvas" else None
+    _report_stopped(port, _stop_studio(port), unsaved)
+    return unsaved
+
+
+def _report_port_in_use(
+    port: int, editor: EditorName = "comfy", graph_dir: Optional[Path] = None, templates_dir: Optional[Path] = None
+) -> None:
     """Say what holds the port and hand over a clickable way in, then stop the launch.
 
     Printed PLAIN (not through loggair) and on its own line: a terminal linkifies a bare ``http://``
@@ -179,15 +288,24 @@ def _report_port_in_use(port: int, command: str = "") -> None:
     check ComfyUI discovers the clash only at the end of its own boot — measured 2026-08-26, 23
     seconds and 91 lines to reach one ERROR line on line 85, followed by exit code 0.
 
-    ``command`` names the subcommand the suggested alternative must carry (``editor``); blank for
-    the default ``run``, whose suggestion is the bare ``streamstudio --port``.
+    The suggested command starts the SAME editor elsewhere, in the order the CLI accepts: the canvas
+    editor on the same folder and templates folder (absolute, shell-quoted, the folder first — liquifai
+    binds positionals up to the first flag), ``streamstudio --editor comfy --port`` for ComfyUI — without
+    the flag it would start the other editor on the offered port. Measured before: the canvas suggestion
+    was ``streamstudio --port 8195``, which served the CURRENT directory with the default templates folder.
     """
     print(f"Port {port} is already in use — StreamStudio may already be running there.")
     print()
     print(f"    Open it:  http://{STUDIO_HOST}:{port}")
     print()
-    spelled = f"streamstudio {command}" if command else "streamstudio"
-    print(f"If that is a different program, run StreamStudio elsewhere:  {spelled} --port {port + 1}")
+    words = ["streamstudio"]
+    if editor == "canvas":
+        words += [str(graph_dir)] if graph_dir is not None else []
+        words += ["--templates-dir", str(templates_dir)] if templates_dir is not None else []
+    else:
+        words += ["--editor", editor]
+    words += ["--port", str(port + 1)]
+    print(f"If that is a different program, run StreamStudio elsewhere:  {shlex.join(words)}")
 
 
 def _as_list(value: Union[str, Sequence[str], None]) -> List[str]:
@@ -315,7 +433,7 @@ def _run(
     # custom nodes, symlink) is wasted when ComfyUI cannot bind, and ComfyUI itself only finds out
     # at the very end of its boot — see _report_port_in_use.
     if _port_in_use(port):
-        _report_port_in_use(port)
+        _report_port_in_use(port, "comfy")
         raise SystemExit(1)
 
     # 1. Clone ComfyUI if it doesn't exist
@@ -427,53 +545,243 @@ def _run(
         logger.info("StreamStudio stopped.")
 
 
+def _chosen_editor(editor: str) -> EditorName:
+    """The ``--editor`` value, checked: liquifai binds it verbatim, so a value outside the Literal is refused here."""
+    if editor not in EDITORS:
+        raise SystemExit(f"--editor must be {' or '.join(EDITORS)} — got {editor!r}")
+    return cast(EditorName, editor)
+
+
+class _ComfyOptions(NamedTuple):
+    """The ComfyUI-only options as a command received them — ``None`` is "not typed" (each defaults to
+    ``None`` so a canvas launch can tell a typed option from an absent one; :func:`_launch` fills in the
+    ComfyUI defaults)."""
+
+    comfy_dir: Optional[Path]
+    background: Optional[bool]
+    default_nodes: Optional[bool]
+    only_taidal_nodes: Optional[bool]
+    palette_config: Optional[Path]
+    install: Optional[bool]
+    manager: Optional[bool]
+    declared_nodes: Optional[bool]
+    custom_node: Optional[List[str]]
+
+
+def _refuse_other_editors_options(
+    editor: EditorName, graph_dir: Optional[Path], templates_dir: Optional[Path], comfy: _ComfyOptions
+) -> None:
+    """Refuse — before anything runs or stops — an option that belongs to the OTHER editor, naming it.
+
+    ``strict_flags`` already refuses a flag that names no parameter; this refuses one that names a
+    parameter the chosen editor ignores — the same "a flag that reaches nothing" failure, one level down.
+    """
+    if editor == "canvas":
+        flags = [f"--{name.replace('_', '-')}" for name, value in comfy._asdict().items() if value is not None]
+        other = "comfy"
+    else:
+        flags = [] if graph_dir is None else [f"a graph directory ({graph_dir})"]
+        flags += [] if templates_dir is None else ["--templates-dir"]
+        other = "canvas"
+    if flags:
+        verb = "applies" if len(flags) == 1 else "apply"
+        raise SystemExit(f"{', '.join(flags)} only {verb} to --editor {other}")
+
+
+def _canvas_folders(graph_dir: Optional[Path], templates_dir: Optional[Path]) -> Tuple[Path, Optional[Path]]:
+    """The canvas editor's graph folder (default: the current directory) and templates folder, ABSOLUTE — a
+    folder that is not there is refused naming it.
+
+    Resolved ONCE, here: every graph path the editor answers is then absolute, so a path from ``GET
+    /api/graphs`` can be sent back, and every dialog opens in the graph folder (measured before, from
+    ``streamstudio graphs``: the list said ``graphs/chain.yaml`` and the file browser looked in
+    ``graphs/graphs``; from ``streamstudio .`` both dialogs opened on ``/``). liquifai binds CLI values
+    VERBATIM as strings (see `_run`), so they are coerced here too."""
+    directory = (Path(graph_dir) if graph_dir is not None else Path.cwd()).expanduser().resolve()
+    templates = Path(templates_dir).expanduser().resolve() if templates_dir is not None else None
+    if not directory.is_dir():
+        raise SystemExit(f"Graph directory not found: {directory}")
+    return directory, templates
+
+
+#: The signals that end the canvas editor the way Ctrl+C (SIGINT) does, so its unsaved work is kept: SIGTERM (what
+#: ``stop`` and ``restart`` send) and SIGHUP (the terminal window it runs in was closed — POSIX only, hence the
+#: lookup). Measured before 2026-09-30: SIGHUP ended the editor at once (exit code -1) and the unsaved edit was gone.
+_WAYS_OUT: Tuple[signal.Signals, ...] = tuple(
+    getattr(signal, name) for name in ("SIGTERM", "SIGHUP") if hasattr(signal, name)
+)
+
+
+def _interrupt(signum: int, frame: Optional[FrameType]) -> None:
+    """SIGTERM or SIGHUP handled like Ctrl+C: the server stops serving and the editor takes the same way out."""
+    raise KeyboardInterrupt
+
+
+def _say(line: str) -> None:
+    """Print one line of the way out. After SIGHUP the terminal is gone and a print fails (``EIO``) — the work is
+    already kept by then, and a line nobody can read is no reason to end with a traceback."""
+    try:
+        print(line, flush=True)
+    except OSError:
+        _terminal_gone()
+
+
+def _terminal_gone() -> None:
+    """Point file descriptors 1 and 2 at /dev/null once the terminal is gone, so what the process still writes — a
+    line left in a buffer, the interpreter's own flush at exit — succeeds. Measured without it: the editor kept the
+    work but exited with code 120, Python's code for an exit whose final flush failed."""
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    try:
+        for fd in (1, 2):
+            os.dup2(devnull, fd)
+    finally:
+        os.close(devnull)
+
+
+def _recovery_notice(workspace: Dict[str, Any]) -> Optional[str]:  # GET /api/workspace's answer
+    """The one line a start prints when the folder holds unsaved work of the last session: when it was kept and the
+    files (named by their way from the folder, :func:`_shown`) — the page asks what to do — or, for a file that cannot
+    be used, why."""
+    recovery = workspace["recovery"]
+    if recovery is None:
+        return None
+    if recovery["error"] is not None:
+        error = recovery["error"]
+        return f"Unsaved work from the last session cannot be read — {error}. The page offers to move it aside."
+    try:
+        kept = datetime.fromisoformat(str(recovery["saved_at"])).astimezone()
+        when = f"{kept.day} {kept:%b %H:%M}"
+    except ValueError:
+        when = str(recovery["saved_at"])
+    folder = Path(str(workspace["folder"]))
+    names = ", ".join(_shown(Path(str(graph["path"])), folder) for graph in recovery["graphs"])
+    return f"Unsaved work from the last session ({when}): {names} — the page asks whether to restore it."
+
+
+def _serve_canvas(graph_dir: Optional[Path], port: int, templates_dir: Optional[Path]) -> None:
+    """Serve the canvas editor over ``graph_dir`` (default: the current directory) on ``port``.
+
+    The way OUT is the point of the shape (the user's item 1, 2026-09-29): Ctrl+C (SIGINT), SIGTERM — what ``stop``
+    and ``restart`` send — and SIGHUP — the terminal window closed (2026-09-30) — all end ``app.run`` the same way,
+    and the ``finally`` keeps the unsaved work in the folder's recovery file (``Studio.stash``) before the process
+    exits. Measured before: SIGTERM ended the process at once (exit -15), SIGHUP too (exit -1), and every unsaved edit
+    was gone. A kill -9 or a crash still cannot keep anything.
+    """
+    directory, templates = _canvas_folders(graph_dir, templates_dir)
+    if _port_in_use(port):
+        _report_port_in_use(port, "canvas", directory, templates)
+        raise SystemExit(1)
+    # Imported here, not at module top: the app pulls in the document model and the palette, which
+    # every other command (a converter, `stop`, the ComfyUI launch) has no use for.
+    from streamstudio.app import EXTENSION, Studio, create_app
+
+    app = create_app(directory, templates_dir=templates)
+    studio: Studio = app.extensions[EXTENSION]
+    notice = _recovery_notice(studio.workspace())
+    if notice is not None:
+        print(notice, flush=True)
+    previous = {signum: signal.signal(signum, _interrupt) for signum in _WAYS_OUT}
+    try:
+        app.run(host=STUDIO_HOST, port=port)
+    except KeyboardInterrupt:
+        pass  # a signal outside werkzeug's serve loop (which returns quietly on one): the same way out
+    finally:
+        try:
+            kept = studio.stash()
+        except OSError as exc:
+            _say(f"Unsaved work could not be kept in {studio.recovery_path}: {exc.strerror or exc}")
+            kept = []
+        finally:
+            for signum, handler in previous.items():
+                signal.signal(signum, handler)
+    if kept:
+        names = ", ".join(_shown(Path(path), studio.graph_dir) for path in kept)
+        _say(f"Unsaved work ({names}) is kept in {studio.recovery_path} — the next start asks what to do.")
+    for stream in (sys.stdout, sys.stderr):  # what the server logged may still sit in a buffer
+        try:
+            stream.flush()
+        except OSError:
+            _terminal_gone()
+
+
+def _launch(
+    editor: EditorName, port: int, graph_dir: Optional[Path], templates_dir: Optional[Path], comfy: _ComfyOptions
+) -> None:
+    """The body ``run`` and ``restart`` share once the editor and its port are settled: serve the canvas
+    editor, or launch ComfyUI with every option it was not given at its own default."""
+    if editor == "canvas":
+        _serve_canvas(graph_dir, port, templates_dir)
+        return
+    _run(
+        comfy_dir=comfy.comfy_dir,
+        port=port,
+        background=bool(comfy.background),
+        default_nodes=comfy.default_nodes is not False,
+        only_taidal_nodes=bool(comfy.only_taidal_nodes),
+        palette_config=comfy.palette_config,
+        install=comfy.install is not False,
+        manager=comfy.manager is not False,
+        declared_nodes=comfy.declared_nodes is not False,
+        custom_node=comfy.custom_node,
+    )
+
+
 # =======================================================================================
 # Commands
 # =======================================================================================
 
 
-@app.command(default=True, short={"p": "port", "b": "background"})
+@app.command(default=True, positionals=["graph_dir"], short={"p": "port", "b": "background"})
 def run(
+    graph_dir: Optional[Path] = None,
+    editor: EditorName = "canvas",
+    port: Optional[int] = None,
+    templates_dir: Optional[Path] = None,
     comfy_dir: Optional[Path] = None,
-    port: int = DEFAULT_PORT,
-    background: bool = False,
-    default_nodes: bool = True,
-    only_taidal_nodes: bool = False,
+    background: Optional[bool] = None,
+    default_nodes: Optional[bool] = None,
+    only_taidal_nodes: Optional[bool] = None,
     palette_config: Optional[Path] = None,
-    install: bool = True,
-    manager: bool = True,
-    declared_nodes: bool = True,
+    install: Optional[bool] = None,
+    manager: Optional[bool] = None,
+    declared_nodes: Optional[bool] = None,
     custom_node: Optional[List[str]] = None,
 ) -> None:
-    """Launch ComfyUI with the Taidal nodes (the default command).
+    """Serve an editor (the default command): the canvas editor over a folder of graphs, or ComfyUI.
 
     Args:
-        comfy_dir: Path to the ComfyUI installation (default: ~/.streamstudio/ComfyUI).
-            Cloned there if it does not exist.
-        port: Port ComfyUI listens on. A port already in use is refused before any launch work,
-            with the address of what is there printed as a clickable URL.
-        background: Start the studio DETACHED and return immediately instead of holding this
+        graph_dir: Canvas editor — the folder whose *.yaml files are the graphs (default: the current
+            directory). More can be opened from anywhere with File → Open.
+        editor: canvas (default) — the graph editor on port 8190; comfy — the ComfyUI editor with the
+            Taidal nodes, on port 8188.
+        port: Port the editor listens on (default: 8190 for canvas, 8188 for comfy). A port already in
+            use is refused before any work, with the address of what is there printed as a clickable URL.
+        templates_dir: Canvas editor — the folder holding the templates (default:
+            ~/.streamstudio/templates, created on the first template saved).
+        comfy_dir: ComfyUI — the installation (default: ~/.streamstudio/ComfyUI). Cloned there if it
+            does not exist.
+        background: ComfyUI — start it DETACHED and return immediately instead of holding this
             terminal. Output goes to a per-port log under ~/.streamstudio/logs/.
-        default_nodes: Show ComfyUI's built-in nodes alongside the Taidal nodes. Turn it off
-            (--default-nodes-) to hide them and surface the Taidal nodes at the palette root.
-        only_taidal_nodes: Show ONLY Taidal nodes — hide the built-ins AND every other
+        default_nodes: ComfyUI — show its built-in nodes alongside the Taidal nodes (default on). Turn
+            it off (--default-nodes-) to hide them and surface the Taidal nodes at the palette root.
+        only_taidal_nodes: ComfyUI — show ONLY Taidal nodes, hiding the built-ins AND every other
             third-party pack. Implies --default-nodes-.
-        palette_config: Palette config file (YAML). Its keep_nodes: list names extra
+        palette_config: ComfyUI — palette config file (YAML). Its keep_nodes: list names extra
             default/custom nodes to KEEP when hiding the palette. Defaults to
             ~/.streamstudio/config.yaml. NOT --config, which liquifai reserves for the app's own
             configuration file.
-        install: Sync ComfyUI's requirements.txt into this environment on every launch (a no-op
-            when satisfied). Turn it off (--install-) for an air-gapped run.
-        manager: Install the ComfyUI-Manager custom node, giving the GUI an in-app store for
+        install: ComfyUI — sync its requirements.txt into this environment on every launch (default on;
+            a no-op when satisfied). Turn it off (--install-) for an air-gapped run.
+        manager: ComfyUI — install the ComfyUI-Manager custom node (default on), an in-app store for
             further custom nodes.
-        declared_nodes: Install the custom nodes that installed packages declare through the
-            streamstudio.custom_nodes entry-point group.
-        custom_node: Git URL(s) of extra ComfyUI custom nodes to clone on launch. Several:
+        declared_nodes: ComfyUI — install the custom nodes installed packages declare through the
+            streamstudio.custom_nodes entry-point group (default on).
+        custom_node: ComfyUI — git URL(s) of extra custom nodes to clone on launch. Several:
             --custom-node=[urlA,urlB].
     """
-    _run(
+    chosen = _chosen_editor(editor)
+    comfy = _ComfyOptions(
         comfy_dir,
-        port,
         background,
         default_nodes,
         only_taidal_nodes,
@@ -483,55 +791,69 @@ def run(
         declared_nodes,
         custom_node,
     )
+    _refuse_other_editors_options(chosen, graph_dir, templates_dir, comfy)
+    _launch(chosen, int(port) if port is not None else EDITOR_PORTS[chosen], graph_dir, templates_dir, comfy)
 
 
 @app.command(short={"p": "port"})
-def stop(port: int = DEFAULT_PORT) -> None:
-    """Stop the StreamStudio server listening on --port.
+def stop(editor: EditorName = "canvas", port: Optional[int] = None) -> None:
+    """Stop the StreamStudio server listening on the editor's port.
 
-    An idle port is not an error — it reports that nothing was there.
+    An idle port is not an error — it reports that nothing was there. A canvas editor keeps its unsaved work in
+    its folder's hidden .streamstudio-workspace.json as it stops, and the message names the files kept there.
 
     Args:
-        port: Port whose studio to stop.
+        editor: canvas (default) or comfy — whose default port to stop.
+        port: Port whose server to stop (default: 8190 for canvas, 8188 for comfy).
     """
-    _report_stopped(port, _stop_studio(port))
+    chosen = _chosen_editor(editor)
+    target = int(port) if port is not None else EDITOR_PORTS[chosen]
+    _stop_and_report(target, chosen)
 
 
-@app.command(short={"p": "port", "b": "background"})
+@app.command(positionals=["graph_dir"], short={"p": "port", "b": "background"})
 def restart(
+    graph_dir: Optional[Path] = None,
+    editor: EditorName = "canvas",
+    port: Optional[int] = None,
+    templates_dir: Optional[Path] = None,
     comfy_dir: Optional[Path] = None,
-    port: int = DEFAULT_PORT,
-    background: bool = False,
-    default_nodes: bool = True,
-    only_taidal_nodes: bool = False,
+    background: Optional[bool] = None,
+    default_nodes: Optional[bool] = None,
+    only_taidal_nodes: Optional[bool] = None,
     palette_config: Optional[Path] = None,
-    install: bool = True,
-    manager: bool = True,
-    declared_nodes: bool = True,
+    install: Optional[bool] = None,
+    manager: Optional[bool] = None,
+    declared_nodes: Optional[bool] = None,
     custom_node: Optional[List[str]] = None,
 ) -> None:
-    """Stop the server on --port (if any), then launch it again — the full run flow.
+    """Stop the server on the editor's port (if any), then serve it again — the full run flow.
 
-    Deliberately re-walks the WHOLE launch (clone, requirements sync, custom nodes, symlink)
-    rather than shortcutting to the relaunch: a restart is the moment a drifted checkout or a
-    newly installed entry point bites, so it is also how you pick those up.
+    Deliberately re-walks the WHOLE launch (for ComfyUI: clone, requirements sync, custom nodes,
+    symlink) rather than shortcutting to the relaunch: a restart is the moment a drifted checkout or
+    a newly installed entry point bites, so it is also how you pick those up. An option of the other
+    editor, and a graph folder that is not there, are refused before anything is stopped. The canvas
+    editor keeps its unsaved work as it stops, and the new one offers it on its page.
 
     Args:
-        comfy_dir: Path to the ComfyUI installation (default: ~/.streamstudio/ComfyUI).
-        port: Port whose studio to restart.
-        background: Start the new studio DETACHED and return immediately.
-        default_nodes: Show ComfyUI's built-in nodes alongside the Taidal nodes.
-        only_taidal_nodes: Show ONLY Taidal nodes. Implies --default-nodes-.
-        palette_config: Palette config file (YAML). NOT --config (liquifai's own).
-        install: Sync ComfyUI's requirements.txt into this environment.
-        manager: Install the ComfyUI-Manager custom node.
-        declared_nodes: Install the entry-point-declared custom nodes.
-        custom_node: Git URL(s) of extra ComfyUI custom nodes.
+        graph_dir: Canvas editor — the folder of graphs (default: the folder the running editor serves, else
+            the current directory).
+        editor: canvas (default) or comfy.
+        port: Port whose server to restart (default: 8190 for canvas, 8188 for comfy).
+        templates_dir: Canvas editor — the templates folder (default: ~/.streamstudio/templates).
+        comfy_dir: ComfyUI — the installation (default: ~/.streamstudio/ComfyUI).
+        background: ComfyUI — start the new one DETACHED and return immediately.
+        default_nodes: ComfyUI — show its built-in nodes alongside the Taidal nodes.
+        only_taidal_nodes: ComfyUI — show ONLY Taidal nodes. Implies --default-nodes-.
+        palette_config: ComfyUI — palette config file (YAML). NOT --config (liquifai's own).
+        install: ComfyUI — sync its requirements.txt into this environment.
+        manager: ComfyUI — install the ComfyUI-Manager custom node.
+        declared_nodes: ComfyUI — install the entry-point-declared custom nodes.
+        custom_node: ComfyUI — git URL(s) of extra custom nodes.
     """
-    _report_stopped(port, _stop_studio(port))
-    _run(
+    chosen = _chosen_editor(editor)
+    comfy = _ComfyOptions(
         comfy_dir,
-        port,
         background,
         default_nodes,
         only_taidal_nodes,
@@ -541,6 +863,16 @@ def restart(
         declared_nodes,
         custom_node,
     )
+    _refuse_other_editors_options(chosen, graph_dir, templates_dir, comfy)
+    if chosen == "canvas":  # a folder that is not there is refused BEFORE the running editor is stopped
+        _canvas_folders(graph_dir, templates_dir)
+    target = int(port) if port is not None else EDITOR_PORTS[chosen]
+    stopped = _stop_and_report(target, chosen)
+    if chosen == "canvas" and graph_dir is None and stopped is not None:
+        # the SAME workspace (R6): the folder the stopped editor served, so its start offers the work it kept there —
+        # measured before, a restart typed in another folder served that one, and the kept work waited unseen
+        graph_dir = stopped.folder
+    _launch(chosen, target, graph_dir, templates_dir, comfy)
 
 
 @app.command(name="export", positionals=["graph"], short={"o": "output"})
@@ -723,36 +1055,6 @@ def convert_server() -> None:
             answer({"ok": True})
         except Exception as exc:  # noqa: BLE001 - every failure answers the requester, never kills the server
             answer({"error": f"{type(exc).__name__}: {exc}"})
-
-
-@app.command(positionals=["graph_dir"], short={"p": "port"})
-def editor(graph_dir: Optional[Path] = None, port: int = EDITOR_PORT) -> None:
-    """Serve the graph editor over the confluid documents of a directory.
-
-    Every ``*.yaml`` in the directory is a graph the editor lists, draws, patches in place and runs
-    one record through (the Flask app of streamstudio.app, served standalone; a consuming Flask app
-    mounts the same blueprints under its own prefix instead). The root URL is the canvas page when it
-    is built (``cd frontend && npm install && npm run build``), else a placeholder that says so and
-    lists the API routes.
-
-    Args:
-        graph_dir: Directory holding the graph documents (default: the current directory).
-        port: Port the editor listens on. A port already in use is refused before anything starts,
-            with the address of what is there printed as a clickable URL.
-    """
-    # liquifai binds CLI values VERBATIM as strings (see `_run`), so coerce once, here.
-    directory = Path(graph_dir) if graph_dir is not None else Path.cwd()
-    port = int(port)
-    if not directory.is_dir():
-        raise SystemExit(f"Graph directory not found: {directory}")
-    if _port_in_use(port):
-        _report_port_in_use(port, command="editor")
-        raise SystemExit(1)
-    # Imported here, not at module top: the app pulls in the document model and the palette, which
-    # every other command (a converter, `stop`) has no use for.
-    from streamstudio.app import create_app
-
-    create_app(directory).run(host=STUDIO_HOST, port=port)
 
 
 def main() -> None:

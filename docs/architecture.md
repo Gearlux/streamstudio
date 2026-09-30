@@ -345,7 +345,7 @@ try:
 except UnsupportedTopologyError as refusal:
     print(refusal)
 # this StreamStudio does not register 11 node(s) the canvas names: node 2
-# (Taidal_waivefront_op_measure_TuneToBand), … Restart it (`streamstudio restart`) …
+# (Taidal_waivefront_op_measure_TuneToBand), … Restart it (`streamstudio restart --editor comfy`) …
 ```
 
 **What you may change.** The wording, and which reasons are listed together. What must hold:
@@ -749,3 +749,388 @@ shape. What must hold: the page keeps no document of its own — no serializer, 
 step it invents without a route — and one generic node component renders every class. A library that carries its own
 graph model (LiteGraph, Rete's editor state) is the rejected alternative, not an upgrade path. Pins:
 `tests/test_canvas.py`, `frontend/src/__tests__/*.test.ts`.
+
+**Update, 2026-09-29.** Three rows of the table changed with the menu scope, each with its own record below: copy and
+paste carry the document's text (so a `2.0` stays `2.0`); nothing reaches the file until Save; and collapse to
+subgraph landed as the subgraph node, whose inside the canvas opens in place. A step still cannot be added to, or
+deleted from, a `Stream`'s `ops:` list from the palette; paste and Convert selection to subgraph do insert members.
+The suites: 82 browser tests, 203 unit tests.
+
+## Changes stay in the editor until Save, and Save refuses to overwrite a file changed on disk (`Document.save`, `POST /api/graphs/<name>/save`, 2026-09-29)
+
+**Context.** Phases 2 and 3 saved every accepted edit at once: `POST …/param` wrote the file before it answered.
+Two things the menu scope asked for cannot live with that: Move to its own file… makes a steps file you have not
+asked to write yet, and Revert needs a saved state to go back to. And a file can change under the editor — a teammate, a `git pull`, an agent —
+which an editor that writes on every change overwrites without a word. The user took the ComfyUI default (the menu
+scope's decision 1): changes stay in the editor until Save, and ● says so.
+
+**Decision.** Every editing route changes the in-memory `Document`, and `dirty` says whether any text differs
+from what was last written, or positions/groups were set since. `Document.save` first compares each file on disk
+with what the editor last read or wrote; any difference refuses the WHOLE save with the path and writes nothing.
+Otherwise it writes every changed file and the sidecar. The trace, the check and every derive run the in-memory
+text. Holding text in memory brought four mechanisms, each from a measured break:
+
+- confluid reads an `include:` from disk, so a load STAGES a held text there (write it, load, put the original
+  back) — under one process-wide lock (`_DISK_LOCK`) that also covers saves and disk reads, because Flask serves
+  threaded;
+- an included file enters the held texts only when an EDIT changes it (a Copy or a template read goes to disk),
+  and when it first enters, every older history entry gets the text it was read as;
+- a positions write MERGES over what the editor holds;
+- Save As rebases relative includes (`rebase_includes`) so the new file names the same steps files.
+
+**Consequences.** Measured:
+
+- A value edit: before, the file said `{low_level: 0.9}` the moment the route answered; now it keeps `0.5`, the
+  answer says `dirty: true`, and `POST …/save` writes it.
+- A save after someone appended a line to the file: `400 …/demo.yaml changed on disk since the editor read it —
+  Revert to load it, or Save As to keep both`, nothing written. For an included steps file the message offers
+  Revert only: a graph written by Save As would include the same file.
+- The lock: 4 threads × 6 traces over a graph holding an unsaved edit in an included steps file left the unsaved
+  value ON DISK and let one trace read a half-written file (`Subgraph: steps is empty`); with the lock, the disk
+  keeps the saved value and every trace answers 200.
+- The merge: `PUT {prep: [11, 22]}` then `PUT {mask: [33, 44]}` put `prep` back at its laid-out place; now both
+  reach the sidecar.
+- The undo rule: after Save, two undos left an included edit in place and the next Save wrote it; now the undo
+  restores the text the file was read as.
+
+The costs: an unsaved steps file sits in the graph folder for the length of each load (a crash mid-load would leave
+it); a teammate's change is found at Save, not while you edit; what the editor holds lives only in the process
+until a stop writes it to the recovery file (the record "Unsaved work is kept in a hidden file of the served folder").
+Handing confluid in-memory texts for `include:` would remove the staging — a confluid API decision, tracked in the
+root `TASKS.md`.
+
+**Example.**
+
+```
+POST /api/graphs/demo/param {node: prep/scaled, param: target_max, value: 2.0}  → dirty: true;  demo.yaml: target_max: 1.0
+POST /api/graphs/demo/save                                                       → dirty: false; demo.yaml: target_max: 2.0
+(someone appends a line to demo.yaml; the editor holds another edit)
+POST /api/graphs/demo/save  → 400 …/demo.yaml changed on disk since the editor read it — Revert to load it, or Save As to keep both
+```
+
+**What you may change.** The shape of the dirty signal, the messages, how Save As asks to overwrite. What must
+hold: no editing route writes to disk; Save never overwrites a file that changed since the editor read it; the
+trace runs what the editor shows; staging happens only under the lock. Pins: `tests/test_app_save.py`,
+`tests/test_app.py::TestTrace::test_the_trace_runs_what_the_editor_shows_not_the_file_on_disk`.
+
+**Update, 2026-09-29 — File ▸ New… writes its file at once.** Explicit Save covers EDITS; making a graph is not an
+edit. Asked whether a graph made with New… by mistake needed a "clear workspace", the user answered: *"New ... by
+mistake should not happen. It should ask to save."* A graph that lives only in the editor is exactly what makes a
+mistaken New… hard to get rid of: it sits in the list, a stop keeps it in the recovery file, and nothing on disk
+shows it. So the New… dialog asks the name and the folder, and Create writes the starter at once
+(`Document.create`: it creates the file or fails, and never opens one that is there, so a file someone made after
+the check is never written over). Measured, `POST /api/graphs {name: fresh, kind: flow}`:
+
+```
+before:  {name: fresh, dirty: true}    no fresh.yaml on disk; ● fresh in the list; a stop kept it in the recovery file
+after:   {name: fresh, dirty: false}   fresh.yaml holds the starter; a stop with no edit keeps nothing (stash() == [])
+POST /api/graphs {name: demo, kind: flow}   (demo.yaml exists)
+         → 400 …/demo.yaml already exists — pick another name, or open it with File ▸ Open    demo.yaml byte for byte
+```
+
+The consequences: every graph the editor shows is a file, so Save has one path and the recovery file holds only
+changed files; Revert of a graph made with New… goes back to its starter; a file made in another folder joins the
+list like one opened with File ▸ Open (`clip~2` when the name is taken). The cost: a mistaken New… leaves a file,
+which the person sees and deletes — the point of the user's answer. What must hold: no graph exists only in the
+editor; New… never writes over a file; every refusal (the file exists, the folder is missing, is not a folder or
+cannot be written, a bad name) comes before anything is written. Pins: `tests/test_app_files.py::TestNew`,
+`tests/test_canvas.py::TestNewAndOpen`.
+
+## A subgraph is one node outside and a nested model inside, its steps named `prep/grey` (`Model.inside`, 2026-09-29)
+
+**Context.** The engine gained `recordstream.flow.subgraph.Subgraph` — a `flow:` mapping used as one op, written
+inline in the step that uses it. Drawn the way every other op was, a subgraph step was ONE opaque node whose `steps`
+parameter was a form field, and three things broke, measured:
+
+- a form edit of `steps` replaced the whole block with one flow-style line: 18 → 11 lines, 4 → 3 comments;
+- one subgraph step made the whole flow's canvas check answer `[]`: an unbuilt marker switched the check off, so a
+  real defect two steps later went unreported;
+- renaming an OUTER step `grey` also rewrote an inner `from: grey`, and the saved file failed with
+  `flow step 'mask': from: 'mono' does not name an EARLIER step`.
+
+The design decisions (`docs/rewrite.md` §6b) fixed the vocabulary: the result line is `result:`, inner names are
+`prep/grey`, and an outer step may not read a value inside.
+
+**Decision.** A `Subgraph` marker — recognised by the engine's class attribute `FLOW_SUBGRAPH` — is one node of
+kind `subgraph`: `record` in and out, plus the entry sockets the engine derives, and ONE parameter, `result`. Its
+inside is a nested `Model` in `model.inside[<node>]`, derived by the same builder, so every inner node carries its
+real `file:line:col` (the steps file's line when the steps are included). Inner names are the engine's, qualified
+(`prep/grey`; a Stream member `stream.ops[1]/grey`, which the trace maps to the engine's `ops[1]/grey`), and each
+inside gains two boundary nodes, `prep/<in>` and `prep/<out>`, where the record enters and leaves. The deriver
+BUILDS a subgraph marker, so the chain check stays on. A step name is scoped to its own steps mapping: the text
+patcher follows no `from:` / `merge_from:` / `bind:` into a marker's `steps:`, and a rename stays on its level. An
+inner problem is reported once, on its inside and at the top; the engine's refusal of the whole subgraph only when
+the inside derived clean.
+
+**Consequences.** Editing `target_max` of `prep/scaled` changes one line and keeps every comment (4 → 4, pinned).
+The check stays on: the defect after a subgraph is reported at its node (`:floor: NeedsSpectrogram needs the record
+entry 'spectrogram', which nothing before it produces …`). Renaming the outer `grey` changes only its own key line,
+and the file runs. The costs: `/` is reserved in step names (the engine refuses it); the patcher tells a subgraph by
+its `!class:` tag, so a `_target_:`-spelled Subgraph is not scoped (a documented limit); a subgraph held in another
+op's slot (`maybe.op`) is drawn and edited like any other, but the engine does not descend there, so its inside has
+no trace rows. Deriving the 25-node Bluetooth pane costs what it did (27.9 ms before, 28.1 ms after, best of 7).
+
+**Example.**
+
+```python
+doc = Document.open("demo.yaml")                        # the flow of prep (a Subgraph of grey, scaled) and mask
+[(n.name, n.kind) for n in doc.model.nodes]             # [('prep', 'subgraph'), ('mask', 'op')]
+[(n.name, n.kind) for n in doc.model.inside["prep"].nodes]
+# [('prep/<in>', 'boundary'), ('prep/grey', 'op'), ('prep/scaled', 'op'), ('prep/<out>', 'boundary')]
+list(doc.model.node("prep").params)                     # ['result']
+doc.set_param("prep/scaled", "target_max", 2.0)         # one line of demo.yaml changes; doc.dirty is True
+```
+
+**What you may change.** How an inside is laid out and drawn, the boundary nodes' spelling, the separator — only
+together with the engine's (`recordstream.flow.steps.SUBGRAPH_SEPARATOR`). What must hold: `steps` is never a form
+field; the deriver builds a subgraph marker; a name is scoped to its level; the editor's inner names are the
+engine's. Pins: `tests/test_subgraph_model.py`, `tests/test_subgraph_edits.py`, `tests/test_app_subgraph.py`.
+
+## Reuse is a copy, a template or an include — never a YAML anchor or a `!ref:` (2026-09-29)
+
+**Context.** A subgraph may be needed in two places. The YAML already has two ways to say "the same thing twice" —
+anchors (`&` / `*` / `<<`) and confluid's `!ref:` — and a third exists for files, `include:`. Each was measured on the
+same two-step subgraph (mask mean 0.2855 on a test image):
+
+- **A merge key** (`flow: {<<: *prep, mask: …}`) puts the merged steps FIRST whatever line it is written on
+  (`['grey', 'scaled', 'first', 'mask']`); a second `<<: *prep` in one flow silently vanishes
+  (`['grey', 'scaled', 'mask']`); and a host step that shares a name with an inner step silently REPLACES it
+  (`ConnectedComponents expects a 2-D mask; got shape (120, 160, 3)`, while the canvas check said `[]`).
+- **`!ref:`** makes both uses ONE object: after a run the first use's `@output` read `0.7145` — the other use's
+  value — instead of its own `0.2855`; `!ref:thr {low_level: 0.2}` written on one use set BOTH uses to 0.2, and the
+  same override on a dotted target silently did nothing.
+- **`steps: {include: prep.steps.yaml}`** in two uses built two SEPARATE sets of op objects
+  (`same inner op objects across uses: False`) and ran right (mask mean `0.2855`).
+
+The user's rule: "if a subgraph is needed twice (either copy it, use templates like comfyui or use the include
+construction)".
+
+**Decision.** Three ways, each a text operation: **copy** (the clipboard holds the step's own text; a subgraph
+whose steps are included is copied with those steps inline — next record); **templates** (a steps file in a
+templates folder outside every graph, written at once; Insert template adds a copy, and nothing links back);
+**include** (Move to its own file… writes the steps to `<name>.steps.yaml` and `steps: {include: …}` in their place;
+Insert steps file… adds another use). Nothing in the editor writes an anchor or a `!ref:` as a reuse spelling.
+
+**Consequences.** A copy and a template are independent: editing one never changes another. An include is shared on
+purpose: an edit through one use lands in the steps file and changes every use — tuning one use alone is what a copy
+is for. A steps file is a bare steps mapping, so the graph list leaves `*.steps.yaml` out. Copying an included
+subgraph used to paste `steps: {include: prep.steps.yaml}`, which bound silently to whatever file of that name sat
+beside the target graph (measured: the paste read `mode: RGB` where the original was `L`); it now pastes the steps
+inline. Anchors and `!ref:` stay valid in a hand-written file — the editor reads one; it never writes one for reuse.
+
+**Example.**
+
+```yaml
+flow:
+  prep:
+    op: !class:recordstream.flow.subgraph.Subgraph
+      steps: {include: prep.steps.yaml}
+      result: scaled
+  mask:
+    op: !class:recordstream.ops.numpy.Threshold {low_level: 0.5}
+  prep2:
+    op: !class:recordstream.flow.subgraph.Subgraph
+      steps: {include: prep.steps.yaml}
+    from: mask
+outputs: prep2
+```
+
+```
+POST …/param {node: prep/scaled, param: target_max, value: 0.5}
+→ prep/scaled 0.5 and prep2/scaled 0.5 — both located at prep.steps.yaml:4:7
+```
+
+**What you may change.** Where templates live (`--templates-dir`), how a copy names itself (`_2`), the template's
+first line. What must hold: three ways and no fourth; a template insert and a paste are copies; the editor never
+writes an anchor or a `!ref:` for reuse. Pins: `tests/test_app_clipboard.py`, `tests/test_app_templates.py`,
+`tests/test_subgraph_model.py::TestUsingOneStepsFileTwice`.
+
+## Copy and paste carry the document's TEXT (`POST …/copy`, `POST …/paste`, 2026-09-29)
+
+**Context.** Phase 3 pasted a node as `add_step(class, params)` with the params read off the model's JSON. JSON has
+one number type, so a copied `{gain: 2.0}` pasted as `{gain: 2}`; comments and `$VAR` spellings were lost; and a
+subgraph — a whole nested block — cannot be rebuilt from a class and a flat parameter map. The user asked that
+copying a subgraph node paste "a full, independent copy of its block".
+
+**Decision.** `POST …/copy {nodes}` answers `{text, kind}`: the copied flow steps' own lines as a steps mapping
+(dedented, comments kept), or the copied `ops:` members as a YAML sequence. The page's clipboard holds that text.
+`POST …/paste {text, after}` inserts it after `after`, on `after`'s level: a taken name is renamed (`grey` →
+`grey_2`) and references among the pasted steps follow; a pasted step that read a step NOT pasted reads the one
+before it, so the block lands as a chain; the step that read `after` now reads the last pasted one; ONE undo entry.
+A subgraph whose steps are included is copied with those steps inline.
+
+**Consequences.** `2.0`, comments and `$VAR` survive; a copy pastes into another graph, and into a Stream as list
+members. The clipboard is filled by the server's answer, so a paste pressed before the copy answered must wait for
+it — it does (measured before: `data-saves` stayed 0 and the paste was dropped). A pasted text holding an
+`include:` key is refused.
+
+**Example.**
+
+```
+POST /api/graphs/chain/copy {nodes: [prep]}
+→ {kind: steps, text: "prep:\n  op: !class:recordstream.flow.subgraph.Subgraph\n    steps:\n      grey:\n        op: !class:… {mode: L}   # to one channel\n…"}
+POST /api/graphs/chain/paste {text: <that text>, after: prep}
+→ pasted: [prep_2]; the nodes are prep, prep_2, mask
+```
+
+**What you may change.** The rename rule, how an outside reference is chained. What must hold: the clipboard is
+document text, never a page-side model; a paste is one edit and one undo entry. Pins: `tests/test_app_clipboard.py`,
+`tests/test_canvas.py::TestCopyPaste`, `tests/test_canvas.py::TestPasteRightAfterCopy`.
+
+## One CLI serves two editors, chosen by `--editor canvas|comfy` (`streamstudio.cli`, 2026-09-29)
+
+**Context.** Until the rewrite's phase 4 there are two editors: the canvas editor, and the ComfyUI extension that a
+consuming annotation workspace still launches. During phases 2 and 3 the canvas editor had a command of its own
+while bare `streamstudio` launched ComfyUI. With the menu scope the canvas editor became the one a person starts,
+so the default had to move (the menu scope's decision 3). Each editor has options the other does not (ComfyUI:
+`--comfy-dir`, `-b`, the palette flags; the canvas editor: a graph folder, `--templates-dir`) and its own port.
+
+**Decision.** `run` (the default command) takes `--editor`, a closed `Literal["canvas", "comfy"]`, default
+`canvas`; `stop` and `restart` take it too, and every port default follows it (`EDITOR_PORTS`: 8190 / 8188). An
+option that belongs to the other editor is refused by name before anything starts — never ignored, since an ignored
+`--comfy-dir` would start the wrong editor without a word. The canvas folders are resolved to absolute paths once,
+in the CLI, before any work (and before `restart` stops anything). The busy-port hint prints the SAME editor,
+folder and templates folder one port up, in the order the CLI parses. The earlier command has no alias (pre-1.0).
+
+**Consequences.** Measured:
+
+```
+$ streamstudio --comfy-dir /path/to/ComfyUI    →  --comfy-dir only applies to --editor comfy
+$ streamstudio restart -b                      →  --background only applies to --editor comfy
+$ streamstudio graphs          (8190 taken)    →  … run StreamStudio elsewhere:  streamstudio /abs/graphs --port 8191
+$ streamstudio restart grpahs                  →  Graph directory not found: /abs/grpahs      (nothing was stopped)
+```
+
+A consumer that needs ComfyUI names it (`python -m streamstudio.cli run --editor comfy`). Every remedy a message
+prints names the editor: the ComfyUI export refusal says `streamstudio restart --editor comfy`, because a bare
+restart would restart the canvas editor on 8190 — its unsaved work going to the recovery file — and leave the stale
+ComfyUI registry running. Before the folders were resolved, `streamstudio graphs` listed `graphs/chain.yaml` and the file browser
+looked in `graphs/graphs`; `streamstudio .` opened both dialogs on `/`, where Save As would have written to the
+filesystem root.
+
+**Example.**
+
+```python
+from streamstudio.cli import EDITOR_PORTS
+EDITOR_PORTS                                   # {'canvas': 8190, 'comfy': 8188}
+```
+
+**What you may change.** The ports, the option spellings, the layout of the hint. What must hold: one closed set of
+editors; an option is never silently dropped; every command a message prints is one the CLI accepts (pinned by
+parsing it back); phase 4 removes `comfy` together with the ComfyUI code. Pins: `tests/test_cli_editor.py`,
+`tests/test_missing_node_refusal.py`.
+
+## Unsaved work is kept in a hidden file of the served folder when the editor stops, and the PAGE asks what to do with it (`Studio.stash`, `GET /api/workspace`, 2026-09-29)
+
+**Context.** Explicit Save (above) made the editor hold edits in memory until Save. `streamstudio stop` and
+`restart` stop the editor with SIGTERM, and measured at the start of this round SIGTERM ended it at once (exit
+-15): every unsaved edit was gone, without a word. The user: *"streamstudio stop or restart should save the file to
+a tmp workspace file (hidden), when opening that same workspace streamstudio should ask to start from the tmp file
+or the original"*. That leaves four questions: where the work is kept, when it is written, who asks, and what may
+never be lost.
+
+**Decision.**
+
+- **Where: one hidden JSON file in the folder the editor was started on**, `.streamstudio-workspace.json`, holding
+  every graph with unsaved work, graphs opened from other folders included. Three
+  alternatives were rejected:
+  - *writing the unsaved text into the graph files* (an autosave) undoes Explicit Save: a stop would write what
+    nobody chose to save, and "Open the saved files" would have nothing left to open;
+  - *a file beside each graph* (`demo.yaml.unsaved`): work from other folders would land where the next start
+    does not look, and the graph list and the file browser would need a second hidden kind;
+  - *a folder under the home directory*: the work would be cut off from the folder it belongs to, and nobody looking
+    at the folder would see that something waits. In the served folder, "the same workspace" is the same folder.
+
+  JSON, not YAML: it is editor state (texts, what each file held when read, positions), not a confluid document,
+  and nothing should ever load it as a graph.
+- **When: only as the process stops, and only when something is unsaved.** The CLI turns SIGTERM into the Ctrl+C
+  way out and writes in a `finally`. There is no periodic autosave: it was not asked for, and a timer writing into a
+  folder under version control makes files nobody asked for.
+- **Who asks: the page, not the terminal.** The editor often starts where nobody watches the terminal (in the
+  background, from a `restart` another tool ran), and a terminal prompt would block the start until answered. The
+  CLI prints one line; the page asks before it opens any graph, because opening one reads the file on disk and the
+  next edit would fork from the saved text. The answers are routes of `Studio`, so an agent's tool can answer the
+  same question.
+- **What is never lost.** A file nobody answered yet is merged into, never overwritten: a second stop (two editors
+  on one folder, a restart before anyone answered) keeps the earlier graphs, and one file kept twice is two
+  entries. A file the editor cannot read is moved aside, never deleted. Restore opens a kept version BESIDE a graph
+  that holds other unsaved changes (`demo~2`). The write goes through a temporary file of its own, renamed over the
+  real one under a `flock` on the folder, so two stops at once, or a stop cut short, leave a whole file. A browser
+  tab of an earlier editor cannot write into the new one: each editor has a session, and a request from another
+  session is refused with `409` before anything changes.
+
+**Consequences.** Measured:
+
+```
+before:  streamstudio stop  →  the editor ends at once (exit -15); no file; the unsaved edit is gone
+after:   $ streamstudio stop --port 8196
+         Stopped StreamStudio on port 8196 (pid 57474). Its unsaved work (demo.yaml) is kept in …/graphs/.streamstudio-workspace.json — the next start asks what to do.
+         $ streamstudio …/graphs --port 8196
+         Unsaved work from the last session (29 Sep 20:06): demo.yaml — the page asks whether to restore it.
+```
+
+- Two editors on one folder, stopped at once: before, work was lost in 4 of 4 trials and one file was not JSON;
+  after, both editors' graphs were kept in 4 of 4.
+- A tab left open across a restart: before, its next edit went to the new editor's document, read from disk, and
+  the kept value (0.8) was gone for good; after, the edit is refused (`409`, nothing changed) and the tab asks the
+  question, whose Restore brings 0.8 back.
+- A graph file of the kept work that cannot be read (`chmod 000`, or not UTF-8): before, every start died with a
+  `PermissionError`; after, the start comes up and the dialog's row names the file and the reason
+  (`…/other/away.yaml cannot be read: Permission denied`).
+
+The costs: the file lives in the person's folder, so a repository holding editor graphs must ignore
+`.streamstudio-workspace*.json`. The undo history is not kept. `stop` asks the editor first and waits up to 5 s,
+so a listener that never answers HTTP stops up to 5 s later. A `kill -9` and a crash
+keep nothing. **Update, 2026-09-30:** SIGHUP — the terminal window the editor runs in closed — takes the same way out
+as SIGTERM (the user's pick); measured before, it ended the editor at once (exit -1) with no file written, and a first
+version kept the work but exited 120 because the final flush to the vanished terminal failed.
+
+**Example.**
+
+```
+POST /api/graphs/demo/param {node: stream.ops[2], param: low_level, value: 0.8}   → dirty: true
+(the editor stops: stop / restart / Ctrl+C / terminal closed)                            → .streamstudio-workspace.json; demo.yaml unchanged
+GET  /api/workspace          → {folder, session, recovery: {saved_at, error: null, aside: null,
+                                  graphs: [{name: demo, disk: unchanged, changed_on_disk: false, …}]}}
+POST /api/workspace/recovery/restore   → [{name: demo, dirty: true, restored: true}, …]
+POST /api/workspace/recovery/restore   → 404 no unsaved work of an earlier session in …/graphs
+```
+
+**What you may change.** The file's inner layout, the wording of the lines and the dialog, how rows are named.
+Adding a periodic autosave is a new decision to put to the user (it writes files unasked). What must hold: a stop never writes a graph file; the recovery file is written only when something is
+unsaved and removed only by an answer; an unanswered or unreadable file is never overwritten or deleted; no graph
+opens before the question is answered; a stop never claims work was kept without reading the file back. Pins:
+`tests/test_recovery.py`, `tests/test_recovery_process.py`, `tests/test_cli_editor.py::TestWhatStopSays`,
+`tests/test_canvas.py::TestUnsavedWorkOfTheLastSession`, `tests/test_canvas.py::TestATabLeftOpenAcrossARestart`.
+
+## An op-list member is named by its place, so an edit re-keys the members after it (`Document._shift_members`, the `shifts` answer, 2026-09-29)
+
+**Context.** A `flow:` step has a key; a member of a `Stream`'s `ops:` (a `Pipeline`'s `transforms:`) has only its
+place, so the canvas names it `stream.ops[2]` — the engine's name. Adding or removing a member (the user's answer
+"yes", 2026-09-29) changes the place of every member after it. The sidecar keeps positions and groups by name, the
+page keeps card sizes and its level by name, and the undo history brings names back. Measured before the re-key was
+complete: a member added between two others was drawn on the sidecar's place of the member it pushed down (both at
+`(200, 0)`), the undo of a removal brought the member back outside its group, and Ctrl+Z inside a subgraph member
+showed another subgraph under the same breadcrumb.
+
+**Decision.** Names stay positional — no ids are written into the YAML (the document-is-the-truth record). Every
+add, remove, undo and redo re-keys the positions and group entries of the LATER members in the same operation;
+the sidecar's positions are merged under the ones the editor holds first, so a missing name means "lay it out
+afresh", never "use what the sidecar kept for that name". `POST …/undo` and `…/redo` answer the renames they made,
+`shifts: [{list, first, by}]`, and the page moves its own per-name state through them instead of guessing.
+
+**Consequences.** A later member keeps its place and group across an insert (`stream.ops[3]` → `stream.ops[4]`),
+and an undo moves the names back. The cost is one more field in two answers and one rule every per-name map must
+follow: a new per-name map on the page must be re-keyed through `shifts`, or it drifts after an undo.
+
+**Example.**
+
+```
+POST …/steps/remove {nodes: [stream.ops[2], stream.ops[4]]}   → both lines gone, one undo entry
+POST …/undo  → changed: true, shifts: [{list: stream.ops, first: 2, by: 1}, {list: stream.ops, first: 4, by: 1}]
+```
+
+**What you may change.** How the page applies `shifts`, the layout of a fresh member. What must hold: member names
+are the engine's positional names; every edit that moves a member re-keys what is kept by name in the same
+operation; undo and redo say how they renamed. Pins: `tests/test_op_lists.py::TestPositionsFollowTheMembers`,
+`tests/test_op_lists.py::TestTheRoutes`, `tests/test_canvas.py::TestAnUndoInsideASubgraphMember`.

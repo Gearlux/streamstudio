@@ -5,22 +5,23 @@
  * are drawn and the line under the search box says how many there are and to type to narrow; filtering the
  * whole list on every keystroke is cheap, drawing it is not.
  *
- * A pick is handed to the app, which inserts the class as a step after the anchor named on the meta line
- * (`POST …/steps`). `data-opened-ms` on the root is the time from the gesture to the list being in the DOM,
- * measured in the page — what the tests print.
+ * A pick is handed to the app, which inserts the class where the meta line says (`POST …/steps`): `added after grey`
+ * (a flow step, or a list member — `added after stream.ops[1]`), or `added at the end of stream.ops` (an op list with no
+ * member selected, `oplists.insertTarget`). `data-opened-ms` on the root is the time from the gesture to the list
+ * being in the DOM, measured in the page — what the tests print.
  */
 import { useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import type { NodeSpec } from "../api";
 import type { Supertypes } from "../model";
+import { insertLabel, type InsertTarget } from "../oplists";
+import { plainDoc } from "../rst";
 import { PALETTE_ROWS, paletteMatches, searchMatches, type PaletteFilter } from "../steps";
 
 export interface PaletteRequest {
   /** Where the gesture happened, in screen pixels — the list opens there. */
   screen: { x: number; y: number };
-  /** The node the pick is inserted after; `undefined` when there is none (the pick is then refused). */
-  anchor: string | undefined;
-  /** Why there is no anchor, in words — shown instead of "after …". */
-  noAnchor?: string;
+  /** Where the pick is inserted; `none` when nowhere (the pick is then refused, in the `why` words when given). */
+  target: InsertTarget;
   /** A dropped wire's type and side; absent for a double-click. */
   filter?: PaletteFilter;
   /** `performance.now()` at the gesture. */
@@ -42,7 +43,7 @@ export function Palette({ request, specs, types, onPick, onClose }: PaletteProps
   const [query, setQuery] = useState("");
   const [active, setActive] = useState(0);
   const root = useRef<HTMLDivElement>(null);
-  const { filter, anchor } = request;
+  const { filter, target } = request;
 
   const matching = useMemo(
     () => (specs ?? []).filter((spec) => paletteMatches(spec, filter, types) && searchMatches(spec, query)),
@@ -73,7 +74,8 @@ export function Palette({ request, specs, types, onPick, onClose }: PaletteProps
     if (matching.length > shown.length) parts.push(`${matching.length} match — type to narrow`);
   }
   if (filter) parts.push(`${filter.side === "inputs" ? "an input taking" : "an output giving"} ${filter.type}`);
-  parts.push(anchor !== undefined ? `added after ${anchor}` : (request.noAnchor ?? "nothing to add after"));
+  const where = insertLabel(target);
+  parts.push(where !== undefined ? `added ${where}` : target.kind === "none" && target.why ? target.why : "nothing to add after");
 
   return (
     <>
@@ -107,7 +109,7 @@ export function Palette({ request, specs, types, onPick, onClose }: PaletteProps
               key={spec.class_path}
               data-class={spec.class_path}
               className={index === active ? "active" : undefined}
-              title={spec.problem || spec.doc}
+              title={spec.problem || plainDoc(spec.doc)}
               onMouseEnter={() => setActive(index)}
               onClick={() => onPick(spec)}
             >
