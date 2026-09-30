@@ -22,7 +22,7 @@ from confluid import configurable
 from recordstream import Algorithm, Image, Input, Label, Mask, Output, Param, Record, register_item
 
 import streamstudio
-from streamstudio.document import Document, Model
+from streamstudio.document import Document, Model, Problem, _gained
 from streamstudio.layout import Group, read_groups, read_sidecar, write_sidecar
 
 MOD = __name__
@@ -1267,3 +1267,79 @@ class TestPatcher:
         assert spell([1, 2]) == "[1, 2]"
         assert spell({"a": 1}) == "{a: 1}"
         assert spell("$DATA_ROOT/x") == "$DATA_ROOT/x"
+
+
+# ------------------------------------------------------------------------------------------------
+# an edit that only MOVES an existing problem is not refused
+# ------------------------------------------------------------------------------------------------
+
+#: A flow with ONE problem that is already there: ``stamp`` binds a value ``probe`` does not have (line 7).
+MOVED_TEXT = """\
+# a flow whose last step binds a value its source does not have (one existing problem)
+flow:
+  probe:
+    op: !class:recordstream.ops.debug.PrintRecordOp {label: probe}
+  stamp:
+    op: !class:recordstream.ops.debug.PrintRecordOp {label: stamp}
+    bind: {label: probe.nosuch}
+outputs: stamp
+"""
+PROBE = "recordstream.ops.debug.PrintRecordOp"
+
+
+def _bind_problems(document: Document) -> List[str]:
+    return [problem.message for problem in document.check() if "nosuch" in problem.message]
+
+
+class TestAMovedProblemIsNotAGainedOne:
+    """An edit is refused when it GAINS a problem. Measured before 2026-09-30: problems were compared by their whole
+    message, location included, so a step inserted ABOVE an existing problem moved it from ``graph.yaml:6:9`` to
+    ``graph.yaml:9:9`` and the edit was refused for "gaining" the problem that was already there."""
+
+    def test_a_step_inserted_above_an_existing_problem_is_accepted_and_the_problem_moves_with_it(
+        self, tmp_path: Path
+    ) -> None:
+        document = Document.open(_write(tmp_path, MOVED_TEXT))
+        [before] = _bind_problems(document)
+        assert "graph.yaml:6:9" in before
+        document.add_step("mid", "probe", PROBE, {"label": "mid"})
+        [after] = _bind_problems(document)
+        assert "graph.yaml:9:9" in after  # the same problem, three lines further down
+        assert "  mid:\n" in document.text
+
+    def test_a_whole_text_that_only_moves_the_problem_is_accepted(self, tmp_path: Path) -> None:
+        document = Document.open(_write(tmp_path, MOVED_TEXT))
+        document.replace_text("# one more comment line on top\n" + MOVED_TEXT)
+        [after] = _bind_problems(document)
+        assert "graph.yaml:7:9" in after
+
+    def test_an_edit_that_adds_a_new_problem_is_still_refused(self, tmp_path: Path) -> None:
+        """The con case: a second, DIFFERENT broken bind is a gained problem, whatever the lines do."""
+        document = Document.open(_write(tmp_path, MOVED_TEXT))
+        broken = MOVED_TEXT.replace(
+            "outputs: stamp\n",
+            f"  again:\n    op: !class:{PROBE} {{label: again}}\n    bind: {{label: probe.other}}\noutputs: again\n",
+        )
+        with pytest.raises(ValueError, match="probe has no output 'other'"):
+            document.replace_text(broken)
+        assert document.text == MOVED_TEXT
+
+    def test_a_second_copy_of_the_same_problem_is_still_a_gained_one(self) -> None:
+        """Counted, not set-compared: the same message moved is one problem; the same message twice is one more."""
+        before = [Problem("x: bind 'p.q' at /g/graph.yaml:6:9", "/g/graph.yaml:6:9")]
+        moved = [Problem("x: bind 'p.q' at /g/graph.yaml:9:9", "/g/graph.yaml:9:9")]
+        doubled = moved + [Problem("x: bind 'p.q' at /g/graph.yaml:12:9", "/g/graph.yaml:12:9")]
+        assert _gained(before, moved) == []
+        assert _gained(before, doubled) == [doubled[1]]
+
+    def test_every_location_spelling_is_taken_out(self) -> None:
+        """confluid's ``file:line:col`` (relative or absolute) and PyYAML's ``line N, column M``."""
+        before = [
+            Problem('graph.yaml: does not load: ScannerError: in "graph.yaml", line 3, column 5', "graph.yaml:3:5"),
+            Problem("Failed to construct X at /a b/graph.yaml:4:9: bad", "/a b/graph.yaml:4:9"),
+        ]
+        after = [
+            Problem('graph.yaml: does not load: ScannerError: in "graph.yaml", line 6, column 5', "graph.yaml:6:5"),
+            Problem("Failed to construct X at /a b/graph.yaml:7:9: bad", "/a b/graph.yaml:7:9"),
+        ]
+        assert _gained(before, after) == []

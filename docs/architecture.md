@@ -525,7 +525,10 @@ a patch of the TEXT at the marker's location through `_yamltext.YamlText`: PyYAM
 node, and those marks coincide with confluid's stamps, so a marker's `file:line:col` names exactly one
 composed node and the edit is expressed against its spans (a kwarg's value, a step's lines, a `!ref:`
 tag). The patched text is re-derived; if it no longer loads or `check()` gains a problem, the edit is
-refused with the located message and nothing is written. Positions never enter the document: they
+refused with the located message and nothing is written. **Update, 2026-09-30:** "gains" compares the problems'
+messages with every location taken out (`file:line:col`, PyYAML's `line N, column M`), COUNTED — measured before,
+the whole message was compared, so a step inserted above an existing problem moved it from `:6:9` to `:9:9` and the
+edit was refused for the problem that was already there; counting keeps the other half (a second copy is gained). Positions never enter the document: they
 live in a sidecar `<graph>.layout.yaml` keyed by node NAME, and the graph loads and runs with the
 sidecar deleted. Node names are the engine's (`recordstream.flow.Tracer`): a `flow:` step by its key,
 a list member `path[i]`, a nested marker by its document path, the contract root by its key.

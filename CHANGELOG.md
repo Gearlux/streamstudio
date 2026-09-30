@@ -20,6 +20,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **An edit is no longer refused for a problem that was already there.** A step inserted above an existing problem
+  (a broken `bind:`) moved it from `flow.yaml:6:9` to `flow.yaml:9:9`, and the edit was refused as if it had made
+  that problem; problems are now compared without their locations, and counted — a second copy is still refused.
 - **The editor's check reports a document that derives but does not build.** A top-level key that confluid
   hands to a same-named constructor parameter used to pass `check()`; it is now one located problem,
   `does not build`, and an edit or a PUT producing such a text is refused and not written.
