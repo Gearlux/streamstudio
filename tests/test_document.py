@@ -22,7 +22,7 @@ from confluid import configurable
 from recordstream import Algorithm, Image, Input, Label, Mask, Output, Param, Record, register_item
 
 import streamstudio
-from streamstudio.document import Document, Model, Problem, _gained
+from streamstudio.document import Document, Model, Problem, _gained, _load_problem
 from streamstudio.layout import Group, read_groups, read_sidecar, write_sidecar
 
 MOD = __name__
@@ -354,6 +354,26 @@ flow:
   floor:
     op: !class:{MOD}.DocBackground {{}}
     from: decode
+"""
+
+
+# a flow whose subgraph reads its steps from ``prep.steps.yaml`` — and a steps file whose brace on line 2 never closes,
+# so PyYAML stops at line 3, column 7 (the ``:`` after ``scaled``)
+INCLUDING_TEXT = """\
+flow:
+  prep:
+    op: !class:recordstream.flow.subgraph.Subgraph
+      steps:
+        include: prep.steps.yaml
+      result: scaled
+outputs: prep
+"""
+
+UNCLOSED_STEPS_TEXT = """\
+grey:
+  op: !class:recordstream.ops.image.ConvertMode {mode: L, oops
+scaled:
+  op: !class:recordstream.ops.numpy.Scale {source_min: 0.0, source_max: 255.0}
 """
 
 
@@ -781,6 +801,41 @@ class TestProblems:
         assert problems[0].message.startswith(f"{path}: does not build: ")
         assert "Failed to construct GraphContract" in problems[0].message
         assert problems[0].loc == f"{path}:1:11"
+
+    def test_a_syntax_error_in_an_included_file_is_located_in_that_file(self, tmp_path: Path) -> None:
+        """Measured 2026-09-30: ``loc`` was ``…/graph.yaml:3:7`` — the GRAPH file with the steps file's line
+        and column — while the message itself names ``…/prep.steps.yaml``. The message stays as it was."""
+        steps = _write(tmp_path, UNCLOSED_STEPS_TEXT, "prep.steps.yaml")
+        path = _write(tmp_path, INCLUDING_TEXT)
+        problems = Document.open(path).check()
+        assert [p.loc for p in problems] == [f"{steps}:3:7"]
+        assert problems[0].message.startswith(f"{path}: does not load: ParserError: ")
+        assert f'in "{steps}", line 3, column 7' in problems[0].message
+
+    def test_a_syntax_error_in_the_graphs_own_text_is_still_located_in_the_graph(self, tmp_path: Path) -> None:
+        """CON case: the same unclosed brace written in the graph itself names the graph, at ITS line."""
+        text = "flow:\n" + "".join(f"  {line}\n" for line in UNCLOSED_STEPS_TEXT.splitlines())
+        path = _write(tmp_path, text)
+        problems = Document.open(path).check()
+        assert [p.loc for p in problems] == [f"{path}:4:9"]
+        assert problems[0].message.startswith(f"{path}: does not load: ParserError: ")
+
+    def test_a_syntax_error_in_a_held_included_file_is_located_in_that_file(self, tmp_path: Path) -> None:
+        """A steps file the editor holds and has NOT saved (it is not on disk at all): confluid parses the held text
+        under the file's real path, so the location names that file although the disk does not have it."""
+        path = _write(tmp_path, INCLUDING_TEXT)
+        steps = tmp_path / "prep.steps.yaml"
+        document = Document(path, {path.resolve(): INCLUDING_TEXT, steps.resolve(): UNCLOSED_STEPS_TEXT})
+        assert not steps.exists()
+        assert [p.loc for p in document.check()] == [f"{steps}:3:7"]
+
+    def test_a_mark_that_names_no_file_is_located_in_the_graph(self, tmp_path: Path) -> None:
+        """CON case: a YAML stream without a file (PyYAML names it ``<unicode string>``) falls back to the graph."""
+        path = tmp_path / "graph.yaml"
+        with pytest.raises(yaml.MarkedYAMLError) as caught:
+            yaml.safe_load("a: {b: 1\nc: 2\n")
+        assert caught.value.problem_mark is not None and caught.value.problem_mark.name == "<unicode string>"
+        assert _load_problem(path, caught.value).loc == f"{path}:2:2"
 
     def test_check_never_raises_and_passes_a_sound_graph(self, tmp_path: Path) -> None:
         assert _open(tmp_path, CONTRACT_FLOW_TEXT).check() == []

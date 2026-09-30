@@ -1537,12 +1537,18 @@ def _unwritable(path: Path) -> Optional[int]:
     return None if os.access(folder, os.W_OK | os.X_OK) else errno.EACCES
 
 
-def _load_problem(path: Path, exc: BaseException, verb: str = "does not load") -> Problem:
-    """A document that does not load (or does not build) is ONE located problem, never an exception."""
+def _load_problem(
+    path: Path, exc: BaseException, verb: str = "does not load", *, held: Collection[Path] = ()
+) -> Problem:
+    """A document that does not load (or does not build) is ONE located problem, never an exception.
+
+    The message always starts with the GRAPH (``<graph>: does not load: …``); the location is the file the error is
+    IN — for a YAML error, the file PyYAML's mark names (:func:`_mark_file`), which for a syntax error in an included
+    steps file is that steps file, not the graph. ``held`` are the files the editor holds (resolved)."""
     loc = str(path)
     mark = getattr(exc, "problem_mark", None)
     if mark is not None:
-        loc = f"{path}:{mark.line + 1}:{mark.column + 1}"
+        loc = f"{_mark_file(path, mark, held)}:{mark.line + 1}:{mark.column + 1}"
     else:
         located = re.search(r" at (\S+:\d+:\d+)", str(exc))
         if located:
@@ -1551,12 +1557,26 @@ def _load_problem(path: Path, exc: BaseException, verb: str = "does not load") -
     return Problem(f"{path}: {verb}: {type(exc).__name__}: {message}", loc)
 
 
+def _mark_file(path: Path, mark: yaml.Mark, held: Collection[Path]) -> str:
+    """The file a PyYAML ``mark`` is in, as the mark spells it: the graph (parsed under its own name,
+    :func:`_load_document`), an included file on disk, or one the editor holds and has not saved (confluid parses a
+    held text under the file's real path) — else the graph, for a stream that is no file (``<unicode string>``).
+
+    Measured before 2026-09-30: a syntax error on line 3 of an included ``prep.steps.yaml`` was located at
+    ``demo.yaml:3:7`` — the graph with the steps file's line — while the message named ``prep.steps.yaml``."""
+    named = Path(mark.name)
+    if named.resolve() in held or named.is_file():
+        return str(mark.name)
+    return str(path)
+
+
 def derive(path: Path, texts: Mapping[Path, str]) -> _Derivation:
     """The model of the document at ``path`` as the texts spell it — never raises."""
     try:
         doc, included = _load_document(path, texts)
     except Exception as exc:  # noqa: BLE001 — every failure to load is reported as a problem
-        return _Derivation(Model(problems=[_load_problem(path, exc)]), {}, None, [], None, (), [path.resolve()], {})
+        problem = _load_problem(path, exc, held=set(texts))
+        return _Derivation(Model(problems=[problem]), {}, None, [], None, (), [path.resolve()], {})
     derivation = _Builder(path).derive(doc)
     files = [path.resolve()] + [p for p in included if p != path.resolve()]
     if not derivation.model.problems:
@@ -1567,7 +1587,7 @@ def derive(path: Path, texts: Mapping[Path, str]) -> _Derivation:
         try:
             _load_document(path, texts, build=True)
         except Exception as exc:  # noqa: BLE001 — every failure to build is reported as a problem
-            derivation.model.problems.append(_load_problem(path, exc, "does not build"))
+            derivation.model.problems.append(_load_problem(path, exc, "does not build", held=set(texts)))
     return derivation._replace(files=files)
 
 
