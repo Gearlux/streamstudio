@@ -56,6 +56,7 @@ import io
 import os
 import re
 import threading
+from collections import Counter
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1904,6 +1905,35 @@ class _Dropped(NamedTuple):
     groups: Dict[str, List[Tuple[int, str]]]
 
 
+#: A location inside a problem's message: confluid's ``file:line:col`` (relative or absolute) and PyYAML's
+#: ``line N, column M``.
+_MESSAGE_LOCATION = re.compile(r"\S+:\d+:\d+|line \d+, column \d+")
+
+
+def _where_free(message: str) -> str:
+    """A problem's message with every location taken out — what stays the same when an edit only moves lines."""
+    return _MESSAGE_LOCATION.sub("<loc>", message)
+
+
+def _gained(before: Sequence[Problem], after: Sequence[Problem]) -> List[Problem]:
+    """The problems ``after`` holds beyond ``before``: compared by message with the locations taken out, and COUNTED.
+
+    Measured before 2026-09-30: problems were compared by their whole message, location included, so a step
+    inserted above an existing problem moved it from ``flow.yaml:6:9`` to ``flow.yaml:9:9`` and the edit was
+    refused for "gaining" the problem that was already there. Counting keeps the other half: the same problem
+    moved is not gained, a second copy of it is.
+    """
+    left = Counter(_where_free(problem.message) for problem in before)
+    gained: List[Problem] = []
+    for problem in after:
+        key = _where_free(problem.message)
+        if left[key] > 0:
+            left[key] -= 1
+        else:
+            gained.append(problem)
+    return gained
+
+
 class _Entry(NamedTuple):
     """One step of the document's history: the texts before an edit, the rename it made, the shifts of a list's
     positional member names it made, in the order they were made (a Convert, a Paste, an add or a removal of list
@@ -2479,10 +2509,10 @@ class Document:
         problem over the current text, and the undo history starts over — the text arrived whole, not as
         a patch the history could hold. Nothing is written; positions and groups held here are kept."""
         candidate: _Texts = {**self._texts, self.path.resolve(): text}
-        before = {problem.message for problem in self.check()}
+        before = self.check()
         derivation = derive(self.path, candidate)
         after = check(derivation, self.path)
-        gained = [problem for problem in after if problem.message not in before]
+        gained = _gained(before, after)
         if gained:
             raise ValueError("; ".join(problem.message for problem in gained))
         self._texts = candidate
@@ -3638,11 +3668,11 @@ class Document:
         earlier edit too, so each older history entry gets it: undoing past this edit restores the file,
         rather than falling back to the disk, which a Save may have changed since (measured before: undo
         after Save showed the saved ``RGB``, and the next Save wrote it back)."""
-        before = {problem.message for problem in self.check()}
+        before = self.check()
         candidate: _Texts = {**self._texts, **changes}
         derivation = derive(self.path, candidate)
         after = check(derivation, self.path)
-        gained = [problem for problem in after if problem.message not in before]
+        gained = _gained(before, after)
         if gained:
             where = f" at {loc}" if loc else ""
             raise ValueError(f"{what} refused{where}: " + "; ".join(problem.message for problem in gained))

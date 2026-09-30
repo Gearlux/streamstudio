@@ -564,7 +564,9 @@ set_param(size, max_band_hz, 30e6):  1 line differs; 148 comment lines kept; $DA
 ```
 
 An edit that makes the document stop loading, or gain a problem (a wire whose types do not meet), is refused with
-a message naming `file:line:col`. **Node names** are one scheme shared by the model, the engine, the sidecar and
+a message naming `file:line:col`. A problem that was already there is not "gained" when an edit only moves it: a
+step inserted above a broken `bind:` moves that problem from `flow.yaml:6:9` to `flow.yaml:9:9`, and the edit goes
+through — while a second broken `bind:` is still refused. **Node names** are one scheme shared by the model, the engine, the sidecar and
 the routes: a `flow:` step by its key (`floor`), a list member by `path[i]` (`stream.ops[1]`), a nested marker by
 its document path (`processor.stream`), a contract root by its key (`contract`), the host's side of a graph
 without a contract as one node, `<host>`, and a node inside a subgraph as `<subgraph>/<step>` (`prep/grey`), with
