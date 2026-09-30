@@ -34,6 +34,10 @@ dependencies = [
     "liquifai>=0.3.0",
     "loggair>=0.2.0",
     # [pydantic] extra: bridge.py enumerates fields via confluid.to_pydantic.
+    # The canvas editor also needs `confluid.load(..., texts=)` for a graph whose steps files it holds: document.py
+    # hands confluid those texts instead of writing them to disk (a graph holding no such file never passes it).
+    # No confluid release carries it yet — until one does, this package needs confluid from a checkout or from
+    # git for that; this floor is raised with that release.
     "confluid[pydantic]>=0.3.0",
     # The pre-release segment is REQUIRED, not cosmetic: under PEP 440 a plain `>=0.1.0`
     # excludes every pre-release of 0.1.0, so it would refuse the only recordstream that

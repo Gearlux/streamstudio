@@ -770,12 +770,14 @@ scope's decision 1): changes stay in the editor until Save, and ● says so.
 **Decision.** Every editing route changes the in-memory `Document`, and `dirty` says whether any text differs
 from what was last written, or positions/groups were set since. `Document.save` first compares each file on disk
 with what the editor last read or wrote; any difference refuses the WHOLE save with the path and writes nothing.
-Otherwise it writes every changed file and the sidecar. The trace, the check and every derive run the in-memory
+So does a file the disk will not take (2026-09-30, the update below). Otherwise it writes every changed file — the
+graph's own last — and the sidecar. The trace, the check and every derive run the in-memory
 text. Holding text in memory brought four mechanisms, each from a measured break:
 
-- confluid reads an `include:` from disk, so a load STAGES a held text there (write it, load, put the original
-  back) — under one process-wide lock (`_DISK_LOCK`) that also covers saves and disk reads, because Flask serves
-  threaded;
+- a load hands every file the editor holds, other than the graph itself, to confluid as `texts=`: confluid parses
+  a held text instead of reading the file, so an `include:` naming a steps file that exists only in the editor
+  loads, and nothing is written; saves, disk reads and loads run under one process-wide lock (`_DISK_LOCK`),
+  because Flask serves threaded and a save empties a file before it writes the new text;
 - an included file enters the held texts only when an EDIT changes it (a Copy or a template read goes to disk),
   and when it first enters, every older history entry gets the text it was read as;
 - a positions write MERGES over what the editor holds;
@@ -788,19 +790,20 @@ text. Holding text in memory brought four mechanisms, each from a measured break
 - A save after someone appended a line to the file: `400 …/demo.yaml changed on disk since the editor read it —
   Revert to load it, or Save As to keep both`, nothing written. For an included steps file the message offers
   Revert only: a graph written by Save As would include the same file.
-- The lock: 4 threads × 6 traces over a graph holding an unsaved edit in an included steps file left the unsaved
-  value ON DISK and let one trace read a half-written file (`Subgraph: steps is empty`); with the lock, the disk
-  keeps the saved value and every trace answers 200.
+- The held texts: after Move to its own file…, 5 checks and 5 edits leave the graph folder as it was during every
+  load (`['demo.yaml']`); with the folder made read-only they still check, edit and trace, and Save writes
+  `prep.steps.yaml` once the folder can be written again.
+- The lock: graph A saved a steps file 300 times while graph B, which includes it without holding it, was checked
+  352 times; without the lock 4 of B's loads read the file half-written (`Subgraph: steps is empty`, a
+  `ParserError`), with it none.
 - The merge: `PUT {prep: [11, 22]}` then `PUT {mask: [33, 44]}` put `prep` back at its laid-out place; now both
   reach the sidecar.
 - The undo rule: after Save, two undos left an included edit in place and the next Save wrote it; now the undo
   restores the text the file was read as.
 
-The costs: an unsaved steps file sits in the graph folder for the length of each load (a crash mid-load would leave
-it); a teammate's change is found at Save, not while you edit; what the editor holds lives only in the process
-until a stop writes it to the recovery file (the record "Unsaved work is kept in a hidden file of the served folder").
-Handing confluid in-memory texts for `include:` would remove the staging — a confluid API decision, tracked in the
-root `TASKS.md`.
+The costs: a teammate's change is found at Save, not while you edit; what the editor holds lives only in the process
+until a stop writes it to the recovery file (the record "Unsaved work is kept in a hidden file of the served folder");
+the editor needs a confluid whose `load` takes `texts=`, and its `confluid` floor is raised when confluid releases it.
 
 **Example.**
 
@@ -812,8 +815,10 @@ POST /api/graphs/demo/save  → 400 …/demo.yaml changed on disk since the edit
 ```
 
 **What you may change.** The shape of the dirty signal, the messages, how Save As asks to overwrite. What must
-hold: no editing route writes to disk; Save never overwrites a file that changed since the editor read it; the
-trace runs what the editor shows; staging happens only under the lock. Pins: `tests/test_app_save.py`,
+hold: no editing route writes to disk, and no load does either — what the editor holds reaches confluid as
+`texts=`; Save never overwrites a file that changed since the editor read it, and writes nothing when one of its
+files cannot be written; the graph's own file is written last; the trace runs what the editor shows; saves, disk
+reads and loads take the lock. Pins: `tests/test_app_save.py`,
 `tests/test_app.py::TestTrace::test_the_trace_runs_what_the_editor_shows_not_the_file_on_disk`.
 
 **Update, 2026-09-29 — File ▸ New… writes its file at once.** Explicit Save covers EDITS; making a graph is not an
@@ -838,6 +843,63 @@ which the person sees and deletes — the point of the user's answer. What must 
 editor; New… never writes over a file; every refusal (the file exists, the folder is missing, is not a folder or
 cannot be written, a bad name) comes before anything is written. Pins: `tests/test_app_files.py::TestNew`,
 `tests/test_canvas.py::TestNewAndOpen`.
+
+**Update, 2026-09-30 — a file the editor holds never reaches the disk before Save.** confluid resolves an
+`include:` to a FILE, so the first cut of Explicit Save wrote each held text into its place for the length of every
+load and put the old content back after, under the lock. That kept a steps file made by Move to its own file… in the
+graph folder during every check, edit and trace, left it there if the process died mid-load, and made a read-only
+folder refuse every edit. The user picked the option that has confluid take the texts: `confluid.load(..., texts=)`
+parses a held text in place of the file — through the same search, with every `file:line:col` naming the real
+path — so `_load_document` hands over every held file but the graph (which it parses itself) and writes nothing.
+`_anchor_entry` anchors a relative include naming a held file to that file even though the disk does not have it;
+an include inside a held file is found beside that file by confluid itself. Measured through the routes, a flow
+holding one subgraph, Move to its own file…, then 5 checks and 5 edits with nothing saved:
+
+```
+before  the folder during those loads:   ['demo.yaml', 'prep.steps.yaml']
+        the same, folder chmod 555:      edit 400 …/prep.steps.yaml:4:7: …/demo.yaml: does not load:
+                                         PermissionError: [Errno 13] Permission denied: '…/prep.steps.yaml'
+after   the folder during those loads:   ['demo.yaml']
+        the same, folder chmod 555:      edit 200
+both    the folder afterwards:           ['demo.yaml']        after Save: ['demo.yaml', 'prep.steps.yaml']
+```
+
+The lock stays, for what still needs it: a load reads the includes the editor does NOT hold from disk, and a save of
+another graph may be writing one of them (the lock bullet above). The rejected alternative is the first cut itself —
+writes into the person's folder that only the lock kept from colliding — measured in confluid's own record ("A
+caller can hand `load` the texts of the files it holds"). Pins:
+`tests/test_app_save.py::TestAHeldTextNeverTouchesTheDisk` — a read-only folder, the folder listed during every
+load, inner nodes located in the held file, a nested include beside a held file, a held text over a different file
+on disk.
+
+Three consequences, found by the review of that change and settled in the same round:
+
+- **A Save writes all of its YAML files or none.** With loads no longer writing, Move to its own file… into a folder
+  that cannot be written is ACCEPTED (it used to fail at the staging write), and the first Save after it wrote the
+  graph, then met the steps file: `400 …/parts/prep.steps.yaml cannot be written: Permission denied`, with
+  `run.yaml` already saying `steps: {include: parts/prep.steps.yaml}` and a fresh `confluid.load(run.yaml)` raising
+  `ConfigFileNotFoundError`. Save As wrote `other/run2.yaml` the same way. `Document._refuse_unwritable` now checks
+  every file before the first write (`_unwritable`: an existing file must be writable, a new one needs a folder
+  that exists and can be written) and refuses in the words a failed write gives; and the graph's own file is written
+  LAST, so a failure no check can foresee (a full disk) still never leaves a graph naming a file that is not there.
+  The rejected alternative — refusing Move to its own file… in a folder that cannot be written — would take back
+  what this update is for: working in a folder you may only read until you choose to save.
+  The positions sidecar is written after the YAML files and is not in the check yet (`TASKS.md`).
+- **`texts=` is passed only when there is something to hand over.** Every load passed it, `texts={}` included, so
+  with the released confluid (0.3.1 — no such keyword; what CI installs) EVERY graph stopped loading:
+  `does not load: TypeError: load() got an unexpected keyword argument 'texts'`, and an edit answered
+  `404 no node 'mask' (the nodes are: [])`. Now only a graph in which the editor holds a steps file needs the
+  confluid carrying `texts=`.
+- **A held file is matched by the path its include resolves to, spelled as written.** On a disk that ignores case
+  the staged file used to be found under any spelling; a held one is not: an include respelled
+  `PREP.steps.yaml` for a held, unsaved `prep.steps.yaml` is refused (`… includes PREP.steps.yaml: Not found`)
+  until Save puts the file on disk. The editor keys an included file by the spelling its include resolves to, so an
+  edit of `Prep.steps.yaml` included as `prep.steps.yaml` is what runs and what Save writes. Matching held files by
+  their identity on disk would give confluid a second identity for a file, which its own record rules out; the case
+  is a documented limit.
+
+Pins: `tests/test_app_save.py::TestASaveTheDiskRefusesWritesNothing`, `::TestAConfluidWithoutHeldTexts`,
+`::TestAnIncludeSpelledInAnotherCase`.
 
 ## A subgraph is one node outside and a nested model inside, its steps named `prep/grey` (`Model.inside`, 2026-09-29)
 

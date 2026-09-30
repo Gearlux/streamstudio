@@ -15,10 +15,12 @@ The documents here use recordstream's own ops only (``PrintRecordOp``, ``Thresho
 this file depends on a class defined in another test module.
 """
 
+import os
 import threading
 from pathlib import Path
 from typing import Any, Dict, List, Tuple, cast
 
+import confluid
 import numpy as np
 import pytest
 from PIL import Image
@@ -430,7 +432,7 @@ class TestRebaseIncludes:
 
 
 # ------------------------------------------------------------------------------------------------
-# a graph that includes a steps file: undo, read-only operations, a teammate's edit, concurrent loads
+# a graph that includes a steps file: undo, read-only operations, a teammate's edit, held texts never on disk
 # ------------------------------------------------------------------------------------------------
 
 SUBGRAPH = "recordstream.flow.subgraph.Subgraph"
@@ -525,8 +527,8 @@ class TestUndoRestoresEveryFileTheDocumentHolds:
 
 class TestAReadOnlyOperationHoldsNoFile:
     """Copy and Save as template READ an included file; only an edit makes the editor hold it (measured before:
-    after a Copy of ``prep/grey`` the canvas kept ``mode L`` while a teammate's file said RGB, and a trace staged
-    the stale L over it)."""
+    after a Copy of ``prep/grey`` the canvas kept ``mode L`` while a teammate's file said RGB, and a trace ran the
+    stale L)."""
 
     @pytest.mark.parametrize("read_only", ["copy", "template"])
     def test_a_teammates_edit_after_a_read_only_operation_is_what_the_canvas_shows(
@@ -577,18 +579,21 @@ class TestEveryRemedyARefusalNamesWorks:
         assert _error(client.post("/api/graphs/demo/save")).endswith("Revert to load it, or Save As to keep both")
 
 
-class TestLoadsThatStageAHeldTextAreSerialized:
-    """A load stages an included file's HELD text on disk for its length; two loads at once used to overlap —
-    the second read the first one's staged text as the "original" and restored it, leaving an unsaved edit on
-    disk (measured every run: 4 threads x 6 traces, then ``Save: 400 … changed on disk``)."""
+class TestAHeldTextNeverTouchesTheDisk:
+    """What the editor holds and has not saved reaches confluid as ``texts=`` — no load writes a file.
+
+    Move to its own file… makes a steps file that exists only in the editor until Save, and an edit of an included
+    file holds its new text there too. Measured before (2026-09-30), every check, edit and trace WROTE each held text
+    into the graph folder for the length of the load and put the file back after: a Move to its own file… followed
+    by 5 checks and 5 edits showed ``prep.steps.yaml`` in the folder during those loads, and with the folder
+    read-only every edit was refused (``does not load: PermissionError: [Errno 13] Permission denied:
+    '…/prep.steps.yaml'``)."""
 
     @pytest.fixture
     def traced(self, graph_dir: Path) -> Path:
-        pixels = np.zeros((20, 20, 3), np.uint8)
-        pixels[5:12, 5:12] = 230
-        Image.fromarray(pixels).save(graph_dir / "demo.png")
+        _picture(graph_dir)
         (graph_dir / "prep.steps.yaml").write_text(
-            f"grey:\n  op: !class:{CONVERT} {{mode: L}}\nscaled:\n  op: !class:recordstream.ops.numpy.Scale "
+            f"grey:\n  op: !class:{CONVERT} {{mode: L}}\nscaled:\n  op: !class:{SCALE} "
             "{source_min: 0.0, source_max: 255.0, target_min: 0.0, target_max: 1.0}\n"
         )
         (graph_dir / "run.yaml").write_text(
@@ -601,9 +606,131 @@ class TestLoadsThatStageAHeldTextAreSerialized:
         )
         return graph_dir
 
+    @pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0, reason="needs a user the folder mode binds")
+    def test_a_read_only_folder_still_checks_edits_and_traces_and_save_then_writes_the_file(
+        self, inline: Path, tmp_path: Path
+    ) -> None:
+        client = create_app(inline, templates_dir=tmp_path / "templates").test_client()
+        _ok(client.post("/api/graphs/run/subgraph/stream.ops[1]/extract", json={"path": "prep.steps.yaml"}))
+        before = _listing(inline)
+        assert "prep.steps.yaml" not in before
+        inline.chmod(0o555)
+        try:
+            edited = _ok(client.post("/api/graphs/run/param", json=INNER_EDIT))  # an edit of the held file: a load
+            assert edited["dirty"] is True
+            assert _ok(client.get("/api/graphs/run/check"))["problems"] == []
+            traced = _ok(client.post("/api/graphs/run/trace", json={}))  # built from the held texts: a load
+            assert set(traced["statuses"].values()) == {"ok"}
+            assert _listing(inline) == before
+        finally:
+            inline.chmod(0o755)
+        _ok(client.post("/api/graphs/run/save"))
+        assert "target_max: 2.0" in (inline / "prep.steps.yaml").read_text()
+
+    def test_no_file_appears_in_the_folder_during_any_load(
+        self, inline: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = create_app(inline, templates_dir=tmp_path / "templates").test_client()
+        real_load = document_module.confluid.load
+        during: List[List[str]] = []
+
+        def load(*args: Any, **kwargs: Any) -> Any:  # confluid.load's own arguments and answer
+            during.append(_listing(inline))
+            return real_load(*args, **kwargs)
+
+        monkeypatch.setattr(document_module.confluid, "load", load)
+        before = _listing(inline)
+        _ok(client.post("/api/graphs/run/subgraph/stream.ops[1]/extract", json={"path": "parts/prep.steps.yaml"}))
+        _ok(
+            client.post("/api/graphs/run/subgraph/stream.ops[1]/inner/extract", json={"path": "parts/inner.steps.yaml"})
+        )
+        _ok(client.post("/api/graphs/run/param", json=INNER_EDIT))
+        _ok(client.get("/api/graphs/run/check"))
+        _ok(client.post("/api/graphs/run/trace", json={}))
+        _ok(client.post("/api/graphs/run/undo"))
+        _ok(client.post("/api/graphs/run/redo"))
+        assert len(during) >= 8
+        assert [listing for listing in during if listing != before] == []
+        assert _listing(inline) == before
+        _ok(client.post("/api/graphs/run/save"))  # the one gesture that writes
+        assert _listing(inline) == sorted(before + ["parts/inner.steps.yaml", "parts/prep.steps.yaml"])
+
+    def test_the_nodes_of_a_held_steps_file_are_located_in_that_file(self, inline: Path, tmp_path: Path) -> None:
+        client = create_app(inline, templates_dir=tmp_path / "templates").test_client()
+        body = _ok(client.post("/api/graphs/run/subgraph/stream.ops[1]/extract", json={"path": "prep.steps.yaml"}))
+        steps = (inline / "prep.steps.yaml").resolve()
+        inside = body["model"]["inside"]["stream.ops[1]"]
+        assert _locs(inside) == {
+            "stream.ops[1]/grey": f"{steps}:2:7",
+            "stream.ops[1]/inner": f"{steps}:4:7",
+        }
+        assert _locs(inside["inside"]["stream.ops[1]/inner"]) == {"stream.ops[1]/inner/scaled": f"{steps}:7:13"}
+        edited = _ok(client.post("/api/graphs/run/param", json=INNER_EDIT))
+        assert _locs(edited["model"]["inside"]["stream.ops[1]"]["inside"]["stream.ops[1]/inner"]) == {
+            "stream.ops[1]/inner/scaled": f"{steps}:7:13"
+        }
+        assert not steps.exists()
+
+    def test_a_nested_include_inside_a_held_steps_file_is_found_beside_that_file(
+        self, inline: Path, tmp_path: Path
+    ) -> None:
+        """Both steps files held, neither on disk: the include ``inner.steps.yaml`` written in
+        ``parts/prep.steps.yaml`` names ``parts/inner.steps.yaml`` — never the ``inner.steps.yaml`` beside the graph."""
+        (inline / "inner.steps.yaml").write_text(f"decoy:\n  op: !class:{PROBE} {{label: decoy}}\n")
+        client = create_app(inline, templates_dir=tmp_path / "templates").test_client()
+        _ok(client.post("/api/graphs/run/subgraph/stream.ops[1]/extract", json={"path": "parts/prep.steps.yaml"}))
+        body = _ok(
+            client.post("/api/graphs/run/subgraph/stream.ops[1]/inner/extract", json={"path": "parts/inner.steps.yaml"})
+        )
+        nested = body["model"]["inside"]["stream.ops[1]"]["inside"]["stream.ops[1]/inner"]
+        assert _locs(nested) == {"stream.ops[1]/inner/scaled": f"{(inline / 'parts/inner.steps.yaml').resolve()}:2:7"}
+        assert _ok(client.get("/api/graphs/run/check"))["problems"] == []
+        assert set(_ok(client.post("/api/graphs/run/trace", json={}))["statuses"].values()) == {"ok"}
+        assert list((inline / "parts").iterdir()) == []
+        _ok(client.post("/api/graphs/run/save"))
+        assert "steps: {include: inner.steps.yaml}" in (inline / "parts/prep.steps.yaml").read_text()
+        assert (inline / "parts/inner.steps.yaml").read_text().startswith("scaled:\n")
+
+    def test_a_held_text_wins_over_the_file_on_disk_which_keeps_its_own_text(
+        self, client: Any, including: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The disk says ``mode: L``, the editor holds ``mode: RGB``: every load sees RGB while the file keeps L —
+        and each load still runs under ``_DISK_LOCK`` (it reads the includes the editor does NOT hold from disk,
+        which a save of another graph may be writing at that moment)."""
+        _ok(client.post("/api/graphs/inc/param", json={"node": "prep/grey", "param": "mode", "value": "RGB"}))
+        real_load = document_module.confluid.load
+        seen: List[Tuple[str, bool]] = []  # (the file's text on disk during the load, another thread got the lock)
+
+        def load(*args: Any, **kwargs: Any) -> Any:  # confluid.load's own arguments and answer
+            outside: List[bool] = []
+
+            def take_the_lock() -> None:  # from another thread; given back at once, so a failure cannot hang the suite
+                got = document_module._DISK_LOCK.acquire(blocking=False)
+                if got:
+                    document_module._DISK_LOCK.release()
+                outside.append(got)
+
+            other = threading.Thread(target=take_the_lock)
+            other.start()
+            other.join()
+            seen.append(((including / "prep.steps.yaml").read_text(), outside[0]))
+            return real_load(*args, **kwargs)
+
+        monkeypatch.setattr(document_module.confluid, "load", load)
+        edited = _ok(client.post("/api/graphs/inc/param", json={"node": "mask", "param": "low_level", "value": 0.4}))
+        assert _canvas(edited) == (0.4, "RGB")
+        assert seen and [disk for disk, _outside in seen if disk != STEPS_TEXT] == []
+        assert not any(outside for _disk, outside in seen)
+        assert (including / "prep.steps.yaml").read_text() == STEPS_TEXT
+        _ok(client.post("/api/graphs/inc/save"))
+        assert "mode: RGB" in (including / "prep.steps.yaml").read_text()
+
     def test_concurrent_traces_leave_the_disk_as_it_was_and_save_is_not_refused(
         self, traced: Path, tmp_path: Path
     ) -> None:
+        """4 threads x 6 traces over a graph holding an unsaved edit of an included file (measured when loads still
+        wrote held texts to disk: two overlapping loads left the unsaved value ON DISK, and Save then refused it as a
+        change someone else made — ``Save: 400 … changed on disk``)."""
         app = create_app(traced, templates_dir=tmp_path / "templates")
         client = app.test_client()
         on_disk = (traced / "prep.steps.yaml").read_text()
@@ -623,29 +750,256 @@ class TestLoadsThatStageAHeldTextAreSerialized:
         for thread in threads:
             thread.join()
         assert [answer for answer in answers if answer[0] != 200] == []
-        assert (traced / "prep.steps.yaml").read_text() == on_disk  # the unsaved 9.0 never stayed on disk
+        assert (traced / "prep.steps.yaml").read_text() == on_disk  # the unsaved 9.0 never reached the disk
         _ok(client.post("/api/graphs/run/save"))
         assert "target_max: 9.0" in (traced / "prep.steps.yaml").read_text()
 
-    def test_no_other_thread_can_touch_the_files_while_a_held_text_is_staged(
-        self, client: Any, including: Path, monkeypatch: pytest.MonkeyPatch
+
+@pytest.fixture
+def inline(graph_dir: Path) -> Path:
+    """``run.yaml``: a Stream whose ``stream.ops[1]`` is a subgraph written INLINE — ``grey``, then the nested
+    subgraph ``inner`` (one ``scaled`` step) — and an empty ``parts/`` folder beside it."""
+    _picture(graph_dir)
+    (graph_dir / "run.yaml").write_text(INLINE_RUN_TEXT.format(picture=graph_dir / "demo.png"))
+    (graph_dir / "parts").mkdir()
+    return graph_dir
+
+
+_MODE_BINDS = pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0, reason="needs a user the file mode binds")
+
+
+class TestASaveTheDiskRefusesWritesNothing:
+    """A Save (or Save As) the disk refuses for ONE of its files writes NONE of them, so the graph on disk never names
+    a steps file that is not there.
+
+    Measured before (2026-09-30): Move to its own file… into a read-only ``parts/``, an inner edit, Save →
+    ``400 …/parts/prep.steps.yaml cannot be written: Permission denied`` — with ``run.yaml`` ALREADY rewritten to
+    ``steps: {include: parts/prep.steps.yaml}``, so a fresh ``confluid.load(run.yaml)`` raised
+    ``ConfigFileNotFoundError``. Save As wrote ``other/run2.yaml`` the same way before it met the steps file."""
+
+    @staticmethod
+    def _moved(inline: Path, tmp_path: Path) -> Any:  # flask.testing.FlaskClient
+        """Move to its own file… into ``parts/prep.steps.yaml``, then an edit of the moved steps: two files to write."""
+        client = create_app(inline, templates_dir=tmp_path / "templates").test_client()
+        _ok(client.post("/api/graphs/run/subgraph/stream.ops[1]/extract", json={"path": "parts/prep.steps.yaml"}))
+        _ok(client.post("/api/graphs/run/param", json=INNER_EDIT))
+        return client
+
+    @_MODE_BINDS
+    def test_save_refused_for_the_steps_file_leaves_the_graph_file_as_it_was(
+        self, inline: Path, tmp_path: Path
     ) -> None:
-        _ok(client.post("/api/graphs/inc/param", json={"node": "prep/grey", "param": "mode", "value": "RGB"}))
+        client = self._moved(inline, tmp_path)
+        graph, steps = inline / "run.yaml", inline / "parts" / "prep.steps.yaml"
+        before = graph.read_text()
+        (inline / "parts").chmod(0o555)
+        try:
+            refused = _error(client.post("/api/graphs/run/save"))
+        finally:
+            (inline / "parts").chmod(0o755)
+        assert refused == f"{steps.resolve()} cannot be written: Permission denied"
+        assert graph.read_text() == before  # the graph still holds its steps inline, and loads
+        assert list((inline / "parts").iterdir()) == []
+        confluid.load(graph, until="document")
+        assert _ok(client.get("/api/graphs/run"))["dirty"] is True  # nothing was saved: the editor still holds both
+        _ok(client.post("/api/graphs/run/save"))  # the folder writable again
+        assert "steps: {include: parts/prep.steps.yaml}" in graph.read_text()
+        assert "target_max: 2.0" in steps.read_text()
+        confluid.load(graph, until="document")
+
+    @_MODE_BINDS
+    def test_save_refused_for_the_graph_file_writes_no_steps_file(self, inline: Path, tmp_path: Path) -> None:
+        """The other way round — ``parts/`` writable, ``run.yaml`` not: the steps file is not written either."""
+        client = self._moved(inline, tmp_path)
+        graph = inline / "run.yaml"
+        graph.chmod(0o444)
+        try:
+            refused = _error(client.post("/api/graphs/run/save"))
+        finally:
+            graph.chmod(0o644)
+        assert refused == f"{graph.resolve()} cannot be written: Permission denied"
+        assert list((inline / "parts").iterdir()) == []
+        _ok(client.post("/api/graphs/run/save"))
+        assert (inline / "parts" / "prep.steps.yaml").is_file()
+
+    @_MODE_BINDS
+    def test_save_as_refused_for_the_steps_file_writes_no_new_graph(self, inline: Path, tmp_path: Path) -> None:
+        client = self._moved(inline, tmp_path)
+        other = tmp_path / "other"
+        other.mkdir()
+        (inline / "parts").chmod(0o555)
+        try:
+            refused = _error(client.post("/api/graphs/run/save-as", json={"path": str(other / "run2.yaml")}))
+        finally:
+            (inline / "parts").chmod(0o755)
+        assert refused == f"{(inline / 'parts' / 'prep.steps.yaml').resolve()} cannot be written: Permission denied"
+        assert list(other.iterdir()) == []
+        _ok(client.post("/api/graphs/run/save"))  # the entry did not move: Save still writes run.yaml
+        assert "steps: {include: parts/prep.steps.yaml}" in (inline / "run.yaml").read_text()
+
+    def test_a_write_the_disk_cuts_short_leaves_the_graph_file_as_it_was(
+        self, inline: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failure no check can foresee (a full disk) while the steps file is written: the graph's own file is
+        written LAST, so it still does not name a steps file that is not there — for Save and for Save As."""
+        client = self._moved(inline, tmp_path)
+        graph = inline / "run.yaml"
+        before = graph.read_text()
+        real_write = document_module.Document._write
+
+        def write(key: Path, text: str) -> None:  # Document._write's own arguments
+            if key.name == "prep.steps.yaml":
+                raise ValueError(f"{key} cannot be written: No space left on device")
+            real_write(key, text)
+
+        monkeypatch.setattr(document_module.Document, "_write", staticmethod(write))
+        assert _error(client.post("/api/graphs/run/save")).endswith("cannot be written: No space left on device")
+        assert graph.read_text() == before
+        other = tmp_path / "other"
+        other.mkdir()
+        assert _error(client.post("/api/graphs/run/save-as", json={"path": str(other / "run2.yaml")})).endswith(
+            "cannot be written: No space left on device"
+        )
+        assert list(other.iterdir()) == []
+
+
+class TestAConfluidWithoutHeldTexts:
+    """The released confluid (0.3.1, what CI installs from PyPI) has no ``load(..., texts=)``.
+
+    Measured 2026-09-30 with that confluid: EVERY graph stopped loading — a plain two-step flow's check answered
+    ``does not load: TypeError: load() got an unexpected keyword argument 'texts'`` and its edit ``404 no node 'mask'
+    (the nodes are: [])`` — because every load passed ``texts=``, even when the editor held no file but the graph.
+    Only a load that holds another file passes it now; that one still needs the confluid carrying ``texts=``."""
+
+    @pytest.fixture
+    def released(self, monkeypatch: pytest.MonkeyPatch) -> List[Dict[str, Any]]:
+        """``confluid.load`` as the released confluid has it: no ``texts`` keyword. Answers each call's keywords."""
         real_load = document_module.confluid.load
-        seen: List[Tuple[bool, bool]] = []  # (the held text is staged on disk, another thread got the lock)
+        calls: List[Dict[str, Any]] = []
 
         def load(*args: Any, **kwargs: Any) -> Any:  # confluid.load's own arguments and answer
-            staged = (including / "prep.steps.yaml").read_text()
-            outside: List[bool] = []
-            other = threading.Thread(target=lambda: outside.append(document_module._DISK_LOCK.acquire(blocking=False)))
-            other.start()
-            other.join()
-            seen.append(("mode: RGB" in staged, outside[0]))
+            calls.append(kwargs)
+            if "texts" in kwargs:
+                raise TypeError("load() got an unexpected keyword argument 'texts'")
             return real_load(*args, **kwargs)
 
         monkeypatch.setattr(document_module.confluid, "load", load)
-        client.get("/api/graphs/inc/check")
-        client.post("/api/graphs/inc/param", json={"node": "mask", "param": "low_level", "value": 0.4})
-        assert seen and all(staged for staged, _outside in seen)
-        assert not any(outside for _staged, outside in seen)
+        return calls
+
+    def test_a_graph_holding_no_other_file_checks_and_edits(self, client: Any, released: List[Dict[str, Any]]) -> None:
+        assert _ok(client.get("/api/graphs/demo/check"))["problems"] == []
+        assert _edit(client)["dirty"] is True
+        assert released and [call for call in released if "texts" in call] == []
+
+    def test_a_graph_including_a_file_it_does_not_hold_checks_and_edits(
+        self, client: Any, including: Path, released: List[Dict[str, Any]]
+    ) -> None:
+        assert _ok(client.get("/api/graphs/inc/check"))["problems"] == []
+        edited = _ok(client.post("/api/graphs/inc/param", json={"node": "mask", "param": "low_level", "value": 0.4}))
+        assert _canvas(edited) == (0.4, "L")
+        assert released and [call for call in released if "texts" in call] == []
+
+    def test_an_edit_of_the_included_file_needs_the_confluid_that_takes_texts(
+        self, client: Any, including: Path, released: List[Dict[str, Any]]
+    ) -> None:
+        """The limit the README states: the edit makes the editor HOLD the steps file; that load needs ``texts=``."""
+        refused = _error(
+            client.post("/api/graphs/inc/param", json={"node": "prep/grey", "param": "mode", "value": "RGB"})
+        )
+        assert "TypeError: load() got an unexpected keyword argument 'texts'" in refused
         assert (including / "prep.steps.yaml").read_text() == STEPS_TEXT
+
+
+def _folds_case(folder: Path) -> bool:
+    """Does the filesystem under ``folder`` ignore case (macOS APFS and Windows NTFS do, by default)?"""
+    probe = folder / "case_probe.txt"
+    probe.write_text("")
+    try:
+        return (folder / "CASE_PROBE.TXT").exists()
+    finally:
+        probe.unlink()
+
+
+class TestAnIncludeSpelledInAnotherCase:
+    """On a disk that ignores case, an include and the file it names may be spelled differently (``prep.steps.yaml`` /
+    ``Prep.steps.yaml``). The editor holds a file under the spelling its include resolves to, so an edit of it is what
+    the canvas shows, what runs and what Save writes. The documented limit (README, "What is not there yet"): an
+    include spelling a steps file you have NOT saved in another case finds nothing until Save — measured 2026-09-30,
+    the edit that respells it is refused with ``… includes PREP.steps.yaml: Not found``."""
+
+    def test_an_edit_of_a_file_the_disk_spells_in_another_case_runs_and_saves(
+        self, graph_dir: Path, tmp_path: Path
+    ) -> None:
+        if not _folds_case(graph_dir):
+            pytest.skip("needs a filesystem that ignores case (macOS APFS, Windows NTFS)")
+        _picture(graph_dir)
+        (graph_dir / "Prep.steps.yaml").write_text(f"grey:\n  op: !class:{CONVERT} {{mode: L}}\n")
+        (graph_dir / "run.yaml").write_text(
+            "stream: !class:recordstream.core.stream.Stream\n"
+            f"  source: !class:recordstream.sources.files.FilesSource\n    files: [{graph_dir / 'demo.png'}]\n"
+            "  ops:\n"
+            "    - !class:recordstream.ops.image.ReadImage {}\n"
+            f"    - !class:{SUBGRAPH}\n      steps: {{include: prep.steps.yaml}}\n"
+        )
+        client = create_app(graph_dir, templates_dir=tmp_path / "templates").test_client()
+        edited = _ok(
+            client.post("/api/graphs/run/param", json={"node": "stream.ops[1]/grey", "param": "mode", "value": "RGB"})
+        )
+        grey = next(n for n in edited["model"]["inside"]["stream.ops[1]"]["nodes"] if n["name"] == "stream.ops[1]/grey")
+        assert grey["params"]["mode"]["value"] == "RGB"
+        assert set(_ok(client.post("/api/graphs/run/trace", json={}))["statuses"].values()) == {"ok"}
+        _ok(client.post("/api/graphs/run/save"))
+        assert "{mode: RGB}" in (graph_dir / "Prep.steps.yaml").read_text()
+
+    def test_an_include_respelling_a_steps_file_not_saved_yet_is_refused_until_save(
+        self, inline: Path, tmp_path: Path
+    ) -> None:
+        if not _folds_case(inline):
+            pytest.skip("needs a filesystem that ignores case (macOS APFS, Windows NTFS)")
+        client = create_app(inline, templates_dir=tmp_path / "templates").test_client()
+        _ok(client.post("/api/graphs/run/subgraph/stream.ops[1]/extract", json={"path": "prep.steps.yaml"}))
+        text = _ok(client.get("/api/graphs/run"))["text"]
+        respelled = text.replace("include: prep.steps.yaml", "include: PREP.steps.yaml")
+        assert respelled != text
+        refused = _error(client.put("/api/graphs/run", json={"text": respelled}))
+        assert "includes PREP.steps.yaml: Not found: PREP.steps.yaml" in refused
+        _ok(client.post("/api/graphs/run/save"))  # on disk now: the disk finds it whatever the case
+        assert _ok(client.put("/api/graphs/run", json={"text": respelled}))["dirty"] is True
+
+
+SCALE = "recordstream.ops.numpy.Scale"
+INNER_EDIT = {"node": "stream.ops[1]/inner/scaled", "param": "target_max", "value": 2.0}
+INLINE_RUN_TEXT = f"""\
+stream: !class:recordstream.core.stream.Stream
+  source: !class:recordstream.sources.files.FilesSource
+    files: [{{picture}}]
+  ops:
+    - !class:recordstream.ops.image.ReadImage {{{{}}}}
+    - !class:{SUBGRAPH}
+      steps:
+        grey:
+          op: !class:{CONVERT} {{{{mode: L}}}}
+        inner:
+          op: !class:{SUBGRAPH}
+            steps:
+              scaled:
+                op: !class:{SCALE} {{{{source_min: 0.0, source_max: 255.0, target_min: 0.0, target_max: 1.0}}}}
+    - !class:{THRESHOLD} {{{{low_level: 0.5}}}}
+"""
+
+
+def _picture(folder: Path) -> None:
+    """``demo.png``: a 20x20 RGB picture with one bright square — what the traced streams read."""
+    pixels = np.zeros((20, 20, 3), np.uint8)
+    pixels[5:12, 5:12] = 230
+    Image.fromarray(pixels).save(folder / "demo.png")
+
+
+def _listing(folder: Path) -> List[str]:
+    """Every file and folder under ``folder``, relative to it, sorted."""
+    return sorted(path.relative_to(folder).as_posix() for path in folder.rglob("*"))
+
+
+def _locs(level: Dict[str, Any]) -> Dict[str, str]:
+    """``{node name: file:line:col}`` of one level's nodes — its boundary nodes have no line and are left out."""
+    return {node["name"]: node["loc"] for node in level["nodes"] if node["kind"] != "boundary"}

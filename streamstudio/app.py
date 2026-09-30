@@ -22,9 +22,9 @@ answer the graph with ``dirty: true``; ``POST …/save`` writes the files and th
 writes them elsewhere, ``…/revert`` drops what is held. **A refusal changes nothing**:
 :class:`~streamstudio.document.Document` refuses an edit that makes the document stop loading or gain a
 problem, a ``PUT`` of a whole text is held to the same test, and a Save that would overwrite a file
-someone else changed on disk writes nothing and names the file. **The run is what the canvas shows**:
-a trace builds the document from the held texts (:meth:`Document.load`), never from the file, so an
-unsaved value is the value that runs.
+someone else changed on disk — or write a file the disk will not take — writes nothing and names the file.
+**The run is what the canvas shows**: a trace builds the document from the held texts
+(:meth:`Document.load`), never from the file, so an unsaved value is the value that runs.
 
 The graph list is a NAME → FILE registry (:class:`Studio`): every ``*.yaml`` of the folder the editor
 was started on — rescanned on every list, a ``*.layout.yaml`` sidecar and a ``*.steps.yaml`` steps file
@@ -686,7 +686,8 @@ class Studio:
     # -- save, save as, revert, check ----------------------------------------------------------
 
     def save(self, name: str) -> Dict[str, Any]:
-        """Write what the editor holds of ``name`` (refused, writing nothing, over a file changed on disk)."""
+        """Write what the editor holds of ``name`` (refused, writing nothing, over a file changed on disk or a file
+        the disk will not take — :meth:`Document.save`)."""
         self.document(name).save()
         return self.graph(name)
 
