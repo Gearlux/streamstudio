@@ -4,7 +4,7 @@
  * inserted after. The insert itself is the server's `POST …/steps` (`Document.add_step`): a flow step spelled
  * `from: <anchor>`, the step that read the anchor re-pointed at the new one. That is also how a pick from a
  * dropped wire is WIRED — the entry wires follow from the order and the classes' declarations, as for every
- * other step — and why a document with no step list (a `Stream`'s `ops:`) refuses the pick in the server's words.
+ * other step. On a `Stream` the pick becomes a member of its `ops:` list instead — `oplists.ts` decides where.
  */
 import type { NodeSpec } from "./api";
 import { compatible, type Graph, type SocketType, type Supertypes } from "./model";
@@ -34,9 +34,8 @@ export function searchMatches(spec: Pick<NodeSpec, "class_path" | "name">, query
   return needle === "" || spec.class_path.toLowerCase().includes(needle) || spec.name.toLowerCase().includes(needle);
 }
 
-/** A new step's key: the class short name in lower case, numbered from 2 when the name is taken. */
-export function stepName(classPath: string, taken: string[]): string {
-  const base = (classPath.split(".").pop() ?? classPath).toLowerCase();
+/** `base` when it is free, else `base2`, `base3`, … — a new subgraph's or template's suggested name. */
+export function uniqueName(base: string, taken: string[]): string {
   const used = new Set(taken);
   if (!used.has(base)) return base;
   let n = 2;
@@ -44,12 +43,59 @@ export function stepName(classPath: string, taken: string[]): string {
   return `${base}${n}`;
 }
 
+/** A new step's key: the class short name in lower case, numbered from 2 when the name is taken. */
+export function stepName(classPath: string, taken: string[]): string {
+  return uniqueName((classPath.split(".").pop() ?? classPath).toLowerCase(), taken);
+}
+
+/** The canvas's snap grid. */
+const GRID = 10;
+/** The room kept around a card a new node would otherwise touch. */
+const GAP = 20;
+
+/**
+ * Where a node added by a click (the Nodes sidebar) lands: `start` on the grid, stepped DOWN until the card no
+ * longer covers any drawn card (with a little room) — so it appears next to the node it follows, never on top of one.
+ */
+export function freeSpot(
+  start: { x: number; y: number },
+  size: { width: number; height: number },
+  cards: { x: number; y: number; width: number; height: number }[],
+): { x: number; y: number } {
+  const x = Math.round(start.x / GRID) * GRID;
+  let y = Math.round(start.y / GRID) * GRID;
+  const covers = (top: number) =>
+    cards.some(
+      (card) =>
+        x < card.x + card.width + GAP &&
+        card.x < x + size.width + GAP &&
+        top < card.y + card.height + GAP &&
+        card.y < top + size.height + GAP,
+    );
+  for (let tries = 0; tries < 500 && covers(y); tries++) y += GRID;
+  return { x, y };
+}
+
+/**
+ * Where a node added by a click lands: below the card it follows (`anchor`), a little to the right, clear of every
+ * card in `cards` — which must be where the cards are AFTER the add (P8): the server lays the later members of a list
+ * out again when one is inserted before them, and measured before, a spot found against the old places put the new
+ * card on top of the member that had moved down.
+ */
+export function spotBeside(
+  anchor: { x: number; y: number; width: number; height: number },
+  cards: { x: number; y: number; width: number; height: number }[],
+  size: { width: number; height: number },
+): { x: number; y: number } {
+  return freeSpot({ x: anchor.x + 60, y: anchor.y + anchor.height + 40 }, size, cards);
+}
+
 /**
  * The node a picked (or pasted) class goes after: the selected node when the model has it, else the flow's
  * output, else the last node the document spells (a `Stream`'s last op) — never the host's side or the
  * contract root, which are not steps. `undefined` when there is nothing to go after.
  */
-export function stepAnchor(graph: Graph, selected: string | undefined): string | undefined {
+export function stepAnchor(graph: Pick<Graph, "model">, selected: string | undefined): string | undefined {
   const names = graph.model.nodes.map((node) => node.name);
   if (selected !== undefined && names.includes(selected)) return selected;
   const output = graph.model.outputs.find((name) => names.includes(name));
@@ -59,6 +105,6 @@ export function stepAnchor(graph: Graph, selected: string | undefined): string |
 }
 
 /** The node whose record `node` reads — where a step dropped from one of `node`'s INPUTS is inserted after. */
-export function recordPredecessor(graph: Graph, node: string): string | undefined {
+export function recordPredecessor(graph: Pick<Graph, "model">, node: string): string | undefined {
   return graph.model.wires.find((wire) => wire.target === node && wire.kind === "record")?.source;
 }

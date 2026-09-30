@@ -95,7 +95,7 @@ Everything a graph needs already has a spelling; nothing is added to confluid:
 | an input the host fills (the selected record, the window) | `GraphContract.inputs` |
 | an input the author must fill | `Mandatory[T]` on the class |
 | one node reading another node's output | `bind: {low_level: floor.noise_floor_db}` |
-| a subgraph reused by several graphs | `include: subflow.yaml` inside `flow:` |
+| a subgraph reused by several graphs | `include: subflow.yaml` inside `flow:`, or `steps: {include: prep.steps.yaml}` inside a `Subgraph` step (§6b) |
 | node positions, notes | the `.layout.yaml` sidecar, keyed by node name |
 
 ### 2.2 The engine: run, stop, inspect, rerun
@@ -256,7 +256,7 @@ on (LangGraph has one shared state); one node can be rerun alone with its cached
 | project | new | deleted |
 | --- | --- | --- |
 | recordstream | `flow/trace.py` (the tracer, 797 lines) | nothing |
-| streamstudio | `app.py` (blueprint + `create_app`), `document.py` (derive, patch, history, sidecar), `palette.py` (registry → node specs), `layout.py`, `cli.py` (`streamstudio editor` standalone), `frontend/` (vite + React Flow), tests | `bridge.py`, `graphio.py`, `export.py`, `nodes.py`, `web/*.js`, the ComfyUI clone and launch, 12,857 Python lines and 3,705 JS lines. The HuggingFace pickers and the directory chooser are ported as Flask routes. |
+| streamstudio | `app.py` (blueprint + `create_app`), `document.py` (derive, patch, history, sidecar), `palette.py` (registry → node specs), `layout.py`, `cli.py` (bare `streamstudio` standalone; `--editor comfy` for ComfyUI until phase 4), `frontend/` (vite + React Flow), tests | `bridge.py`, `graphio.py`, `export.py`, `nodes.py`, `web/*.js`, the ComfyUI clone and launch, 12,857 Python lines and 3,705 JS lines. The HuggingFace pickers and the directory chooser are ported as Flask routes. |
 | annotaide | mounts the blueprint; *set source…*, *graph*, *settings* open it in a pane | the resident converter, seeding through the CLI, the graph-copy re-check, the waiting room, tab naming: 743 lines and 30 rules |
 | navigaitor | registers the graph tools once and the per-node tools of any graph a session opens | nothing |
 | the op author | writes the op class only | |
@@ -300,10 +300,9 @@ runs `check()` on every one, and keeps JSON and YAML side by side until the flip
   only, stored as the page spelled them (`docs/architecture.md` has both records). A rerun from the run panel sends
   only the values that differ from what the run's node holds, and a value typed there is a trial, never written.
 - Taken while closing phase 3 (2026-09-28), gathered from what landed:
-  - **The wire rule** stands as written above for EVERY document edit the canvas cannot route: a drawn wire, and a
-    step into a `Stream`'s `ops:` list (the palette, a dropped wire and paste all refuse there with the server's
-    `'stream.ops[1]' is not a flow step (the steps are: [])`). The page never writes a spelling the document did not
-    state; each is a missing route in `streamstudio/TASKS.md`.
+  - **The wire rule** stands as written above for EVERY document edit the canvas cannot route — today a drawn wire.
+    The page never writes a spelling the document did not state; a missing route is an item in
+    `streamstudio/TASKS.md`. Adding to and removing from a `Stream`'s `ops:` list became routes on 2026-09-29 (§6c).
   - **Groups live in the sidecar only**, stored as the page spelled them; the server reads inside a group only to
     follow a rename.
   - **Positions and the layout history are the page's.** The server stores what the page sends (`PUT …/positions`,
@@ -312,13 +311,13 @@ runs `check()` on every one, and keeps JSON and YAML side by side until the flip
   - **The built page is not in the wheel.** `frontend/dist` is gitignored, outside `package-data`, not built by CI
     (navigaitor's precedent); an install without it serves the API and a placeholder naming the build command.
     Shipping it is a release item for the flip (`streamstudio/TASKS.md`).
-  - **The palette draws at most 200 rows**; typing narrows them. Paste is `add_step` per copied node with the values
-    the document spells, so a whole float arrives as an integer (`2.0` → `2`, tracked).
+  - **The palette draws at most 200 rows**; typing narrows them. Paste inserts the copied steps' own YAML text (since
+    2026-09-29), so `2.0` stays `2.0` and comments come along.
 
 Taken while landing phase 2 (2026-09-28):
 
-- The standalone verb is `streamstudio editor <graph_dir> --port 8190`, not `run`: bare `streamstudio`
-  still launches ComfyUI until the flip, and the two servers coexist on one machine (8188 beside 8190).
+- The standalone editor is bare `streamstudio <graph_dir>` on port 8190, and the ComfyUI editor is
+  `streamstudio --editor comfy` on 8188; the two servers coexist on one machine (§6a, decision 3).
 - The HuggingFace pickers and the directory chooser arrive in phase 3 as routes beside the page that
   calls them; phase 2 ships no route without a caller. **Not landed with phase 3** (2026-09-28): no node of the page
   calls one yet, so the same rule keeps them out; they are deferred to `streamstudio/TASKS.md` and must land before
@@ -366,6 +365,83 @@ outputs: {stream: Stream, class_names: "List[str]"}  exported; check(): classifi
 The first line is the open socket a template leaves for its author; the second is the CON case,
 refused by name before anything is built.
 
+## 6a. The menu scope — three decisions (decided 2026-09-29)
+
+The editor's menus, Nodes sidebar, right-click menus and groups were proposed with three open questions. The
+answer was "go with the defaults" — option A each time. All three landed on 2026-09-29.
+
+| # | the question | decided | what you see now |
+| --- | --- | --- | --- |
+| 1 | When does an edit reach the file? | **A** — changes stay in the editor until Save (B was: every edit written at once, as in phases 2-3) | `● demo.yaml` while unsaved; File ▸ Save writes; a file changed on disk is refused: `…/demo.yaml changed on disk since the editor read it — Revert to load it, or Save As to keep both` |
+| 2 | What do Open and Save As browse? | **A** — a file browser of the machine the editor runs on, starting in the graph folder (B was: a browser upload) | `GET /api/files`; folders first, then `.yaml` files |
+| 3 | Which editor does bare `streamstudio` start? | **A** — the canvas editor on 8190; `streamstudio --editor comfy` starts ComfyUI on 8188, and the consuming annotation workspace asks for ComfyUI by name until phase 4 | `streamstudio --comfy-dir /x` → `--comfy-dir only applies to --editor comfy` |
+
+The menu bar (ComfyUI style, only entries that do something):
+
+```
+New       Flow graph… | Pipeline… | Source graph (with its contract)…
+File      Open… Ctrl+O · Save Ctrl+S · Save As… Ctrl+Shift+S · Revert
+Edit      Undo Ctrl+Z · Redo Ctrl+Shift+Z · Cut / Copy / Paste · Delete · Select all · Rename… F2
+View      Nodes sidebar N · Fit to view · Arrange · Arrange in columns · Minimap
+Graph     Add group · Group selection G · Convert selection to subgraph · Insert template ▸ · Save selection as template… · Delete template ▸ · Check graph
+Run       Run Ctrl+Enter · Step · Rerun selected node
+```
+
+## 6b. Subgraphs — four decisions (decided 2026-09-29)
+
+A subgraph is written INLINE, as an op: `op: !class:recordstream.flow.subgraph.Subgraph {steps: {…}, result: scaled}`
+— no new YAML syntax, no confluid change. Four questions were put, each answered; all four landed on 2026-09-29.
+
+**1. Using one subgraph twice.** The user: *"if a subgraph is needed twice (either copy it, use templates like
+comfyui or use the include construction)"*. So three ways and only these: Copy/Paste (an independent copy of the
+block, comments kept), templates (a steps file in `~/.streamstudio/templates` or `--templates-dir`, inserted as a
+copy), and `steps: {include: prep.steps.yaml}` (Move to its own file… / Insert steps file…; every use gets its own op
+objects, and an edit through one use changes every use). YAML anchors and `!ref:` are NOT reuse spellings — measured,
+an anchor merged into `flow:` runs first whatever line it is on and a second use vanishes; a `!ref:` makes both uses
+one object, so one use's `@output` read the other's value (`0.7145` instead of `0.2855`). Rationale:
+`docs/architecture.md` → "Reuse is a copy, a template or an include".
+
+**2. An outer step reading a value inside a subgraph** (`bind: {value: measure.level}`, `level` an inner step of
+`measure`). Decided: **A — refused before anything runs**, saying what to do:
+
+```
+flow step 'stamp': bind value='measure.level' reads 'level' of 'measure', which is a subgraph — a step outside a
+subgraph cannot read a value of a step inside it; move that step out of the subgraph
+```
+
+**3. The result line.** Decided: **A — `result: scaled`**. Written `outputs:`, the file's own top-level
+`outputs: boxes` is broadcast into a same-named constructor parameter; measured: the run failed with
+`flow: outputs 'boxes' does not name a step`.
+
+**4. How an inner node is named.** Decided: **A — `prep/grey`**, on the canvas, in the run panel and in errors (a
+Stream member: `stream.ops[1]/grey`; nested: `prep/inner/x`). A step name may therefore not contain `/`:
+
+```
+flow: step name 'prep/grey' may not contain '/' (reserved for the nodes inside a subgraph: 'prep/grey' is the step
+'grey' inside the subgraph 'prep')
+```
+
+The tracer lists `['prep', 'prep/grey', 'prep/scaled', 'mask']`; `run(until='prep/scaled')` pauses inside.
+
+## 6c. Round 2 — four answers (2026-09-29)
+
+The review of 3b put four questions. The user's answers, verbatim, and what each became:
+
+| # | the question | the answer | what you see now |
+| --- | --- | --- | --- |
+| 1 | `stop` / `restart` drop unsaved edits — keep them? | *"streamstudio stop or restart should save the file to a tmp workspace file (hidden), when opening that same workspace streamstudio should ask to start from the tmp file or the original"* | landed: the stop writes `<folder>/.streamstudio-workspace.json` and says so; the next start prints `Unsaved work from the last session (29 Sep 20:06): demo.yaml — the page asks whether to restore it.` and the page asks **Restore unsaved work** / **Open the saved files** before it opens a graph |
+| 2 | a graph made with New… by mistake stays in the list — a "clear workspace"? | *"clear workspace ?"*, then: *"New ... by mistake should not happen. It should ask to save."* | landed in round 3: there is no "clear workspace" — File ▸ New… asks a **Name** and a **Folder** (Browse… for another), shows the file it will write (`→ /home/me/graphs/fresh.yaml`), and **Create** writes the starter at once and opens it with no ●; a file that is already there is refused and left byte for byte — `/home/me/graphs/fresh.yaml already exists — pick another name, or open it with File ▸ Open` |
+| 3 | Pipeline graphs: should adding and removing work on `ops` list members? | *"yes"* | landed: a click, a palette pick or a dropped wire adds a member after the selected member, or at the end of the list; Delete / Cut remove members as one edit; later members keep their places |
+| 4 | Shift+click: add to the selection like ComfyUI, or keep React Flow's box? | *"match"* | landed: Shift+click adds a card and never removes one; Cmd/Ctrl+click toggles; Shift+drag on empty canvas still draws a box |
+
+How each works, and what it refuses: README → "Unsaved work survives a stop", "New, Open and the file browser",
+"Pipelines — adding to and removing from an `ops:` list", and the gesture table; the reasons:
+`docs/architecture.md` → "Unsaved work is kept in a hidden file of the served folder", "Changes stay in the editor
+until Save" (its 2026-09-29 update: why New… writes at once) and "An op-list member is named by its place".
+
+What a stop still cannot keep, stated in the README: a `kill -9`, a crash, and the undo history. Closing the
+editor's terminal (SIGHUP) keeps the work since 2026-09-30 (the user's pick).
+
 ## 7. Phases, tests first
 
 Each phase ends with its gates green and the previous path still working.
@@ -374,8 +450,11 @@ Each phase ends with its gates green and the previous path still working.
 | --- | --- | --- | --- |
 | 0 templates | every converted YAML loads, carries its contract, passes `check()` | the 17 conversions | in progress 2026-09-28 |
 | 1 engine, landed 2026-09-28 | `recordstream/tests/test_trace.py`: 39 tests — overhead bound, rerun recomputes only downstream, refused parameter leaves the trace untouched, gated chain runs whole, in-place edit is flagged, lazy constructor | `recordstream/flow/trace.py`, exported as `recordstream.flow.Tracer`, user page `docs/trace.md` | tests in progress 2026-09-28 |
-| 2 document and app, landed 2026-09-28 | `streamstudio/tests/test_document.py` (58): bte_view derives 24 nodes and 49 wires, patch keeps comments and `$VAR`, new parameter shifts nothing, wire mismatch refused, rename is atomic, sidecar round trip; `test_app.py` (47): every route through Flask's test client; `test_palette.py` (72); `test_layout.py` (28) | `document.py`, `_yamltext.py`, `palette.py`, `layout.py`, `app.py`, `cli.py` (`editor`) | 205 tests green; whole suite `730 passed, 1 skipped in 30.83s`; mypy `Success: no issues found in 50 source files` |
-| 3 canvas, landed 2026-09-28 | the playwright proof turned into `tests/test_canvas.py` against the built page: sockets refuse a mismatch, palette of the real 419 types, save produces the same YAML the model came from | `frontend/` | landed 2026-09-28 in two parts — part 1, the scaffold: 14 playwright + 9 vitest; part 2 (palette of the real 447 classes, groups, undo/redo, copy/paste, arrange, rename, run panel, settings): `tests/test_canvas.py` 44 + vitest 57, with `test_app.py` 61, `test_layout.py` 37, `test_document.py` 59. Deferred to `streamstudio/TASKS.md`: collapse to subgraph, a step into a `Stream`'s `ops:`, a route that writes a wire, the HuggingFace pickers and directory chooser |
+| 2 document and app, landed 2026-09-28 | `streamstudio/tests/test_document.py` (58): bte_view derives 24 nodes and 49 wires, patch keeps comments and `$VAR`, new parameter shifts nothing, wire mismatch refused, rename is atomic, sidecar round trip; `test_app.py` (47): every route through Flask's test client; `test_palette.py` (72); `test_layout.py` (28) | `document.py`, `_yamltext.py`, `palette.py`, `layout.py`, `app.py`, `cli.py` | 205 tests green; whole suite `730 passed, 1 skipped in 30.83s`; mypy `Success: no issues found in 50 source files` |
+| 3 canvas, landed 2026-09-28 | the playwright proof turned into `tests/test_canvas.py` against the built page: sockets refuse a mismatch, palette of the real 419 types, save produces the same YAML the model came from | `frontend/` | landed 2026-09-28 in two parts — part 1, the scaffold: 14 playwright + 9 vitest; part 2 (palette of the real 447 classes, groups, undo/redo, copy/paste, arrange, rename, run panel, settings): `tests/test_canvas.py` 44 + vitest 57, with `test_app.py` 61, `test_layout.py` 37, `test_document.py` 59. Deferred to `streamstudio/TASKS.md`: a step into a `Stream`'s `ops:`, a route that writes a wire, the HuggingFace pickers and directory chooser; collapse to subgraph landed in 3b |
+| 3b menus, groups, subgraphs, landed 2026-09-29 | §6a and §6b: explicit Save and its refusals, New / Open / Save As / Revert and the file browser, copy/paste as text, templates, the subgraph node model and its four routes, the `--editor` switch; `recordstream/tests/test_subgraph.py`, `test_trace_subgraph.py`; `streamstudio/tests/test_app_save.py`, `test_app_files.py`, `test_app_clipboard.py`, `test_app_templates.py`, `test_app_subgraph.py`, `test_subgraph_model.py`, `test_subgraph_edits.py`, `test_cli_editor.py`; 24 more browser tests | `recordstream/flow/subgraph.py` and the tracer's descent; `document.py`, `app.py`, `cli.py`, `layout.py`, `_yamltext.py`; the page's menu bar, Nodes sidebar, right-click menus, groups, levels | landed; see §9 |
+| 3c round 2, landed 2026-09-29 | §6c: `tests/test_recovery.py` (40), `test_recovery_process.py` (7, real editor processes), `test_op_lists.py` (50), 21 more in `test_cli_editor.py`, 18 more browser tests, 88 more vitest | `app.py` (the recovery routes, the session guard), `cli.py` (the way out on SIGTERM, what `stop` says, `restart`'s folder), `document.py` (op-list members, the comment rule, `shifts`), `layout.py`; the page's recovery dialog, op-list targets and Shift+click | landed; see §9 |
+| 3d round 3, landed 2026-09-29 | §6c item 2: `tests/test_app_files.py::TestNew` (the file written at once, every refusal writing nothing, a file appearing between the check and the write never overwritten), `test_app_save.py::TestRevert` (back to the starter), `test_recovery.py` (an untouched New graph is not kept), `tests/test_canvas.py::TestNewAndOpen` (3 more browser tests), `frontend/src/__tests__/newgraph.test.ts` (9) | `document.py` (`Document.create`), `app.py` (`Studio.new_graph` writes; the recovery rows are changed files only); the page's New dialog (Name, Folder, Browse…, the path line, the refusal in place) | landed; see §9 |
 | 4 annotaide | its existing suite, with the converter and seeding pins deleted and the mount pinned | the mount, the deletions |
 | 5 agent tools | the transcript of §2.4 as a test against the generated tools | navigaitor registration |
 
@@ -389,8 +468,10 @@ tools for Algorithms without a run; any change to confluid's grammar.
 
 ## 9. Status
 
-Landed on 2026-09-28, nothing committed. Phase 0, phase 1, phase 2 and phase 3 are complete (phase 3 without
-collapse to subgraph, deferred).
+Landed on 2026-09-28 and 2026-09-29, nothing committed. Phase 0, phase 1, phase 2 and phase 3 are complete, and so
+are 3b — the menu scope (§6a) and subgraphs (§6b) — 3c, round 2 (§6c items 1, 3 and 4), and 3d, round 3 (§6c item
+2: New… writes the file at once). Phase 4 (the consuming workspace mounts the editor) and phase 5
+(agent tools) are next; the root `TASKS.md` holds both.
 
 | project | what landed | gate |
 | --- | --- | --- |
@@ -399,10 +480,16 @@ collapse to subgraph, deferred).
 | waivefront | ten YAML twins under `waivefront/annotation/`; `write_annotations.yaml` carries the `app:` block and round-trips it; `tests/test_template_twins.py` | `111 passed`; mypy clean in touched files |
 | waivefront, the panes rooted (2026-09-28) | every one of the 16 VIEW documents (8 hand-written sources + 8 converted twins) ends in a `contract:` root — `GraphContract(name="<pane> view", inputs={input: Signal, regions: Regions}, outputs={})`, the host's side declared — so `Document.add_step` of a node whose entry nothing produces is REFUSED (`bte_view.yaml:69:9: … NoiseFloorEstimate needs the record entry 'spectrogram', which nothing before it produces — the chain has input, regions at that point`) where a synthetic `<host>` used to accept it; appended after the last entry because the pane's own `outputs: <step>` line broadcasts into `GraphContract.outputs` when the root comes first (measured: `confluid.load` fails); the old importer drops it and regenerates a byte-identical canvas on all 16 | waivefront `147 passed` (`test_template_twins.py` + `test_annotation_templates.py`), `mypy waivefront`: `Success: no issues found in 200 source files`; streamstudio `test_document.py` `59 passed`, `mypy streamstudio`: `Success: no issues found in 51 source files` |
 | streamstudio | the ComfyUI contract canvas pins `classes` and the collision refusal; this page; the phases in the root `TASKS.md` | `93 passed`; mypy clean |
-| streamstudio, phase 2 | `document.py` (derive, located patches, undo ring, sidecar), `_yamltext.py` (the patcher over PyYAML's composed tree), `palette.py` (registry → node specs, `to_pydantic` widgets), `layout.py` (layered first layout + sidecar), `app.py` (`editor_blueprint` + `create_app`, `Studio` on `app.extensions`), the `editor` verb in `cli.py`; `pyproject.toml` declares `flask` and `pyyaml`; `tests/test_document.py` 58, `test_app.py` 47, `test_palette.py` 72, `test_layout.py` 28 | isort/black `left unchanged`; flake8 clean; `mypy streamstudio`: `Success: no issues found in 50 source files`; `pytest -q`: `730 passed, 1 skipped in 30.83s`; `test_packaging.py`: `12 passed`; red run before implementing (modules moved aside): `1 error in 6.04s` |
-| streamstudio, phase 3 part 1 | `frontend/` — `src/api.ts` (one function per route), `src/model.ts` (the model's JSON, `modelToFlow`, `compatible` over `GET /api/types`), `src/canvas/GenericNode.tsx` (the one node component), `src/canvas/Canvas.tsx` (React Flow, `isValidConnection`, positions on drag stop, proposals, the status bar), `src/App.tsx` (picker, sidebar text, toasts); `app.py` gains `GET /api/types` (`document.supertypes()`), `web_dist()`, `page_blueprint()`, `create_app(web_dist=)`; `pyproject.toml` declares `node` as a system dependency; the root `.gitignore` no longer ignores `frontend/`; `tests/test_canvas.py` 14 (playwright, real mouse drags), `frontend/src/__tests__/model.test.ts` 9, `test_app.py` 52 | `npm run build`: `338.47 kB │ gzip: 109.55 kB`, `built in 491ms`; `gzip -c dist/assets/*.js \| wc -c`: `109506`; `pytest -q tests/test_canvas.py`: `14 passed in 18.15s` (skipped `1 skipped in 7.76s` before the build — the red run); `npm test`: `9 passed`; `mypy streamstudio`: `Success: no issues found in 51 source files`; `streamstudio editor <dir> --port 8199` → `GET /` `200 text/html` serving the built page, its asset `200 338479 bytes` |
+| streamstudio, phase 2 | `document.py` (derive, located patches, undo ring, sidecar), `_yamltext.py` (the patcher over PyYAML's composed tree), `palette.py` (registry → node specs, `to_pydantic` widgets), `layout.py` (layered first layout + sidecar), `app.py` (`editor_blueprint` + `create_app`, `Studio` on `app.extensions`), the standalone command in `cli.py`; `pyproject.toml` declares `flask` and `pyyaml`; `tests/test_document.py` 58, `test_app.py` 47, `test_palette.py` 72, `test_layout.py` 28 | isort/black `left unchanged`; flake8 clean; `mypy streamstudio`: `Success: no issues found in 50 source files`; `pytest -q`: `730 passed, 1 skipped in 30.83s`; `test_packaging.py`: `12 passed`; red run before implementing (modules moved aside): `1 error in 6.04s` |
+| streamstudio, phase 3 part 1 | `frontend/` — `src/api.ts` (one function per route), `src/model.ts` (the model's JSON, `modelToFlow`, `compatible` over `GET /api/types`), `src/canvas/GenericNode.tsx` (the one node component), `src/canvas/Canvas.tsx` (React Flow, `isValidConnection`, positions on drag stop, proposals, the status bar), `src/App.tsx` (picker, sidebar text, toasts); `app.py` gains `GET /api/types` (`document.supertypes()`), `web_dist()`, `page_blueprint()`, `create_app(web_dist=)`; `pyproject.toml` declares `node` as a system dependency; the root `.gitignore` no longer ignores `frontend/`; `tests/test_canvas.py` 14 (playwright, real mouse drags), `frontend/src/__tests__/model.test.ts` 9, `test_app.py` 52 | `npm run build`: `338.47 kB │ gzip: 109.55 kB`, `built in 491ms`; `gzip -c dist/assets/*.js \| wc -c`: `109506`; `pytest -q tests/test_canvas.py`: `14 passed in 18.15s` (skipped `1 skipped in 7.76s` before the build — the red run); `npm test`: `9 passed`; `mypy streamstudio`: `Success: no issues found in 51 source files`; the standalone editor on port 8199 → `GET /` `200 text/html` serving the built page, its asset `200 338479 bytes` |
 | streamstudio, phase 3 part 2 | `frontend/src/` — `canvas/Palette.tsx` + `steps.ts` (the palette, the step anchor and name), `groups.ts` + `canvas/GroupNode.tsx` (boxes derived from their members), `history.ts` (the layout timeline beside the server's text history), `layout.ts` (`arrange`, dagre), `run.ts` + `panels/RunPanel.tsx` (run, step, inspect, rerun), `panels/SettingsForm.tsx`, `canvas/ParamWidget.tsx` (the one widget of the node, the form and the rerun form), `App.tsx` (toolbar, tabs, shortcuts); `layout.py` gains the `groups:` block (`Group`, `read_groups`, `rename_member`), `document.py` keeps and re-keys groups, `app.py` gains `PUT /api/graphs/<name>/groups`; `tests/test_canvas.py` 44, vitest 57, `test_layout.py` 37, `test_app.py` 61 | `npm run build`: `411.68 kB │ gzip: 134.81 kB` (part 1: `338.47 kB │ gzip: 109.55 kB`); `pytest -q tests/test_canvas.py tests/test_app.py tests/test_layout.py tests/test_packaging.py`: `1 failed, 153 passed` — the one failure is the 24-node bte layer pin the pane's new `contract:` root outdated (another session; tracked); whole suite `1 failed, 797 passed, 1 skipped`; `mypy streamstudio`: `Success: no issues found in 51 source files`; red run before implementing: `8 failed, 35 deselected` |
 | streamstudio, phase 3 closed (2026-09-28) | the documentation checklist, no code: README `The rewrite (phases 2-3 landed)` (the build commands, the gestures, every refusal verbatim, what is not there yet, and the mount corrected to one prefix — measured: the old snippet served the placeholder at `/editor/` and `404` at `/editor/api/graphs`), an AGENTS invariants block, the architecture record *The canvas is a React Flow page over the document routes*, CHANGELOG, this page; the root phase-3 item deleted and its deferred parts moved to `streamstudio/TASKS.md`; no environment variable was introduced (`web_dist()` resolves off `__file__`, the port is `--port`) | `pytest -q tests/test_canvas.py`: `44 passed in 41.93s`; `npm test`: `Tests  57 passed (57)`; `gzip -c dist/assets/*.js \| wc -c`: `134831` (`411743` bytes raw); whole suite `1 failed, 797 passed, 1 skipped in 65.89s` — the failure is still the 24-node bte layer pin (`test_layout.py:337`, `assert 25 == 24`, tracked); `mypy streamstudio`: `Success: no issues found in 51 source files`; `test_packaging.py`: `12 passed in 0.47s` (it checks the README's links) |
+| recordstream, 3b (2026-09-29) | `flow/subgraph.py` — `Subgraph(steps, result)`, an op in the compose group, running its inside on the flow kernel; `consumes` / `produces` / `flags` derived (`produces` and `flags` from the lineage of `result`); every structural mistake refused before the first record, naming the outer step and the line; `check_chain(raised=…)`; the tracer descends with a child tracer per subgraph step (`prep/grey`, pause inside, step, resume, rerun); the public `StepReferenceError`; README, `docs/graph.md`, `docs/trace.md`, an architecture record | `pytest -q`: `1426 passed`; isort/black/flake8 clean; `mypy recordstream`: `Success: no issues found in 132 source files` |
+| streamstudio, 3b backend (2026-09-29) | explicit Save (`save`, `save-as`, `revert`, `check`, the changed-on-disk refusals, `_DISK_LOCK`, merged positions), New / Open / the file browser, copy/paste as text, `POST …/steps/remove`, templates (`--templates-dir`), the subgraph node model (`model.inside`, qualified names, boundary nodes) and its routes (`subgraph`, `extract`, `include`, template insert), the `--editor canvas\|comfy` switch | `pytest -q` without the browser tests: `1076 passed, 1 skipped`; isort/black/flake8 clean; `mypy streamstudio`: `Success: no issues found in 59 source files` |
+| streamstudio, 3b page (2026-09-29) | the menu bar and keyboard map (`commands.ts`), the right-click menus, the file / new / check dialogs, ● and `beforeunload`, the Nodes sidebar (Subgraph left out, docstring markup as inline code), groups (Add group, resize, drag in and out), subgraph levels (breadcrumb, Escape, `?level=`, a readable fit on entering, a fit after Arrange), one-request Cut / Delete, paste waiting for its copy | `tests/test_canvas.py`: `83 passed` (58 before the fixes; 20 of the new tests failed on the old build); `npm test`: `Tests  203 passed (203)`; `npm run typecheck` and `npm run build` clean |
+| the consuming annotation workspace, 3b (2026-09-29) | its ComfyUI launch names the editor (`python -m streamstudio.cli run --editor comfy`), pinned in two halves (the command and its neutral working directory run without streamstudio installed) | `pytest -q`: `2059 passed`; `mypy`: `Success: no issues found in 99 source files` |
+| streamstudio, 3c round 2 (2026-09-29) | §6c items 1, 3 and 4: the recovery file (`Studio.stash` on the way out of SIGTERM and Ctrl+C, `GET /api/workspace`, restore, discard, the session guard, what `stop` says, `restart`'s folder), op-list members added and removed (`OP_LISTS`, `{list}` on `POST …/steps`, `added`, the member comment rule, `shifts`), Shift+click; the page's recovery dialog, op-list targets and selection; `.streamstudio-workspace*.json` ignored in every project whose folders hold editor graphs | `pytest -q` (page built): `1296 passed, 1 skipped in 195.54s`; `tests/test_canvas.py` alone: `101 passed`; `npm test`: `Tests  291 passed (291)`, 18 files; `mypy streamstudio`: `Success: no issues found in 62 source files`; live on port 8196: `stop` printed the kept-work line and the next start the restore line |
+| streamstudio, 3d round 3 (2026-09-29) | §6c item 2: File ▸ New… writes the file at once — `Studio.new_graph` through `Document.create` (the file is created or the write fails, never opened over one that is there), `dirty: false`, a file in another folder joins like File ▸ Open (`clip~2`); every refusal before anything is written; the recovery rows are changed files only; the page's New dialog (Name, Folder, Browse…, the path line, the server's refusal shown in place) | `pytest -q` (page built): `1306 passed, 1 skipped`; `tests/test_canvas.py` alone: `104 passed`; `npm test`: `Tests  301 passed (301)`, 19 files; `mypy streamstudio`: `Success: no issues found in 62 source files` |
 
 Two things measured while doing it, both recorded in the root `TASKS.md`:
 

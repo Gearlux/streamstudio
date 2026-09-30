@@ -3,8 +3,10 @@
 The page is a drawing of the document (``docs/rewrite.md`` §0, §2.1), so every assertion here compares
 the DOM with what the routes answer for the SAME temporary graph directory: the nodes and wires of
 ``GET /api/graphs/<name>`` are what is rendered, a handle's type is the socket's type, a widget edit
-lands in the YAML the route serves, a node drag lands in the sidecar, and the text after edits is what
-:class:`streamstudio.document.Document` produces from the file. The synthetic documents are the shape
+lands in the YAML the route serves, a node drag in the positions it serves, and the text after edits is
+what :class:`streamstudio.document.Document` produces from the file. Edits are held by the editor until
+File ▸ Save (Explicit Save): an edit marks the page ``data-dirty`` and leaves the file byte-identical;
+Save writes the document and the sidecar (``save_file``). The synthetic documents are the shape
 ``test_app.py`` uses — recordstream's own numpy ops plus a few tiny classes defined HERE and spelled by
 the module name pytest imported this file under.
 
@@ -38,12 +40,13 @@ from typing import Any, Callable, Dict, Iterator, List, NamedTuple, Tuple
 import numpy as np
 import pytest
 from confluid import configurable
+from PIL import Image as PILImage
 from recordstream import Algorithm, Image, Input, Label, Output, Record
 from werkzeug.serving import make_server
 
 from streamstudio import layout
-from streamstudio.app import create_app
-from streamstudio.document import Document
+from streamstudio.app import EXTENSION, RECOVERY_FILE, Studio, create_app, starter_text
+from streamstudio.document import ALREADY_EXISTS, Document
 
 playwright_api = pytest.importorskip(
     "playwright.sync_api", reason="playwright is not installed (pip install playwright)"
@@ -150,6 +153,45 @@ class TinyCount(Algorithm):
         return {"count": 1}
 
 
+#: How many parameters ``TinyWide`` takes — more than a hover card has room for in a 900-px window.
+WIDE = 40
+
+
+def _wide_class() -> type:
+    """``TinyWide``: an op whose constructor takes ``WIDE`` documented parameters.
+
+    A class's parameters ARE its constructor's signature (the palette reads them, with their ``Args:`` lines, straight
+    from the class), so a class with forty of them is spelled out as source and executed here rather than typed forty
+    times. Defined in THIS module, so the palette names it ``<MOD>.TinyWide`` like the other tiny classes.
+    """
+    params = ", ".join(f"knob_{index:02d}: float = {index}.0" for index in range(WIDE))
+    args = "".join(
+        f"            knob_{index:02d}: Knob {index}, a gain this op would scale by.\n" for index in range(WIDE)
+    )
+    body = "".join(f"        self.knob_{index:02d} = knob_{index:02d}\n" for index in range(WIDE))
+    source = (
+        "class TinyWide:\n"
+        '    """An op with many parameters — the hover card cannot list them all.\n\n'
+        "        Args:\n"
+        f"{args}"
+        '    """\n\n'
+        "    consumes = {'image': 'Image'}\n"
+        "    produces = {'image': 'Image'}\n\n"
+        f"    def __init__(self, {params}) -> None:\n"
+        f"{body}\n"
+        "    def __call__(self, record: Record) -> Record:\n"
+        "        return record\n"
+    )
+    namespace: Dict[str, Any] = {"__name__": __name__, "Record": Record}
+    exec(source, namespace)  # noqa: S102 - a fixture class built from the text above, nothing external
+    wide = configurable(category="op", group="canvas-test")(namespace["TinyWide"])
+    assert isinstance(wide, type)
+    return wide
+
+
+TinyWide = _wide_class()
+
+
 # ------------------------------------------------------------------------------------------------
 # the documents
 # ------------------------------------------------------------------------------------------------
@@ -225,9 +267,15 @@ def graph_dir(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def server(graph_dir: Path) -> Iterator[str]:
+def templates_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """The editor's templates folder — a temporary one, never the person's ``~/.streamstudio/templates``."""
+    return tmp_path_factory.mktemp("templates")
+
+
+@pytest.fixture
+def server(graph_dir: Path, templates_dir: Path) -> Iterator[str]:
     """``create_app`` over the graph directory, served on a free port by werkzeug in a daemon thread."""
-    httpd = make_server("127.0.0.1", 0, create_app(graph_dir), threaded=True)
+    httpd = make_server("127.0.0.1", 0, create_app(graph_dir, templates_dir=templates_dir), threaded=True)
     thread = threading.Thread(target=httpd.serve_forever, name="streamstudio-canvas-test", daemon=True)
     thread.start()
     yield f"http://127.0.0.1:{httpd.server_port}"
@@ -266,6 +314,31 @@ def api_post(server: str, path: str, body: Dict[str, Any]) -> Any:  # the route'
 def wait_saves(page: Any, count: int) -> None:
     """``data-saves`` counts the writes the server accepted — a test waits on it, never on time."""
     page.wait_for_selector(f'.app[data-saves="{count}"]')
+
+
+def open_menu(page: Any, menu: str) -> None:
+    """Open a menu of the bar by its title (``[data-menu=<id>]``); its items exist in the page only while it is open."""
+    page.locator(f'[data-menu="{menu}"] > .menubar-title').click()
+    page.wait_for_selector(f'[data-menu="{menu}"] .dropdown')
+
+
+def menu_command(page: Any, menu: str, command: str) -> None:
+    """Pick ``command`` from the bar's ``menu`` — the way a person reaches what the toolbar buttons used to do."""
+    open_menu(page, menu)
+    page.locator(f'[data-menu="{menu}"] [data-command="{command}"]').click()
+
+
+def copy_selection(page: Any) -> None:
+    """Ctrl+C, then wait for the copy's answer (its toast): Paste acts only once the page holds the copied text."""
+    page.keyboard.press("Control+c")
+    page.locator('[data-toast="info"]', has_text="copied").last.wait_for()
+
+
+def save_file(page: Any, count: int) -> None:
+    """File ▸ Save, then wait until the server's answer is drawn: ``count`` accepted writes and nothing unsaved."""
+    menu_command(page, "file", "save")
+    wait_saves(page, count)
+    page.wait_for_selector('.app[data-dirty="false"]')
 
 
 def meets(source: str, target: str, types: Dict[str, List[str]]) -> bool:
@@ -511,7 +584,7 @@ class TestDrawingWires:
 
 
 class TestWidgets:
-    def test_editing_a_number_widget_writes_the_value_into_the_yaml_and_keeps_the_comment(
+    def test_editing_a_number_widget_patches_the_value_into_the_yaml_and_keeps_the_comment(
         self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path
     ) -> None:
         opened = open_graph("pets")
@@ -522,10 +595,12 @@ class TestWidgets:
         opened.page.wait_for_selector('.app[data-saves="1"]')
         text = api_get(server, "api/graphs/pets")["text"]
         assert "low_level: 0.9}   # the mask" in text
-        assert (graph_dir / "pets.yaml").read_text() == text
         assert text.count("\n") == PETS_TEXT.count("\n")  # one line changed, none added
         assert opened.page.locator("[data-yaml]").inner_text().rstrip("\n") == text.rstrip("\n")
         assert widget.input_value() == "0.9"
+        assert (graph_dir / "pets.yaml").read_text() == PETS_TEXT  # held by the editor until Save
+        save_file(opened.page, 2)
+        assert (graph_dir / "pets.yaml").read_text() == text
         assert opened.errors == []
 
     def test_a_value_the_constructor_refuses_shows_the_located_message_and_reverts_the_widget(
@@ -557,6 +632,7 @@ class TestWidgets:
         widget.fill("0.75")
         widget.press("Enter")
         opened.page.wait_for_selector('.app[data-saves="1"]')
+        save_file(opened.page, 2)
         served = api_get(server, "api/graphs/pets")["text"]
         document = Document.open(graph_dir / "pets.yaml")
         assert served == document.text == (graph_dir / "pets.yaml").read_text()
@@ -570,7 +646,7 @@ class TestWidgets:
 
 
 class TestPositions:
-    def test_dragging_a_node_saves_its_position_and_a_reload_restores_it(
+    def test_dragging_a_node_holds_its_position_save_writes_it_and_a_reload_restores_it(
         self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path
     ) -> None:
         opened = open_graph("wires")
@@ -582,6 +658,9 @@ class TestPositions:
         opened.page.wait_for_selector('.app[data-saves="1"]')
         expected = (before[0] + DRAG[0], before[1] + DRAG[1])
         assert tuple(api_get(server, "api/graphs/wires")["positions"]["gain"]) == expected
+        assert opened.page.locator(".app").get_attribute("data-dirty") == "true"
+        assert not (graph_dir / "wires.layout.yaml").exists()  # held by the editor until Save
+        save_file(opened.page, 2)
         assert layout.read_sidecar(graph_dir / "wires.layout.yaml")["gain"] == expected
         assert (graph_dir / "wires.yaml").read_text() == WIRES_TEXT  # a position never touches the document
         opened.page.reload()
@@ -601,7 +680,8 @@ class TestPalette:
     ) -> None:
         opened = open_graph("wires")
         wait_palette_loaded(opened.page)
-        specs = api_get(server, "api/palette")
+        # every class the route lists but the one no list offers (an empty subgraph is refused; SUBGRAPH below)
+        specs = [spec for spec in api_get(server, "api/palette") if spec["class_path"] != SUBGRAPH]
         assert len(specs) > PALETTE_ROWS  # the real catalogue: hundreds of classes, so the cap is exercised
         started = time.perf_counter()
         opened.page.mouse.dblclick(*EMPTY)
@@ -654,7 +734,7 @@ class TestPalette:
         text = api_get(server, "api/graphs/wires")["text"]
         assert "  threshold:\n    op: !class:recordstream.ops.numpy.Threshold {}\n    from: gain\n" in text
         assert f"  boost:\n    op: !class:{MOD}.TinyGain {{gain: 3.0}}\n    from: threshold\n" in text
-        assert (graph_dir / "wires.yaml").read_text() == text
+        assert (graph_dir / "wires.yaml").read_text() == WIRES_TEXT  # held by the editor until Save
         opened.page.wait_for_selector(node_root("threshold"))
         wires = api_get(server, "api/graphs/wires")["model"]["wires"]
         assert len(wires) > edges_before
@@ -676,23 +756,23 @@ class TestPalette:
         assert text.endswith("outputs: threshold\n")
         assert opened.errors == []
 
-    def test_picking_on_a_stream_is_refused_with_the_servers_message(
-        self, open_graph: Callable[[str], Opened], graph_dir: Path
+    def test_picking_on_a_stream_with_nothing_selected_appends_a_member_to_its_ops_list(
+        self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path
     ) -> None:
+        """DESIGN2 §3. Before: the palette said ``added after stream.ops[2]`` and the pick was refused with
+        ``'stream.ops[2]' is not a flow step (the steps are: [])``. Now the pick is the list's last member."""
         opened = open_graph("pets")
         wait_palette_loaded(opened.page)
         opened.page.mouse.dblclick(*EMPTY)
         opened.page.locator("[data-palette-search]").fill("recordstream.ops.numpy.Threshold")
-        assert "after stream.ops[2]" in opened.page.locator("[data-palette-meta]").inner_text()
+        assert "added at the end of stream.ops" in opened.page.locator("[data-palette-meta]").inner_text()
         opened.page.locator("[data-palette-list] li").first.click()
-        toast = opened.page.locator('[data-toast="error"]')
-        toast.wait_for()
-        assert "'stream.ops[2]' is not a flow step (the steps are: [])" in toast.inner_text()
-        assert (graph_dir / "pets.yaml").read_text() == PETS_TEXT
-        assert opened.page.locator(".app").get_attribute("data-saves") == "0"
-        assert opened.errors == [
-            "console.error: Failed to load resource: the server responded with a status of 400 (BAD REQUEST)"
-        ]
+        wait_saves(opened.page, 1)
+        text = api_get(server, "api/graphs/pets")["text"]
+        assert text == PETS_TEXT + "    - !class:recordstream.ops.numpy.Threshold {}\n"
+        opened.page.wait_for_selector(f'{node_root("stream.ops[3]")}[data-class="recordstream.ops.numpy.Threshold"]')
+        assert (graph_dir / "pets.yaml").read_text() == PETS_TEXT  # held by the editor until Save
+        assert opened.errors == []
 
     def test_a_wire_dropped_on_empty_canvas_lists_the_classes_with_a_compatible_input_and_the_pick_wires_it(
         self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path
@@ -717,7 +797,7 @@ class TestPalette:
         text = api_get(server, "api/graphs/wires")["text"]
         assert f"  tinygain:\n    op: !class:{MOD}.TinyGain {{}}\n    from: decode\n" in text
         assert f"  gain:\n    op: !class:{MOD}.TinyGain {{gain: 2.0}}\n    from: tinygain\n" in text
-        assert (graph_dir / "wires.yaml").read_text() == text
+        assert (graph_dir / "wires.yaml").read_text() == WIRES_TEXT  # held by the editor until Save
         wires = api_get(server, "api/graphs/wires")["model"]["wires"]
         assert any(
             wire["source"] == "decode" and wire["source_socket"] == "image" and wire["target"] == "tinygain"
@@ -748,9 +828,11 @@ class TestPalette:
         assert f"  boost:\n    op: !class:{MOD}.TinyGain {{gain: 3.0}}\n    from: tinydecode\n" in text
         assert opened.errors == []
 
-    def test_a_wire_dropped_on_a_stream_canvas_lists_record_takers_and_the_pick_is_refused(
+    def test_a_wire_dropped_on_a_stream_canvas_lists_record_takers_and_the_pick_follows_that_member(
         self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path
     ) -> None:
+        """DESIGN2 §3. Before: the pick after ``stream.ops[2]`` was refused (``is not a flow step``). Now it is the
+        member after it — here the list's last."""
         opened = open_graph("pets")
         wait_palette_loaded(opened.page)
         specs = api_get(server, "api/palette")
@@ -762,12 +844,14 @@ class TestPalette:
         expected = [spec for spec in specs if any(meets("Record", socket["type"], types) for socket in spec["inputs"])]
         assert rows.count() == min(len(expected), PALETTE_ROWS) > 50  # every op takes a record
         opened.page.locator("[data-palette-search]").fill("recordstream.ops.numpy.Threshold")
+        assert "after stream.ops[2]" in opened.page.locator("[data-palette-meta]").inner_text()
         opened.page.locator("[data-palette-list] li").first.click()
-        toast = opened.page.locator('[data-toast="error"]')
-        toast.wait_for()
-        assert "'stream.ops[2]' is not a flow step (the steps are: [])" in toast.inner_text()
+        wait_saves(opened.page, 1)
+        text = api_get(server, "api/graphs/pets")["text"]
+        assert text == PETS_TEXT + "    - !class:recordstream.ops.numpy.Threshold {}\n"
+        opened.page.wait_for_selector(f'{node_root("stream.ops[3]")}[data-class="recordstream.ops.numpy.Threshold"]')
         assert (graph_dir / "pets.yaml").read_text() == PETS_TEXT
-        assert opened.page.locator(".app").get_attribute("data-saves") == "0"
+        assert opened.errors == []
 
 
 # ------------------------------------------------------------------------------------------------
@@ -798,6 +882,8 @@ class TestGroups:
             {"id": "g1", "title": "group 1", "color": body["groups"][0]["color"], "nodes": ["decode", "gain"]}
         ]
         assert body["groups"][0]["color"].startswith("#")
+        assert not (graph_dir / "wires.layout.yaml").exists()  # held by the editor until Save
+        save_file(opened.page, 2)  # a clean page reloads without the leave-page prompt
         assert layout.read_groups(graph_dir / "wires.layout.yaml") == body["groups"]
         assert body["positions"] == positions_before  # grouping moves nothing
         assert (graph_dir / "wires.yaml").read_text() == WIRES_TEXT  # the document has no group spelling
@@ -824,6 +910,7 @@ class TestGroups:
             assert after[name] == [before[name][0] + DRAG[0], before[name][1] + DRAG[1]], name
         for name in ("boost", "count", "<host>"):
             assert after[name] == before[name], name
+        save_file(opened.page, 2)
         assert layout.read_sidecar(graph_dir / "wires.layout.yaml")["gain"] == tuple(after["gain"])
         assert layout.read_groups(graph_dir / "wires.layout.yaml") == [GROUP]
         assert node_translate(opened.page, "gain")[0] - node_translate(opened.page, "decode")[0] == gap_before
@@ -842,6 +929,7 @@ class TestGroups:
         opened.page.wait_for_selector('.app[data-saves="1"]')
         assert opened.page.locator("[data-group]").count() == 0
         assert api_get(server, "api/graphs/wires")["groups"] == []
+        save_file(opened.page, 2)
         assert layout.read_groups(graph_dir / "wires.layout.yaml") == []
         assert api_get(server, "api/graphs/wires")["positions"] == before
         assert node_boxes(opened.page, "decode", "gain") == boxes_before
@@ -869,13 +957,16 @@ class TestGroups:
         assert (graph_dir / "wires.yaml").read_text() == WIRES_TEXT
         assert opened.errors == []
 
-    def test_the_toolbar_groups_the_selection_and_the_title_and_colour_are_edited_on_the_group(
+    def test_the_graph_menu_groups_the_selection_and_the_title_and_colour_are_edited_on_the_group(
         self, open_graph: Callable[[str], Opened], server: str
     ) -> None:
         opened = open_graph("wires")
-        assert opened.page.locator('[data-action="group"]').is_disabled()
+        open_menu(opened.page, "graph")
+        assert opened.page.locator('[data-menu="graph"] [data-command="group"]').is_disabled()
+        opened.page.keyboard.press("Escape")
+        assert opened.page.locator('[data-menu="graph"] .dropdown').count() == 0
         box_select(opened.page, "decode", "gain")
-        opened.page.locator('[data-action="group"]').click()
+        menu_command(opened.page, "graph", "group")
         opened.page.wait_for_selector('.app[data-saves="1"]')
         group = opened.page.locator('[data-group="g1"]')
         assert group.count() == 1
@@ -907,45 +998,48 @@ class TestUndoRedo:
     def test_ctrl_z_reverses_a_move_before_the_edit_made_ahead_of_it_and_shift_redoes_both(
         self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path
     ) -> None:
-        """The split, pinned: the MOVE is the page's (the sidecar gets its old position back, the document is not
-        touched), the EDIT is the server's (the text comes back from the document's own history, the sidecar is
-        not touched) — and one Ctrl+Z reverses whichever came last."""
+        """The split, pinned: the MOVE is the page's (the editor gets its old position back, the document is not
+        touched), the EDIT is the server's (the text comes back from the document's own history, the positions are
+        not touched) — and one Ctrl+Z reverses whichever came last. Nothing reaches the disk without Save."""
         opened = open_graph("pets")
         page = opened.page
-        sidecar = graph_dir / "pets.layout.yaml"
+
+        def served() -> Tuple[str, Tuple[float, float]]:
+            body = api_get(server, "api/graphs/pets")
+            x, y = body["positions"]["stream.ops[2]"]
+            return body["text"], (x, y)
+
         widget = page.locator(f'{node_root("stream.ops[1]")} input[data-param="low_level"]')
         widget.fill("0.9")
         widget.press("Enter")
         wait_saves(page, 1)
-        edited = (graph_dir / "pets.yaml").read_text()
+        edited, before = served()
         assert "low_level: 0.9}   # the mask" in edited
-        before = tuple(api_get(server, "api/graphs/pets")["positions"]["stream.ops[2]"])
         start = centre(page.locator(f'{node_root("stream.ops[2]")} .title').bounding_box())
         drag(page, start, (start[0] + DRAG[0], start[1] + DRAG[1]))
         wait_saves(page, 2)
         moved = (before[0] + DRAG[0], before[1] + DRAG[1])
-        assert layout.read_sidecar(sidecar)["stream.ops[2]"] == moved
+        assert served() == (edited, moved)
 
         page.keyboard.press("Control+z")  # the move came last: the page writes the old position back
         wait_saves(page, 3)
-        assert layout.read_sidecar(sidecar)["stream.ops[2]"] == before
+        assert served() == (edited, before)
         assert node_translate(page, "stream.ops[2]") == before
-        assert (graph_dir / "pets.yaml").read_text() == edited
 
         page.keyboard.press("Control+z")  # then the edit: the server's history gives the old text back
         wait_saves(page, 4)
-        assert (graph_dir / "pets.yaml").read_text() == PETS_TEXT
+        assert served() == (PETS_TEXT, before)
         assert widget.input_value() == "0.5"
-        assert layout.read_sidecar(sidecar)["stream.ops[2]"] == before
 
         page.keyboard.press("Control+Shift+z")
         wait_saves(page, 5)
-        assert (graph_dir / "pets.yaml").read_text() == edited
+        assert served() == (edited, before)
         assert widget.input_value() == "0.9"
         page.keyboard.press("Control+Shift+z")
         wait_saves(page, 6)
-        assert layout.read_sidecar(sidecar)["stream.ops[2]"] == moved
+        assert served() == (edited, moved)
         assert node_translate(page, "stream.ops[2]") == moved
+        assert (graph_dir / "pets.yaml").read_text() == PETS_TEXT and not (graph_dir / "pets.layout.yaml").exists()
         assert opened.errors == []
 
     def test_an_edit_the_page_never_saw_is_undone_through_the_servers_history(
@@ -957,14 +1051,17 @@ class TestUndoRedo:
         opened = open_graph("pets")
         widget = opened.page.locator(f'{node_root("stream.ops[1]")} input[data-param="low_level"]')
         assert widget.input_value() == "0.7"
+        assert opened.page.locator(".app").get_attribute("data-dirty") == "true"  # the agent's edit is unsaved
         opened.page.keyboard.press("Control+z")
         wait_saves(opened.page, 1)
-        assert (graph_dir / "pets.yaml").read_text() == PETS_TEXT
+        assert api_get(server, "api/graphs/pets")["text"] == PETS_TEXT
         assert widget.input_value() == "0.5"
+        opened.page.wait_for_selector('.app[data-dirty="false"]')  # back to what the file holds
+        assert (graph_dir / "pets.yaml").read_text() == PETS_TEXT
         assert opened.errors == []
 
-    def test_the_toolbar_pair_undoes_and_redoes_a_parameter_edit(
-        self, open_graph: Callable[[str], Opened], graph_dir: Path
+    def test_the_edit_menu_undoes_and_redoes_a_parameter_edit(
+        self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path
     ) -> None:
         opened = open_graph("wires")
         page = opened.page
@@ -972,23 +1069,24 @@ class TestUndoRedo:
         widget.fill("5")
         widget.press("Enter")
         wait_saves(page, 1)
-        edited = (graph_dir / "wires.yaml").read_text()
+        edited = api_get(server, "api/graphs/wires")["text"]
         assert "{gain: 5}" in edited
-        page.locator('[data-action="undo"]').click()
+        menu_command(page, "edit", "undo")
         wait_saves(page, 2)
-        assert (graph_dir / "wires.yaml").read_text() == WIRES_TEXT
+        assert api_get(server, "api/graphs/wires")["text"] == WIRES_TEXT
         assert widget.input_value() == "2"
-        page.locator('[data-action="redo"]').click()
+        menu_command(page, "edit", "redo")
         wait_saves(page, 3)
-        assert (graph_dir / "wires.yaml").read_text() == edited
+        assert api_get(server, "api/graphs/wires")["text"] == edited
         assert widget.input_value() == "5"
+        assert (graph_dir / "wires.yaml").read_text() == WIRES_TEXT
         assert opened.errors == []
 
     def test_with_nothing_to_undo_the_page_says_so_and_writes_nothing(
         self, open_graph: Callable[[str], Opened], graph_dir: Path
     ) -> None:
         opened = open_graph("wires")
-        opened.page.locator('[data-action="undo"]').click()
+        menu_command(opened.page, "edit", "undo")
         toast = opened.page.locator('[data-toast="info"]')
         toast.wait_for()
         assert "wires.yaml" in toast.inner_text() and "nothing to undo" in toast.inner_text()
@@ -999,45 +1097,45 @@ class TestUndoRedo:
 
 
 # ------------------------------------------------------------------------------------------------
-# copy / paste: a paste on a flow is add_step of the same class with the same values
+# copy / paste: the TEXT of the copied steps (their own lines), pasted after the selection
 # ------------------------------------------------------------------------------------------------
 
 
 class TestCopyPaste:
-    def test_paste_on_a_flow_adds_the_copied_class_with_its_values_after_the_selection(
+    def test_paste_on_a_flow_adds_the_copied_steps_own_lines_after_the_selection(
         self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path
     ) -> None:
         opened = open_graph("wires")
         page = opened.page
         page.locator(f'{node_root("gain")} .title').click()
-        page.keyboard.press("Control+c")
+        copy_selection(page)
         page.locator(f'{node_root("boost")} .title').click()
         assert selected_nodes(page) == ["boost"]
         page.keyboard.press("Control+v")
         wait_saves(page, 1)
-        text = (graph_dir / "wires.yaml").read_text()
-        # `2.0` arrives as `2`: JSON has ONE number type, so a whole float cannot cross the browser as a float — the
-        # widget path writes `5` for a typed 5 the same way. The constructor takes either (TinyGain(gain=2).gain == 2).
-        assert f"  tinygain:\n    op: !class:{MOD}.TinyGain {{gain: 2}}\n    from: boost\n" in text
-        assert f"  count:\n    op: !class:{MOD}.TinyCount {{}}\n    from: tinygain\n" in text
-        assert api_get(server, "api/graphs/wires")["text"] == text
-        page.wait_for_selector(node_root("tinygain"))
+        text = api_get(server, "api/graphs/wires")["text"]
+        # the copied step's own text — `gain: 2.0` as written — under a free name, reading the step it was pasted after
+        assert f"  gain_2:\n    op: !class:{MOD}.TinyGain {{gain: 2.0}}\n    from: boost\n" in text
+        assert f"  count:\n    op: !class:{MOD}.TinyCount {{}}\n    from: gain_2\n" in text
+        assert (graph_dir / "wires.yaml").read_text() == WIRES_TEXT  # held by the editor until Save
+        page.wait_for_selector(node_root("gain_2"))
         assert opened.errors == []
 
-    def test_paste_on_a_stream_is_refused_with_the_servers_message(
-        self, open_graph: Callable[[str], Opened], graph_dir: Path
+    def test_paste_on_a_stream_inserts_a_copy_of_the_member_after_the_selection(
+        self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path
     ) -> None:
         opened = open_graph("pets")
         page = opened.page
         page.locator(f'{node_root("stream.ops[1]")} .title').click()
-        page.keyboard.press("Control+c")
+        copy_selection(page)
         page.keyboard.press("Control+v")
-        toast = page.locator('[data-toast="error"]')
-        toast.wait_for()
-        assert "'stream.ops[1]' is not a flow step (the steps are: [])" in toast.inner_text()
+        wait_saves(page, 1)
+        text = api_get(server, "api/graphs/pets")["text"]
+        member = "    - !class:recordstream.ops.numpy.Threshold {low_level: 0.5}   # the mask\n"
+        assert text == PETS_TEXT.replace(member, member * 2)  # the line, comment and all, twice
+        page.wait_for_selector(node_root("stream.ops[3]"))
         assert (graph_dir / "pets.yaml").read_text() == PETS_TEXT
-        assert page.locator(".app").get_attribute("data-saves") == "0"
-        assert opened.errors == [REFUSED_400]
+        assert opened.errors == []
 
 
 # ------------------------------------------------------------------------------------------------
@@ -1063,7 +1161,7 @@ class TestArrange:
         opened = open_graph("wires")
         page = opened.page
         before = api_get(server, "api/graphs/wires")["positions"]
-        page.locator('[data-action="arrange"]').click()
+        menu_command(page, "view", "arrange")
         wait_saves(page, 1)
         placed = api_get(server, "api/graphs/wires")["positions"]
         xs = [placed[name][0] for name in ("decode", "gain", "boost", "count")]
@@ -1073,10 +1171,11 @@ class TestArrange:
             assert node_translate(page, name) == tuple(placed[name]), name
         boxes = list(node_boxes(page, *WIRES_NODES).values())
         assert not any(overlap(a, b) for i, a in enumerate(boxes) for b in boxes[i + 1 :])
+        save_file(page, 2)
         assert layout.read_sidecar(graph_dir / "wires.layout.yaml") == {k: tuple(v) for k, v in placed.items()}
         assert (graph_dir / "wires.yaml").read_text() == WIRES_TEXT
         page.keyboard.press("Control+z")  # an arrange is a layout change: the page writes the old places back
-        wait_saves(page, 2)
+        wait_saves(page, 3)
         assert api_get(server, "api/graphs/wires")["positions"] == before
         assert opened.errors == []
 
@@ -1088,7 +1187,7 @@ class TestArrange:
         start = centre(page.locator(f'{node_root("gain")} .title').bounding_box())
         drag(page, start, (start[0] + DRAG[0], start[1] + DRAG[1]))
         wait_saves(page, 1)
-        page.locator('[data-action="arrange-server"]').click()
+        menu_command(page, "view", "arrange-server")
         wait_saves(page, 2)
         laid = layout.layered_layout(Document.open(graph_dir / "wires.yaml").model)
         assert api_get(server, "api/graphs/wires")["positions"] == {k: [x, y] for k, (x, y) in laid.items()}
@@ -1104,7 +1203,7 @@ class TestArrange:
 
 class TestRename:
     def test_double_clicking_a_title_renames_the_node_in_one_edit_and_it_stays_where_it_was(
-        self, open_graph: Callable[[str], Opened], graph_dir: Path
+        self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path
     ) -> None:
         opened = open_graph("wires")
         page = opened.page
@@ -1115,7 +1214,8 @@ class TestRename:
         field.fill("amp")
         field.press("Enter")
         wait_saves(page, 1)
-        text = (graph_dir / "wires.yaml").read_text()
+        assert (graph_dir / "wires.yaml").read_text() == WIRES_TEXT  # held by the editor until Save
+        text = api_get(server, "api/graphs/wires")["text"]
         assert f"  amp:\n    op: !class:{MOD}.TinyGain {{gain: 2.0}}\n    from: decode\n" in text
         assert f"  boost:\n    op: !class:{MOD}.TinyGain {{gain: 3.0}}\n    from: amp\n" in text
         page.wait_for_selector(node_root("amp"))
@@ -1343,7 +1443,7 @@ class TestSettingsForm:
         assert opened.errors == []
 
     def test_a_change_in_the_form_is_the_edit_the_canvas_widget_shows_and_back(
-        self, open_graph: Callable[[str], Opened], graph_dir: Path
+        self, open_graph: Callable[[str], Opened], server: str
     ) -> None:
         opened = open_graph("pets")
         page = opened.page
@@ -1353,11 +1453,2025 @@ class TestSettingsForm:
         in_form.fill("0.8")
         in_form.press("Enter")
         wait_saves(page, 1)
-        assert "low_level: 0.8}   # the mask" in (graph_dir / "pets.yaml").read_text()
+        assert "low_level: 0.8}   # the mask" in api_get(server, "api/graphs/pets")["text"]
         assert on_canvas.input_value() == "0.8"
         on_canvas.fill("0.6")
         on_canvas.press("Enter")
         wait_saves(page, 2)
         assert in_form.input_value() == "0.6"
-        assert "low_level: 0.6}   # the mask" in (graph_dir / "pets.yaml").read_text()
+        assert "low_level: 0.6}   # the mask" in api_get(server, "api/graphs/pets")["text"]
+        assert opened.errors == []
+
+
+# ------------------------------------------------------------------------------------------------
+# Explicit Save: an edit is held by the editor (● and data-dirty), File ▸ Save writes it
+# ------------------------------------------------------------------------------------------------
+
+
+def picked_label(page: Any) -> str:
+    """The graph dropdown's shown option — ``● pets · graph`` while the graph holds unsaved changes."""
+    return str(page.locator("select[data-graph-picker]").evaluate("s => s.options[s.selectedIndex].text"))
+
+
+def listed_dirty(server: str) -> Dict[str, bool]:
+    return {entry["name"]: entry["dirty"] for entry in api_get(server, "api/graphs")}
+
+
+def edit_low_level(page: Any, value: str) -> None:
+    widget = page.locator(f'{node_root("stream.ops[1]")} input[data-param="low_level"]')
+    widget.fill(value)
+    widget.press("Enter")
+
+
+class TestExplicitSave:
+    def test_an_edit_shows_the_dirty_mark_and_leaves_the_file_untouched(
+        self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path
+    ) -> None:
+        opened = open_graph("pets")
+        page = opened.page
+        assert page.locator(".app").get_attribute("data-dirty") == "false"
+        assert page.title() == "streamstudio editor"
+        assert page.locator("[data-title]").inner_text() == "pets.yaml"
+        assert picked_label(page) == "pets · graph"
+        edit_low_level(page, "0.9")
+        wait_saves(page, 1)
+        page.wait_for_selector('.app[data-dirty="true"]')
+        assert page.title() == "● streamstudio editor"
+        assert page.locator("[data-title]").inner_text() == "● pets.yaml"
+        assert picked_label(page) == "● pets · graph"
+        assert listed_dirty(server)["pets"] is True
+        assert "low_level: 0.9}   # the mask" in api_get(server, "api/graphs/pets")["text"]
+        assert (graph_dir / "pets.yaml").read_text() == PETS_TEXT
+        assert opened.errors == []
+
+    def test_file_save_writes_the_file_and_clears_the_mark(
+        self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path
+    ) -> None:
+        opened = open_graph("pets")
+        page = opened.page
+        open_menu(page, "file")
+        assert page.locator('[data-menu="file"] [data-command="save"]').is_disabled()  # nothing to save yet
+        page.keyboard.press("Escape")
+        edit_low_level(page, "0.9")
+        wait_saves(page, 1)
+        edited = api_get(server, "api/graphs/pets")["text"]
+        save_file(page, 2)
+        assert (graph_dir / "pets.yaml").read_text() == edited
+        assert page.title() == "streamstudio editor"
+        assert page.locator("[data-title]").inner_text() == "pets.yaml"
+        assert picked_label(page) == "pets · graph"
+        assert listed_dirty(server)["pets"] is False
+        assert opened.errors == []
+
+    def test_ctrl_s_saves_too(self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path) -> None:
+        opened = open_graph("pets")
+        page = opened.page
+        edit_low_level(page, "0.7")
+        wait_saves(page, 1)
+        page.keyboard.press("Control+s")
+        wait_saves(page, 2)
+        page.wait_for_selector('.app[data-dirty="false"]')
+        assert "low_level: 0.7}   # the mask" in (graph_dir / "pets.yaml").read_text()
+        assert opened.errors == []
+
+
+# ------------------------------------------------------------------------------------------------
+# New… and Open… (the file browser is the EDITOR's machine, GET api/files)
+# ------------------------------------------------------------------------------------------------
+
+
+def open_new(page: Any, kind: str) -> None:
+    """New ▸ <kind> — the dialog asks the name and the folder; its folder field waits for ``GET api/workspace``."""
+    menu_command(page, "new", f"new-{kind}")
+    page.locator('[data-dialog="new"]').wait_for()
+    page.wait_for_function("() => document.querySelector('[data-new-folder]')?.value !== ''")
+
+
+def new_path_shown(page: Any) -> str:
+    """The file Create would write, as the dialog shows it (``→ /w/fresh.yaml``)."""
+    return str(page.locator("[data-new-path]").inner_text())
+
+
+def picker_values(page: Any) -> List[str]:
+    return list(page.locator("select[data-graph-picker] option").evaluate_all("os => os.map(o => o.value)"))
+
+
+class TestNewAndOpen:
+    """DESIGN3 — the user, 2026-09-29: "New ... by mistake should not happen. It should ask to save". New… asks the
+    name and the folder and Create WRITES the starter file at once: no graph exists only in the editor."""
+
+    def test_new_flow_graph_writes_the_starter_at_once_and_opens_it_with_nothing_unsaved(
+        self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path
+    ) -> None:
+        folder = api_get(server, "api/workspace")["folder"]
+        assert Path(folder) == graph_dir.resolve()
+        opened = open_graph("wires")
+        page = opened.page
+        open_new(page, "flow")
+        dialog = page.locator('[data-dialog="new"]')
+        assert dialog.locator(".modal-title").inner_text() == "New flow graph"
+        assert page.locator("[data-new-kind]").get_attribute("data-new-kind") == "flow"
+        assert page.locator("[data-new-folder]").input_value() == folder  # the folder the editor was started on
+        assert page.locator("[data-new-confirm]").is_disabled()  # no name yet
+        page.locator("[data-new-name]").fill("fresh")
+        assert new_path_shown(page) == f"{folder}/fresh.yaml"
+        assert not (graph_dir / "fresh.yaml").exists()  # typing writes nothing; Create does
+
+        page.locator("[data-new-confirm]").click()
+        wait_ready(page, "fresh")
+        assert dialog.count() == 0
+        # the file is on disk at once, holding the starter, and the editor holds nothing unsaved
+        assert (graph_dir / "fresh.yaml").read_text() == starter_text("flow", "fresh")
+        body = api_get(server, "api/graphs/fresh")
+        assert body["kind"] == "flow" and body["dirty"] is False and body["model"]["problems"] == []
+        assert body["text"] == starter_text("flow", "fresh")
+        drawn = page.locator(NODE).evaluate_all("ns => ns.map(n => n.dataset.node)")
+        assert sorted(drawn) == sorted(node["name"] for node in body["model"]["nodes"]) == ["probe"]
+        # no ● anywhere: the root, the title, the dropdown
+        assert page.locator(".app").get_attribute("data-dirty") == "false"
+        assert page.title() == "streamstudio editor"
+        assert page.locator("[data-title]").inner_text() == "fresh.yaml"
+        assert "fresh" in picker_values(page)
+        assert picker_labels(page)["fresh"] == "fresh · flow"
+        assert listed_dirty(server)["fresh"] is False
+        open_menu(page, "file")
+        assert page.locator('[data-menu="file"] [data-command="save"]').is_disabled()  # nothing to save
+        page.keyboard.press("Escape")
+        assert opened.errors == []
+
+    def test_an_existing_file_is_refused_in_the_dialog_and_left_byte_for_byte(
+        self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path
+    ) -> None:
+        folder = api_get(server, "api/workspace")["folder"]
+        before = (graph_dir / "clip.yaml").read_bytes()
+        opened = open_graph("wires")
+        page = opened.page
+        open_new(page, "flow")
+        page.locator("[data-new-name]").fill("clip")
+        page.locator("[data-new-confirm]").click()
+        refused = page.locator("[data-new-refused]")
+        refused.wait_for()
+        assert refused.inner_text() == ALREADY_EXISTS.format(path=Path(folder) / "clip.yaml")
+        assert (graph_dir / "clip.yaml").read_bytes() == before
+        # the dialog stays, with what was typed, usable again; the graph shown is still the one it was
+        assert page.locator('[data-dialog="new"]').count() == 1
+        assert page.locator("[data-new-name]").input_value() == "clip"
+        assert page.locator("[data-new-busy]").get_attribute("data-new-busy") == "false"
+        assert page.locator("[data-new-confirm]").is_enabled()
+        assert page.locator(".app").get_attribute("data-graph") == "wires"
+        assert picker_values(page).count("clip") == 1 and not any(v.startswith("clip~") for v in picker_values(page))
+
+        # fixing the name in place clears the refusal, and Create then writes the file
+        page.locator("[data-new-name]").fill("clip_two")
+        assert refused.count() == 0
+        page.locator("[data-new-confirm]").click()
+        wait_ready(page, "clip_two")
+        assert (graph_dir / "clip_two.yaml").read_text() == starter_text("flow", "clip_two")
+        assert (graph_dir / "clip.yaml").read_bytes() == before
+        assert opened.errors == [REFUSED_400]
+
+    def test_browse_picks_another_folder_and_the_file_lands_there_and_joins_the_list(
+        self,
+        open_graph: Callable[[str], Opened],
+        server: str,
+        graph_dir: Path,
+        tmp_path_factory: pytest.TempPathFactory,
+    ) -> None:
+        other = tmp_path_factory.mktemp("elsewhere").resolve()
+        folder = api_get(server, "api/workspace")["folder"]
+        opened = open_graph("wires")
+        page = opened.page
+        open_new(page, "pipeline")
+        assert page.locator('[data-dialog="new"] .modal-title').inner_text() == "New pipeline"
+        page.locator("[data-new-name]").fill("fresh")
+        page.locator("[data-new-browse]").click()
+        # the server's file dialog, picking a folder, starting in the folder the field holds
+        page.wait_for_selector(f'[data-dialog="file"] [data-file-mode="folder"][data-file-dir="{folder}"]')
+        path_field = page.locator("[data-file-path]")
+        path_field.fill(str(other))
+        path_field.press("Enter")
+        page.wait_for_selector(f'[data-file-dir="{other}"]')
+        page.locator("[data-file-confirm]").click()
+        page.locator('[data-dialog="new"]').wait_for()
+        assert page.locator("[data-new-folder]").input_value() == str(other)
+        assert page.locator("[data-new-name]").input_value() == "fresh"  # what was typed survives the browse
+        assert new_path_shown(page) == f"{other}/fresh.yaml"
+
+        page.locator("[data-new-confirm]").click()
+        wait_ready(page, "fresh")
+        assert (other / "fresh.yaml").read_text() == starter_text("pipeline", "fresh")
+        assert not (graph_dir / "fresh.yaml").exists()
+        listed = {entry["name"]: entry for entry in api_get(server, "api/graphs")}
+        assert Path(listed["fresh"]["path"]).resolve() == other / "fresh.yaml"
+        assert listed["fresh"]["dirty"] is False
+        assert "fresh" in picker_values(page) and not picker_labels(page)["fresh"].startswith("● ")
+        assert page.locator(".app").get_attribute("data-dirty") == "false"
+        assert page.locator(NODE).count() > 0
+        assert opened.errors == []
+
+    def test_a_name_the_list_holds_joins_from_another_folder_under_a_free_name(
+        self,
+        open_graph: Callable[[str], Opened],
+        server: str,
+        graph_dir: Path,
+        tmp_path_factory: pytest.TempPathFactory,
+    ) -> None:
+        """A file of another folder joins like one opened with File ▸ Open: ``clip`` is taken, so it is ``clip~2`` —
+        the page opens the name the server ANSWERS, not the one typed."""
+        other = tmp_path_factory.mktemp("elsewhere").resolve()
+        before = (graph_dir / "clip.yaml").read_bytes()
+        opened = open_graph("wires")
+        page = opened.page
+        open_new(page, "flow")
+        page.locator("[data-new-name]").fill("clip")
+        page.locator("[data-new-folder]").fill(str(other))
+        assert new_path_shown(page) == f"{other}/clip.yaml"
+        page.locator("[data-new-confirm]").click()
+        wait_ready(page, "clip~2")
+        assert (other / "clip.yaml").read_text() == starter_text("flow", "clip")
+        assert (graph_dir / "clip.yaml").read_bytes() == before
+        listed = {entry["name"]: Path(entry["path"]).resolve() for entry in api_get(server, "api/graphs")}
+        assert listed["clip"] == (graph_dir / "clip.yaml").resolve() and listed["clip~2"] == other / "clip.yaml"
+        assert {"clip", "clip~2"} <= set(picker_values(page))
+        assert page.locator(".app").get_attribute("data-dirty") == "false"
+        assert opened.errors == []
+
+    def test_open_through_the_file_dialog_lists_the_file_and_shows_it(
+        self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path
+    ) -> None:
+        (graph_dir / "elsewhere").mkdir()
+        (graph_dir / "elsewhere" / "other.yaml").write_text(CLIP_TEXT)
+        opened = open_graph("wires")
+        page = opened.page
+        menu_command(page, "file", "open")
+        page.locator('[data-dialog="file"]').wait_for()
+        page.wait_for_selector(f'[data-file-mode="open"][data-file-dir="{graph_dir.resolve()}"]')
+        entries = page.locator("[data-file-entry]").evaluate_all(
+            "es => es.map(e => [e.dataset.fileEntry, e.dataset.fileKind])"
+        )
+        assert entries[0] == ["elsewhere", "dir"]  # folders first
+        assert ["wires.yaml", "yaml"] in entries
+        page.locator('[data-file-entry="elsewhere"]').click()
+        page.wait_for_selector(f'[data-file-dir="{(graph_dir / "elsewhere").resolve()}"]')
+        page.locator('[data-file-entry="other.yaml"]').click()
+        page.locator("[data-file-confirm]").click()
+        wait_ready(page, "other")
+        listed = {entry["name"]: entry["path"] for entry in api_get(server, "api/graphs")}
+        assert Path(listed["other"]).resolve() == (graph_dir / "elsewhere" / "other.yaml").resolve()
+        assert "other" in page.locator("select[data-graph-picker] option").evaluate_all("os => os.map(o => o.value)")
+        page.wait_for_selector(node_root("clip"))
+        assert page.locator(".app").get_attribute("data-dirty") == "false"
+        assert opened.errors == []
+
+
+# ------------------------------------------------------------------------------------------------
+# the Nodes sidebar: every class by package and kind; a click adds after the selection
+# ------------------------------------------------------------------------------------------------
+
+
+class TestNodesSidebar:
+    def test_the_sidebar_lists_the_packages_and_a_click_adds_a_step_after_the_selection(
+        self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path
+    ) -> None:
+        opened = open_graph("wires")
+        page = opened.page
+        wait_palette_loaded(page)
+        specs = api_get(server, "api/palette")
+        page.locator('button[data-command="toggle-nodes"]').click()
+        page.locator("[data-nodes-sidebar]").wait_for()
+        packages = page.locator("[data-nodes-package]").evaluate_all("ps => ps.map(p => p.dataset.nodesPackage)")
+        assert sorted(packages) == sorted({spec["class_path"].split(".")[0] for spec in specs})
+        page.locator('[data-nodes-package="recordstream"] .nodes-package-head').click()
+        kinds = page.locator('[data-nodes-package="recordstream"] [data-nodes-kind]').evaluate_all(
+            "ks => ks.map(k => k.dataset.nodesKind)"
+        )
+        assert set(kinds) == {spec["kind"] for spec in specs if spec["class_path"].startswith("recordstream.")}
+        assert kinds.index("source") < kinds.index("op")  # sources first, then ops, …
+        page.locator(f'{node_root("gain")} .title').click()
+        page.wait_for_selector('.app[data-selection="gain"]')
+        assert "Click adds after gain" in page.locator("[data-nodes-sidebar] .nodes-foot").inner_text()
+        page.locator("[data-nodes-search]").fill("recordstream.ops.numpy.Threshold")
+        entry = page.locator('[data-nodes-entry][data-class="recordstream.ops.numpy.Threshold"]')
+        assert entry.count() == 1
+        entry.click()
+        wait_saves(page, 1)
+        text = api_get(server, "api/graphs/wires")["text"]
+        assert "  threshold:\n    op: !class:recordstream.ops.numpy.Threshold {}\n    from: gain\n" in text
+        assert f"  boost:\n    op: !class:{MOD}.TinyGain {{gain: 3.0}}\n    from: threshold\n" in text
+        page.wait_for_selector(node_root("threshold"))
+        assert (graph_dir / "wires.yaml").read_text() == WIRES_TEXT
+        assert opened.errors == []
+
+
+# ------------------------------------------------------------------------------------------------
+# right-click on the canvas: Add Node ▸, Add Group, …; Add Group draws an EMPTY box
+# ------------------------------------------------------------------------------------------------
+
+
+class TestRightClick:
+    def test_right_click_on_empty_canvas_offers_add_node_and_add_group_which_draws_an_empty_box(
+        self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path
+    ) -> None:
+        opened = open_graph("wires")
+        page = opened.page
+        wait_palette_loaded(page)
+        page.mouse.click(*EMPTY, button="right")
+        menu = page.locator('[data-context-menu="pane"]')
+        menu.wait_for()
+        labels = menu.locator(".menu-label").all_inner_texts()
+        assert labels[:3] == ["Add Node", "Add Group", "Paste"]
+        menu.locator('[data-submenu="add-node"]').click()
+        page.locator("[data-add-node] [data-add-node-search]").wait_for()
+        menu.locator('[data-command="add-group"]').click()
+        wait_saves(page, 1)
+        box = page.locator("[data-group]")
+        assert box.count() == 1
+        assert box.get_attribute("data-members") == ""
+        assert box.locator(".group-empty").count() == 1
+        groups = api_get(server, "api/graphs/wires")["groups"]
+        assert len(groups) == 1 and groups[0]["nodes"] == [] and len(groups[0]["bounds"]) == 4
+        corner = box.bounding_box()
+        assert EMPTY[0] - 10 <= corner["x"] <= EMPTY[0] + 1 and EMPTY[1] - 10 <= corner["y"] <= EMPTY[1] + 1
+        assert (corner["width"], corner["height"]) == tuple(groups[0]["bounds"][2:])  # drawn at its stored size
+        assert not (graph_dir / "wires.layout.yaml").exists()
+        assert opened.errors == []
+
+
+# ------------------------------------------------------------------------------------------------
+# subgraphs: convert, enter, edit inside, reuse (copy, template, include)
+# ------------------------------------------------------------------------------------------------
+
+SCALE_LINE = (
+    "          op: !class:recordstream.ops.numpy.Scale "
+    "{source_min: 0.0, source_max: 255.0, target_min: 0.0, target_max: 1.0}"
+)
+
+SUB_TEXT = f"""\
+# a flow holding one subgraph
+flow:
+  prep:
+    op: !class:recordstream.flow.subgraph.Subgraph
+      steps:
+        grey:
+          op: !class:recordstream.ops.image.ConvertMode {{mode: L}}   # to one channel
+        scaled:
+{SCALE_LINE}
+      result: scaled
+  mask:
+    op: !class:recordstream.ops.numpy.Threshold {{low_level: 0.5}}
+outputs: mask
+"""
+
+
+def drawn_nodes(page: Any) -> List[str]:
+    return sorted(page.locator(NODE).evaluate_all("ns => ns.map(n => n.dataset.node)"))
+
+
+def enter_subgraph(page: Any, name: str) -> None:
+    """Double-click the subgraph's card (its class line — a double-click on the NAME renames) and wait for the level."""
+    page.locator(f"{node_root(name)} .title .cls").dblclick()
+    page.wait_for_selector(f'.app[data-level="{name}"]')
+    page.wait_for_selector(node_root(f"{name}/<out>"))
+
+
+def inner_value(body: Dict[str, Any], level: str, step: str, param: str) -> Any:  # a JSON value of any type
+    nodes = body["model"]["inside"][level]["nodes"]
+    return next(node for node in nodes if node["name"] == f"{level}/{step}")["params"][param]["value"]
+
+
+class TestSubgraphs:
+    def test_two_consecutive_steps_become_one_subgraph_node(
+        self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path
+    ) -> None:
+        opened = open_graph("wires")
+        page = opened.page
+        box_select(page, "gain", "boost")
+        assert selected_nodes(page) == ["boost", "gain"]
+        menu_command(page, "graph", "to-subgraph")
+        wait_saves(page, 1)
+        page.wait_for_selector(node_root("subgraph"))
+        assert page.locator(node_root("subgraph")).get_attribute("data-kind") == "subgraph"
+        assert page.locator(node_root("gain")).count() == 0 and page.locator(node_root("boost")).count() == 0
+        inner = page.locator(f'{node_root("subgraph")} [data-inner-steps]').get_attribute("data-inner-steps")
+        assert inner == "gain,boost"
+        body = api_get(server, "api/graphs/wires")
+        steps = [node["name"] for node in body["model"]["nodes"] if node["kind"] != "host"]
+        assert steps == ["decode", "subgraph", "count"]
+        assert (
+            "  subgraph:\n"
+            "    op: !class:recordstream.flow.subgraph.Subgraph\n"
+            "      steps:\n"
+            "        gain:\n"
+            f"          op: !class:{MOD}.TinyGain {{gain: 2.0}}\n"
+            "        boost:\n"
+            f"          op: !class:{MOD}.TinyGain {{gain: 3.0}}\n"
+            "          from: gain\n"
+            "      result: boost\n"
+            "    from: decode\n"
+        ) in body["text"]
+        assert f"  count:\n    op: !class:{MOD}.TinyCount {{}}\n    from: subgraph\n" in body["text"]
+        assert (graph_dir / "wires.yaml").read_text() == WIRES_TEXT
+        assert opened.errors == []
+
+    def test_a_double_click_shows_the_inside_under_a_breadcrumb_and_escape_goes_back_up(
+        self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path
+    ) -> None:
+        (graph_dir / "sub.yaml").write_text(SUB_TEXT)
+        opened = open_graph("sub")
+        page = opened.page
+        assert drawn_nodes(page) == ["mask", "prep"]
+        assert page.locator("[data-breadcrumb]").count() == 0
+        enter_subgraph(page, "prep")
+        crumbs = page.locator("[data-breadcrumb] [data-crumb]").evaluate_all(
+            "cs => cs.map(c => [c.dataset.crumb, c.textContent])"
+        )
+        assert crumbs == [["", "sub"], ["prep", "prep"]]
+        assert " › ".join(label for _level, label in crumbs) == "sub › prep"
+        inside = api_get(server, "api/graphs/sub")["model"]["inside"]["prep"]
+        assert drawn_nodes(page) == sorted(node["name"] for node in inside["nodes"])
+        assert drawn_nodes(page) == ["prep/<in>", "prep/<out>", "prep/grey", "prep/scaled"]
+        titles = page.locator(f"{NODE} .title .name").all_inner_texts()
+        assert sorted(titles) == ["<in>", "<out>", "grey", "scaled"]
+        wait_edges(page, len(inside["wires"]))
+        page.keyboard.press("Escape")
+        page.wait_for_selector('.app[data-level=""]')
+        page.wait_for_selector(node_root("mask"))
+        assert page.locator("[data-breadcrumb]").count() == 0
+        assert drawn_nodes(page) == ["mask", "prep"]
+        assert opened.errors == []
+
+    def test_an_inner_parameter_edit_changes_exactly_that_line_once_saved(
+        self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path
+    ) -> None:
+        (graph_dir / "sub.yaml").write_text(SUB_TEXT)
+        opened = open_graph("sub")
+        page = opened.page
+        enter_subgraph(page, "prep")
+        widget = page.locator(f'{node_root("prep/scaled")} input[data-param="target_max"]')
+        assert widget.input_value() == "1"
+        widget.fill("2.5")
+        widget.press("Enter")
+        wait_saves(page, 1)
+        assert page.locator(".app").get_attribute("data-level") == "prep"  # an edit keeps the level shown
+        assert (graph_dir / "sub.yaml").read_text() == SUB_TEXT
+        save_file(page, 2)
+        before, after = SUB_TEXT.splitlines(), (graph_dir / "sub.yaml").read_text().splitlines()
+        assert len(after) == len(before)
+        changed = [(old, new) for old, new in zip(before, after) if old != new]
+        assert changed == [(SCALE_LINE, SCALE_LINE.replace("target_max: 1.0}", "target_max: 2.5}"))]
+        assert opened.errors == []
+
+    def test_copy_and_paste_of_a_subgraph_node_gives_a_second_independent_block(
+        self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path
+    ) -> None:
+        (graph_dir / "sub.yaml").write_text(SUB_TEXT)
+        opened = open_graph("sub")
+        page = opened.page
+        page.locator(f'{node_root("prep")} .title .cls').click()
+        copy_selection(page)
+        page.keyboard.press("Control+v")
+        wait_saves(page, 1)
+        body = api_get(server, "api/graphs/sub")
+        text = body["text"]
+        assert text.count("op: !class:recordstream.flow.subgraph.Subgraph") == 2
+        assert text.count("# to one channel") == 2  # the block's own lines, comments kept
+        assert sorted(body["model"]["inside"]) == ["prep", "prep_2"]
+        block = SUB_TEXT[SUB_TEXT.index("  prep:\n") : SUB_TEXT.index("  mask:\n")]
+        assert text == SUB_TEXT.replace(block, block + block.replace("  prep:\n", "  prep_2:\n", 1))
+        records = [(w["source"], w["target"]) for w in body["model"]["wires"] if w["kind"] == "record"]
+        assert records == [("prep", "prep_2"), ("prep_2", "mask")]  # pasted after prep, read by what read prep
+        page.wait_for_selector(node_root("prep_2"))
+        enter_subgraph(page, "prep_2")
+        widget = page.locator(f'{node_root("prep_2/scaled")} input[data-param="target_max"]')
+        widget.fill("2.5")
+        widget.press("Enter")
+        wait_saves(page, 2)
+        body = api_get(server, "api/graphs/sub")
+        assert inner_value(body, "prep_2", "scaled", "target_max") == 2.5
+        assert inner_value(body, "prep", "scaled", "target_max") == 1.0  # the copy is independent
+        assert opened.errors == []
+
+    def test_save_as_template_then_insert_template_adds_a_third_copy(
+        self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path, templates_dir: Path
+    ) -> None:
+        (graph_dir / "sub.yaml").write_text(SUB_TEXT)
+        opened = open_graph("sub")
+        page = opened.page
+        page.locator(f'{node_root("prep")} .title .cls').click()
+        copy_selection(page)
+        page.keyboard.press("Control+v")
+        wait_saves(page, 1)
+        page.locator(f'{node_root("prep")} .title .cls').click()
+        page.wait_for_selector('.app[data-selection="prep"]')
+        menu_command(page, "graph", "save-template")
+        page.locator('[data-dialog="ask"]').wait_for()
+        assert page.locator("[data-ask-input]").input_value() == "prep"
+        page.locator("[data-ask-input]").fill("prepper")
+        page.locator("[data-ask-confirm]").click()
+        page.locator('[data-toast="info"]', has_text="template prepper saved").wait_for()
+        saved = (templates_dir / "prepper.steps.yaml").read_text()
+        assert saved.startswith("# prepper: grey, scaled — saved from ")
+        assert "# to one channel" in saved and "target_max: 1.0}" in saved
+        assert page.locator(".app").get_attribute("data-saves") == "1"  # a template is no edit of the graph
+        page.locator(f'{node_root("mask")} .title .cls').click()
+        page.wait_for_selector('.app[data-selection="mask"]')
+        open_menu(page, "graph")
+        page.locator('[data-menu="graph"] [data-submenu="insert-template"]').click()
+        page.locator('[data-template="prepper"]').click()
+        wait_saves(page, 2)
+        body = api_get(server, "api/graphs/sub")
+        assert body["text"].count("op: !class:recordstream.flow.subgraph.Subgraph") == 3
+        assert "include" not in body["text"]  # a COPY: nothing links back to the template
+        assert sorted(body["model"]["inside"]) == ["prep", "prep_2", "prepper"]
+        inner = [node["name"] for node in body["model"]["inside"]["prepper"]["nodes"]]
+        assert inner == ["prepper/<in>", "prepper/grey", "prepper/scaled", "prepper/<out>"]
+        page.wait_for_selector(node_root("prepper"))
+        assert (graph_dir / "sub.yaml").read_text() == SUB_TEXT
+        assert opened.errors == []
+
+    def test_move_to_its_own_file_writes_the_steps_file_on_save_and_the_graph_includes_it(
+        self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path
+    ) -> None:
+        (graph_dir / "sub.yaml").write_text(SUB_TEXT)
+        opened = open_graph("sub")
+        page = opened.page
+        page.locator(f'{node_root("prep")} .title .cls').click(button="right")
+        menu = page.locator('[data-context-menu="node"]')
+        menu.wait_for()
+        menu.locator('[data-command="extract"]').click()
+        page.locator('[data-dialog="file"]').wait_for()
+        assert page.locator("[data-file-name]").input_value() == "prep.steps.yaml"
+        page.locator("[data-file-confirm]").click()
+        wait_saves(page, 1)
+        text = api_get(server, "api/graphs/sub")["text"]
+        assert "      steps: {include: prep.steps.yaml}\n" in text and "grey:" not in text
+        assert not (graph_dir / "prep.steps.yaml").exists()  # held by the editor until Save, like any change
+        assert (graph_dir / "sub.yaml").read_text() == SUB_TEXT
+        save_file(page, 2)
+        steps = (graph_dir / "prep.steps.yaml").read_text()
+        assert "grey:" in steps and "# to one channel" in steps and "target_max: 1.0}" in steps
+        assert (graph_dir / "sub.yaml").read_text() == text
+        body = api_get(server, "api/graphs/sub")
+        assert body["model"]["problems"] == []
+        grey = next(node for node in body["model"]["inside"]["prep"]["nodes"] if node["name"] == "prep/grey")
+        assert grey["loc"].startswith(f"{graph_dir / 'prep.steps.yaml'}:")  # located in the steps file
+        assert "prep.steps.yaml" not in [entry["name"] for entry in api_get(server, "api/graphs")]
+        enter_subgraph(page, "prep")
+        assert drawn_nodes(page) == ["prep/<in>", "prep/<out>", "prep/grey", "prep/scaled"]
+        assert opened.errors == []
+
+
+# ------------------------------------------------------------------------------------------------
+# the run panel over a subgraph: its inner nodes are rows under it
+# ------------------------------------------------------------------------------------------------
+
+RUNSUB_TEXT = """\
+stream: !class:recordstream.core.stream.Stream
+  source: !class:recordstream.sources.files.FilesSource
+    files: [{png}]
+  ops:
+    - !class:recordstream.ops.image.ReadImage {{}}
+    - !class:recordstream.flow.subgraph.Subgraph
+      steps:
+        grey:
+          op: !class:recordstream.ops.image.ConvertMode {{mode: L}}
+        scaled:
+          op: !class:recordstream.ops.numpy.Scale
+            {{source_min: 0.0, source_max: 255.0, target_min: 0.0, target_max: 1.0}}
+      result: scaled
+    - !class:recordstream.ops.numpy.Threshold {{low_level: 0.5}}
+"""
+
+RUNSUB_ROWS = ("stream.ops[0]", "stream.ops[1]", "stream.ops[1]/grey", "stream.ops[1]/scaled", "stream.ops[2]")
+
+
+def write_demo_png(path: Path) -> None:
+    """Two bright rectangles on a dark ground — the shape of the editor's demo image, generated here."""
+    pixels = np.zeros((120, 160, 3), dtype=np.uint8)
+    pixels[:] = (20, 20, 30)
+    pixels[20:71, 15:61] = 230
+    pixels[50:106, 90:146] = 200
+    PILImage.fromarray(pixels).save(path)
+
+
+class TestRunPanelInsideSubgraphs:
+    def test_the_run_panel_lists_the_inner_rows_under_their_subgraph_and_a_run_pauses_inside(
+        self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path
+    ) -> None:
+        write_demo_png(graph_dir / "demo.png")
+        (graph_dir / "runsub.yaml").write_text(RUNSUB_TEXT.format(png=graph_dir / "demo.png"))
+        opened = open_graph("runsub")
+        page = opened.page
+        open_run_tab(page)
+        page.locator('[data-action="run"]').click()
+        wait_answers(page, 1)
+        rows = page.locator("[data-run-row]").evaluate_all(
+            "rs => rs.map(r => [r.dataset.runRow, r.dataset.runParent ?? null, r.dataset.depth])"
+        )
+        assert rows == [
+            ["stream.ops[0]", None, "0"],
+            ["stream.ops[1]", None, "0"],
+            ["stream.ops[1]/grey", "stream.ops[1]", "1"],
+            ["stream.ops[1]/scaled", "stream.ops[1]", "1"],
+            ["stream.ops[2]", None, "0"],
+        ]
+        assert page.locator('[data-run-row="stream.ops[1]/grey"] td').first.inner_text().startswith("└ grey")
+        run = api_get(server, f"api/runs/{page.locator('[data-run-panel]').get_attribute('data-run')}")
+        assert run["statuses"] == {name: "ok" for name in RUNSUB_ROWS}
+        for name in RUNSUB_ROWS:
+            assert page.locator(f'[data-run-row="{name}"] [data-field="status"]').inner_text() == "ok", name
+
+        # inside the subgraph, the selected inner node is where the next run pauses
+        enter_subgraph(page, "stream.ops[1]")
+        page.locator(f'{node_root("stream.ops[1]/scaled")} .title .cls').click()
+        page.wait_for_selector('.app[data-selection="stream.ops[1]/scaled"]')
+        page.locator('[data-action="run"]').click()
+        wait_answers(page, 2)
+        assert run_statuses(page, "stream.ops[1]/grey", "stream.ops[1]/scaled") == {
+            "stream.ops[1]/grey": "ok",
+            "stream.ops[1]/scaled": "paused",
+        }
+        run = api_get(server, f"api/runs/{page.locator('[data-run-panel]').get_attribute('data-run')}")
+        assert run["paused_at"] == "stream.ops[1]/scaled"
+        assert run["statuses"]["stream.ops[2]"] == "not reached"
+        assert opened.errors == []
+
+
+# ================================================================================================
+# the fixes after the build (FIXES.md K1–K8 and the review's confirmed items)
+# ================================================================================================
+
+#: The class a document spells a subgraph step with — never offered as a class to add (an empty one is refused).
+SUBGRAPH = "recordstream.flow.subgraph.Subgraph"
+
+CHAIN_TEXT = """\
+# chain — a plain flow graph with four steps and comments
+flow:
+  grey:
+    op: !class:recordstream.ops.image.ConvertMode {mode: L}   # one channel
+  scaled:
+    op: !class:recordstream.ops.numpy.Scale {source_min: 0.0, source_max: 255.0, target_min: 0.0, target_max: 1.0}
+  mask:
+    # keep the bright part
+    op: !class:recordstream.ops.numpy.Threshold {low_level: 0.5}
+  parts:
+    op: !class:recordstream.ops.numpy.ConnectedComponents {}
+outputs: parts
+"""
+
+BLOBS_TEXT = """\
+# blobs — read, prepare inside a subgraph, threshold, count
+flow:
+  read:
+    op: !class:recordstream.ops.image.ReadImage {}
+  prep:
+    from: read
+    op: !class:recordstream.flow.subgraph.Subgraph
+      steps:
+        grey:
+          op: !class:recordstream.ops.image.ConvertMode {mode: L}
+        scaled:
+          op: !class:recordstream.ops.numpy.Scale {source_min: 0.0, source_max: 255.0, target_min: 0.0, target_max: 1.0}
+      result: scaled
+  mask:
+    op: !class:recordstream.ops.numpy.Threshold {low_level: 0.5}
+  parts:
+    op: !class:recordstream.ops.numpy.ConnectedComponents {}
+outputs: parts
+"""
+
+DEMO_TEXT = """\
+stream: !class:recordstream.core.stream.Stream
+  source: !class:recordstream.sources.files.FilesSource
+    files: [{png}]
+  ops:
+    - !class:recordstream.ops.image.ReadImage {{}}
+    - !class:recordstream.ops.image.ConvertMode {{mode: L}}
+    - !class:recordstream.ops.numpy.Scale {{source_min: 0.0, source_max: 255.0, target_min: 0.0, target_max: 1.0}}
+    - !class:recordstream.ops.numpy.Threshold {{low_level: 0.5}}
+    - !class:recordstream.ops.numpy.ConnectedComponents {{}}
+"""
+
+STEPS_FILE_TEXT = """\
+# prep — make the image grey, then scale it to 0..1
+grey:
+  op: !class:recordstream.ops.image.ConvertMode {mode: L}
+scaled:
+  op: !class:recordstream.ops.numpy.Scale {source_min: 0.0, source_max: 255.0, target_min: 0.0, target_max: 1.0}
+"""
+
+
+def steps_of(body: Dict[str, Any]) -> List[str]:
+    """The top level's steps, in the model's order (the host's side left out)."""
+    return [node["name"] for node in body["model"]["nodes"] if node["kind"] != "host"]
+
+
+def rects_overlap(a: Dict[str, float], b: Dict[str, float]) -> bool:
+    return (
+        a["x"] < b["x"] + b["width"]
+        and b["x"] < a["x"] + a["width"]
+        and a["y"] < b["y"] + b["height"]
+        and b["y"] < a["y"] + a["height"]
+    )
+
+
+def flow_point(page: Any, screen: Tuple[float, float]) -> Tuple[float, float]:
+    """The flow coordinates under a screen point at the top level's START viewport (zoom 1, origin 56 px down),
+    snapped to the canvas's 10-px grid as React Flow's ``screenToFlowPosition`` snaps them."""
+    pane = page.locator(".canvas .react-flow").bounding_box()
+    return round((screen[0] - pane["x"]) / 10) * 10, round((screen[1] - pane["y"] - 56) / 10) * 10
+
+
+class TestPasteRightAfterCopy:
+    """K1: Ctrl/Cmd+V pressed while the copy is still on its way is never dropped — it waits for the copy, then
+    pastes."""
+
+    def test_ctrl_v_before_the_copy_answered_waits_for_it_and_pastes(
+        self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path
+    ) -> None:
+        (graph_dir / "chain.yaml").write_text(CHAIN_TEXT)
+        opened = open_graph("chain")
+        page = opened.page
+        held: List[Any] = []  # the copy request, held until the paste key has been pressed
+        page.route("**/api/graphs/chain/copy", lambda route: held.append(route))
+        page.locator(f'{node_root("grey")} .title .cls').click()
+        page.wait_for_selector('.app[data-selection="grey"]')
+        page.keyboard.press("Control+c")
+        while not held:  # each round trip lets playwright hand the intercepted copy request to the route above
+            page.wait_for_function("() => true")
+        page.keyboard.press("Control+v")  # the copy has NOT answered: the paste must wait for it
+        held[0].continue_()
+        wait_saves(page, 1)
+        text = api_get(server, "api/graphs/chain")["text"]
+        assert text.count("op: !class:recordstream.ops.image.ConvertMode {mode: L}   # one channel") == 2
+        assert "  grey_2:\n" in text
+        assert opened.errors == []
+
+
+class TestSubgraphIsMadeNotAdded:
+    """K2: the Subgraph class is left out of the Nodes sidebar, the palette and Add Node ▸ (an empty one is refused);
+    the sidebar says how a subgraph is made instead."""
+
+    def test_no_list_offers_the_subgraph_class_and_the_sidebar_names_the_three_ways(
+        self, open_graph: Callable[[str], Opened], server: str
+    ) -> None:
+        opened = open_graph("wires")
+        page = opened.page
+        wait_palette_loaded(page)
+        assert SUBGRAPH in [spec["class_path"] for spec in api_get(server, "api/palette")]  # the catalogue holds it
+        page.locator('button[data-command="toggle-nodes"]').click()
+        page.locator("[data-nodes-search]").fill("recordstream.flow.subgraph")
+        assert page.locator(f'[data-nodes-entry][data-class="{SUBGRAPH}"]').count() == 0
+        hint = page.locator("[data-nodes-subgraph-hint]").inner_text()
+        assert "Convert selection to subgraph" in hint and "Insert template" in hint and "Insert steps file" in hint
+        page.mouse.dblclick(*EMPTY)
+        page.locator("[data-palette-search]").fill(SUBGRAPH)
+        assert page.locator("[data-palette-list] li").count() == 0
+        page.keyboard.press("Escape")
+        page.mouse.click(*EMPTY, button="right")
+        page.locator('[data-context-menu="pane"] [data-submenu="add-node"]').click()
+        page.locator("[data-add-node-search]").fill(SUBGRAPH)
+        assert page.locator(f'[data-add-node] [data-class="{SUBGRAPH}"]').count() == 0
+        assert opened.errors == []
+
+
+class TestSettingsFollowTheLevel:
+    """K3: the settings tab lists the nodes of the level the canvas shows."""
+
+    def test_inside_a_subgraph_the_settings_tab_lists_and_edits_its_inner_steps(
+        self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path
+    ) -> None:
+        (graph_dir / "sub.yaml").write_text(SUB_TEXT)
+        opened = open_graph("sub")
+        page = opened.page
+        page.locator('[data-tab="settings"]').click()
+        sections = "ss => ss.map(s => s.dataset.formNode)"
+        page.wait_for_selector('[data-form-node="mask"]')
+        assert page.locator("[data-form-node]").evaluate_all(sections) == ["prep", "mask"]
+        enter_subgraph(page, "prep")
+        page.wait_for_selector('[data-form-node="prep/grey"]')
+        assert page.locator("[data-form-node]").evaluate_all(sections) == ["prep/grey", "prep/scaled"]
+        widget = page.locator('[data-form-node="prep/scaled"] input[data-param="target_max"]')
+        widget.fill("2.5")
+        widget.press("Enter")
+        wait_saves(page, 1)
+        assert inner_value(api_get(server, "api/graphs/sub"), "prep", "scaled", "target_max") == 2.5
+        page.locator('[data-crumb=""]').click()
+        page.wait_for_selector('[data-form-node="mask"]')
+        assert page.locator("[data-form-node]").evaluate_all(sections) == ["prep", "mask"]
+        assert opened.errors == []
+
+
+class TestLevelInTheUrl:
+    """K5: ``?level=`` follows the canvas like ``?graph=``; a reload opens that level."""
+
+    def test_the_level_shown_is_in_the_url_and_a_reload_opens_it(
+        self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path
+    ) -> None:
+        (graph_dir / "sub.yaml").write_text(SUB_TEXT)
+        opened = open_graph("sub")
+        page = opened.page
+        assert "level=" not in page.url
+        enter_subgraph(page, "prep")
+        page.wait_for_function("() => new URL(location.href).searchParams.get('level') === 'prep'")
+        assert "graph=sub" in page.url
+        page.reload()
+        wait_ready(page, "sub")
+        page.wait_for_selector('.app[data-level="prep"]')
+        page.wait_for_selector(node_root("prep/<out>"))
+        assert drawn_nodes(page) == ["prep/<in>", "prep/<out>", "prep/grey", "prep/scaled"]
+        page.keyboard.press("Escape")
+        page.wait_for_selector('.app[data-level=""]')
+        page.wait_for_function("() => !new URL(location.href).searchParams.has('level')")
+        assert opened.errors == []
+
+    def test_a_level_the_graph_does_not_hold_opens_the_top(
+        self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path
+    ) -> None:
+        (graph_dir / "sub.yaml").write_text(SUB_TEXT)
+        opened = open_graph("sub")
+        page = opened.page
+        page.goto(f"{server}/?graph=sub&level=nope")
+        wait_ready(page, "sub")
+        page.wait_for_selector(node_root("mask"))
+        assert page.locator(".app").get_attribute("data-level") == ""
+        page.wait_for_function("() => !new URL(location.href).searchParams.has('level')")
+        assert opened.errors == []
+
+
+class TestCutAndDeleteAreOneEdit:
+    """K4 (the page's half): Cut and Delete remove every selected step in ONE request — one edit, one undo."""
+
+    def test_deleting_two_steps_is_one_request_and_one_undo_brings_both_back(
+        self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path
+    ) -> None:
+        (graph_dir / "chain.yaml").write_text(CHAIN_TEXT)
+        opened = open_graph("chain")
+        page = opened.page
+        sent: List[str] = []
+        # every request touching steps, as `METHOD path` (`POST api/graphs/chain/steps/remove`)
+        page.on(
+            "request",
+            lambda request: (
+                sent.append(f"{request.method} {request.url.split('/', 3)[3]}") if "/steps" in request.url else None
+            ),
+        )
+        box_select(page, "grey", "scaled")
+        assert selected_nodes(page) == ["grey", "scaled"]
+        page.keyboard.press("Delete")
+        wait_saves(page, 1)
+        page.wait_for_selector(node_root("grey"), state="detached")
+        assert steps_of(api_get(server, "api/graphs/chain")) == ["mask", "parts"]
+        assert sent == ["POST api/graphs/chain/steps/remove"]  # ONE request, not a DELETE per step
+        page.keyboard.press("Control+z")
+        wait_saves(page, 2)
+        assert api_get(server, "api/graphs/chain")["text"] == CHAIN_TEXT
+        assert opened.errors == []
+
+    def test_cut_removes_the_steps_in_one_edit_and_paste_puts_them_back_elsewhere(
+        self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path
+    ) -> None:
+        (graph_dir / "chain.yaml").write_text(CHAIN_TEXT)
+        opened = open_graph("chain")
+        page = opened.page
+        box_select(page, "grey", "scaled")
+        page.keyboard.press("Control+x")
+        wait_saves(page, 1)
+        assert steps_of(api_get(server, "api/graphs/chain")) == ["mask", "parts"]
+        page.locator(f'{node_root("parts")} .title .cls').click()
+        page.wait_for_selector('.app[data-selection="parts"]')
+        page.keyboard.press("Control+v")
+        wait_saves(page, 2)
+        assert steps_of(api_get(server, "api/graphs/chain")) == ["mask", "parts", "grey", "scaled"]
+        assert opened.errors == []
+
+
+class TestConvertingAGroup:
+    """The review's HIGH item: Convert group to subgraph draws the server's answer — ONE subgraph node at the box's
+    corner — and one undo brings back the steps AND the box."""
+
+    def test_the_group_becomes_one_subgraph_node_where_the_box_was(
+        self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path
+    ) -> None:
+        (graph_dir / "chain.yaml").write_text(CHAIN_TEXT)
+        opened = open_graph("chain")
+        page = opened.page
+        box_select(page, "grey", "scaled")
+        page.keyboard.press("g")
+        wait_saves(page, 1)
+        corner = node_translate(page, "group:g1")
+        page.locator(".group-title").first.click(button="right")
+        page.locator('[data-context-menu="group"] [data-command="group-to-subgraph"]').click()
+        wait_saves(page, 2)
+        page.wait_for_selector(node_root("group_1"))
+        body = api_get(server, "api/graphs/chain")
+        assert steps_of(body) == ["group_1", "mask", "parts"]
+        assert drawn_nodes(page) == ["group_1", "mask", "parts"]
+        assert page.locator(node_root("group_1")).get_attribute("data-kind") == "subgraph"
+        assert body["groups"] == []
+        assert page.locator("[data-group]").count() == 0
+        assert (
+            "  group_1:\n    op: !class:recordstream.flow.subgraph.Subgraph\n"
+            in page.locator("[data-yaml]").inner_text()
+        )
+        assert node_translate(page, "group_1") == corner
+        assert body["positions"]["group_1"] == list(corner)
+        page.keyboard.press("Control+z")
+        wait_saves(page, 3)
+        page.wait_for_selector(node_root("grey"))
+        body = api_get(server, "api/graphs/chain")
+        assert body["text"] == CHAIN_TEXT
+        assert [group["nodes"] for group in body["groups"]] == [["grey", "scaled"]]
+        page.wait_for_selector('[data-group="g1"][data-members="grey,scaled"]')
+        assert opened.errors == []
+
+    def test_converting_boxed_steps_from_the_menu_keeps_the_box_around_the_new_node(
+        self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path
+    ) -> None:
+        """The review's LOW item: the box's members that became the subgraph are replaced by it — never a box naming
+        nodes that are gone."""
+        (graph_dir / "chain.yaml").write_text(CHAIN_TEXT)
+        opened = open_graph("chain")
+        page = opened.page
+        box_select(page, "grey", "scaled")
+        page.keyboard.press("g")
+        wait_saves(page, 1)
+        page.mouse.click(*EMPTY)
+        box_select(page, "grey", "scaled")
+        menu_command(page, "graph", "to-subgraph")
+        wait_saves(page, 2)
+        page.wait_for_selector(node_root("subgraph"))
+        assert [group["nodes"] for group in api_get(server, "api/graphs/chain")["groups"]] == [["subgraph"]]
+        page.wait_for_selector('[data-group="g1"][data-members="subgraph"]')
+        assert opened.errors == []
+
+
+class TestSelectionAfterConvertingListMembers:
+    """The review's MEDIUM item: list members are named by position, so after a conversion the old names belong to
+    OTHER nodes — nothing stays selected, and ▶ Run runs the whole stream."""
+
+    def test_nothing_stays_selected_and_run_runs_every_member(
+        self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path
+    ) -> None:
+        write_demo_png(graph_dir / "demo.png")
+        (graph_dir / "demo.yaml").write_text(DEMO_TEXT.format(png=graph_dir / "demo.png"))
+        opened = open_graph("demo")
+        page = opened.page
+        box_select(page, "stream.ops[1]", "stream.ops[2]")
+        assert page.locator(".app").get_attribute("data-selection") == "stream.ops[1],stream.ops[2]"
+        menu_command(page, "graph", "to-subgraph")
+        wait_saves(page, 1)
+        page.wait_for_selector(f'{node_root("stream.ops[1]")}[data-kind="subgraph"]')
+        page.wait_for_selector('.app[data-selection=""]')
+        assert selected_nodes(page) == []
+        open_run_tab(page)
+        assert "pausing" not in (page.locator('button[data-command="run"]').get_attribute("title") or "")
+        page.locator('[data-action="run"]').click()
+        wait_answers(page, 1)
+        run = api_get(server, f"api/runs/{page.locator('[data-run-panel]').get_attribute('data-run')}")
+        assert run["paused_at"] is None
+        assert run["statuses"]["stream.ops[3]"] == "ok"
+        assert opened.errors == []
+
+
+class TestHoverCard:
+    """The review's MEDIUM item: the hover card stays inside the window and says how many parameters it could not
+    show."""
+
+    def test_a_long_parameter_list_stays_in_the_window_and_counts_the_hidden_ones(
+        self, open_graph: Callable[[str], Opened], server: str
+    ) -> None:
+        opened = open_graph("wires")
+        page = opened.page
+        wait_palette_loaded(page)
+        page.locator('button[data-command="toggle-nodes"]').click()
+        page.locator("[data-nodes-search]").fill(f"{MOD}.TinyWide")
+        page.locator(f'[data-nodes-entry][data-class="{MOD}.TinyWide"]').hover()
+        card = page.locator(f'[data-nodes-card="{MOD}.TinyWide"]')
+        card.wait_for()
+        page.wait_for_selector("[data-card-more]")
+        box = card.bounding_box()
+        assert box["y"] >= 0 and box["y"] + box["height"] <= 900  # inside the 1400×900 window
+        shown = card.locator(".node-card-param").count()
+        assert 0 < shown < WIDE
+        assert card.locator("[data-card-more]").inner_text() == f"+{WIDE - shown} more parameters"
+        for row in card.locator(".node-card-param").all():  # every row drawn is drawn whole
+            row_box = row.bounding_box()
+            assert row_box["y"] + row_box["height"] <= box["y"] + box["height"]
+        page.locator("[data-nodes-search]").fill(f"{MOD}.TinyGain")
+        page.mouse.move(*EMPTY)  # the new list is drawn under a pointer that did not move: move it away, then back
+        page.locator(f'[data-nodes-entry][data-class="{MOD}.TinyGain"]').hover()
+        small = page.locator(f'[data-nodes-card="{MOD}.TinyGain"]')
+        small.wait_for()
+        assert small.locator(".node-card-param").count() == 1
+        assert small.locator("[data-card-more]").count() == 0
+        assert opened.errors == []
+
+
+class TestDocsMarkup:
+    """K7: a docstring's ``literal``, `interpreted` and :role:`target` show as inline code — never the markup."""
+
+    def test_the_sidebar_shows_a_role_and_a_literal_as_inline_code(
+        self, open_graph: Callable[[str], Opened], server: str
+    ) -> None:
+        opened = open_graph("wires")
+        page = opened.page
+        wait_palette_loaded(page)
+        specs = api_get(server, "api/palette")
+        marked = next(
+            spec
+            for spec in specs
+            if re.search(r":[a-z]+:`[^`]+`", spec["doc"]) and "``" in spec["doc"] and "~" not in spec["doc"]
+        )
+        page.locator('button[data-command="toggle-nodes"]').click()
+        page.locator("[data-nodes-search]").fill(marked["class_path"])
+        entry = page.locator(f'[data-nodes-entry][data-class="{marked["class_path"]}"]')
+        doc = entry.locator(".nodes-entry-doc")
+        shown = doc.inner_text()
+        assert "``" not in shown and not re.search(r":[a-z]+:", shown), shown
+        role_match = re.search(r":[a-z]+:`([^`]+)`", marked["doc"])
+        literal_match = re.search(r"``(.+?)``", marked["doc"])
+        assert role_match and literal_match  # the spec was picked for carrying both
+        role, literal = role_match.group(1), literal_match.group(1)
+        codes = doc.locator("code").all_inner_texts()
+        assert role in codes and literal in codes
+        assert opened.errors == []
+
+
+class TestAddGroupFromTheBar:
+    """The review's LOW item: Graph ▸ Add group drops its empty box on empty canvas — never over cards it does not
+    hold."""
+
+    def test_the_box_lands_where_no_card_is(self, open_graph: Callable[[str], Opened], server: str) -> None:
+        positions = api_get(server, "api/graphs/wires")["positions"]
+        # cards across the middle of the view, where the bar's Add group used to centre the box
+        crowded = {**positions, "decode": [100, 330], "gain": [390, 330], "boost": [680, 330], "count": [390, 520]}
+        api_put(server, "api/graphs/wires/positions", {"positions": crowded})
+        opened = open_graph("wires")
+        page = opened.page
+        menu_command(page, "graph", "add-group")
+        wait_saves(page, 1)
+        box = page.locator("[data-group]")
+        assert box.get_attribute("data-members") == ""
+        drawn = box.bounding_box()
+        for name in ("decode", "gain", "boost", "count"):
+            assert not rects_overlap(drawn, page.locator(node_root(name)).bounding_box()), name
+        pane = page.locator(".canvas .react-flow").bounding_box()
+        assert drawn["x"] >= pane["x"] and drawn["x"] + drawn["width"] <= pane["x"] + pane["width"]
+        assert opened.errors == []
+
+
+#: Every card of the level lies inside the canvas's visible pane — what a person sees without scrolling.
+CARDS_IN_VIEW = """() => {
+  const pane = document.querySelector('.canvas .react-flow').getBoundingClientRect();
+  const cards = [...document.querySelectorAll('.react-flow__node')].map((n) => n.getBoundingClientRect());
+  return cards.length > 0 && cards.every((c) =>
+    c.left >= pane.left && c.right <= pane.right && c.top >= pane.top && c.bottom <= pane.bottom);
+}"""
+
+
+def viewport_zoom(page: Any) -> float:
+    style = page.locator(".react-flow__viewport").get_attribute("style") or ""
+    found = re.search(r"scale\(([\d.]+)\)", style)
+    assert found, style
+    return float(found.group(1))
+
+
+class TestEnteringASubgraphIsReadable:
+    """Entering a subgraph shows its WHOLE inside when it fits at a readable zoom (0.8 and up, never above 1),
+    with its ``<in>`` in view either way. Measured before (2026-09-29, a 1440x900 window): the two-step inside of
+    ``prep`` opened at zoom 1 with ``<out>`` off the right edge; at 0.66 (the first version's plain fit) the cards'
+    text was 6-8 px."""
+
+    def test_a_small_inside_opens_whole_at_a_readable_zoom(
+        self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path
+    ) -> None:
+        (graph_dir / "blobs.yaml").write_text(BLOBS_TEXT)
+        opened = open_graph("blobs")
+        page = opened.page
+        enter_subgraph(page, "prep")
+        page.wait_for_selector('.canvas[data-view-level="prep"]')
+        page.wait_for_function(CARDS_IN_VIEW)
+        assert 0.8 <= viewport_zoom(page) <= 1.0
+        assert drawn_nodes(page) == ["prep/<in>", "prep/<out>", "prep/grey", "prep/scaled"]
+        assert opened.errors == []
+
+
+class TestArrangeShowsTheGraph:
+    """View ▸ Arrange lays the level out AND shows it: measured before (2026-09-29), the arranged demo stream
+    stepped down to the bottom-right corner, half behind the side panel and the minimap."""
+
+    def test_after_arrange_every_card_is_in_view(
+        self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path
+    ) -> None:
+        write_demo_png(graph_dir / "demo.png")
+        (graph_dir / "demo.yaml").write_text(DEMO_TEXT.format(png=graph_dir / "demo.png"))
+        opened = open_graph("demo")
+        page = opened.page
+        menu_command(page, "view", "arrange")
+        wait_saves(page, 1)
+        page.wait_for_function(CARDS_IN_VIEW)
+        assert viewport_zoom(page) <= 1.0
+        assert opened.errors == []
+
+
+class TestFileDialogPath:
+    """The review's LOW item: a deep folder's path field shows the folder's own name, not only the start of the path."""
+
+    def test_the_path_field_is_scrolled_to_the_current_folder(
+        self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path
+    ) -> None:
+        deep = graph_dir / ("a_rather_long_folder_name_" * 3) / "and_another_long_folder_for_the_dialog" / "graphs"
+        deep.mkdir(parents=True)
+        (deep / "deep.yaml").write_text(CLIP_TEXT)
+        api_post(server, "api/graphs/open", {"path": str(deep / "deep.yaml")})
+        opened = open_graph("deep")
+        page = opened.page
+        menu_command(page, "file", "open")
+        page.wait_for_selector(f'[data-file-dir="{deep.resolve()}"]')
+        field = page.locator("[data-file-path]")
+        left, width, shown = field.evaluate("e => [e.scrollLeft, e.scrollWidth, e.clientWidth]")
+        assert width > shown  # the path is longer than the field
+        assert left + shown >= width - 1  # scrolled to its end: "…/graphs" is what shows
+        assert opened.errors == []
+
+
+class TestToastsKeepClearOfTheTabs:
+    """The review's LOW item: a toast never covers the side panel's tabs (or the bar), and a click on a tab switches."""
+
+    def test_a_toast_leaves_the_tabs_clickable(self, open_graph: Callable[[str], Opened], graph_dir: Path) -> None:
+        (graph_dir / "chain.yaml").write_text(CHAIN_TEXT)
+        opened = open_graph("chain")
+        page = opened.page
+        page.locator(f'{node_root("grey")} .title .cls').click()
+        copy_selection(page)
+        toast = page.locator("[data-toast]").first.bounding_box()
+        bar = page.locator("header.bar").bounding_box()
+        assert toast["y"] >= bar["y"] + bar["height"]
+        for tab in ("text", "settings", "run"):
+            tab_box = page.locator(f'[data-tab="{tab}"]').bounding_box()
+            assert not rects_overlap(toast, tab_box), tab
+            hit = page.evaluate(
+                "([x, y]) => document.elementFromPoint(x, y)?.dataset.tab ?? null", list(centre(tab_box))
+            )
+            assert hit == tab
+        page.locator('[data-tab="run"]').click()
+        page.locator("[data-run-panel]").wait_for()
+        assert page.locator("[data-toast]").count() >= 1  # the toast was still up when the tab switched
+        assert opened.errors == []
+
+
+# ------------------------------------------------------------------------------------------------
+# K8: the gestures the build shipped without a browser test
+# ------------------------------------------------------------------------------------------------
+
+
+class TestFileMenuGestures:
+    def test_save_as_through_the_file_dialog_writes_the_new_file_and_shows_it(
+        self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path
+    ) -> None:
+        opened = open_graph("pets")
+        page = opened.page
+        edit_low_level(page, "0.9")
+        wait_saves(page, 1)
+        menu_command(page, "file", "save-as")
+        page.locator('[data-dialog="file"]').wait_for()
+        page.wait_for_selector(f'[data-file-mode="save"][data-file-dir="{graph_dir.resolve()}"]')
+        assert page.locator("[data-file-name]").input_value() == "pets.yaml"
+        page.locator("[data-file-name]").fill("pets_copy")
+        page.locator("[data-file-confirm]").click()
+        wait_ready(page, "pets_copy")
+        page.wait_for_selector('.app[data-dirty="false"]')
+        assert "low_level: 0.9}   # the mask" in (graph_dir / "pets_copy.yaml").read_text()
+        assert (graph_dir / "pets.yaml").read_text() == PETS_TEXT  # the old file is left as it was
+        assert "graph=pets_copy" in page.url
+        assert "pets_copy" in page.locator("select[data-graph-picker] option").evaluate_all(
+            "os => os.map(o => o.value)"
+        )
+        assert opened.errors == []
+
+    def test_revert_from_the_file_menu_drops_the_unsaved_edit(
+        self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path
+    ) -> None:
+        opened = open_graph("pets")
+        page = opened.page
+        edit_low_level(page, "0.9")
+        wait_saves(page, 1)
+        menu_command(page, "file", "revert")
+        page.locator('[data-dialog="ask"]').wait_for()
+        page.locator("[data-ask-confirm]").click()
+        wait_saves(page, 2)
+        page.wait_for_selector('.app[data-dirty="false"]')
+        assert api_get(server, "api/graphs/pets")["text"] == PETS_TEXT
+        assert page.locator(f'{node_root("stream.ops[1]")} input[data-param="low_level"]').input_value() == "0.5"
+        assert page.locator("[data-yaml]").inner_text().rstrip("\n") == PETS_TEXT.rstrip("\n")
+        assert opened.errors == []
+
+    def test_insert_steps_file_adds_a_subgraph_step_that_includes_it(
+        self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path
+    ) -> None:
+        (graph_dir / "prep.steps.yaml").write_text(STEPS_FILE_TEXT)
+        opened = open_graph("wires")
+        page = opened.page
+        page.mouse.click(*EMPTY, button="right")
+        page.locator('[data-context-menu="pane"] [data-command="insert-steps"]').click()
+        page.locator('[data-dialog="file"]').wait_for()
+        page.wait_for_selector(f'[data-file-mode="open"][data-file-dir="{graph_dir.resolve()}"]')
+        page.locator('[data-file-entry="prep.steps.yaml"]').click()
+        page.locator("[data-file-confirm]").click()
+        wait_saves(page, 1)
+        body = api_get(server, "api/graphs/wires")
+        assert "steps: {include: prep.steps.yaml}" in body["text"]
+        assert [node["name"] for node in body["model"]["inside"]["prep"]["nodes"]] == [
+            "prep/<in>",
+            "prep/grey",
+            "prep/scaled",
+            "prep/<out>",
+        ]
+        page.wait_for_selector(f'{node_root("prep")}[data-kind="subgraph"]')
+        assert (graph_dir / "wires.yaml").read_text() == WIRES_TEXT
+        assert opened.errors == []
+
+    def test_leaving_the_page_while_unsaved_asks_first(self, open_graph: Callable[[str], Opened]) -> None:
+        opened = open_graph("pets")
+        page = opened.page
+        asked: List[str] = []
+
+        def answer(dialog: Any) -> None:  # playwright.sync_api.Dialog: record what was asked, then leave
+            asked.append(dialog.type)
+            dialog.accept()
+
+        page.on("dialog", answer)
+        page.locator(f'{node_root("stream.ops[1]")} .title .cls').click()  # a gesture, as a person makes one
+        page.reload()
+        wait_ready(page, "pets")
+        assert asked == []  # nothing unsaved: no question
+        edit_low_level(page, "0.9")
+        wait_saves(page, 1)
+        page.reload()
+        wait_ready(page, "pets")
+        assert asked == ["beforeunload"]
+        assert opened.errors == []
+
+
+class TestGroupGestures:
+    def test_resizing_a_box_over_another_node_takes_it_in(
+        self, open_graph: Callable[[str], Opened], server: str
+    ) -> None:
+        opened = open_graph("wires")
+        page = opened.page
+        box_select(page, "decode", "gain")
+        page.keyboard.press("g")
+        wait_saves(page, 1)
+        box = page.locator('[data-group="g1"]')
+        assert box.get_attribute("data-members") == "decode,gain"
+        grip = page.locator('[data-group="g1"] [data-group-grip]').bounding_box()
+        boost = page.locator(node_root("boost")).bounding_box()
+        drag(
+            page,
+            centre(grip),
+            (boost["x"] + boost["width"] + 30, max(centre(grip)[1], boost["y"] + boost["height"] + 30)),
+        )
+        wait_saves(page, 2)
+        page.wait_for_selector('[data-group="g1"][data-members="decode,gain,boost"]')
+        group = api_get(server, "api/graphs/wires")["groups"][0]
+        assert group["nodes"] == ["decode", "gain", "boost"]
+        assert len(group["bounds"]) == 4
+        assert opened.errors == []
+
+    def test_dragging_a_node_into_a_box_adds_it_and_out_again_lets_it_go(
+        self, open_graph: Callable[[str], Opened], server: str
+    ) -> None:
+        opened = open_graph("wires")
+        page = opened.page
+        page.mouse.click(400, 450, button="right")
+        page.locator('[data-context-menu="pane"] [data-command="add-group"]').click()
+        wait_saves(page, 1)
+        box = page.locator("[data-group]")
+        assert box.get_attribute("data-members") == ""
+        drawn = box.bounding_box()
+        title = centre(page.locator(f'{node_root("boost")} .title').bounding_box())
+        drag(page, title, (drawn["x"] + drawn["width"] / 2, drawn["y"] + 90))
+        wait_saves(page, 2)
+        page.wait_for_selector('[data-group][data-members="boost"]')
+        assert api_get(server, "api/graphs/wires")["groups"][0]["nodes"] == ["boost"]
+        inside = centre(page.locator(f'{node_root("boost")} .title').bounding_box())
+        drag(page, inside, title)
+        wait_saves(page, 3)
+        page.wait_for_selector('[data-group][data-members=""]')
+        group = api_get(server, "api/graphs/wires")["groups"][0]
+        assert group["nodes"] == [] and len(group["bounds"]) == 4  # the box stays where it was, empty
+        assert opened.errors == []
+
+
+class TestAddingFromMenusAndTheSidebar:
+    def test_add_node_from_the_right_click_menu_adds_the_class_where_the_canvas_was_clicked(
+        self, open_graph: Callable[[str], Opened], server: str
+    ) -> None:
+        opened = open_graph("wires")
+        page = opened.page
+        wait_palette_loaded(page)
+        page.mouse.click(500, 500, button="right")
+        page.locator('[data-context-menu="pane"] [data-submenu="add-node"]').click()
+        page.locator("[data-add-node-search]").fill("recordstream.ops.numpy.Threshold")
+        page.locator('[data-add-node] [data-class="recordstream.ops.numpy.Threshold"]').click()
+        wait_saves(page, 1)
+        body = api_get(server, "api/graphs/wires")
+        assert "  threshold:\n    op: !class:recordstream.ops.numpy.Threshold {}\n    from: count\n" in body["text"]
+        at = flow_point(page, (500, 500))
+        assert body["positions"]["threshold"] == [pytest.approx(at[0], abs=1), pytest.approx(at[1], abs=1)]
+        page.wait_for_selector(node_root("threshold"))
+        assert opened.errors == []
+
+    def test_dragging_a_sidebar_entry_onto_the_canvas_adds_it_at_the_drop_point(
+        self, open_graph: Callable[[str], Opened], server: str
+    ) -> None:
+        opened = open_graph("wires")
+        page = opened.page
+        wait_palette_loaded(page)
+        page.locator('button[data-command="toggle-nodes"]').click()
+        page.locator("[data-nodes-search]").fill("recordstream.ops.numpy.Threshold")
+        entry = page.locator('[data-nodes-entry][data-class="recordstream.ops.numpy.Threshold"]')
+        pane = page.locator(".canvas .react-flow__pane")
+        pane_box = pane.bounding_box()
+        entry.drag_to(pane, target_position={"x": 300, "y": 450})
+        wait_saves(page, 1)
+        body = api_get(server, "api/graphs/wires")
+        assert "  threshold:\n    op: !class:recordstream.ops.numpy.Threshold {}\n" in body["text"]
+        at = flow_point(page, (pane_box["x"] + 300, pane_box["y"] + 450))
+        assert body["positions"]["threshold"] == [pytest.approx(at[0], abs=1), pytest.approx(at[1], abs=1)]
+        page.wait_for_selector(node_root("threshold"))
+        assert opened.errors == []
+
+
+# ================================================================================================
+# round 2 (DESIGN2): unsaved work survives a stop, op lists are editable, Shift+click adds
+# ================================================================================================
+
+#: What the last session's edit made of the pets document's ``Threshold`` line.
+PETS_KEPT_LINE = "low_level: 0.9}   # the mask"
+
+
+#: What the last session's edit made of ``fresh``'s one step (New… wrote ``fresh.yaml`` with ``{label: probe}``).
+FRESH_KEPT_LINE = "{label: edited}"
+
+
+def keep_unsaved_work(graph_dir: Path, templates_dir: Path) -> Path:
+    """What a stop leaves behind, written by the editor's own code: a Studio over the folder edits ``pets`` (unsaved),
+    makes ``fresh`` with New… (which WRITES ``fresh.yaml``) and edits its step, and edits ``clip``, then
+    :meth:`Studio.stash` — what ``streamstudio stop`` runs — keeps them. ``clip.yaml`` then changes on disk, as if
+    edited elsewhere after the stop."""
+    studio = Studio(graph_dir, templates_dir=templates_dir)
+    studio.set_param("pets", "stream.ops[1]", "low_level", 0.9)
+    studio.new_graph("fresh", "flow")
+    assert (graph_dir / "fresh.yaml").read_text() == starter_text("flow", "fresh")
+    studio.set_param("fresh", "probe", "label", "edited")
+    studio.set_param("clip", "clip", "limit", 2.0)
+    assert sorted(Path(kept).name for kept in studio.stash()) == ["clip.yaml", "fresh.yaml", "pets.yaml"]
+    (graph_dir / "clip.yaml").write_text(CLIP_TEXT + "# changed on disk after the stop\n")
+    return graph_dir / RECOVERY_FILE
+
+
+def open_asking(browser: Any, server: str, name: str) -> Opened:
+    """Open ``?graph=<name>`` on a folder holding a recovery file: the page asks before it loads any graph, so this
+    waits for the question, never for the graph."""
+    page = browser.new_page(viewport={"width": 1400, "height": 900})
+    errors: List[str] = []
+    page.on("pageerror", lambda exc: errors.append(f"pageerror: {exc}"))
+    page.on("console", lambda msg: errors.append(f"console.error: {msg.text}") if msg.type == "error" else None)
+    page.goto(f"{server}/?graph={name}")
+    page.wait_for_selector('.app[data-recovery="asking"] [data-dialog="recovery"]')
+    return Opened(page, errors)
+
+
+def picker_labels(page: Any) -> Dict[str, str]:
+    """Every option of the graph dropdown, by graph name: ``● pets · graph`` while it holds unsaved changes."""
+    options = page.locator("select[data-graph-picker] option").evaluate_all("os => os.map(o => [o.value, o.text])")
+    return {value: text for value, text in options}
+
+
+class TestUnsavedWorkOfTheLastSession:
+    """DESIGN2 §1 — the user's item 1: "streamstudio stop or restart should save the file to a tmp workspace file
+    (hidden), when opening that same workspace streamstudio should ask to start from the tmp file or the original"."""
+
+    def test_the_page_asks_first_and_restore_brings_the_unsaved_work_back(
+        self, browser: Any, server: str, graph_dir: Path, templates_dir: Path
+    ) -> None:
+        recovery = keep_unsaved_work(graph_dir, templates_dir)
+        opened = open_asking(browser, server, "pets")
+        page = opened.page
+        try:
+            dialog = page.locator('[data-dialog="recovery"]')
+            assert dialog.locator(".modal-title").inner_text().startswith("Unsaved work from the last session (")
+            rows = page.locator("[data-recovery-graph]").evaluate_all(
+                "rs => rs.map(r => [r.dataset.recoveryGraph, r.dataset.recoveryDisk, r.dataset.changedOnDisk,"
+                " r.innerText.replace(/\\s+/g, ' ').trim()])"
+            )
+            # every kept graph is a FILE with changes: New… wrote fresh.yaml, so it is "changed" like the others
+            assert sorted(rows) == [
+                ["clip", "changed", "true", "clip.yaml changed — the file on disk changed after the editor stopped"],
+                ["fresh", "unchanged", "false", "fresh.yaml changed"],
+                ["pets", "unchanged", "false", "pets.yaml changed"],
+            ]
+            assert page.locator(NODE).count() == 0  # nothing is loaded while the question is open
+            page.keyboard.press("Escape")  # a choice is required: Escape does not answer it
+            assert page.locator('.app[data-recovery="asking"] [data-dialog="recovery"]').count() == 1
+
+            page.locator('[data-recovery-action="restore"]').click()
+            page.wait_for_selector('.app[data-recovery="restored"]')
+            wait_ready(page, "pets")
+            assert PETS_KEPT_LINE in page.locator("[data-yaml]").inner_text()
+            assert page.locator(".app").get_attribute("data-dirty") == "true"
+            labels = picker_labels(page)
+            assert {name for name, label in labels.items() if label.startswith("● ")} == {"clip", "fresh", "pets"}
+            assert labels["wires"] == "wires · flow"
+            # nothing reached the disk: the files are as the stop left them, and the recovery file is gone
+            assert (graph_dir / "pets.yaml").read_text() == PETS_TEXT
+            assert (graph_dir / "fresh.yaml").read_text() == starter_text(
+                "flow", "fresh"
+            )  # New wrote it; the edit is held
+            assert not recovery.exists()
+            assert PETS_KEPT_LINE in api_get(server, "api/graphs/pets")["text"]
+            assert FRESH_KEPT_LINE in api_get(server, "api/graphs/fresh")["text"]
+            assert listed_dirty(server) == {
+                "clip": True,
+                "fresh": True,
+                "mismatch": False,
+                "pets": True,
+                "wires": False,
+            }
+            assert api_get(server, "api/workspace")["recovery"] is None
+            assert opened.errors == []
+        finally:
+            page.close()
+
+    def test_open_the_saved_files_asks_once_more_then_drops_the_kept_work(
+        self, browser: Any, server: str, graph_dir: Path, templates_dir: Path
+    ) -> None:
+        recovery = keep_unsaved_work(graph_dir, templates_dir)
+        opened = open_asking(browser, server, "pets")
+        page = opened.page
+        try:
+            page.locator('[data-recovery-action="discard"]').click()
+            ask = page.locator('[data-dialog="ask"]')
+            ask.wait_for()
+            assert "Discard the unsaved work of the last session?" in ask.inner_text()
+            assert "This cannot be undone." in ask.inner_text()
+            page.locator("[data-ask-cancel]").click()  # Cancel goes back to the question, the file untouched
+            page.wait_for_selector('.app[data-recovery="asking"] [data-dialog="recovery"]')
+            assert recovery.is_file()
+
+            page.locator('[data-recovery-action="discard"]').click()
+            page.locator("[data-ask-confirm]").click()
+            page.wait_for_selector('.app[data-recovery="discarded"]')
+            wait_ready(page, "pets")
+            assert page.locator("[data-yaml]").inner_text().rstrip("\n") == PETS_TEXT.rstrip("\n")
+            assert page.locator(".app").get_attribute("data-dirty") == "false"
+            labels = picker_labels(page)
+            assert not any(label.startswith("● ") for label in labels.values())
+            # New… wrote fresh.yaml: dropping the kept work drops its edit, never the file
+            assert labels["fresh"] == "fresh · flow"
+            assert (graph_dir / "fresh.yaml").read_text() == starter_text("flow", "fresh")
+            assert FRESH_KEPT_LINE not in api_get(server, "api/graphs/fresh")["text"]
+            assert not recovery.exists()
+            assert (graph_dir / "pets.yaml").read_text() == PETS_TEXT
+            assert opened.errors == []
+        finally:
+            page.close()
+
+
+#: The one class these tests add to an op list: a pass-through op, so every chain around it still checks.
+PROBE = "recordstream.ops.debug.PrintRecordOp"
+
+
+class TestOpListsAreEditable:
+    """DESIGN2 §3 — the user's item 3 ("yes"): on a Stream the Nodes sidebar adds MEMBERS to its ``ops`` list and
+    Delete removes them. Before: both were refused with ``'stream.ops[1]' is not a flow step (the steps are: [])``."""
+
+    def test_add_after_a_member_delete_two_in_one_undo_and_append_at_the_end(
+        self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path
+    ) -> None:
+        write_demo_png(graph_dir / "demo.png")
+        demo = DEMO_TEXT.format(png=graph_dir / "demo.png")
+        (graph_dir / "demo.yaml").write_text(demo)
+        # the positions the editor laid out, HELD (as after a drag): the later members must keep theirs when renumbered
+        before = api_get(server, "api/graphs/demo")["positions"]
+        api_put(server, "api/graphs/demo/positions", {"positions": before})
+        opened = open_graph("demo")
+        page = opened.page
+        wait_palette_loaded(page)
+        sent: List[str] = []
+        page.on(
+            "request",
+            lambda request: (
+                sent.append(f"{request.method} {request.url.split('/', 3)[3]}") if "/steps" in request.url else None
+            ),
+        )
+        page.locator('button[data-command="toggle-nodes"]').click()
+        page.locator("[data-nodes-search]").fill(PROBE)
+        entry = page.locator(f'[data-nodes-entry][data-class="{PROBE}"]')
+
+        # 1. stream.ops[1] selected: a click inserts the member right after it
+        page.locator(f'{node_root("stream.ops[1]")} .title .cls').click()
+        page.wait_for_selector('.app[data-selection="stream.ops[1]"]')
+        assert page.locator("[data-nodes-target]").get_attribute("data-nodes-target") == "after"
+        assert "Click adds after stream.ops[1]" in page.locator("[data-nodes-sidebar] .nodes-foot").inner_text()
+        entry.click()
+        wait_saves(page, 1)
+        added = api_get(server, "api/graphs/demo")
+        convert = "    - !class:recordstream.ops.image.ConvertMode {mode: L}\n"
+        assert convert + f"    - !class:{PROBE} {{}}\n" in added["text"]
+        assert added["text"] == demo.replace(convert, convert + f"    - !class:{PROBE} {{}}\n")
+        assert sent == ["POST api/graphs/demo/steps"]
+        page.wait_for_selector(f'{node_root("stream.ops[2]")}[data-class="{PROBE}"]')
+        # the members after it moved down one name and kept their places; the new one is not drawn on top of them
+        positions = added["positions"]
+        for index in (0, 1):
+            assert positions[f"stream.ops[{index}]"] == before[f"stream.ops[{index}]"]
+        for index in (2, 3, 4):
+            assert positions[f"stream.ops[{index + 1}]"] == before[f"stream.ops[{index}]"], index
+        assert positions["stream.ops[2]"] not in [before[f"stream.ops[{index}]"] for index in range(5)]
+        assert node_translate(page, "stream.ops[3]") == tuple(before["stream.ops[2]"])
+        assert (graph_dir / "demo.yaml").read_text() == demo  # held by the editor until Save
+
+        # 2. two members selected, Delete: ONE request, and one undo brings both back
+        page.locator(f'{node_root("stream.ops[2]")} .title .cls').click()
+        page.locator(f'{node_root("stream.ops[3]")} .title .cls').click(modifiers=["Shift"])
+        page.wait_for_selector('.app[data-selection="stream.ops[2],stream.ops[3]"]')
+        sent.clear()
+        page.keyboard.press("Delete")
+        wait_saves(page, 2)
+        removed = api_get(server, "api/graphs/demo")
+        scale = "    - !class:recordstream.ops.numpy.Scale"
+        assert PROBE not in removed["text"] and scale not in removed["text"]
+        assert [node["name"] for node in removed["model"]["nodes"] if node["name"].startswith("stream.ops[")] == [
+            f"stream.ops[{index}]" for index in range(4)
+        ]
+        assert sent == ["POST api/graphs/demo/steps/remove"]
+        page.wait_for_selector('.app[data-selection=""]')  # members are named by position: nothing stays selected
+        page.keyboard.press("Control+z")
+        wait_saves(page, 3)
+        assert api_get(server, "api/graphs/demo")["text"] == added["text"]
+        page.wait_for_selector(f'{node_root("stream.ops[2]")}[data-class="{PROBE}"]')
+
+        # 3. nothing selected: a click appends the member at the end of the list
+        page.wait_for_selector('.app[data-selection=""]')
+        assert page.locator("[data-nodes-target]").get_attribute("data-nodes-target") == "end"
+        assert "Click adds at the end of stream.ops" in page.locator("[data-nodes-sidebar] .nodes-foot").inner_text()
+        entry.click()
+        wait_saves(page, 4)
+        appended = api_get(server, "api/graphs/demo")["text"]
+        assert appended == added["text"] + f"    - !class:{PROBE} {{}}\n"
+        page.wait_for_selector(f'{node_root("stream.ops[6]")}[data-class="{PROBE}"]')
+        assert (graph_dir / "demo.yaml").read_text() == demo
+        assert opened.errors == []
+
+
+class TestShiftClickAdds:
+    """DESIGN2 §4 — the user's item 4 ("match", ComfyUI's "Ctrl/Shift + Click — Add clicked node to selection").
+    Before (a Mac): click ``mask``, Shift+click ``grey`` → the selection stayed ``mask``."""
+
+    def test_shift_click_adds_a_card_and_shift_drag_on_the_pane_still_draws_a_box(
+        self, open_graph: Callable[[str], Opened], graph_dir: Path
+    ) -> None:
+        (graph_dir / "chain.yaml").write_text(CHAIN_TEXT)
+        opened = open_graph("chain")
+        page = opened.page
+        page.locator(f'{node_root("mask")} .title .cls').click()
+        page.wait_for_selector('.app[data-selection="mask"]')
+        page.locator(f'{node_root("grey")} .title .cls').click(modifiers=["Shift"])
+        page.wait_for_selector('.app[data-selection="grey,mask"]')
+        assert selected_nodes(page) == ["grey", "mask"]
+        # Shift+click never takes a card OUT: on a selected card it leaves the selection as it is
+        page.locator(f'{node_root("mask")} .title .cls').click(modifiers=["Shift"])
+        assert page.locator(".app").get_attribute("data-selection") == "grey,mask"
+        assert selected_nodes(page) == ["grey", "mask"]
+        # Shift + drag on EMPTY canvas is still React Flow's box
+        page.mouse.click(*EMPTY)
+        page.wait_for_selector('.app[data-selection=""]')
+        box_select(page, "scaled", "mask")
+        assert selected_nodes(page) == ["mask", "scaled"]
+        assert sorted((page.locator(".app").get_attribute("data-selection") or "").split(",")) == ["mask", "scaled"]
+        assert page.locator(".app").get_attribute("data-saves") == "0"  # a selection writes nothing
+        assert (graph_dir / "chain.yaml").read_text() == CHAIN_TEXT
+        assert opened.errors == []
+
+
+# ================================================================================================
+# round 2, the review's findings (R1 … R12, P1 … P10): each test names the finding it pins
+# ================================================================================================
+
+#: Chrome's console line for a request refused on purpose by the session guard (the editor restarted).
+REFUSED_409 = "console.error: Failed to load resource: the server responded with a status of 409 (CONFLICT)"
+#: … and for a recovery answer another tab already gave.
+REFUSED_404 = "console.error: Failed to load resource: the server responded with a status of 404 (NOT FOUND)"
+
+
+@pytest.fixture
+def served(graph_dir: Path, templates_dir: Path) -> Iterator[Tuple[str, Any]]:
+    """The ``server`` fixture, with the app itself — a test restarts the editor IN PLACE: what ``streamstudio restart``
+    does as seen from a page (the same address, a new editor with a new session, the unsaved work kept on the way
+    out)."""
+    app = create_app(graph_dir, templates_dir=templates_dir)
+    httpd = make_server("127.0.0.1", 0, app, threaded=True)
+    thread = threading.Thread(target=httpd.serve_forever, name="streamstudio-canvas-restart", daemon=True)
+    thread.start()
+    yield f"http://127.0.0.1:{httpd.server_port}", app
+    httpd.shutdown()
+    thread.join(timeout=10)
+
+
+def restart_in_place(app: Any, graph_dir: Path, templates_dir: Path) -> None:
+    """Stop the editor the way a stop does (:meth:`Studio.stash`), then serve a NEW one on the same address."""
+    app.extensions[EXTENSION].stash()
+    app.extensions[EXTENSION] = Studio(graph_dir, templates_dir=templates_dir)
+
+
+def open_page(browser: Any, url: str, name: str) -> Opened:
+    page = browser.new_page(viewport={"width": 1400, "height": 900})
+    errors: List[str] = []
+    page.on("pageerror", lambda exc: errors.append(f"pageerror: {exc}"))
+    page.on("console", lambda msg: errors.append(f"console.error: {msg.text}") if msg.type == "error" else None)
+    page.goto(f"{url}/?graph={name}")
+    return Opened(page, errors)
+
+
+class TestATabLeftOpenAcrossARestart:
+    """R1 / P1 (high): the user's own case — ``streamstudio restart`` while the editor tab stays open. Measured before:
+    the tab edited the NEW editor's document (read from disk), so the kept ``0.9`` vanished on the next change, Save
+    wrote the file without it and said clean, and the next stop replaced the kept version."""
+
+    def test_the_next_edit_changes_nothing_and_the_tab_asks_the_recovery_question(
+        self, browser: Any, served: Tuple[str, Any], graph_dir: Path, templates_dir: Path
+    ) -> None:
+        url, app = served
+        opened = open_page(browser, url, "pets")
+        page = opened.page
+        try:
+            wait_ready(page, "pets")
+            edit_low_level(page, "0.9")
+            wait_saves(page, 1)
+            restart_in_place(app, graph_dir, templates_dir)
+            widget = page.locator(f'{node_root("stream.ops[0]")} input[data-param="target_max"]')
+            widget.fill("3.0")
+            widget.press("Enter")
+            page.wait_for_selector('.app[data-recovery="asking"] [data-dialog="recovery"]')
+            rows = page.locator("[data-recovery-graph]").evaluate_all("rs => rs.map(r => r.dataset.recoveryGraph)")
+            assert rows == ["pets"]
+            # nothing reached the new editor, nor the disk
+            assert listed_dirty(url)["pets"] is False
+            assert (graph_dir / "pets.yaml").read_text() == PETS_TEXT
+            page.locator('[data-recovery-action="restore"]').click()
+            page.wait_for_selector('.app[data-recovery="restored"]')
+            wait_ready(page, "pets")
+            shown = page.locator("[data-yaml]").inner_text()
+            assert PETS_KEPT_LINE in shown and "target_max: 3.0" not in shown
+            assert page.locator(".app").get_attribute("data-dirty") == "true"
+            assert opened.errors == [REFUSED_409]
+        finally:
+            page.close()
+
+    def test_a_save_changes_nothing_and_the_kept_work_survives_the_next_stop(
+        self, browser: Any, served: Tuple[str, Any], graph_dir: Path, templates_dir: Path
+    ) -> None:
+        url, app = served
+        opened = open_page(browser, url, "pets")
+        page = opened.page
+        try:
+            wait_ready(page, "pets")
+            edit_low_level(page, "0.9")
+            wait_saves(page, 1)
+            restart_in_place(app, graph_dir, templates_dir)
+            page.keyboard.press("Control+s")
+            page.wait_for_selector('.app[data-recovery="asking"] [data-dialog="recovery"]')
+            assert (graph_dir / "pets.yaml").read_text() == PETS_TEXT  # Save did not write the disk version
+            app.extensions[EXTENSION].stash()  # the next stop, nobody having answered
+            kept = json.loads((graph_dir / RECOVERY_FILE).read_text())
+            assert [entry["name"] for entry in kept["graphs"]] == ["pets"]
+            assert PETS_KEPT_LINE in next(iter(kept["graphs"][0]["texts"].values()))
+            assert opened.errors == [REFUSED_409]
+        finally:
+            page.close()
+
+
+class TestTheQuestionAnsweredInAnotherTab:
+    """R12 / P4 (b): measured before, a second tab still showing the question was stuck once the first had answered —
+    Restore and Open the saved files both refused (``no unsaved work``), and Escape did nothing."""
+
+    @pytest.mark.parametrize("second", ["restore", "discard"])
+    def test_the_second_tab_drops_the_question_and_loads_the_graphs(
+        self, browser: Any, server: str, graph_dir: Path, templates_dir: Path, second: str
+    ) -> None:
+        keep_unsaved_work(graph_dir, templates_dir)
+        first, other = open_asking(browser, server, "pets"), open_asking(browser, server, "pets")
+        try:
+            first.page.locator('[data-recovery-action="restore"]').click()
+            wait_ready(first.page, "pets")
+            other.page.locator(f'[data-recovery-action="{second}"]').click()
+            if second == "discard":
+                other.page.locator("[data-ask-confirm]").click()
+            other.page.wait_for_selector('.app[data-recovery="none"]')
+            wait_ready(other.page, "pets")
+            assert PETS_KEPT_LINE in other.page.locator("[data-yaml]").inner_text()  # what the editor holds
+            assert "already answered" in other.page.locator('[data-toast="info"]').last.inner_text()
+            assert other.errors == [REFUSED_404]
+        finally:
+            first.page.close()
+            other.page.close()
+
+
+class TestTheQuestionKeepsTheKeyboard:
+    """P5: measured before, Tab reached the menu bar and the graph picker behind the question (a graph was made, or
+    loaded from disk, before it was answered); P10: the irreversible discard had the focus on Discard."""
+
+    def test_tab_stays_in_the_dialog_and_the_page_behind_it_is_inert(
+        self, browser: Any, server: str, graph_dir: Path, templates_dir: Path
+    ) -> None:
+        keep_unsaved_work(graph_dir, templates_dir)
+        opened = open_asking(browser, server, "pets")
+        page = opened.page
+        try:
+            in_dialog = "() => document.activeElement?.closest('[data-dialog]')?.dataset.dialog ?? null"
+            for _ in range(6):
+                page.keyboard.press("Tab")
+                assert page.evaluate(in_dialog) == "recovery"
+            page.keyboard.press("Shift+Tab")
+            assert page.evaluate(in_dialog) == "recovery"
+            assert page.locator("header.bar").get_attribute("inert") is not None
+            assert page.locator("main.body").get_attribute("inert") is not None
+            assert page.locator(".app").get_attribute("data-graph") == ""
+            page.locator('[data-recovery-action="restore"]').click()
+            wait_ready(page, "pets")
+            assert page.locator("header.bar").get_attribute("inert") is None
+            assert opened.errors == []
+        finally:
+            page.close()
+
+    def test_the_discard_question_names_the_files_and_keeps_the_focus_on_cancel(
+        self, browser: Any, server: str, graph_dir: Path, templates_dir: Path
+    ) -> None:
+        recovery = keep_unsaved_work(graph_dir, templates_dir)
+        opened = open_asking(browser, server, "pets")
+        page = opened.page
+        try:
+            page.locator('[data-recovery-action="discard"]').click()
+            ask = page.locator('[data-dialog="ask"]')
+            ask.wait_for()
+            assert "The unsaved changes of pets.yaml, fresh.yaml and clip.yaml are lost." in ask.inner_text()
+            assert page.evaluate("() => document.activeElement?.hasAttribute('data-ask-cancel')") is True
+            page.keyboard.press("Enter")  # a stray Enter cancels: the kept work is still there
+            page.wait_for_selector('.app[data-recovery="asking"] [data-dialog="recovery"]')
+            assert recovery.is_file()
+            assert opened.errors == []
+        finally:
+            page.close()
+
+    def test_an_unreadable_recovery_file_is_said_to_be_moved_aside_never_lost(
+        self, browser: Any, server: str, graph_dir: Path
+    ) -> None:
+        """R9: measured before, the question said "This cannot be undone." of a file that is only moved aside."""
+        (graph_dir / RECOVERY_FILE).write_text("{not json")
+        opened = open_asking(browser, server, "pets")
+        page = opened.page
+        try:
+            aside = graph_dir / ".streamstudio-workspace.broken.json"
+            assert f"moves that file aside to {aside}" in page.locator("[data-recovery-error]").inner_text()
+            page.locator('[data-recovery-action="discard"]').click()
+            ask = page.locator('[data-dialog="ask"]')
+            assert "Set the unreadable unsaved work aside?" in ask.inner_text()
+            assert "cannot be undone" not in ask.inner_text()
+            page.locator("[data-ask-confirm]").click()
+            wait_ready(page, "pets")
+            assert aside.read_text() == "{not json"
+            assert opened.errors == []
+        finally:
+            page.close()
+
+
+class TestTheRowsSayWhatTheDiskHolds:
+    """R10, R11: a kept graph whose file was deleted says so; a file of another folder is named by its way there."""
+
+    def test_a_deleted_file_and_a_file_of_another_folder(
+        self, browser: Any, server: str, graph_dir: Path, templates_dir: Path, tmp_path_factory: pytest.TempPathFactory
+    ) -> None:
+        other = tmp_path_factory.mktemp("other") / "pets.yaml"
+        other.write_text(PETS_TEXT)
+        studio = Studio(graph_dir, templates_dir=templates_dir)
+        studio.set_param("pets", "stream.ops[1]", "low_level", 0.9)
+        studio.open_graph(str(other))
+        studio.set_param("pets~2", "stream.ops[1]", "low_level", 0.8)
+        studio.stash()
+        (graph_dir / "pets.yaml").unlink()
+        opened = open_asking(browser, server, "wires")
+        page = opened.page
+        try:
+            rows = page.locator("[data-recovery-graph]").evaluate_all(
+                "rs => rs.map(r => [r.dataset.recoveryDisk, r.querySelector('.recovery-file').innerText])"
+            )
+            assert rows[0] == ["gone", "pets.yaml"]
+            assert rows[1] == ["unchanged", f"../{other.parent.name}/pets.yaml"]
+            note = page.locator('[data-recovery-graph="pets"] .recovery-note').inner_text()
+            assert note == "changed — the file was deleted or moved away after the editor stopped; Save writes it again"
+            assert opened.errors == []
+        finally:
+            page.close()
+
+
+PIPED_TEXT = """\
+stream: !class:recordstream.core.stream.Stream
+  source: !class:recordstream.sources.files.FilesSource
+    files: [{png}]
+  ops:
+    - !class:recordstream.ops.image.ReadImage {{}}
+    - !class:recordstream.transform.Pipeline
+      transforms:
+        - !class:recordstream.ops.image.ConvertMode {{mode: L}}
+        - !class:recordstream.ops.numpy.Threshold {{low_level: 0.5}}
+    - !class:recordstream.ops.debug.PrintRecordOp {{}}
+"""
+
+
+class TestAddingIntoAPipelinesTransforms:
+    """P3: measured before, no page gesture added into a Pipeline's ``transforms`` — the Pipeline selected, a click
+    added after it in ``stream.ops`` although the sidebar footer said to select the node holding the list. P8: a member
+    added after the first transform was drawn on top of the one that moved down."""
+
+    def test_the_pipeline_selected_a_click_appends_to_its_transforms(
+        self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path
+    ) -> None:
+        write_demo_png(graph_dir / "demo.png")
+        (graph_dir / "piped.yaml").write_text(PIPED_TEXT.format(png=graph_dir / "demo.png"))
+        opened = open_graph("piped")
+        page = opened.page
+        wait_palette_loaded(page)
+        page.locator('button[data-command="toggle-nodes"]').click()
+        page.locator("[data-nodes-search]").fill(PROBE)
+        page.locator(f'{node_root("stream.ops[1]")} .title .cls').click()
+        page.wait_for_selector('.app[data-selection="stream.ops[1]"]')
+        foot = page.locator("[data-nodes-sidebar] .nodes-foot").inner_text()
+        assert "Click adds at the end of stream.ops[1].transforms" in foot
+        page.locator(f'[data-nodes-entry][data-class="{PROBE}"]').click()
+        wait_saves(page, 1)
+        assert (
+            "        - !class:recordstream.ops.numpy.Threshold {low_level: 0.5}\n"
+            f"        - !class:{PROBE} {{}}\n"
+            f"    - !class:{PROBE} {{}}\n"
+        ) in api_get(server, "api/graphs/piped")["text"]
+        assert opened.errors == []
+
+    def test_a_member_added_after_the_first_transform_covers_no_card(
+        self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path
+    ) -> None:
+        """P8, on the graph fresh from disk (nothing dragged, so the server lays the later members out again)."""
+        write_demo_png(graph_dir / "demo.png")
+        (graph_dir / "piped.yaml").write_text(PIPED_TEXT.format(png=graph_dir / "demo.png"))
+        opened = open_graph("piped")
+        page = opened.page
+        wait_palette_loaded(page)
+        page.locator('button[data-command="toggle-nodes"]').click()
+        page.locator("[data-nodes-search]").fill(PROBE)
+        page.locator(f'{node_root("stream.ops[1].transforms[0]")} .title .cls').click()
+        page.wait_for_selector('.app[data-selection="stream.ops[1].transforms[0]"]')
+        page.locator(f'[data-nodes-entry][data-class="{PROBE}"]').click()
+        wait_saves(page, 1)
+        page.wait_for_selector(f'{node_root("stream.ops[1].transforms[1]")}[data-class="{PROBE}"]')
+        names = [f"stream.ops[1].transforms[{index}]" for index in range(3)] + [
+            f"stream.ops[{index}]" for index in range(3)
+        ]
+        page.wait_for_function(
+            'names => names.every(n => document.querySelector(`.react-flow__node[data-id="${n}"]`))', arg=names
+        )
+        boxes = node_boxes(page, *names)  # zoom 1: a screen box is the card's flow box
+        overlapping = [(a, b) for i, a in enumerate(names) for b in names[i + 1 :] if rects_overlap(boxes[a], boxes[b])]
+        assert overlapping == []
+        assert opened.errors == []
+
+    def test_a_wire_dragged_out_of_the_empty_transforms_input_appends_to_it(
+        self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path
+    ) -> None:
+        write_demo_png(graph_dir / "demo.png")
+        empty = PIPED_TEXT.format(png=graph_dir / "demo.png").replace(
+            "      transforms:\n"
+            "        - !class:recordstream.ops.image.ConvertMode {mode: L}\n"
+            "        - !class:recordstream.ops.numpy.Threshold {low_level: 0.5}\n",
+            "      transforms: []\n",
+        )
+        (graph_dir / "piped.yaml").write_text(empty)
+        opened = open_graph("piped")
+        page = opened.page
+        wait_palette_loaded(page)
+        start = handle(page, "stream.ops[1]", "transforms[0]", "in").bounding_box()
+        drag(page, centre(start), EMPTY)
+        page.wait_for_selector("[data-palette]")
+        assert "added at the end of stream.ops[1].transforms" in page.locator("[data-palette-meta]").inner_text()
+        page.locator("[data-palette-search]").fill(PROBE)
+        page.locator(f'[data-palette-list] [data-class="{PROBE}"]').first.click()
+        wait_saves(page, 1)
+        assert f"      transforms:\n        - !class:{PROBE} {{}}\n" in api_get(server, "api/graphs/piped")["text"]
+        assert opened.errors == []
+
+
+TWOSUB_TEXT = """\
+stream: !class:recordstream.core.stream.Stream
+  ops:
+    - !class:recordstream.flow.subgraph.Subgraph
+      steps:
+        read:
+          op: !class:recordstream.ops.image.ReadImage {}
+    - !class:recordstream.flow.subgraph.Subgraph
+      steps:
+        grey:
+          op: !class:recordstream.ops.image.ConvertMode {mode: L}
+        mask:
+          op: !class:recordstream.ops.numpy.Threshold {low_level: 0.5}
+"""
+
+
+class TestAnUndoInsideASubgraphMember:
+    """P7: measured before, Ctrl+Z inside ``stream.ops[0]`` put the removed member back before it and the canvas kept
+    the NAME — it showed the OTHER subgraph under the same breadcrumb."""
+
+    def test_the_canvas_follows_the_member_to_its_new_name(
+        self, open_graph: Callable[[str], Opened], graph_dir: Path
+    ) -> None:
+        (graph_dir / "twosub.yaml").write_text(TWOSUB_TEXT)
+        opened = open_graph("twosub")
+        page = opened.page
+        page.locator(f'{node_root("stream.ops[0]")} .title .cls').click()
+        page.keyboard.press("Delete")
+        wait_saves(page, 1)
+        page.wait_for_selector(f'{node_root("stream.ops[0]")}[data-kind="subgraph"]')
+        page.locator(f'{node_root("stream.ops[0]")} .title .cls').dblclick()
+        page.wait_for_selector('.app[data-level="stream.ops[0]"]')
+        page.wait_for_selector(node_root("stream.ops[0]/grey"))
+        page.keyboard.press("Control+z")
+        wait_saves(page, 2)
+        page.wait_for_selector('.app[data-level="stream.ops[1]"]')
+        page.wait_for_selector(node_root("stream.ops[1]/grey"))
+        assert page.locator(node_root("stream.ops[0]/read")).count() == 0
+        assert opened.errors == []
+
+
+class TestShiftHeldWhileDragging:
+    """P9: measured before, with Shift still held after Shift+clicking cards, dragging a selected card did nothing."""
+
+    def test_a_drag_with_shift_held_moves_the_whole_selection(
+        self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path
+    ) -> None:
+        (graph_dir / "chain.yaml").write_text(CHAIN_TEXT)
+        opened = open_graph("chain")
+        page = opened.page
+        before = {name: node_translate(page, name) for name in ("grey", "scaled", "mask", "parts")}
+        page.locator(f'{node_root("mask")} .title .cls').click()
+        page.keyboard.down("Shift")
+        page.locator(f'{node_root("grey")} .title .cls').click()
+        page.locator(f'{node_root("scaled")} .title .cls').click()
+        page.wait_for_selector('.app[data-selection="grey,scaled,mask"]')
+        start = centre(page.locator(f'{node_root("mask")} .title .cls').bounding_box())
+        drag(page, start, (start[0] - DRAG[0], start[1] + DRAG[1]))
+        page.keyboard.up("Shift")
+        wait_saves(page, 1)
+        after = {name: node_translate(page, name) for name in before}
+        moved = {name: (after[name][0] - before[name][0], after[name][1] - before[name][1]) for name in before}
+        assert moved == {
+            "grey": (-DRAG[0], DRAG[1]),
+            "scaled": (-DRAG[0], DRAG[1]),
+            "mask": (-DRAG[0], DRAG[1]),
+            "parts": (0, 0),
+        }
+        assert selected_nodes(page) == ["grey", "mask", "scaled"]
+        assert opened.errors == []
+
+
+class TestAnUndoDrawsTheMembersWhereTheEditorHoldsThem:
+    """Found while re-running the review's page scripts: an undo that renamed members (an add undone) left a card drawn
+    at the place of the member that had held its name, and the next plain click wrote that stale place back — a
+    Threshold card moved onto the undone member's spot. Every member is drawn where the answer puts it."""
+
+    def test_after_an_add_is_undone_every_card_is_at_its_answered_place(
+        self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path
+    ) -> None:
+        write_demo_png(graph_dir / "demo.png")
+        (graph_dir / "demo.yaml").write_text(DEMO_TEXT.format(png=graph_dir / "demo.png"))
+        opened = open_graph("demo")
+        page = opened.page
+        wait_palette_loaded(page)
+        page.locator('button[data-command="toggle-nodes"]').click()
+        page.locator("[data-nodes-search]").fill(PROBE)
+        page.locator(f'{node_root("stream.ops[1]")} .title .cls').click()
+        page.wait_for_selector('.app[data-selection="stream.ops[1]"]')
+        page.locator(f'[data-nodes-entry][data-class="{PROBE}"]').click()
+        wait_saves(page, 1)
+        page.mouse.click(*EMPTY)
+        page.keyboard.press("Control+z")
+        wait_saves(page, 2)
+        answered = api_get(server, "api/graphs/demo")["positions"]
+        members = [f"stream.ops[{index}]" for index in range(5)]
+        page.wait_for_function(
+            """places => Object.entries(places).every(([n, [x, y]]) => {
+                const style = document.querySelector(`.react-flow__node[data-id="${n}"]`)?.getAttribute("style") ?? "";
+                return style.includes(`translate(${x}px, ${y}px)`);
+            })""",
+            arg={name: answered[name] for name in members},
+        )
         assert opened.errors == []

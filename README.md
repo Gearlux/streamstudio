@@ -1,24 +1,561 @@
 # StreamStudio
 
-Auto-generating [ComfyUI](https://github.com/comfyanonymous/ComfyUI) nodes from [RecordStream](https://github.com/Gearlux/recordstream) / Waivefront operations.
+A graph editor for [RecordStream](https://github.com/Gearlux/recordstream) pipelines written as confluid YAML
+documents — and, behind `--editor comfy`, a [ComfyUI](https://github.com/comfyanonymous/ComfyUI) extension that
+auto-generates ComfyUI nodes from RecordStream / Waivefront operations.
 
-StreamStudio is the GUI layer of [Taidal](https://github.com/Gearlux). Rather than ship its own editor, it runs as a ComfyUI **custom node** package: every callable already exposed by RecordStream, Waivefront, or HuggingFace `datasets` is auto-wrapped into a ComfyUI node, so you compose and run pipelines visually on ComfyUI's canvas with no StreamStudio-specific ops to maintain.
+```bash
+streamstudio path/to/graphs      # the canvas editor over that folder:  http://127.0.0.1:8190
+streamstudio --editor comfy      # the ComfyUI editor:                  http://127.0.0.1:8188
+```
 
-## The rewrite (phases 2-3 landed): editing a graph document without ComfyUI
-
-StreamStudio is being rebuilt as a Flask app over the confluid YAML graph document, with no ComfyUI
-underneath — [`docs/rewrite.md`](docs/rewrite.md) is the scope. Phases 2 and 3 of its six landed on
-2026-09-28: the document model with its HTTP surface, and the canvas page that draws a document and edits it
-through those routes. Everything from [Installation](#installation) down describes the ComfyUI extension, which
-still runs — and is still what a consuming annotation workspace opens — until phase 4 replaces it
+The two are separate servers and can run side by side. The canvas editor is the rewrite
+([`docs/rewrite.md`](docs/rewrite.md)) and is described first. From [Installation](#installation) down, this page
+describes the ComfyUI editor, which a consuming annotation workspace still opens until the rewrite's phase 4
 ([what is not there yet](#what-is-not-there-yet)).
 
-**The YAML is the truth.** `streamstudio.document.Document` opens a graph file and derives a model
-from it — nodes with typed sockets, wires, located problems — by reading declarations that already
-exist (`recordstream.algorithm_spec`, an op's `consumes`/`produces`, `confluid.input_specs` /
-`output_specs` / `to_pydantic`, `GraphContract.inputs`/`outputs`) and the `recordstream.items`
-registry for socket types. Nothing is written per class. An edit — `set_param`, `add_step`,
-`remove_step`, `rename_node` — patches the line the marker came from; the file is never re-dumped:
+## The canvas editor
+
+The YAML file is the graph. The editor draws it, and every change you make is a patch of the line it is about —
+comments, `$VAR` spellings and key order survive. No change is written to disk until you **Save**. A graph made
+with **New…** is written at once, so every graph the editor shows is a file on disk.
+
+### Starting and stopping it
+
+```bash
+streamstudio path/to/graphs                                  # port 8190; the folder's *.yaml files are the graphs
+streamstudio                                                 # the same, over the current directory
+streamstudio path/to/graphs --port 8191 --templates-dir ~/my-templates
+streamstudio stop                                            # stop what listens on 8190
+streamstudio stop --port 8191                                # stop what listens on 8191
+streamstudio restart                                         # stop it, then serve the SAME folder again
+streamstudio restart path/to/graphs                          # stop it, then serve that folder
+```
+
+`stop` and `restart` never throw away unsaved work: the editor keeps it in a hidden file of its folder, and the
+next start offers it back ([Unsaved work survives a stop](#unsaved-work-survives-a-stop)). `restart` without a folder asks
+the running editor which folder it serves and serves that one again, so the kept work is offered at once.
+
+The folder is resolved once, so every path the editor shows is absolute. A folder that is not there is refused
+before anything is stopped or started (`restart` included):
+
+```
+$ streamstudio restart grpahs
+Graph directory not found: /home/me/grpahs
+```
+
+A taken port is refused before anything starts. The message gives the address to open, and the same command one
+port up (the folder printed absolute):
+
+```
+$ streamstudio graphs
+Port 8190 is already in use — StreamStudio may already be running there.
+
+    Open it:  http://127.0.0.1:8190
+
+If that is a different program, run StreamStudio elsewhere:  streamstudio /home/me/graphs --port 8191
+```
+
+An option that belongs to the ComfyUI editor is refused by name, not ignored:
+
+```
+$ streamstudio --comfy-dir /path/to/ComfyUI
+--comfy-dir only applies to --editor comfy
+$ streamstudio restart -b
+--background only applies to --editor comfy
+```
+
+### Unsaved work survives a stop
+
+When the editor stops while it holds unsaved work — `streamstudio stop`, `streamstudio restart`, Ctrl+C in its
+terminal, or closing that terminal window — it writes that work to a hidden file in the folder it serves,
+`.streamstudio-workspace.json`. The graph
+files themselves are not touched. `stop` says where the work went:
+
+```
+$ streamstudio stop
+Stopped StreamStudio on port 8190 (pid 57474). Its unsaved work (demo.yaml) is kept in /home/me/graphs/.streamstudio-workspace.json — the next start asks what to do.
+```
+
+The editor's own terminal prints the same as it exits (`Unsaved work (demo.yaml) is kept in … — the next start
+asks what to do.`). With nothing unsaved, `stop` prints only `Stopped StreamStudio on port 8190 (pid 57503).` and no
+file is written. A graph made with New… and not changed since is not unsaved work: New… already wrote its file.
+
+**The next start on that folder** says so before anything else:
+
+```
+$ streamstudio graphs
+Unsaved work from the last session (29 Sep 20:06): demo.yaml — the page asks whether to restore it.
+```
+
+and the page asks before it opens any graph:
+
+```
+Unsaved work from the last session (29 Sep 13:25)
+  demo.yaml           changed
+  radio_view.yaml     changed — the file on disk changed after the editor stopped
+[Restore unsaved work]   [Open the saved files]
+```
+
+| you choose | what happens |
+| --- | --- |
+| **Restore unsaved work** | Those graphs open as they were when the editor stopped — the text, the node positions, the groups — marked ●. Nothing is written until you Save. |
+| **Open the saved files** | One more question: `Discard the unsaved work of the last session? The unsaved changes of demo.yaml and radio_view.yaml are lost. This cannot be undone.` **Discard** drops the kept work and shows the files as they are on disk; **Cancel** goes back to the first question. |
+
+Either answer removes the hidden file; a later stop writes a new one if something is unsaved again. The question
+must be answered — Escape does not close it, and no graph opens until it is. What a row can say after the file
+name:
+
+| the row says | meaning |
+| --- | --- |
+| `changed` | the kept text differs from the file; the file on disk is as the editor last saw it |
+| `changed — the file on disk changed after the editor stopped` | someone wrote the file since; after Restore, Save refuses as usual (`… changed on disk since the editor read it — Revert to load it, or Save As to keep both`) |
+| `changed — the file was deleted or moved away after the editor stopped; Save writes it again` | the file is gone; Save puts it back |
+| `changed — /home/me/other/away.yaml cannot be read: Permission denied` | the file is there but cannot be read |
+| `changed (kept 29 Sep 18:09)` | the same file was kept twice, by two stops (two editors on one folder, or a stop before anyone answered); both rows are restored, the second as `flow~2` |
+
+Files are named by their way from the folder, so a file opened from elsewhere reads `../other/flow.yaml`; it
+rejoins the graph list on Restore. A graph the editor already holds unsaved changes of is not overwritten: the kept
+version opens beside it as `demo~2`.
+
+**What a stop cannot keep:**
+
+- A `kill -9`, a crash or a power cut. The file is written as the editor stops; there is no periodic autosave.
+- The undo history. A restored graph starts with an empty history.
+
+**Two more cases:**
+
+- A kept file the editor cannot read (hand-edited, cut short) never stops the start. The start line says
+  `Unsaved work from the last session cannot be read — <the file and why>. The page offers to move it aside.`, and
+  the page offers only **Open the saved files**, which moves the file to `.streamstudio-workspace.broken.json`
+  (then `…broken-2.json`) — nothing is deleted.
+- A browser tab left open across a `restart` cannot write into the new editor. Its next edit changes nothing and
+  shows `the editor was restarted after this page was loaded — nothing was changed; the page asks the new editor
+  what it holds, and the unsaved work the stop kept is offered again`, and the tab then asks the question above.
+
+The hidden file's name matches `.streamstudio-workspace*.json`. If the graph folder is inside a git checkout, add
+that line to its `.gitignore` (this repository's own `.gitignore` carries it).
+
+### The window
+
+A menu bar across the top, the canvas in the middle, a side panel on the right with three tabs — **text** (the
+YAML as the editor holds it), **settings** (a form of every node on the level the canvas shows) and **run**.
+
+| menu | items (shortcut; on a Mac ⌘ for Ctrl) |
+| --- | --- |
+| **New** | Flow graph… · Pipeline… · Source graph (with its contract)… |
+| **File** | Open… `Ctrl+O` · Save `Ctrl+S` · Save As… `Ctrl+Shift+S` · Revert |
+| **Edit** | Undo `Ctrl+Z` · Redo `Ctrl+Shift+Z` (or `Ctrl+Y`) · Cut `Ctrl+X` · Copy `Ctrl+C` · Paste `Ctrl+V` · Delete `Delete`/`Backspace` · Select all `Ctrl+A` · Rename… `F2` |
+| **View** | Nodes sidebar `N` · Fit to view · Arrange · Arrange in columns · Minimap |
+| **Graph** | Add group · Group selection `G` · Convert selection to subgraph · Insert template ▸ · Save selection as template… · Delete template ▸ · Check graph |
+| **Run** | Run `Ctrl+Enter` · Step · Rerun selected node |
+
+An item that cannot act is greyed — Save while nothing changed, Copy with nothing selected. Keys are ignored
+while you type in a field. `Escape` closes an open menu; with none open, it goes up one subgraph level. The bar
+also has a **Nodes** button (the sidebar) and a green **▶ Run**.
+
+**The graph list** (the dropdown in the bar) holds every `*.yaml` of the folder, every file opened with
+File ▸ Open…, and every file New… wrote in another folder. It leaves out `*.layout.yaml` (the positions sidecars)
+and `*.steps.yaml` (subgraph steps files, below). A file that appears in the folder later shows up on the next
+look. A file from elsewhere (opened, or made there with New…) whose name the list already holds gets `demo~2`. A
+graph with unsaved changes reads `● demo · flow`.
+
+### Save, Save As, Revert — changes stay in the editor until you save
+
+Every edit — a value, a new step, a rename, undo, a move, a group — changes the editor's copy only. The title, the
+file name in the bar and the dropdown show **●** while a graph holds unsaved changes; closing or reloading the
+page asks first. Measured on the document of [Subgraphs](#subgraphs--a-flow-used-as-one-step):
+
+| you do | the file on disk | the editor |
+| --- | --- | --- |
+| set `target_max` of `prep/scaled` to `2.0` | `target_max: 1.0` | `● demo.yaml` |
+| **File ▸ Save** | `target_max: 2.0` | `demo.yaml` |
+| undo back to the saved text | unchanged | the ● goes away |
+
+**Run** traces what the editor holds, not the file: an unsaved value is the value the run uses.
+
+**Save refuses to overwrite someone else's change.** When the file changed on disk since the editor read or wrote
+it, nothing is written:
+
+```
+/home/me/graphs/demo.yaml changed on disk since the editor read it — Revert to load it, or Save As to keep both
+```
+
+For a steps file the graph includes, Save As cannot keep both (the new graph would include the same file), so the
+message offers Revert only. A graph file that was deleted meanwhile is simply written again. A file Save cannot
+read is refused the same way, since the editor cannot compare it with what it read:
+
+```
+/home/me/graphs/demo.yaml cannot be read: Permission denied — the editor never writes over a file it cannot compare with what it read; make it readable, or Save As to write the graph elsewhere
+```
+
+**File ▸ Save As…** writes the graph to another `.yaml` and the list entry follows it: its name becomes the new
+file's (`copy`), the old file is left as it was, the positions sidecar comes along, and a relative `include:` is
+rewritten so it still names the same steps file. An existing file makes the dialog's button read **Replace**. A
+file another list entry holds is refused:
+
+```
+/home/me/graphs/demo.yaml is open as 'demo' — save that one, or choose another file
+```
+
+**File ▸ Revert** drops the unsaved changes (the undo history, moves and groups too) and reads the file again —
+for a graph made with New…, the starter New… wrote. A graph whose file was deleted while the editor held it has
+nothing to read:
+
+```
+/home/me/graphs/fresh.yaml is not on disk any more — Save writes it again
+```
+
+### New, Open and the file browser
+
+**New ▸ Flow graph… / Pipeline… / Source graph (with its contract)…** asks where the new file goes, and
+**Create writes it at once**. There is no graph that lives only in the editor, so a New… made by mistake is a file
+you can see and delete, never hidden state:
+
+```
+New flow graph
+  named steps, each reading the record of the one before (flow:)
+  Name     [ fresh                ]
+  Folder   [ /home/me/graphs      ]  [Browse…]
+  → /home/me/graphs/fresh.yaml
+                                          [Cancel]  [Create]
+```
+
+The title names the kind you picked. **Folder** starts as the folder the editor serves; type another one, or
+**Browse…** for the file browser (below) in its folder mode. The line under it is the file Create will write, and
+it follows what you type (a `.yaml` you add yourself is not doubled). After Create the graph opens with no ●:
+`fresh.yaml` holds the starter, and nothing is unsaved until you change it. A file made in another folder joins
+the list the way File ▸ Open… adds one — if the list already holds its name, the entry is `clip~2`.
+
+Each kind starts from one step that reads and writes nothing, so it has no problem to fix before you begin:
+
+```yaml
+# fresh — a flow graph: each step reads the record the step above it returns
+flow:
+  probe:
+    op: !class:recordstream.ops.debug.PrintRecordOp {label: probe}
+outputs: probe
+```
+
+**Pipeline…** starts a `stream: !class:recordstream.core.stream.Stream` with an `ops:` list; **Source graph (with
+its contract)…** starts the flow above plus a `contract: !class:recordstream.ops.contract.GraphContract` root
+written AFTER it (written before `flow:`, the contract would receive the file's `outputs:` line and fail to
+build).
+
+**What Create refuses.** Nothing is written, the dialog stays open with what you typed, and it shows the reason in
+red; changing the name or the folder clears it. Measured:
+
+| you type | the dialog says |
+| --- | --- |
+| Name `demo`, and `demo.yaml` is already there | `/home/me/graphs/demo.yaml already exists — pick another name, or open it with File ▸ Open` — the file is left byte for byte |
+| Folder `/home/me/nowhere` | `/home/me/nowhere does not exist — pick another folder` |
+| Folder `/home/me/graphs/demo.yaml` | `/home/me/graphs/demo.yaml is not a folder — pick another folder` |
+| Name `x`, Folder `/home/me/locked` (one you may not write into) | `/home/me/locked/x.yaml cannot be written: Permission denied — pick another folder` — the folder stays empty |
+| Name `x.layout` or `my/graph` | `'x.layout' cannot name a graph file — use letters, digits, '_', '-', '.' or spaces, not starting with '.' and not ending in '.layout' or '.steps'` |
+| Name `fresh`, while the list holds a `fresh` whose file was deleted | `/home/me/graphs/fresh.yaml is open as 'fresh' — its file is gone from disk; Save that graph, or pick another name` |
+
+**File ▸ Open…** and **Save As…** use a file browser of the machine the editor runs on, starting in the graph
+folder: folders first, then `.yaml` files; hidden entries and `*.layout.yaml` are left out. An opened file joins
+the list. An unreadable file is refused with its name, and the list is untouched.
+
+### The Nodes sidebar
+
+`N` (or the **Nodes** button) opens every class the editor can describe, grouped by **package** (the first part of
+the class path) and then by **kind** — Sources, Ops, Algorithms, Engines, Sinks, Runnables, Values, Contracts. The
+search box narrows by every word you type. Each entry shows its name, one line of description and coloured chips
+for the record entries it reads and writes. Hovering shows the whole description and the parameters; a long list
+ends with `+37 more parameters` rather than running off the window. Docstring markup such as
+``:class:`DirectorySink` `` and ``` ``fields.json`` ``` shows as inline code.
+
+**Click** an entry to add it after the selected node; **drag** it onto the canvas to place it where you drop it.
+The footer says which: `Click adds after grey · drag places it`. On a Pipeline (a `Stream` with an `ops:` list) with
+nothing selected it reads `Click adds at the end of stream.ops · drag places it` ([Pipelines](#pipelines--adding-to-and-removing-from-an-ops-list)).
+The `Subgraph` class is not listed — an empty one
+is refused — and the footer says how one is made instead:
+`A subgraph is made from steps: Graph ▸ Convert selection to subgraph, Insert template ▸ or Insert steps file…`.
+Double-clicking empty canvas opens the same catalogue as a search palette.
+
+### Pipelines — adding to and removing from an `ops:` list
+
+On a Pipeline the ops are a list, not named steps, so the canvas names each one by its place: `stream.ops[0]`,
+`stream.ops[1]`, … Adding and removing work on that list. Starting from this file:
+
+```yaml
+# demo — a stream over one image
+stream: !class:recordstream.core.stream.Stream
+  source: !class:recordstream.sources.files.FilesSource
+    files: [demo.png]
+  ops:
+    - !class:recordstream.ops.image.ReadImage {}
+    - !class:recordstream.ops.image.ConvertMode {mode: L}   # one channel
+    # then the mask
+    - !class:recordstream.ops.numpy.Threshold {low_level: 0.5}
+```
+
+| you do | what changes in the text (in the editor, until Save) |
+| --- | --- |
+| select `stream.ops[1]` (ConvertMode), click `PrintRecordOp` in the Nodes sidebar | one line is added right after ConvertMode, above `# then the mask`: `- !class:recordstream.ops.debug.PrintRecordOp {}` — it is `stream.ops[2]`, and Threshold becomes `stream.ops[3]` |
+| nothing selected, click `PrintRecordOp` | one line at the end of the list: `- !class:recordstream.ops.debug.PrintRecordOp {}` |
+| select two members, press `Delete` | both lines go, as ONE edit — one Ctrl+Z brings both back |
+| delete every member | `ops: []` — a stream that passes records through unchanged |
+
+The palette, right-click ▸ Add Node ▸ and a wire dropped on empty canvas add the same way. Every other line —
+comments included — stays byte for byte. A later member keeps its place on the canvas and its group when its
+number changes (`stream.ops[3]` → `stream.ops[2]`), and an undo moves the numbers back.
+
+- **A comment on its own line above a member belongs to that member:** it goes when the member is deleted, moves
+  with it on Cut and Paste, and a member added before it lands above it. The comments above the FIRST member stay
+  with the list.
+- **The list keeps its own style.** A block list gets a `- ` line; a one-line list stays one line
+  (`ops: [!class:…PrintRecordOp {label: a}, !class:…PrintRecordOp {label: new}]`); an empty `ops: []   # nothing yet`
+  becomes a block list and keeps its comment on the key line (`ops:   # nothing yet`); a Stream that spells no `ops:`
+  gets the key.
+- **A `Pipeline` holds a list too** (`transforms:`). Select the Pipeline and click an entry to add at the end of its
+  `transforms`; select one of its members to add after that member.
+- **Where it cannot go:** there is no place BEFORE the first member — select nothing to append, or a member to add
+  after it. A list written in brackets over several lines is refused
+  (`…/brackets.yaml:2:8: stream.ops is written in brackets over several lines — spell it as a block list (one '- ' item per
+  line) to add to it or remove from it`), and so is a list that lives in an included steps file
+  (`stream.ops comes from …/parts.yaml; edit that list there`). A graph holding two op lists, with nothing selected
+  that says which, answers `this graph holds 2 op lists (stream.ops, other.ops) — select a member of one, or the node
+  holding it, to add to it`.
+
+### Right-click menus
+
+| on | items |
+| --- | --- |
+| empty canvas | Add Node ▸ (by kind, with a search) · Add Group · Paste · Insert template ▸ · Insert steps file… · Arrange |
+| a node | Rename… · Delete · Copy · Group · Convert to subgraph · Save as template… · Run to here — and on a subgraph node also Open · Move to its own file… |
+| a group's title bar | Rename… · Colour ▸ · Ungroup · Convert group to subgraph |
+
+A right-click on a node that is not selected selects it first, so the node menu acts on what you see highlighted.
+Run to here runs one record and pauses before the node.
+
+### Groups
+
+Select nodes and press `G` for a titled, coloured box that moves its members with it. **Graph ▸ Add group** drops
+an empty box on free canvas near the middle of the view; **right-click ▸ Add Group** drops it where you clicked.
+Drag a node into a box to add it, out of the box to remove it. Resize a box by its corner grip (or its edges when it
+is selected): afterwards it holds exactly the nodes whose centre it covers. Groups live in the positions sidecar
+beside the graph, never in the YAML — a box that was sized by hand keeps its `bounds`, and a box drawn inside a
+subgraph names that level as its `parent`:
+
+```yaml
+# demo.layout.yaml
+positions:
+  prep: [40.0, 40.0]
+  prep/grey: [100.0, 60.0]
+groups:
+- id: g1
+  title: front end
+  color: '#3b82f6'
+  nodes: [prep/grey]
+  bounds: [60.0, 20.0, 420.0, 260.0]
+  parent: prep
+```
+
+### Subgraphs — a flow used as one step
+
+A subgraph is a `flow:` mapping written inside the step that uses it. It is an ordinary op,
+`recordstream.flow.subgraph.Subgraph` — no new YAML syntax:
+
+```yaml
+flow:
+  prep:
+    op: !class:recordstream.flow.subgraph.Subgraph
+      steps:
+        grey:
+          op: !class:recordstream.ops.image.ConvertMode {mode: L}
+        scaled:
+          op: !class:recordstream.ops.numpy.Scale {source_min: 0.0, source_max: 255.0, target_min: 0.0, target_max: 1.0}
+      result: scaled
+  mask:
+    op: !class:recordstream.ops.numpy.Threshold {low_level: 0.5}
+outputs: mask
+```
+
+`result:` names the inner step whose record leaves the subgraph (left out: the last inner step).
+
+**What you see.** The canvas shows TWO nodes, `prep` and `mask`. `prep` is drawn as a stacked blue card — a
+`record` in, a `record` out, a bar listing its inner steps (`grey → scaled`) and an `open ▸` button. Its one
+setting is `result`; the steps are not a form field. **Double-click** it (or `open ▸`, or right-click ▸ Open) and
+the canvas shows its inside:
+
+```
+demo › prep                                         ← the breadcrumb; click "demo" or press Escape to go up
+<in> ──▶ grey ──▶ scaled ──▶ <out>                  ← <in> / <out> are where the record enters and leaves
+```
+
+The inside opens whole when it fits at a readable zoom (0.8 to 1), else at 0.8 with `<in>` in view, and the address follows it — `?graph=demo&level=prep` — so a
+reload or a shared link opens the same level (a level the graph no longer holds opens the top). The settings tab
+lists the inner steps. Editing `target_max` on `prep/scaled` rewrites that one line; everything else in the file
+stays byte for byte.
+
+**Names.** An inner node is named `<subgraph>/<step>`: `prep/grey`, and a subgraph that is the second member of a
+Stream's `ops:` list gives `stream.ops[1]/grey`. So a step name may not contain `/`. Inner names are scoped to
+their subgraph — an outer `grey` and an inner `grey` are two steps, and renaming the outer one never touches the
+inside. A rename stays on its level:
+
+```
+rename prep/grey to other/mono
+→ …/prep.steps.yaml:2:7: prep/grey can only be renamed on its own level — 'prep/<name>' or a bare name, not 'other/mono'
+```
+
+**Making one.** Select consecutive steps and use **Graph ▸ Convert selection to subgraph** (or the node menu's
+Convert to subgraph). The steps move inside with their own lines and comments; the last one is the `result`, and
+every outer reference to it (`from:`, `merge_from:`, `bind:`, `outputs:`) now names the subgraph. Converting
+`grey` and `scaled` of a three-step chain gives exactly the document above. Refused, with the reason:
+
+| you select | the editor says |
+| --- | --- |
+| `grey` and `mask`, `scaled` between them | `grey and mask are not consecutive steps — select the steps between them too (scaled)` |
+| `grey` and `scaled`, while `boxes` reads `grey` | `boxes reads grey (from: grey), which would move inside the subgraph — select boxes too, or leave grey out` |
+| steps on two levels | `the nodes to convert must be steps of ONE level — 'prep/grey' and 'tail' are on different levels` |
+
+**Convert group to subgraph** (a group's title-bar menu) does the same for a box's members, names the subgraph
+after the box (`front end` → `front_end`) and places it at the box's corner. Consecutive members of a Stream's
+`ops:` list become ONE member whose inner steps are named after their classes (`convert_mode`, `scale`). One
+Ctrl/Cmd+Z undoes a conversion, box included.
+
+**Running it.** The **run** tab lists the inner rows indented under their subgraph (`└ grey`, `└ scaled`), and a
+subgraph row carries a small `subgraph` tag. Select `prep/scaled` and Run: the run pauses INSIDE the subgraph, before
+`scaled`; **Step** carries on through the inside, then the outer steps. **Rerun selected node** on `prep/scaled`
+recomputes `scaled`, then the steps after `prep` — nothing before it runs again.
+
+### Using one subgraph twice — copy, templates, or include
+
+Three ways, and only these. YAML anchors (`&`/`*`/`<<`) and `!ref:` are not reuse spellings — nothing in the
+editor writes them (why: [docs/architecture.md](docs/architecture.md)).
+
+**1. Copy.** Copy a subgraph node and paste it: the clipboard holds the step's own YAML text, comments included,
+and the paste is an independent copy (a taken name gets `_2`). Copying a subgraph whose steps are in a steps file
+puts those steps inline in the copy, so it never shares the other's file. The clipboard is text, so a copy
+pastes into another graph as well:
+
+```yaml
+prep:
+  op: !class:recordstream.flow.subgraph.Subgraph
+    steps:
+      grey:
+        op: !class:recordstream.ops.image.ConvertMode {mode: L}   # to one channel
+      scaled:
+        op: !class:recordstream.ops.numpy.Scale {source_min: 0.0, source_max: 255.0, target_min: 0.0, target_max: 1.0}
+    result: scaled
+```
+
+**2. Templates, like ComfyUI.** **Save as template…** on a subgraph node (or on a selection of steps) writes its
+steps to `<templates folder>/<name>.steps.yaml` at once — no Save needed. The templates folder is
+`~/.streamstudio/templates` (made on the first save), or the one `--templates-dir` names. **Insert template ▸**
+adds a COPY as a new subgraph step after the selected node, named after the template (`prepare`, then
+`prepare_2`), with `result:` its last step. Nothing links the copy back: editing it never changes the template.
+**Delete template ▸** removes the file. A saved template starts with a line saying where it came from:
+
+```yaml
+# prepare: grey, scaled — saved from /home/me/graphs/chain.yaml
+grey:
+  op: !class:recordstream.ops.image.ConvertMode {mode: L}   # to one channel
+scaled:
+  op: !class:recordstream.ops.numpy.Scale {source_min: 0.0, source_max: 255.0, target_min: 0.0, target_max: 1.0}
+```
+
+**3. Include a steps file.** **Move to its own file…** (a subgraph node's menu) moves the steps to
+`<graph folder>/prep.steps.yaml` — a bare steps mapping, the same grammar as `flow:` — and writes `steps: {include:
+prep.steps.yaml}` in their place; the new file is written with the graph on Save. **Insert steps file…** (the
+empty-canvas menu) adds a subgraph step that includes an existing one:
+
+```yaml
+flow:
+  prep:
+    op: !class:recordstream.flow.subgraph.Subgraph
+      steps: {include: prep.steps.yaml}
+      result: scaled
+  mask:
+    op: !class:recordstream.ops.numpy.Threshold {low_level: 0.5}
+  prep2:
+    op: !class:recordstream.flow.subgraph.Subgraph
+      steps: {include: prep.steps.yaml}
+    from: mask
+outputs: prep2
+```
+
+Each use runs its own op objects. An edit inside either use lands in `prep.steps.yaml`, so it changes **every**
+use — that is what include is for. Measured: `target_max: 0.5` set on `prep/scaled` reads `0.5` on `prep2/scaled`
+too, and both nodes are located at `prep.steps.yaml:4:7`. Use Copy or a template when the uses must differ.
+
+### What the canvas does, gesture by gesture
+
+The page writes only through the routes below, and draws what the server answers; a refusal is a toast carrying
+the server's located message.
+
+| you do | the page calls | what the document says afterwards (in the editor, until Save) |
+| --- | --- | --- |
+| change a widget on a node, or in the **settings** tab | `POST …/param` | the value on its own line (a refused value reverts) |
+| click a Nodes-sidebar entry, or pick one in the palette / Add Node ▸ | `POST …/steps` — on a flow `{after}` the selected node (else the flow's output; inside a subgraph, its last step); on a Pipeline `{after}` the selected member, else `{list: "stream.ops"}` | on a flow a new step, `from:` the anchor; on a Pipeline a new member after the selected one, or at the end of the list |
+| drag a sidebar entry onto the canvas | `POST …/steps`, then its position | the same, placed at the drop point |
+| drag a wire out of a socket and drop it on nothing | the palette, narrowed to the classes that fit that type | the step (or member) inserted after that node; out of a Pipeline's empty `transforms[0]` input, at the end of its `transforms` |
+| drag a wire between two sockets | nothing — a dashed proposal | unchanged: no route writes a wire yet; a mismatch is refused while dragging |
+| `F2`, or double-click a node's name | `POST …/rename` | the key and every reference to it, on its own level |
+| select nodes, `Delete` | ONE `POST …/steps/remove` | the steps (or list members) gone and what read them rewired — one undo brings all back |
+| click a card, then `Shift`+click more cards | nothing — the selection | each Shift+clicked card is ADDED to the selection; Shift+click never takes one out |
+| `Cmd`+click (Mac) / `Ctrl`+click (elsewhere) a card | nothing — the selection | the card is added, or taken out when it was selected — the one way to drop a single card |
+| `Shift`+drag on EMPTY canvas | nothing — the selection | every card inside the box is selected |
+| drag a selected card (Shift held or not) | `PUT …/positions` | unchanged — the whole selection moves together |
+| `Ctrl+X` / `Ctrl+C`, then `Ctrl+V` | `POST …/copy`, then `POST …/paste` | the copied YAML text inserted after the selection (a Stream member after a member); a paste pressed before the copy answered waits for it |
+| `G`, Add group, resize or drag into / out of a box | `PUT …/groups` | unchanged — groups live in the sidecar |
+| drag a node or a box | `PUT …/positions` | unchanged — positions live in the sidecar |
+| *Arrange* (left to right by the cards' sizes) / *Arrange in columns* (the server's layers), then the view fits the whole level (never above zoom 1) | `PUT …/positions` / `POST …/layout` | unchanged |
+| `Ctrl+Z` / `Ctrl+Shift+Z` | a document edit: `POST …/undo` / `…/redo`; a move or group: the page writes the old layout back | the text history is the server's — an agent's edit is undone the same way |
+| **run** tab: *run* (record #N, pausing before the selected node), *step*, click a node | `POST …/trace`, `GET/POST /api/runs/<run>…` | unchanged — each node shows its status, time and generation |
+| in a node's entry: change a value, *rerun this node* | `POST /api/runs/<run>/rerun` with the values that differ | unchanged — the value is a trial; the node and what follows are recomputed |
+| **Graph ▸ Check graph** | `GET …/check` | unchanged — every problem, with its `file:line:col` |
+
+### What it refuses, and how it says so
+
+A refused edit changes nothing. The message is the server's, verbatim (paths shortened to `…`):
+
+| you try | what you see |
+| --- | --- |
+| drag an `Image` output onto a `Label` input | the wire does not attach — no edge, no message |
+| drag between two sockets whose types meet, where the document has no such wire | a dashed wire and `wires.yaml: the wire decode.image → boost.image is drawn as a proposal, not written — on boost it would be spelled 'from: decode' (a record wire) or 'bind: {image: decode.image}' (a value), and no route writes those yet. …` |
+| type a value the class refuses (`limit` → `-1`) | `clip.limit = -1 refused at …/clip.yaml:5:9: clip: Failed to construct Clip at …/clip.yaml:5:9: limit must be positive, got -1` — the widget shows the old value again |
+| delete every step of a subgraph from inside it | `'prep/grey' is the only step of the subgraph 'prep' — nothing would be left for it to return; remove 'prep' instead` — nothing is removed |
+| add a step named `a/b` inside `prep` | `'a/b' is not a name on the level of 'prep' — name it 'b'` |
+| add a step to a subgraph whose steps are written on one line | `…/demo.yaml:6:14: the steps of the subgraph 'prep' are written on one line ({…}) — spell them as a block mapping, one step per line, to add a step` |
+| add a class to a list written in brackets over several lines | `…/brackets.yaml:2:8: stream.ops is written in brackets over several lines — spell it as a block list (one '- ' item per line) to add to it or remove from it` |
+| add a class on a graph holding two op lists, nothing selected | `this graph holds 2 op lists (stream.ops, other.ops) — select a member of one, or the node holding it, to add to it` (the page's words; nothing is sent) |
+| drag a wire out of the FIRST member's `record` input and drop it on nothing | `nothing feeds stream.ops[0] — a step can only be inserted after another one` (the page's words) |
+| rename a node to a name in use | `'gain' is already a node (the nodes are: ['gain', 'clip'])` — the title goes back |
+| *run* a graph with no source of its own | `clip.yaml: this graph has no source to draw a record from — a host supplies the record (mount the editor in one) or wire a source` |
+| undo with nothing to undo | `wires.yaml: nothing to undo — the editor holds no earlier edit of this document` |
+
+### What is not there yet
+
+- **The flip.** A consuming annotation workspace still opens the ComfyUI canvases (`streamstudio run --editor
+  comfy`), not this editor. Mounting this editor in their place is phase 4, and the ComfyUI extension described
+  from [Installation](#installation) down is deleted in the same phase.
+- **Writing a wire.** A drawn wire stays a dashed proposal until a route can write `from:`, `bind:` or `!ref:`.
+- **A member at the START of a list.** Adding goes after a member or at the end, so a new first member is made by
+  adding it and deleting the ones before it. Paste, Insert template and Insert steps file place by the older rule:
+  after the selected node — into an empty `ops: []` with nothing selected they are refused.
+- **Adding to, or removing from, a list written in an included steps file.** Edit that file's list there.
+- **Unsaved work that ends without a stop.** A crash, a `kill -9` or closing the editor's terminal loses it
+  ([what a stop cannot keep](#unsaved-work-survives-a-stop)).
+- **A steps file made by Move to its own file… and not saved yet** is written into the graph folder for the length
+  of each load (a trace, a check) and removed afterwards; the list and Save never see it.
+- **A subgraph held in another op's slot** (`RandomApply(op=Subgraph(…))`) is drawn and edited as a subgraph node
+  (`maybe.op`), but the run tab shows no rows for its inside.
+- **The HuggingFace pickers and the directory chooser** of the ComfyUI nodes. The settings tab lists every
+  parameter; it does not yet narrow to a pane's `app:` field list.
+- **The page inside the package.** An install from GitHub serves a placeholder until a release builds the page
+  in ([Building the canvas page](#building-the-canvas-page)).
+
+### The document model and node names
+
+`streamstudio.document.Document` opens a graph file and derives a model from it — nodes with typed sockets,
+wires, located problems — by reading declarations that already exist (`recordstream.algorithm_spec`, an op's
+`consumes`/`produces`, `confluid.input_specs` / `output_specs` / `to_pydantic`, `GraphContract.inputs`/`outputs`)
+and the `recordstream.items` registry for socket types. Nothing is written per class. An edit patches the line the
+marker came from; the file is never re-dumped:
 
 ```
 re-dump of a shipped 24-step pane:   275 lines / 148 comment lines  ->  179 lines / 0 comments
@@ -26,66 +563,74 @@ re-dump of a shipped 24-step pane:   275 lines / 148 comment lines  ->  179 line
 set_param(size, max_band_hz, 30e6):  1 line differs; 148 comment lines kept; $DATA_ROOT kept
 ```
 
-An edit that makes the document stop loading, or gain a problem (a wire whose types do not meet), is refused
-with a message naming `file:line:col`, and nothing is written. An accepted edit is saved at once; `undo`/`redo`
-walk one text history per document. What the canvas draws that the pipeline does not do — where each node sits,
-the boxes around groups of nodes — lives in a sidecar, `<graph>.layout.yaml`, keyed by node name; delete it and the
-graph still loads and runs:
+An edit that makes the document stop loading, or gain a problem (a wire whose types do not meet), is refused with
+a message naming `file:line:col`. **Node names** are one scheme shared by the model, the engine, the sidecar and
+the routes: a `flow:` step by its key (`floor`), a list member by `path[i]` (`stream.ops[1]`), a nested marker by
+its document path (`processor.stream`), a contract root by its key (`contract`), the host's side of a graph
+without a contract as one node, `<host>`, and a node inside a subgraph as `<subgraph>/<step>` (`prep/grey`), with
+the two boundary nodes `prep/<in>` and `prep/<out>`. An inner node carries the `file:line:col` of its own line —
+in the steps file when the steps are included.
 
-```yaml
-# streamstudio layout sidecar — where the canvas draws each node ({node name: [x, y]} in canvas pixels) and …
-positions:
-  decode: [40.0, 40.0]
-  stream.ops[1]: [380.0, 240.0]
-groups:
-- id: g1
-  title: front end
-  color: '#3b82f6'
-  nodes: [decode, 'stream.ops[1]']
-```
+### The routes
 
-**Node names** are one scheme shared by the model, the engine, the sidecar and the routes: a `flow:` step by its
-key (`floor`), a list member by `path[i]` (`stream.ops[1]`), a nested marker by its document path (`processor.stream`),
-a contract root by its key (`contract`), and — for a graph without a contract — the host's side as one node, `<host>`.
+One `Studio` method each — JSON in, JSON out. A refusal is `400 {error}` with the located message; a name that
+does not exist is `404 {error}` listing what there is. Every route that names a node takes a qualified name
+(`prep/scaled`); in a URL it may carry the slash (`/steps/prep/grey`). Every edit is held in memory until
+`…/save`.
 
-**The routes**, one call on the document each — JSON in, JSON out; a refusal is `400 {error}` with
-the located message, a name that does not exist is `404 {error}` listing what there is:
+The page sends the header `X-Streamstudio-Session` with the session `GET /api/workspace` answered. A request whose
+session is not the running editor's (a tab left open across a restart) is refused with `409` and changes nothing;
+`GET /api/workspace` itself is always answered, so the page can join again. A request without the header — a
+script, a tool — is served as always.
 
 | verb | path | what it does |
 | --- | --- | --- |
-| GET | `/api/graphs` | every `*.yaml` of the directory as `{name, path, kind}` — `flow`, `graph` or `contract` |
-| GET | `/api/graphs/<name>` | `{name, path, kind, text, model, positions, groups, history_depth}` |
-| PUT | `/api/graphs/<name>` | `{text}` replaces the whole document; refused when it gains a problem; the history starts over |
+| GET | `/api/workspace` | `{folder, session, recovery}` — `recovery` is `null`, or the unsaved work a stop kept: `{saved_at, graphs: [{name, path, disk: unchanged\|changed\|gone\|unreadable, reason, changed_on_disk, saved_at}], error, aside}`; for a file that cannot be used, `graphs` is empty, `error` says why and `aside` is where discard moves it |
+| POST | `/api/workspace/recovery/restore` | open the kept graphs (unsaved, no undo history) and remove the file; answers the graph list, each entry with `restored`; `404` when there is nothing kept |
+| POST | `/api/workspace/recovery/discard` | remove the file (move an unreadable one aside); answers the graph list; `404` when there is nothing kept |
+| GET | `/api/graphs` | `[{name, path, kind, dirty}]` — `kind` is `flow`, `graph` or `contract` |
+| POST | `/api/graphs` | `{name, kind: flow\|pipeline\|source, dir?}` — WRITE the starter to `<dir or the graph folder>/<name>.yaml` at once and add it to the list; answers the graph with `dirty: false` (its `name` may be `fresh~2`). Refused, writing nothing, when the file exists, the name breaks the file-name rule, or the folder is not a writable folder (`404` when it does not exist) |
+| POST | `/api/graphs/open` | `{path}` — add any `.yaml` on this machine to the list |
+| GET | `/api/files?dir=` | `{dir, parent, entries: [{name, path, kind: dir\|yaml}]}` — the file browser; no `dir` = the graph folder |
+| GET | `/api/graphs/<name>` | `{name, path, kind, text, model, positions, groups, history_depth, dirty}`; `model.inside` holds each subgraph's inside, recursively |
+| PUT | `/api/graphs/<name>` | `{text}` replaces the whole document in the editor; the history starts over |
+| POST | `/api/graphs/<name>/save` | write every changed file and the sidecar — refused when a file changed on disk |
+| POST | `/api/graphs/<name>/save-as` | `{path, overwrite?}` — write the graph to another file; the entry follows it |
+| POST | `/api/graphs/<name>/revert` | read the file again, dropping unsaved changes |
+| GET | `/api/graphs/<name>/check` | `{problems: [{message, loc}]}` |
 | POST | `/api/graphs/<name>/param` | `{node, param, value}` — patch one value on its own line, or insert it when the file left the default |
-| POST | `/api/graphs/<name>/steps` | `{name, after, class_path, params}` — insert a `flow:` step; what read `after` now reads the new step |
-| DELETE | `/api/graphs/<name>/steps/<node>` | remove a step; what read it now reads what it read from |
-| POST | `/api/graphs/<name>/rename` | `{node, new}` — the key, every `from:` / `merge_from:` / `bind:` / `!ref:` / `outputs:` naming it, its sidecar position and every group listing it |
-| POST | `/api/graphs/<name>/undo`, `…/redo` | one step of the text history; `changed` says whether there was one |
-| PUT | `/api/graphs/<name>/positions` | `{positions: {node: [x, y]}}` — written to the sidecar |
-| POST | `/api/graphs/<name>/layout` | lay the graph out afresh (longest-path layering) and save it |
-| PUT | `/api/graphs/<name>/groups` | `{groups: [{id, title, color, nodes}, …]}` — the sidecar's `groups:` block, stored as sent; the document is untouched |
+| POST | `/api/graphs/<name>/steps` | `{name?, after?, list?, class_path, params}` — `after` a flow step: a new step on its level named `name`, and what read `after` now reads it; `after` an op-list member (`stream.ops[1]`): a new member after it; no `after` and `list: "stream.ops"`: a new member at the end. Answers the graph plus `added` (the new node's name) |
+| DELETE | `/api/graphs/<name>/steps/<node>` | remove one step (what read it now reads what it read from) or one list member |
+| POST | `/api/graphs/<name>/steps/remove` | `{nodes}` — remove several steps or members as ONE edit, all or nothing; removing every member leaves `ops: []` |
+| POST | `/api/graphs/<name>/rename` | `{node, new}` — the key, every reference on its level, its position and group entries (for a subgraph: every `prep/…` name) |
+| POST | `/api/graphs/<name>/undo`, `…/redo` | one step of the text history; `changed` says whether there was one, `shifts` how list members were renumbered (`[{list: "stream.ops", first: 2, by: 1}]`) |
+| POST | `/api/graphs/<name>/copy` | `{nodes}` → `{text, kind: steps\|ops}` — the steps' own YAML text |
+| POST | `/api/graphs/<name>/paste` | `{text, after}` → the graph plus `pasted: [names]` — one undo entry |
+| POST | `/api/graphs/<name>/subgraph` | `{nodes, name}` → the graph plus `subgraph: <new node>` — Convert selection to subgraph |
+| POST | `/api/graphs/<name>/subgraph/<node>/extract` | `{path?}` — Move to its own file |
+| POST | `/api/graphs/<name>/include` | `{path, after, name?}` — Insert steps file |
+| POST | `/api/graphs/<name>/templates/<template>/insert` | `{after}` — Insert template |
+| GET | `/api/templates` | `[{name, path, steps, doc}]` |
+| POST | `/api/templates` | `{name, graph, nodes, overwrite?}` — Save as template (written at once) |
+| DELETE | `/api/templates/<name>` | delete one; answers the remaining list |
+| PUT | `/api/graphs/<name>/positions` | `{positions: {node: [x, y]}}` — merged over what the editor holds |
+| POST | `/api/graphs/<name>/layout` | lay every level out afresh (longest-path layering) |
+| PUT | `/api/graphs/<name>/groups` | `{groups: [{id, title, color, nodes, bounds?, parent?}, …]}` — stored as sent |
 | GET | `/api/types` | `{socket type: [the types it may be wired into]}` — the meet rule the canvas applies while you drag |
-| GET | `/api/graphs/<name>/form` | `{node: JSON-schema properties}` from `confluid.to_pydantic` — the settings form |
+| GET | `/api/graphs/<name>/form` | `{node: JSON-schema properties}` from `confluid.to_pydantic` — the settings form, every level |
 | GET | `/api/palette` | every configurable class as a typed node spec; `?refresh=1` rescans the registry |
-| POST | `/api/graphs/<name>/trace` | `{record, until}` — run record `#record` of the graph's own source through it, pausing before `until` |
-| GET | `/api/runs/<run>` | the trace: per node its params, inputs, outputs, status and milliseconds |
+| POST | `/api/graphs/<name>/trace` | `{record, until}` — run record `#record` of the graph's own source through what the editor holds, pausing before `until` (`prep/scaled` pauses inside) |
+| GET | `/api/runs/<run>` | the trace: per node its params, inputs, outputs, status and milliseconds; inner rows carry `parent` |
 | POST | `/api/runs/<run>/rerun` | `{node, params}` — rebuild one node through its constructor and rerun from it |
 
-**Serving it** standalone, over a directory of graph documents (`editor` is the verb until the flip —
-`streamstudio` alone still launches ComfyUI):
-
-```bash
-streamstudio editor path/to/graphs --port 8190     # -p 8190; a taken port is refused before anything starts
-```
-
-A consuming Flask app mounts the API and the page under ONE prefix instead — the page calls `api/…` relative to
-its own address, so the two must sit side by side:
+A consuming Flask app mounts the API and the page under ONE prefix — the page calls `api/…` relative to its own
+address, so the two must sit side by side:
 
 ```python
 from streamstudio.app import editor_blueprint, page_blueprint, web_dist
 
-app.register_blueprint(editor_blueprint(graph_dir), url_prefix="/editor")   # the routes above, at /editor/api/…
-app.register_blueprint(page_blueprint(web_dist()), url_prefix="/editor")    # the built page, at /editor/
+app.register_blueprint(editor_blueprint(graph_dir, templates_dir=templates), url_prefix="/editor")   # /editor/api/…
+app.register_blueprint(page_blueprint(web_dist()), url_prefix="/editor")                              # the page at /editor/
 ```
 
 ```
@@ -108,9 +653,9 @@ npm test         # the page's unit tests (vitest)
 npm run dev      # optional: a hot-reloading copy on vite's own port, proxying api/ to an editor on port 8190
 ```
 
-`frontend/dist` is a build product: gitignored, not inside the wheel, not built by CI. `streamstudio editor` serves
-it at `/` when it is there. Until then — and after `pip install --pre streamstudio`, which carries no page — `/` answers a
-placeholder that says what to do:
+`frontend/dist` is a build product: gitignored, not inside the wheel, not built by CI. `streamstudio` serves it at
+`/` when it is there. Until then — and after a `pip install` from GitHub, which carries no page — `/` answers
+a placeholder that says what to do:
 
 ```
 streamstudio editor
@@ -124,68 +669,16 @@ reload; the page lands in frontend/dist beside the package. The API is up:
 The browser tests of the page (`tests/test_canvas.py`, headless chromium) skip when `frontend/dist/index.html` is
 absent, and the skip reason is that same build command.
 
-### What the canvas does
-
-The page draws the document and writes only through the routes above — what it shows after an edit is the server's
-answer, and a refusal is a toast carrying the server's located message:
-
-| you do | the page calls | what the document says afterwards |
-| --- | --- | --- |
-| change a widget on a node, or in the **settings** tab | `POST …/param` | the value on its own line (a refused value reverts) |
-| double-click empty canvas, pick a class | `POST …/steps` after the selected node (else the flow's output) | a new `flow:` step, `from:` the anchor; a `Stream`'s `ops:` list is refused — no route adds to it yet |
-| drag a wire out of a socket and drop it on nothing | the same list, narrowed to classes that take (or give) that type | the step inserted after that node — wired by the order, as every step is |
-| drag a wire between two sockets | nothing — a dashed proposal | unchanged: no route writes a wire yet; a mismatch is refused while dragging |
-| double-click a node's name, type, Enter | `POST …/rename` | the key and every reference to it |
-| select nodes, press **G** (or *group*) | `PUT …/groups` | unchanged — a group lives in the sidecar only |
-| drag a node or a group's title bar | `PUT …/positions` | unchanged — positions live in the sidecar |
-| *arrange* (dagre, left to right by the cards' sizes) / *columns* (the server's layout) | `PUT …/positions` / `POST …/layout` | unchanged |
-| Ctrl/Cmd+C, then Ctrl/Cmd+V | `POST …/steps` per copied node, same class and values, after the selection | new steps; refused on a document with no step list |
-| Ctrl/Cmd+Z, Shift+Ctrl/Cmd+Z (or *undo* / *redo*) | a document edit: `POST …/undo` / `…/redo`; a move, an arrange, a group: the page writes the old layout back | the text history is the server's — an agent's edit is undone the same way |
-| **run** tab: *run* (record #N, pausing before the selected node), *step*, click a node | `POST …/trace`, `GET/POST /api/runs/<run>…` | unchanged — each traced node shows its status, wall time and generation; its entry lists what came in and went out |
-| in a node's entry: change a value, *rerun this node* | `POST /api/runs/<run>/rerun` with the values that differ from what ran | unchanged — the value is a trial; the node and what follows it are recomputed |
-
-A graph with no source of its own (a view pane, a `flow:` alone) is refused by *run* in the server's words — a host
-supplies its record. The catalogue the palette lists is `GET /api/palette` (447 classes measured in this workspace;
-200 rows are drawn and typing narrows them; the list opens in ~6 ms).
-
-### What it refuses, and how it says so
-
-A refused edit writes nothing, and the message is the server's, verbatim (measured on small synthetic graphs; the
-temporary directory is shortened to `…`):
-
-| you try | what you see |
-| --- | --- |
-| drag an `Image` output onto a `Label` input | the wire does not attach while you drag — no edge, no message, nothing written |
-| drag between two sockets whose types meet, where the document has no such wire | a dashed wire and a warning: `wires.yaml: the wire decode.image → boost.image is drawn as a proposal, not written — on boost it would be spelled 'from: decode' (a record wire) or 'bind: {image: decode.image}' (a value), and no route writes those yet. The editor writes parameters, positions, names, groups and steps.` The dashed wire is gone after the next edit. |
-| type a value the class refuses (`limit` → `-1`) | `clip.limit = -1 refused at …/clip.yaml:5:9: clip: Failed to construct Clip at …/clip.yaml:5:9: limit must be positive, got -1` — the widget shows the old value again |
-| add, paste or drop a step on a document that is one `Stream` | `'stream.ops[1]' is not a flow step (the steps are: [])` |
-| rename a node to a name in use | `'gain' is already a node (the nodes are: ['gain', 'clip', '<host>'])` — the title goes back |
-| *run* a graph with no source of its own | `clip.yaml: this graph has no source to draw a record from — a host supplies the record (mount the editor in one) or wire a source` |
-| *rerun this node* with a trial value the class refuses | `…/pets.yaml:stream:stream.ops[1]: limit must be positive, got -1` — the run stays as it was |
-| undo with nothing to undo | `wires.yaml: nothing to undo — the editor holds no earlier edit of this document` |
-
-### What is not there yet
-
-- **The flip.** A consuming annotation workspace still opens the ComfyUI canvases — the JSON workflows, through
-  bare `streamstudio` — not this editor. Mounting the editor in their place is phase 4, and the ComfyUI extension
-  described from [Installation](#installation) down is deleted in the same phase.
-- **Writing a wire.** A drawn wire stays a dashed proposal until a route can write `from:`, `bind:` or `!ref:`.
-- **Adding a step to a `Stream`'s `ops:` list.** Steps go into `flow:` documents only; a Stream refuses (above).
-- **Collapse to subgraph** — one node standing for an `include:` file, opened in place.
-- **The HuggingFace pickers and the directory chooser** of the ComfyUI nodes. The settings tab lists every parameter
-  of every node; it does not yet narrow to a pane's `app:` field list.
-- **The page inside the wheel.** `pip install --pre streamstudio` serves the placeholder until a release builds the page in.
-- **Undoing a rename** restores the text, but the node loses its saved position.
-
 ## Installation
 
-StreamStudio is on PyPI as a pre-release, so `pip` needs `--pre` to see it:
+StreamStudio is not on PyPI yet; install it from GitHub:
 
 ```bash
-pip install --pre streamstudio
+pip install git+https://github.com/Gearlux/streamstudio.git@main
 ```
 
-ComfyUI itself is **not** a Python dependency — the CLI clones it on first run (see below).
+The canvas editor needs nothing more (plus a built page — [Building the canvas page](#building-the-canvas-page)).
+ComfyUI itself is **not** a Python dependency — `streamstudio --editor comfy` clones it on first run (see below).
 
 ### Domain node sets are plugins, not requirements
 
@@ -196,7 +689,7 @@ unconditionally, and the two places that use one (the colormap list and the arra
 render) fall back cleanly when it is absent.
 
 Install the domain package however you normally would — from PyPI, from a git checkout,
-editable — and restart the editor. There is no extra to enable and nothing to configure
+editable — and restart the editor (`streamstudio restart`, or `streamstudio restart --editor comfy`). There is no extra to enable and nothing to configure
 here: discovery reads what the environment holds.
 
 ### Shell completion
@@ -221,12 +714,15 @@ streamstudio restart --help             # or -h
 Options work on either side of the command name (`streamstudio --port 9000 restart` ≡
 `streamstudio restart --port 9000`), and a key may be spelled with hyphens or underscores.
 The launcher commands carry short forms — **`-p`** for `--port`, **`-b`** for `--background`
-(and `-o` for `--output` on the export/import commands):
+(the ComfyUI editor only), and `-o` for `--output` on the export/import commands:
 
 ```bash
-streamstudio restart -b                 # detached
-streamstudio stop -p 8189
+streamstudio restart --editor comfy -b  # the ComfyUI editor, detached
+streamstudio stop -p 8189               # stop whatever StreamStudio listens on 8189
 ```
+
+`--editor canvas|comfy` picks the editor for `run` (the default command), `stop` and `restart`;
+the default port follows it — 8190 for `canvas` (the default), 8188 for `comfy`.
 
 Three spellings differ from a typical argparse CLI:
 
@@ -244,10 +740,12 @@ Error: streamstudio: unknown option 'prt' — it names no parameter of the 'rest
 command and no key in the configuration. Did you mean 'port'? …
 ```
 
-## Quick start
+## Quick start — the ComfyUI editor
+
+Everything from here down is the ComfyUI editor. Start it with `--editor comfy`:
 
 ```bash
-streamstudio
+streamstudio --editor comfy
 ```
 
 On first run this:
@@ -260,12 +758,16 @@ On first run this:
 Reuse an existing ComfyUI checkout with `--comfy-dir`:
 
 ```bash
-streamstudio --comfy-dir /path/to/ComfyUI
+streamstudio --editor comfy --comfy-dir /path/to/ComfyUI
 ```
+
+Every ComfyUI option (`--comfy-dir`, `-b`/`--background`, `--default-nodes-`, `--only-taidal-nodes`,
+`--palette-config`, `--install-`, `--manager-`, `--declared-nodes-`, `--custom-node`) needs `--editor comfy`;
+without it the canvas editor refuses it by name (`--comfy-dir only applies to --editor comfy`).
 
 ### The port
 
-StreamStudio serves on `http://127.0.0.1:8188` (ComfyUI's own default). The launcher checks that
+The ComfyUI editor serves on `http://127.0.0.1:8188` (ComfyUI's own default). The launcher checks that
 address **before** it does any work, so a studio that is already up is reported in a second rather
 than after a full boot:
 
@@ -274,14 +776,14 @@ Port 8188 is already in use — StreamStudio may already be running there.
 
     Open it:  http://127.0.0.1:8188
 
-If that is a different program, run StreamStudio elsewhere:  streamstudio --port 8189
+If that is a different program, run StreamStudio elsewhere:  streamstudio --editor comfy --port 8189
 ```
 
 The command exits non-zero and starts nothing. Use `--port` to serve somewhere else — to run a
 second studio beside one that is already open, or when another program holds 8188:
 
 ```bash
-streamstudio --port 8189
+streamstudio --editor comfy --port 8189
 ```
 
 ### Stopping and restarting
@@ -290,10 +792,12 @@ streamstudio --port 8189
 launcher, an editor's launch button, or a `python main.py` you ran by hand:
 
 ```bash
-streamstudio restart          # stop what is on 8188, then launch again
-streamstudio stop             # just stop it
-streamstudio restart --port 8189
+streamstudio restart --editor comfy               # stop what is on 8188, then launch again
+streamstudio stop --editor comfy                  # just stop it
+streamstudio restart --editor comfy --port 8189
 ```
+
+Without `--editor comfy`, `stop` and `restart` act on the canvas editor's port, 8190.
 
 `restart` re-walks the whole launch flow (requirements sync, custom nodes, symlink), so it is also
 how you pick up newly installed nodes or a changed entry point. Stopping a port nothing is listening
@@ -302,10 +806,10 @@ on is not an error — `restart` simply starts.
 ### Running detached
 
 Both `run` and `restart` hold the terminal by default, the way a server should. `--background` (or
-`--bg`) hands it back:
+`-b`) hands it back:
 
 ```bash
-streamstudio restart --bg
+streamstudio restart --editor comfy -b
 ```
 
 ```
@@ -318,7 +822,7 @@ StreamStudio is starting in the background — log: ~/.streamstudio/logs/studio-
 The studio runs in its own session, so it survives the shell that started it, and its output goes to
 a per-port log under `~/.streamstudio/logs/` — never the directory you launched from. The command
 returns as soon as the process is spawned rather than waiting for the bind, so a boot that fails
-shows up in that log; `streamstudio stop` is how you end it.
+shows up in that log; `streamstudio stop --editor comfy` is how you end it.
 
 Taidal nodes then appear in ComfyUI's *Add Node* menu grouped by what they ARE, not by which package ships them. A role-bearing class nests under `Taidal/<Role>[/<Task>]` (role-first) — e.g. `Taidal/Model/Classification`, `Taidal/Trainer/Detection`, `Taidal/Logger` (loggers are task-agnostic, so no task level). An op / source / engine nests under `Taidal/<Category>[/<group>]` — `Taidal/Op/numpy`, `Taidal/Source`. The **producing package rides the node label** as an uppercased tag — `[RECORDSTREAM] Threshold`, `[YOURPACKAGE] YourModel` — so you can tell where a node comes from without burying it in a per-package folder.
 
@@ -344,13 +848,13 @@ Every launch (not just the first) seeds ComfyUI's `custom_nodes/` directory from
 2. **`STREAMSTUDIO_CUSTOM_NODES` env var** — comma-separated git URLs:
 
    ```bash
-   STREAMSTUDIO_CUSTOM_NODES="https://github.com/rgthree/rgthree-comfy,https://github.com/crystian/ComfyUI-Crystools" streamstudio
+   STREAMSTUDIO_CUSTOM_NODES="https://github.com/rgthree/rgthree-comfy,https://github.com/crystian/ComfyUI-Crystools" streamstudio --editor comfy
    ```
 
-3. **Repeatable `--custom-node` flag** — ad-hoc, per launch:
+3. **The `--custom-node` list** — ad-hoc, per launch:
 
    ```bash
-   streamstudio --custom-node https://github.com/rgthree/rgthree-comfy --custom-node https://github.com/crystian/ComfyUI-Crystools
+   streamstudio --editor comfy --custom-node=[https://github.com/rgthree/rgthree-comfy,https://github.com/crystian/ComfyUI-Crystools]
    ```
 
 Each repo is cloned into `custom_nodes/<repo-name>` and, if it ships a `requirements.txt`, its dependencies are pip-installed into the **active environment** (the same one ComfyUI runs in). The install is **idempotent**: a repo whose directory already exists is skipped, so updating or removing a node is ComfyUI-Manager's job, not the launcher's. A clone or dependency failure of one node — or a broken entry-point declaration — logs a warning and the launch continues; a broken custom node never blocks the studio. (`--manager-` filters the manager from the *declared* tier only: explicitly requesting its URL via env/flag still installs it.)
@@ -360,7 +864,7 @@ Each repo is cloned into `custom_nodes/<repo-name>` and, if it ships a `requirem
 By default the palette shows ComfyUI's built-in nodes (KSampler, Preview Image, …) **alongside** the Taidal nodes. To launch a Taidal-only palette, pass `--default-nodes-`:
 
 ```bash
-streamstudio --default-nodes-
+streamstudio --editor comfy --default-nodes-
 ```
 
 This (a) prunes ComfyUI's built-in / `comfy_extras` / API nodes from the *Add Node* menu, leaving the auto-discovered Taidal nodes (and any other third-party custom nodes), and (b) surfaces the Taidal nodes at the **palette root** — `RecordStream/Op/numpy`, `Waivefront/Op/targets`, `StreamStudio` — instead of nested under a `Taidal/` folder (there's nothing left to disambiguate them from). The default `--default-nodes` keeps everything visible and the `Taidal/` grouping.
@@ -378,14 +882,14 @@ A **default config ships with the package** (`streamstudio/config.default.yaml`,
 
 ```bash
 cp "$(python -c 'import streamstudio,os;print(os.path.join(os.path.dirname(streamstudio.__file__),"config.default.yaml"))')" ~/.streamstudio/config.yaml
-streamstudio --default-nodes- --config ./my-palette.yaml   # or point at any file
+streamstudio --editor comfy --default-nodes- --palette-config ./my-palette.yaml   # or point at any file
 ```
 
 **Only Taidal nodes** (`--only-taidal-nodes`) goes further: it hides **every** non-Taidal node — ComfyUI's built-ins **and** other third-party custom packs (mtb, WWAA, …) — leaving only Taidal nodes + the keep-list. It implies `--default-nodes-`.
 
 ```bash
-streamstudio --only-taidal-nodes                          # only Taidal + Preview Image/as-text
-streamstudio --only-taidal-nodes --config ./my-palette.yaml
+streamstudio --editor comfy --only-taidal-nodes                                  # only Taidal + Preview Image/as-text
+streamstudio --editor comfy --only-taidal-nodes --palette-config ./my-palette.yaml
 ```
 
 > **Note:** hiding the defaults removes most of ComfyUI's native viewers, but the keep-list retains the ones in use, and Taidal's own **custom viewer nodes are self-contained** — the **Array / Tensor Histogram** and **Display Any** nodes render on their own canvas/widget (no native viewer needed) — so the Taidal-only palette stays fully usable for inspecting data.
@@ -999,7 +1503,7 @@ runnable: !class:myproject.training.ClassificationTrainer
   (Taidal_waivefront_op_measure_TuneToBand), node 3 (…SelectBurst), … A Taidal node the
   canvas names but this installation has no class for is normally an op added AFTER the
   editor started — the node registry is read once at startup. Restart it
-  (`streamstudio restart`) and convert again; if the op really is gone from this
+  (`streamstudio restart --editor comfy`) and convert again; if the op really is gone from this
   installation, the canvas is older than the code and needs redrawing.
   ```
 

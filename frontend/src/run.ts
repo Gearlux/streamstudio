@@ -8,13 +8,54 @@
  * the canvas's value after a document edit, or a trial value typed into the panel — and an unchanged form sends
  * nothing, which recomputes the node as it is.
  */
-import type { Run } from "./api";
+import type { Run, TraceNode } from "./api";
 import type { Json, ModelNode } from "./model";
 
-/** The node "step" pauses before next: `null` runs to the end, `undefined` when the run is not paused. */
+/** One row of the run panel: a traced node, how deep it sits in subgraphs, and the subgraph node it sits in. */
+export interface RunRow {
+  node: TraceNode;
+  depth: number;
+  parent: string | undefined;
+}
+
+const parentOf = (node: TraceNode): string | undefined => (typeof node.parent === "string" ? node.parent : undefined);
+
+/**
+ * The traced nodes as the panel lists them: every inner node right under its subgraph, indented one step deeper
+ * (`Tracer.to_dict` marks each inner row with `parent`, the qualified subgraph node — `prep` for `prep/grey`,
+ * `prep/inner` for `prep/inner/x`). The tracer already lists an inside right after its subgraph; the rows are put
+ * there anyway, so a row listed later still lands under its subgraph. A row whose subgraph is not listed stays at
+ * the top.
+ */
+export function runRows(nodes: TraceNode[]): RunRow[] {
+  const listed = new Set(nodes.map((node) => node.node));
+  const children = new Map<string, TraceNode[]>();
+  const roots: TraceNode[] = [];
+  for (const node of nodes) {
+    const parent = parentOf(node);
+    if (parent === undefined || parent === node.node || !listed.has(parent)) roots.push(node);
+    else children.set(parent, [...(children.get(parent) ?? []), node]);
+  }
+  const rows: RunRow[] = [];
+  const seen = new Set<string>();
+  const visit = (node: TraceNode, depth: number, parent: string | undefined) => {
+    if (seen.has(node.node)) return; // a parent cycle in a malformed answer is listed once, never looped
+    seen.add(node.node);
+    rows.push({ node, depth, parent });
+    for (const child of children.get(node.node) ?? []) visit(child, depth + 1, node.node);
+  };
+  for (const root of roots) visit(root, 0, undefined);
+  return rows;
+}
+
+/**
+ * The node "step" pauses before next, in the panel's order — so it steps INTO a subgraph (paused before `prep`, the
+ * next pause is before `prep/grey`) and out of it again: `null` runs to the end, `undefined` when the run is not
+ * paused.
+ */
 export function nextNode(run: Run): string | null | undefined {
   if (run.paused_at === null) return undefined;
-  const names = run.trace.nodes.map((node) => node.node);
+  const names = runRows(run.trace.nodes).map((row) => row.node.node);
   const index = names.indexOf(run.paused_at);
   return index >= 0 && index + 1 < names.length ? names[index + 1] : null;
 }

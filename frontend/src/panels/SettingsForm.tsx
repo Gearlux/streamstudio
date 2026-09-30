@@ -1,21 +1,24 @@
 /**
- * The settings form: `GET …/form` rendered as one form per node — every constructor parameter of every node, in
- * the model's order, with the SAME widget the node on the canvas draws (`ParamWidget`) and the SAME write
- * (`setParam` → `POST …/param`). Both read the value from the model the server answers, so an edit made in one
- * shows in the other on the next answer; neither holds a value of its own. A node whose form is empty (the host's
- * side, a class the palette cannot describe) has no section.
+ * The settings form: `GET …/form` rendered as one form per node — every constructor parameter of every node of the
+ * LEVEL the canvas shows (the top, or the inside of a subgraph: `prep/grey`, `prep/scaled`), in the model's order,
+ * with the SAME widget the node on the canvas draws (`ParamWidget`) and the SAME write (`setParam` → `POST …/param`).
+ * Both read the value from the model the server answers, so an edit made in one shows in the other on the next
+ * answer; neither holds a value of its own. A node whose form is empty (the host's side, a subgraph's `<in>`/`<out>`,
+ * a class the palette cannot describe) has no section.
  */
 import { useEditor } from "../context";
+import { EMPTY_MODEL, levelModel } from "../levels";
 import type { Graph, Json, Param } from "../model";
 import { shortClass } from "../model";
 import { ParamWidget } from "../canvas/ParamWidget";
 
-export function SettingsForm({ graph }: { graph: Graph }) {
+export function SettingsForm({ graph, level = "" }: { graph: Graph; level?: string }) {
   const { form, setParam } = useEditor();
-  const nodes = graph.model.nodes.filter((node) => Object.keys(form[node.name] ?? {}).length > 0);
+  const view = levelModel(graph.model, level) ?? EMPTY_MODEL;
+  const nodes = view.nodes.filter((node) => Object.keys(form[node.name] ?? {}).length > 0);
   return (
     <div className="settings" data-settings>
-      {nodes.length === 0 && <p className="dim">No node of this graph has a parameter to set.</p>}
+      {nodes.length === 0 && <p className="dim">No node {level === "" ? "of this graph" : `inside ${level}`} has a parameter to set.</p>}
       {nodes.map((node) => (
         <section key={node.name} className="form-node" data-form-node={node.name}>
           <h3>

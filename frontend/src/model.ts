@@ -11,8 +11,12 @@
 import type { Edge, Node } from "@xyflow/react";
 import type { Group } from "./groups";
 
+/**
+ * `subgraph` is a `recordstream.flow.subgraph.Subgraph` step drawn as ONE node (its inside is `Model.inside[name]`);
+ * `boundary` is the `<in>` / `<out>` node drawn inside a subgraph (DESIGN §2.6).
+ */
 export const NODE_KINDS = [
-  "source", "op", "algorithm", "engine", "sink", "runnable", "value", "contract", "host", "alias",
+  "source", "op", "algorithm", "engine", "sink", "runnable", "value", "contract", "host", "alias", "subgraph", "boundary",
 ] as const;
 export type NodeKind = (typeof NODE_KINDS)[number];
 
@@ -21,6 +25,10 @@ export type WireKind = (typeof WIRE_KINDS)[number];
 
 export const GRAPH_KINDS = ["flow", "graph", "contract"] as const;
 export type GraphKind = (typeof GRAPH_KINDS)[number];
+
+/** What New… creates (`POST api/graphs {kind}`): a `flow:`, a `Stream` with an `ops:` list, or a flow plus its contract. */
+export const NEW_GRAPH_KINDS = ["flow", "pipeline", "source"] as const;
+export type NewGraphKind = (typeof NEW_GRAPH_KINDS)[number];
 
 /** A socket type: a registered item class name, a graph slot kind, a JSON-schema scalar word, or `*`. */
 export type SocketType = string;
@@ -79,6 +87,11 @@ export interface Model {
   wires: Wire[];
   problems: Problem[];
   outputs: string[];
+  /**
+   * Per subgraph node (by its qualified name, `prep`, `prep/inner`), the model of its inside — recursive, inner node
+   * names qualified, with the `<in>`/`<out>` boundary nodes; absent on a server without subgraphs (`levels.ts`).
+   */
+  inside?: Record<string, Model>;
 }
 
 /** `{node name: [x, y]}` — the sidecar's shape. */
@@ -88,6 +101,8 @@ export interface GraphSummary {
   name: string;
   path: string;
   kind: GraphKind;
+  /** The editor holds changes to it not yet written (Explicit Save). */
+  dirty: boolean;
 }
 
 export interface Graph extends GraphSummary {

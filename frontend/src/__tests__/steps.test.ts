@@ -5,7 +5,7 @@
 import { describe, expect, it } from "vitest";
 import type { NodeSpec } from "../api";
 import type { Graph, ModelNode } from "../model";
-import { PALETTE_ROWS, paletteMatches, recordPredecessor, stepAnchor, stepName } from "../steps";
+import { PALETTE_ROWS, freeSpot, paletteMatches, recordPredecessor, spotBeside, stepAnchor, stepName, uniqueName } from "../steps";
 
 const spec = (classPath: string, inputs: [string, string][] = [], outputs: [string, string][] = []): NodeSpec => ({
   class_path: classPath,
@@ -50,6 +50,7 @@ const graph = (nodes: ModelNode[], outputs: string[] = [], wires: Graph["model"]
   positions: {},
   groups: [],
   history_depth: 50,
+  dirty: false,
 });
 
 describe("paletteMatches", () => {
@@ -104,4 +105,55 @@ describe("recordPredecessor — where a step dropped from an INPUT goes", () => 
   const flow = graph([node("decode"), node("gain")], ["gain"], wires);
   it("is the node whose record the target reads", () => expect(recordPredecessor(flow, "gain")).toBe("decode"));
   it("is undefined for the first step (nothing feeds it)", () => expect(recordPredecessor(flow, "decode")).toBeUndefined());
+});
+
+describe("uniqueName — a subgraph's or a template's suggested name", () => {
+  it("is the base when free, numbered from 2 when taken", () => {
+    expect(uniqueName("subgraph", [])).toBe("subgraph");
+    expect(uniqueName("subgraph", ["subgraph"])).toBe("subgraph2");
+    expect(uniqueName("subgraph", ["subgraph", "subgraph2"])).toBe("subgraph3");
+  });
+});
+
+describe("freeSpot — where a node added by a click lands", () => {
+  const size = { width: 240, height: 120 };
+  it("is the start when nothing is there", () => {
+    expect(freeSpot({ x: 100, y: 100 }, size, [])).toEqual({ x: 100, y: 100 });
+  });
+  it("steps down past every card it would cover, staying on the 10-px grid", () => {
+    const cards = [
+      { x: 90, y: 90, width: 240, height: 120 },
+      { x: 90, y: 230, width: 240, height: 120 },
+    ];
+    const spot = freeSpot({ x: 100, y: 100 }, size, cards);
+    expect(spot.x).toBe(100);
+    expect(spot.y).toBeGreaterThanOrEqual(350);
+    expect(spot.y % 10).toBe(0);
+  });
+  it("snaps the start to the grid", () => {
+    expect(freeSpot({ x: 103, y: 97 }, size, [])).toEqual({ x: 100, y: 100 });
+  });
+});
+
+describe("spotBeside — a node added by a click lands below the one it follows, clear of every card (P8)", () => {
+  const size = { width: 240, height: 200 };
+
+  it("measured against the cards where they are AFTER the add — the server moved the later member down", () => {
+    // piped.yaml fresh from disk: transforms[0] at (40, 440); the member added after it pushed the old transforms[1]
+    // (now transforms[2]) from (40, 640) down to (40, 840) — measured before, the new card was placed against the OLD
+    // place and landed on top of it
+    const anchor = { x: 40, y: 440, ...size };
+    const after = [anchor, { x: 40, y: 840, ...size }];
+    const spot = spotBeside(anchor, after, size);
+    const overlaps = after.some(
+      (card) => spot.x < card.x + card.width && card.x < spot.x + size.width && spot.y < card.y + card.height && card.y < spot.y + size.height,
+    );
+    expect(overlaps).toBe(false);
+    expect(spot.x).toBe(100);
+  });
+
+  it("with room below the anchor, right there", () => {
+    const anchor = { x: 40, y: 40, ...size };
+    expect(spotBeside(anchor, [anchor], size)).toEqual({ x: 100, y: 280 });
+  });
 });

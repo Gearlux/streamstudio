@@ -63,7 +63,7 @@ dependencies = [
     # a module-scope import is a hard dependency whatever else happens to install it.
     "pyyaml",
     # Imported at MODULE scope by app.py: the graph editor is a Flask blueprint (mounted by a consuming
-    # Flask app, or served standalone by `streamstudio editor`) — docs/rewrite.md.
+    # Flask app, or served standalone by bare `streamstudio`, the canvas editor) — docs/rewrite.md.
     "flask",
 ]
 requires-python = ">=3.12"

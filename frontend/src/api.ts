@@ -2,15 +2,21 @@
  * The typed client for every phase-2 route of `streamstudio/app.py` — one function per route.
  *
  * Paths are RELATIVE (`api/graphs`, never `/api/graphs`): the page is built with `base: "./"`, so the same
- * bundle works served at `/` by `streamstudio editor` and under a consuming app's prefix (`/editor/`),
+ * bundle works served at `/` by `streamstudio` (the canvas editor) and under a consuming app's prefix (`/editor/`),
  * as long as that app registers the API blueprint under the same prefix.
  *
  * A refusal is what the routes answer: `400 {error}` with the LOCATED message (`file:line:col: …`), a
  * name that does not exist `404 {error}` naming what there is. Both surface as an `ApiError` whose
  * `error` is that message verbatim, so the page shows the server's words and never paraphrases them.
+ *
+ * Explicit Save (DESIGN §2.2): every editing route changes the document the server holds IN MEMORY and answers it
+ * with `dirty`; only `save` / `save-as` write files. A node name in a URL may be QUALIFIED (`prep/grey`, a node
+ * inside a subgraph): the routes take it as `<path:node>`, so each segment is encoded on its own (`nodePath`).
  */
 import type { Group } from "./groups";
-import type { Form, Graph, GraphSummary, Json, Positions, Supertypes } from "./model";
+import type { Form, Graph, GraphSummary, Json, NewGraphKind, Positions, Problem, Supertypes } from "./model";
+import type { NameShift } from "./levels";
+import type { RestoredSummary, Workspace } from "./recovery";
 
 export class ApiError extends Error {
   constructor(
@@ -31,12 +37,37 @@ export function errorMessage(exc: unknown): string {
 
 type Method = "GET" | "PUT" | "POST" | "DELETE";
 
+/**
+ * The editor SESSION this page joined (`GET api/workspace` answers it), sent with every request as
+ * `X-Streamstudio-Session` (R1, P1): the server refuses a request of an earlier editor's session — a tab left open
+ * across `streamstudio restart` — with `409`, changing nothing, and the page joins the new editor again
+ * (`onRestarted`). Measured before: such a tab edited the NEW editor's document, read from disk, so the kept edit
+ * vanished on the next change, Save wrote the file without it, and the next stop replaced the kept version.
+ */
+let session: string | null = null;
+let restarted: ((message: string) => void) | null = null;
+
+/** Send `joined` with every request from now on (`null`: none — a request without it is served as ever). */
+export function joinSession(joined: string | null): void {
+  session = joined;
+}
+
+/** Hear every `409` — the editor restarted since this page joined it; `null` stops listening. */
+export function onRestarted(listener: ((message: string) => void) | null): void {
+  restarted = listener;
+}
+
+/** The status the server refuses a request of another session with. */
+export const RESTARTED_STATUS = 409;
+
 // `object`, not `Record<string, Json>`: a group carries keys the page never declared (`Group`), and a body is
 // only ever JSON.stringify-ed.
 async function call<T>(method: Method, path: string, body?: object): Promise<T> {
+  const headers: Record<string, string> = body === undefined ? {} : { "content-type": "application/json" };
+  if (session !== null) headers["x-streamstudio-session"] = session;
   const response = await fetch(path, {
     method,
-    headers: body === undefined ? {} : { "content-type": "application/json" },
+    headers,
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const data: unknown = await response.json().catch(() => undefined);
@@ -45,6 +76,7 @@ async function call<T>(method: Method, path: string, body?: object): Promise<T> 
       typeof data === "object" && data !== null && typeof (data as { error?: unknown }).error === "string"
         ? (data as { error: string }).error
         : `${response.status} ${response.statusText} on ${method} ${path}`;
+    if (response.status === RESTARTED_STATUS) restarted?.(error);
     throw new ApiError(response.status, error);
   }
   return data as T;
@@ -52,18 +84,97 @@ async function call<T>(method: Method, path: string, body?: object): Promise<T> 
 
 const graphPath = (name: string): string => `api/graphs/${encodeURIComponent(name)}`;
 
+/** A (possibly qualified) node name as a `<path:node>` URL part: `prep/grey` → `prep/grey`, each segment encoded. */
+export const nodePath = (node: string): string => node.split("/").map(encodeURIComponent).join("/");
+
 // ---------------------------------------------------------------------------------------------------
 // graphs
 // ---------------------------------------------------------------------------------------------------
 
-/** `GET api/graphs` — every `*.yaml` of the directory as `{name, path, kind}`. */
+/**
+ * `GET api/graphs` — `[{name, path, kind, dirty}]`: every `*.yaml` of the graph folder (sidecars and `*.steps.yaml`
+ * left out), and every file opened with Open… or made with New… in another folder.
+ */
 export const listGraphs = (): Promise<GraphSummary[]> => call("GET", "api/graphs");
 
-/** `GET api/graphs/<name>` — `{name, path, kind, text, model, positions, groups, history_depth}`. */
+/** `GET api/graphs/<name>` — `{name, path, kind, text, model, positions, groups, history_depth, dirty}`. */
 export const getGraph = (name: string): Promise<Graph> => call("GET", graphPath(name));
 
-/** `PUT api/graphs/<name>` `{text}` — replace the whole document (refused when it gains a problem). */
+/** `PUT api/graphs/<name>` `{text}` — replace the whole document in memory (refused when it gains a problem). */
 export const putText = (name: string, text: string): Promise<Graph> => call("PUT", graphPath(name), { text });
+
+/**
+ * `POST api/graphs` `{name, kind, dir?}` — New…: WRITES the starter of `kind` to `<dir or graph folder>/<name>.yaml` at
+ * once and answers the graph, not dirty (a folder other than the editor's joins the list like a file opened). Refused,
+ * writing nothing, when that file exists, the folder does not exist or cannot be written, or the name is one the
+ * server's rule refuses — the refusal names the file or the rule.
+ */
+export const newGraph = (name: string, kind: NewGraphKind, dir?: string): Promise<Graph> =>
+  call("POST", "api/graphs", dir === undefined ? { name, kind } : { name, kind, dir });
+
+/** `POST api/graphs/open` `{path}` — open any `.yaml` on the editor's machine and list it (a taken name → `demo~2`). */
+export const openGraph = (path: string): Promise<Graph> => call("POST", "api/graphs/open", { path });
+
+/**
+ * `POST api/graphs/<name>/save` — write every changed file and the sidecar. Refused, writing nothing, when a file
+ * changed on disk since the editor read it (the message says to Revert or Save As).
+ */
+export const saveGraph = (name: string): Promise<Graph> => call("POST", `${graphPath(name)}/save`);
+
+/** `POST api/graphs/<name>/save-as` `{path, overwrite?}` — write it to `path`; the list entry now names the new file. */
+export const saveGraphAs = (name: string, path: string, overwrite = false): Promise<Graph> =>
+  call("POST", `${graphPath(name)}/save-as`, overwrite ? { path, overwrite } : { path });
+
+/** `POST api/graphs/<name>/revert` — read the file again; the in-memory history, positions and groups are dropped. */
+export const revertGraph = (name: string): Promise<Graph> => call("POST", `${graphPath(name)}/revert`);
+
+/** `GET api/graphs/<name>/check` — every problem of the document, each with its `file:line:col`. */
+export const checkGraph = (name: string): Promise<{ problems: Problem[] }> => call("GET", `${graphPath(name)}/check`);
+
+// ---------------------------------------------------------------------------------------------------
+// the workspace — the folder the editor was started on, and the unsaved work a stop kept there (DESIGN2 §1)
+// ---------------------------------------------------------------------------------------------------
+
+/**
+ * `GET api/workspace` — `{folder, session, recovery}`: `session` is the editor's (the page joins it, `joinSession`);
+ * `recovery` is `null`, or the unsaved work the last session kept in the folder's hidden
+ * `.streamstudio-workspace.json` when it stopped (`recovery.ts`). Answered whatever session a page sends: it is how a
+ * page joins again after a restart.
+ */
+export const getWorkspace = (): Promise<Workspace> => call("GET", "api/workspace");
+
+/**
+ * `POST api/workspace/recovery/restore` — open the kept graphs with their unsaved texts, positions and groups (held in
+ * the editor, dirty; nothing is written until Save) and remove the recovery file. Answers the graph list, each entry
+ * with `restored`: a file this editor holds unsaved edits of, or one kept twice, opens a second entry beside the
+ * first (`demo~2`) — no version is dropped.
+ */
+export const restoreRecovery = (): Promise<RestoredSummary[]> => call("POST", "api/workspace/recovery/restore");
+
+/** `POST api/workspace/recovery/discard` — drop the kept work (the recovery file goes). Answers the graph list. */
+export const discardRecovery = (): Promise<GraphSummary[]> => call("POST", "api/workspace/recovery/discard");
+
+// ---------------------------------------------------------------------------------------------------
+// the file browser — the editor's machine, never the browser's
+// ---------------------------------------------------------------------------------------------------
+
+export interface FileEntry {
+  name: string;
+  path: string;
+  kind: "dir" | "yaml";
+}
+
+export interface FileListing {
+  dir: string;
+  /** The folder above, or `null` at the root. */
+  parent: string | null;
+  /** Folders first; hidden entries and `*.layout.yaml` left out. */
+  entries: FileEntry[];
+}
+
+/** `GET api/files?dir=<absolute dir>` — no `dir` is the graph folder; a missing one is a 404 naming it. */
+export const listFiles = (dir?: string): Promise<FileListing> =>
+  call("GET", dir === undefined ? "api/files" : `api/files?dir=${encodeURIComponent(dir)}`);
 
 // ---------------------------------------------------------------------------------------------------
 // editing — each answers the whole graph after the edit
@@ -73,26 +184,51 @@ export const putText = (name: string, text: string): Promise<Graph> => call("PUT
 export const setParam = (name: string, node: string, param: string, value: Json): Promise<Graph> =>
   call("POST", `${graphPath(name)}/param`, { node, param, value });
 
-export interface NewStep {
+/**
+ * Where a new step goes: after a step or a list member (`after`), or at the END of an op list (`list`, the list node
+ * `<holder>.<slot>` — `stream.ops`; sent without `after`). Exactly one of the two.
+ */
+export type StepPlace = { after: string; list?: undefined } | { list: string; after?: undefined };
+
+export type NewStep = {
   name: string;
-  after: string;
   class_path: string;
   params: Record<string, Json>;
-}
+} & StepPlace;
 
-/** `POST api/graphs/<name>/steps` — insert a `flow:` step after `after`. */
-export const addStep = (name: string, step: NewStep): Promise<Graph> =>
+/**
+ * `POST api/graphs/<name>/steps` — insert a `flow:` step after `after`. Inside a subgraph both names are QUALIFIED:
+ * `{name: "prep/threshold", after: "prep/grey"}` inserts into prep's `steps:`. On an op list (DESIGN2 §3) `after` names
+ * a MEMBER — `{after: "stream.ops[1]"}` inserts the class as `stream.ops[2]` — and `{list: "stream.ops"}` appends it as
+ * the list's last member (an empty `ops: []` becomes a block list); `name` is the step name a flow step would take,
+ * sent either way (a member is named by its position). The answer is the graph plus `added`: the new node's name as the
+ * server made it (`stream.ops[2]`; a flow step's own, qualified name).
+ */
+export const addStep = (name: string, step: NewStep): Promise<Graph & { added?: string }> =>
   call("POST", `${graphPath(name)}/steps`, { ...step });
 
-/** `DELETE api/graphs/<name>/steps/<node>` — remove a step; what read it now reads what it read from. */
+/** `DELETE api/graphs/<name>/steps/<path:node>` — remove a step; what read it now reads what it read from. */
 export const removeStep = (name: string, node: string): Promise<Graph> =>
-  call("DELETE", `${graphPath(name)}/steps/${encodeURIComponent(node)}`);
+  call("DELETE", `${graphPath(name)}/steps/${nodePath(node)}`);
+
+/**
+ * `POST api/graphs/<name>/steps/remove` `{nodes}` — remove several steps as ONE edit (one undo entry): what Cut and
+ * Delete send for the whole selection, so one Ctrl/Cmd+Z brings every removed step back. Op list MEMBERS are removed
+ * the same way (`{nodes: ["stream.ops[1]", "stream.ops[3]"]}`); the later members are renumbered by the server, their
+ * positions and group entries with them; removing every member leaves `ops: []`.
+ */
+export const removeSteps = (name: string, nodes: string[]): Promise<Graph> =>
+  call("POST", `${graphPath(name)}/steps/remove`, { nodes });
 
 /** `POST api/graphs/<name>/rename` `{node, new}` — the key, every reference to it, and the sidecar entry. */
 export const renameNode = (name: string, node: string, newName: string): Promise<Graph> =>
   call("POST", `${graphPath(name)}/rename`, { node, new: newName });
 
-export type HistoryStep = Graph & { changed: boolean };
+/**
+ * An undo or redo: the graph, whether there was a step, and how it renamed op list members (`shifts`, in order —
+ * a page inside a subgraph MEMBER follows it, `levels.followShifts`).
+ */
+export type HistoryStep = Graph & { changed: boolean; shifts?: NameShift[] };
 
 /** `POST api/graphs/<name>/undo` — one step back in the text history; `changed` says whether there was one. */
 export const undo = (name: string): Promise<HistoryStep> => call("POST", `${graphPath(name)}/undo`);
@@ -100,19 +236,89 @@ export const undo = (name: string): Promise<HistoryStep> => call("POST", `${grap
 /** `POST api/graphs/<name>/redo`. */
 export const redo = (name: string): Promise<HistoryStep> => call("POST", `${graphPath(name)}/redo`);
 
+/** What `copy` answers: the YAML text of the copied steps — a steps mapping, or a sequence of `ops` list members. */
+export interface Copied {
+  text: string;
+  kind: "steps" | "ops";
+}
+
+/** `POST api/graphs/<name>/copy` `{nodes}` — the nodes' own lines (comments kept, dedented), as text. */
+export const copyNodes = (name: string, nodes: string[]): Promise<Copied> => call("POST", `${graphPath(name)}/copy`, { nodes });
+
+/**
+ * `POST api/graphs/<name>/paste` `{text, after}` — insert copied text after `after`: a taken name is suffixed
+ * (`grey` → `grey_2`) and the references among the pasted steps follow; ONE undo entry.
+ */
+export const pasteText = (name: string, text: string, after: string): Promise<Graph & { pasted?: string[] }> =>
+  call("POST", `${graphPath(name)}/paste`, { text, after });
+
+// ---------------------------------------------------------------------------------------------------
+// subgraphs (DESIGN §2.6) and templates (§2.5)
+// ---------------------------------------------------------------------------------------------------
+
+/**
+ * `POST api/graphs/<name>/subgraph` `{nodes, name}` — consecutive steps of one level become one subgraph step; `name`
+ * is qualified on that level like the steps (`{nodes: ["prep/grey", "prep/scaled"], name: "prep/subgraph"}`). The
+ * answer's `subgraph` is the new node's name — `name` for flow steps, the first member's POSITION for list members.
+ */
+export const convertToSubgraph = (name: string, nodes: string[], subgraph: string): Promise<Graph & { subgraph?: string }> =>
+  call("POST", `${graphPath(name)}/subgraph`, { nodes, name: subgraph });
+
+/** `POST api/graphs/<name>/subgraph/<path:node>/extract` `{path?}` — Move to its own file: `steps: {include: …}`. */
+export const extractSubgraph = (name: string, node: string, path?: string): Promise<Graph> =>
+  call("POST", `${graphPath(name)}/subgraph/${nodePath(node)}/extract`, path === undefined ? {} : { path });
+
+/** `POST api/graphs/<name>/include` `{path, after, name?}` — Insert steps file: a subgraph step that includes it. */
+export const includeSteps = (name: string, path: string, after: string, step?: string): Promise<Graph> =>
+  call("POST", `${graphPath(name)}/include`, step === undefined ? { path, after } : { path, after, name: step });
+
+/** A template: a steps file in the templates folder (`~/.streamstudio/templates` by default). */
+export interface Template {
+  name: string;
+  path: string;
+  steps: string[];
+  /** The file's first comment line. */
+  doc: string;
+}
+
+/** `GET api/templates`. */
+export const listTemplates = (): Promise<Template[]> => call("GET", "api/templates");
+
+/**
+ * `POST api/templates` `{name, graph, nodes, overwrite?}` — a subgraph node saves its inner steps, flow steps save
+ * themselves. Written at once (a template is not part of any document, so no Save is needed).
+ */
+export const saveTemplate = (template: string, graph: string, nodes: string[], overwrite = false): Promise<unknown> =>
+  call("POST", "api/templates", overwrite ? { name: template, graph, nodes, overwrite } : { name: template, graph, nodes });
+
+/** `DELETE api/templates/<name>`. */
+export const deleteTemplate = (template: string): Promise<unknown> =>
+  call("DELETE", `api/templates/${encodeURIComponent(template)}`);
+
+/** `POST api/graphs/<name>/templates/<template>/insert` `{after}` — a COPY of the template as a new subgraph step. */
+export const insertTemplate = (name: string, template: string, after: string): Promise<Graph> =>
+  call("POST", `${graphPath(name)}/templates/${encodeURIComponent(template)}/insert`, { after });
+
 // ---------------------------------------------------------------------------------------------------
 // positions
 // ---------------------------------------------------------------------------------------------------
 
-/** `PUT api/graphs/<name>/positions` `{positions}` — written to the sidecar; answers every node's position. */
+/**
+ * `PUT api/graphs/<name>/positions` `{positions}` — held until Save (then the sidecar); answers every node's position.
+ * The server MERGES what it is sent over the positions it holds, so a partial map is safe; the page sends the whole
+ * map it draws all the same.
+ */
 export const putPositions = (name: string, positions: Positions): Promise<Positions> =>
   call("PUT", `${graphPath(name)}/positions`, { positions });
 
-/** `POST api/graphs/<name>/layout` — lay the graph out afresh on the server and save it. */
+/** `POST api/graphs/<name>/layout` — lay the graph out afresh on the server (held until Save). */
 export const relayout = (name: string): Promise<Positions> => call("POST", `${graphPath(name)}/layout`);
 
-/** `PUT api/graphs/<name>/groups` `{groups}` — the sidecar's `groups:` block, replaced whole; the document is untouched. */
-export const putGroups = (name: string, groups: Group[]): Promise<{ groups: Group[] }> =>
+/**
+ * `PUT api/graphs/<name>/groups` `{groups}` — the sidecar's `groups:` block, replaced whole and held until Save;
+ * the document is untouched. Answers the groups and whether the graph is now dirty.
+ */
+export const putGroups = (name: string, groups: Group[]): Promise<{ groups: Group[]; dirty?: boolean }> =>
   call("PUT", `${graphPath(name)}/groups`, { groups });
 
 // ---------------------------------------------------------------------------------------------------
