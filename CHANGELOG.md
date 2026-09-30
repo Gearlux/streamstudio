@@ -20,6 +20,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **A YAML error in an included steps file is located in that file.** A graph `demo.yaml` that includes
+  `prep.steps.yaml`, whose brace on line 2 never closes, was reported by Check graph at `…/demo.yaml:3:7` — the
+  graph with the steps file's line — while the message named `prep.steps.yaml`. It is now at
+  `…/prep.steps.yaml:3:7`, also for a steps file you have not saved yet; an error in the graph's own text still
+  names the graph. The message is unchanged.
 - **A steps file you have not saved never touches the disk.** After Move to its own file…, every check, edit and
   run wrote `prep.steps.yaml` into the graph folder for the length of the load and removed it after, and with the
   folder read-only every edit was refused (`does not load: PermissionError: [Errno 13] Permission denied:

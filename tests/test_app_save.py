@@ -391,6 +391,28 @@ class TestCheck:
         assert "does not load" in problems[0]["message"]
         assert problems[0]["loc"].endswith("broken.yaml:3:1")
 
+    def test_a_syntax_error_in_an_included_file_is_located_in_that_file(self, client: Any, graph_dir: Path) -> None:
+        """Measured 2026-09-30: the route answered ``…/inc.yaml:3:7`` — the graph with the steps file's line."""
+        (graph_dir / "inc.yaml").write_text(
+            "flow:\n"
+            "  prep:\n"
+            "    op: !class:recordstream.flow.subgraph.Subgraph\n"
+            "      steps:\n"
+            "        include: prep.steps.yaml\n"
+            "      result: scaled\n"
+            "outputs: prep\n"
+        )
+        steps = graph_dir / "prep.steps.yaml"
+        steps.write_text(  # the brace on line 2 never closes: PyYAML stops at line 3, column 7
+            "grey:\n"
+            "  op: !class:recordstream.ops.image.ConvertMode {mode: L, oops\n"
+            "scaled:\n"
+            f"  op: !class:{THRESHOLD} {{low_level: 0.5}}\n"
+        )
+        problems = _ok(client.get("/api/graphs/inc/check"))["problems"]
+        assert [problem["loc"] for problem in problems] == [f"{steps}:3:7"]
+        assert "does not load: ParserError" in problems[0]["message"]
+
     def test_check_of_an_unknown_graph_is_404(self, client: Any) -> None:
         assert client.get("/api/graphs/nosuch/check").status_code == 404
 
