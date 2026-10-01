@@ -1204,7 +1204,7 @@ class TestFirstLayout:
         self, open_graph: Callable[[str], Opened], graph_dir: Path
     ) -> None:
         """Measured 2026-10-01 before the rule: ``contract`` at (40, 240) under ``known`` (373 px tall, 40..413) —
-        the one overlapping pair; after: ``contract`` at (40, 440), 27 px below ``known``'s bottom."""
+        the one overlapping pair; after: ``contract`` at (40, 430), 17 px below ``known``'s bottom."""
         waivefront = pytest.importorskip("waivefront")
         shipped = Path(waivefront.__file__).parent / "annotation" / "bte_view.yaml"
         (graph_dir / "bte_view.yaml").write_text(shipped.read_text())
@@ -1218,7 +1218,7 @@ class TestFirstLayout:
         assert overlapping == []
         known, contract = node_translate(page, "known"), node_translate(page, "contract")
         assert known == (40.0, 40.0)
-        assert contract == (40.0, 440.0)
+        assert contract == (40.0, 430.0)
         assert opened.errors == []
 
 

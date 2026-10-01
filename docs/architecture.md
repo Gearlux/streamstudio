@@ -564,7 +564,7 @@ the YAML. Pins: `tests/test_document.py::TestSetParam::test_the_bluetooth_pane_k
 spaced the cards of one column by a fixed `ROW_DY = 200`, so a card taller than about 180 px was drawn over the next
 one. Measured on the shipped Bluetooth pane once its head step became `known` (`CollectKnownAccessCodes`, ten
 parameters): `known` at (40, 40) is 373 px tall, and the `contract` root at (40, 240) showed only its last 8 px. Over
-the 34 graph levels of the shipped annotation panes and annotation-workspace templates, 8 pairs of drawn cards
+the 32 graph levels of the shipped annotation panes and annotation-workspace templates, 8 pairs of drawn cards
 overlapped. *Decision.* Within a column the next card's y is the previous card's y plus
 `max(ROW_DY, card_height(previous) + CARD_GAP)`, rounded up to the canvas's 10-px snap grid (`layout.GRID`, React
 Flow's `snapGrid`: a corner off it jumps on its first drag). `positions` starts fresh nodes below the lowest kept
@@ -583,10 +583,13 @@ flow opened headless at 1400x900, each React Flow node's measured height beside 
 | a subgraph `<in>` pill (a note) | 1 / 0 / 0 | 80 | 81 |
 | the classification workspace value | 2 / 34 / 1 | 925 | 925 |
 
-Over all 197 cards the estimate is exact on 195 and 1 px over on the two pills — never under. `CARD_GAP = 19` is what
-`ROW_DY` leaves under a six-row card (200 − 181), so every card that fitted the fixed pitch keeps its place: 27 of
-the 34 levels lay out byte-identically, the 7 that moved are exactly the ones that overlapped, and 8 overlapping pairs
-became 0. Rejected: letting the page send its measured heights back (the graph answer carries positions before the
+Over all 197 cards the estimate is exact on 195 and 1 px over on the two pills — never under. `CARD_GAP = 17` is what
+`ROW_DY` leaves under the TALLEST card it fits — a five-row subgraph card, 37 + 5 × 24 + 26 = 183 px (a six-row op card
+is 181) — so every card that fitted the fixed pitch keeps its place: 25 of the 32 shipped levels lay out
+byte-identically, the 7 that moved are exactly the ones that overlapped, and 8 overlapping pairs became 0. A gap
+measured under the six-row op card alone (19 = 200 − 181) left the subgraph bar out: the card below a five-row
+subgraph card moved from (40, 240) to (40, 250) although nothing overlapped (measured on the page, the Bluetooth pane
+with two steps made a subgraph). Rejected: letting the page send its measured heights back (the graph answer carries positions before the
 page has drawn, and a layout that depends on an open page is no longer a function of the document); placing the
 unwired root where no step can be taller (it fixes one pane, not the other six levels). *Consequences.* The estimate
 mirrors the card's CSS: a new row type, a taller widget or a changed font makes it stale, and only the browser test
@@ -597,12 +600,14 @@ title-only card that keeps the fixed pitch. The page's *Arrange* (dagre over mea
 
 ```python
 layout.card_height(model.node("known"))      # 373 — 37 + 14 rows × 24; the page measured 373
-layout.layered_layout(model)["contract"]      # (40.0, 440.0) — was (40.0, 240.0), under `known`
+layout.layered_layout(model)["contract"]      # (40.0, 430.0) — was (40.0, 240.0), under `known`
 ```
 
 *What you may change.* The part heights and the gap (re-calibrated), the rounding. What must hold: the estimate is
-never below a drawn card, `ROW_DY` stays the MINIMUM pitch so short cards keep their places, and `layout.py` imports
-no document code. Pins: `tests/test_layout.py::TestCardHeight`, `::TestTallCards`,
+never below a drawn card, `ROW_DY` stays the MINIMUM pitch so short cards keep their places, `CARD_GAP` is
+`ROW_DY` minus the tallest card shape that fits it (re-derived with every part height —
+`::TestTallCards::test_no_card_shape_the_fixed_pitch_fitted_moves_the_next_card` enumerates the shapes), and
+`layout.py` imports no document code. Pins: `tests/test_layout.py::TestCardHeight`, `::TestTallCards`,
 `::test_bte_views_first_layout_overlaps_no_two_cards_of_a_column`, `tests/test_canvas.py::TestFirstLayout`.
 
 ## The canvas page is a build artifact beside the package, and a drawn wire is a proposal until a route can spell it (`frontend/`, `streamstudio.app.page_blueprint`, 2026-09-28)

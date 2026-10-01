@@ -207,8 +207,8 @@ class TestTallCards:
         g = Graph([card("tall", 1, 10, 3), card("short", 0, 4, 2, kind="contract")])
         pos = layered_layout(g)
         assert pos["tall"] == (column(0), row(0))
-        # was (40, 240) = row(1): inside the tall card (40..413). Now 40 + 373 + 19 = 432, up to the grid: 440.
-        assert pos["short"] == (column(0), 440.0)
+        # was (40, 240) = row(1): inside the tall card (40..413). Now 40 + 373 + 17 = 430, on the grid.
+        assert pos["short"] == (column(0), 430.0)
         assert pos["short"][1] >= pos["tall"][1] + card_height(g.nodes[0]) + CARD_GAP
 
     def test_a_short_card_above_a_tall_one_keeps_todays_pitch(self) -> None:
@@ -216,10 +216,10 @@ class TestTallCards:
         pos = layered_layout(g)
         assert pos["short"] == (column(0), row(0))
         assert pos["tall"] == (column(0), row(1))
-        assert pos["last"] == (column(0), row(1) + 400.0)  # 240 + (373 + 19 → 400)
+        assert pos["last"] == (column(0), row(1) + 390.0)  # 240 + (373 + 17 = 390)
 
     def test_cards_of_six_rows_or_fewer_keep_todays_coordinates_exactly(self) -> None:
-        """CON case: 181 px (six rows) + the gap is exactly ``ROW_DY`` — every such card stays on today's grid, so
+        """CON case: 181 px (six rows) + the gap stays within ``ROW_DY`` — every such card stays on today's grid, so
         a graph of short cards lays out byte-identically to the fixed pitch (a bare ``Node`` the same)."""
         g = Graph(
             [card("a", 1, 3, 2), card("b", 0, 4, 2), Node("c"), card("d", 2, 1, 2), card("e", 1, 1, 1)],
@@ -235,8 +235,39 @@ class TestTallCards:
             "e": (column(1), row(1)),
         }
 
+    def test_a_five_row_subgraph_card_the_tallest_the_fixed_pitch_fitted_keeps_it(self) -> None:
+        """The tallest card the fixed 200-px pitch fitted is a SUBGRAPH card of five rows — 37 + 5 × 24 + its 26-px bar
+        = 183 px; a six-row op card is 181. Measured 2026-10-01 on the page (the Bluetooth pane with ``known`` and
+        ``window`` made the subgraph ``prep``, rows 1/1/3, drawn 183 px, opened without a positions file): the card
+        below it sat at (40, 240) on the fixed pitch, and at (40, 250) with a gap of 19 px (183 + 19 = 202, up to the
+        grid: 210) — moved although nothing overlapped."""
+        g = Graph([card("prep", 1, 1, 3, kind="subgraph"), card("contract", 0, 4, 2, kind="contract")])
+        assert card_height(g.nodes[0]) == 183
+        assert layered_layout(g)["contract"] == (column(0), row(1))
+
+    def test_no_card_shape_the_fixed_pitch_fitted_moves_the_next_card(self) -> None:
+        """Every shape a card can take — any number of rows, with or without a note line, an op or a subgraph card —
+        whose estimate fits ``ROW_DY`` keeps the next card at ``ROW_DY``; a taller one pushes it below its bottom plus
+        ``CARD_GAP``. ``CARD_GAP`` is exactly what ``ROW_DY`` leaves under the tallest shape that fits, so a change to
+        a part height (``CARD_ROW``, ``CARD_NOTE``, ``CARD_SUBGRAPH_BAR``) fails here until the gap is re-derived."""
+        fitted: List[int] = []
+        for rows in range(12):
+            for note in ("", "a note"):
+                for kind in ("op", "subgraph"):
+                    first = card("first", 0, rows, 0, note=note, kind=kind)
+                    height = card_height(first)
+                    below = layered_layout(Graph([first, Node("next")]))["next"]
+                    if height <= ROW_DY:
+                        fitted.append(height)
+                        assert below == (column(0), row(1)), (rows, note, kind, height)
+                    else:
+                        assert below[1] >= row(0) + height + CARD_GAP, (rows, note, kind, height)
+        assert max(fitted) == 183
+        assert CARD_GAP == ROW_DY - max(fitted)
+
     def test_a_seven_row_card_is_the_first_to_push(self) -> None:
-        """The boundary: 205 px + 19 = 224, up to the grid: 230 — one row more than fits today's 200-px pitch."""
+        """The boundary for an op card: 205 px + 17 = 222, up to the grid: 230 — one row more than fits today's 200-px
+        pitch."""
         g = Graph([card("seven", 1, 4, 2), card("next", 1, 1, 1)])
         assert card_height(g.nodes[0]) == 205
         assert layered_layout(g)["next"] == (column(0), MARGIN + 230.0)
@@ -255,7 +286,7 @@ class TestTallCards:
         assert pos["a"] == (column(0), row(0))
         assert pos["b"] == (column(0), row(1))
         assert pos["tall"] == (column(1), row(0))
-        assert pos["c"] == (column(1), row(0) + 400.0)
+        assert pos["c"] == (column(1), row(0) + 390.0)
 
 
 class TestSidecar:
@@ -496,15 +527,15 @@ class TestPositions:
         g = Graph([card("tall", 1, 10, 3), card("fresh", 0, 4, 2)])
         side = tmp_path / "g.layout.yaml"
         write_sidecar(side, {"tall": (500.0, 100.0)})
-        assert positions(g, side)["fresh"] == (column(0), 100.0 + 400.0)
+        assert positions(g, side)["fresh"] == (column(0), 100.0 + 390.0)
 
     def test_the_lowest_bottom_counts_not_the_lowest_top(self, tmp_path: Path) -> None:
         """A tall kept card whose top is HIGHER than a short kept card's can still reach further down."""
         g = Graph([card("tall", 1, 10, 3), card("short", 1, 1, 1), card("fresh", 1, 1, 1)])
         side = tmp_path / "g.layout.yaml"
         write_sidecar(side, {"tall": (40.0, 40.0), "short": (700.0, 100.0)})
-        # the short card's bottom row ends at 100 + 200 = 300; the tall one's at 40 + 400 = 440
-        assert positions(g, side)["fresh"] == (column(0), 440.0)
+        # the short card's bottom row ends at 100 + 200 = 300; the tall one's at 40 + 390 = 430
+        assert positions(g, side)["fresh"] == (column(0), 430.0)
 
     def test_fresh_tall_cards_stack_by_their_own_heights(self, tmp_path: Path) -> None:
         g = Graph([card("kept", 1, 1, 1), card("tall", 1, 10, 3), card("after", 1, 1, 1)])
@@ -512,7 +543,7 @@ class TestPositions:
         write_sidecar(side, {"kept": (40.0, 40.0)})
         pos = positions(g, side)
         assert pos["tall"] == (column(0), 40.0 + ROW_DY)
-        assert pos["after"] == (column(0), 40.0 + ROW_DY + 400.0)
+        assert pos["after"] == (column(0), 40.0 + ROW_DY + 390.0)
 
 
 def test_a_node_without_wires_goes_below_the_wired_ones_in_its_column() -> None:
@@ -554,7 +585,7 @@ def test_bte_view_derives_into_twenty_nine_layers_one_column_apart() -> None:
     """The shipped Bluetooth pane is a 29-step chain (24 before 2026-09-30) plus its contract root (the
     host's inputs, which no step names by entry, so it carries no wire): the steps stay one row, 340 px
     apart, and the root sits under the first step — below its BOTTOM. Measured 2026-10-01: the root was at
-    (40, 240) = ``row(1)``, inside ``known`` (373 px, 40..413) but for its last 8 px; now (40, 440)."""
+    (40, 240) = ``row(1)``, inside ``known`` (373 px, 40..413) but for its last 8 px; now (40, 430)."""
     pos = layered_layout(_bte_view_model())
     assert len(pos) == 30
     steps = {name: xy for name, xy in pos.items() if name != "contract"}
@@ -562,7 +593,7 @@ def test_bte_view_derives_into_twenty_nine_layers_one_column_apart() -> None:
     assert xs == [column(i) for i in range(29)]
     assert {y for _, y in steps.values()} == {row(0)}
     assert pos["known"] == (column(0), row(0))
-    assert pos["contract"] == (column(0), 440.0)
+    assert pos["contract"] == (column(0), 430.0)
 
 
 def test_bte_views_first_layout_overlaps_no_two_cards_of_a_column() -> None:
