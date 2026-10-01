@@ -22,7 +22,7 @@ from confluid import configurable
 from recordstream import Algorithm, Image, Input, Label, Mask, Output, Param, Record, register_item
 
 import streamstudio
-from streamstudio.document import Document, Model, Problem, _gained, _load_problem
+from streamstudio.document import Document, Model, Problem, _gained, _include_names, _load_problem
 from streamstudio.layout import Group, read_groups, read_sidecar, write_sidecar
 
 MOD = __name__
@@ -382,6 +382,7 @@ _GROUP: Group = {"id": "g1", "title": "front end", "color": "#335", "nodes": ["g
 
 def _write(tmp_path: Path, text: str, name: str = "graph.yaml") -> Path:
     path = tmp_path / name
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text)
     return path
 
@@ -613,28 +614,32 @@ class TestDerive:
         with pytest.raises(KeyError, match="decode.*count"):
             model.node("nope")
 
-    def test_the_bluetooth_pane_derives_25_nodes_and_49_wires(self) -> None:
-        """Measured 2026-09-27 on the shipped ``bte_view.yaml``: 24 steps, 23 ``from:`` record wires,
-        9 gate wires (one per ``requires:``), 17 entry wires (who produced what a node reads), and no
-        host wire — the head node (``WindowSignal``) declares nothing. Measured again 2026-09-28, the
-        day the pane gained its ``contract:`` root: 25 nodes — the 24 steps plus the root, whose
-        outputs are the host's two entries — and the same 49 wires (no step reads ``input`` or
-        ``regions`` by name, so the root wires to nothing and no ``<host>`` node is drawn).
+    def test_the_bluetooth_pane_derives_30_nodes_and_59_wires(self) -> None:
+        """Measured 2026-09-30 on the shipped ``bte_view.yaml``: 29 steps plus the ``contract:`` root —
+        30 nodes, whose root's outputs are the host's two entries — and 59 wires: 28 ``from:`` record
+        wires, 10 gate wires (one per ``requires:``), 21 entry wires (who produced what a node reads),
+        and no host wire — the head node (``CollectKnownAccessCodes``) reads its Signal by TYPE and
+        declares nothing, and no step reads ``input`` or ``regions`` by name, so the root wires to
+        nothing and no ``<host>`` node is drawn. The day before it was 25 nodes and 49 wires (23 / 9 /
+        17): the pane then gained five steps — ``known``, ``channel``, ``overlap``, ``eye`` and ``edr`` —
+        one more gate (``classify.try_edr`` → ``edr``) and four more entry wires (``channel`` into
+        ``tune`` and ``limit``, ``inst_freq`` into ``eye``, ``burst`` into ``edr``).
 
         This pins the waivefront file's declarations from here; a change there shows up here first.
         """
         path = _bte_path()
         model = Document.open(path).model
-        assert len(model.nodes) == 25
-        assert len(model.wires) == 49
+        assert len(model.nodes) == 30
+        assert len(model.wires) == 59
         kinds: Dict[str, int] = {}
         for wire in model.wires:
             kinds[wire.kind] = kinds.get(wire.kind, 0) + 1
-        assert kinds == {"record": 23, "gate": 9, "entry": 17}
+        assert kinds == {"record": 28, "gate": 10, "entry": 21}
         assert model.problems == []
         gates = {(w.source, w.source_socket, w.target) for w in model.wires if w.kind == "gate"}
         assert ("pick", "plain", "burst") in gates
         assert ("classify", "ble", "ble") in gates
+        assert ("classify", "try_edr", "edr") in gates
         root = model.node("contract")
         assert root.kind == "contract"
         assert [(s.name, s.type) for s in root.outputs] == [("input", "Signal"), ("regions", "Regions")]
@@ -647,6 +652,8 @@ class TestDerive:
         located message and the text is left as it was. The CON case beside it: the same pane with the
         root cut off is fed by a synthetic ``<host>`` that supplies anything, so the same insert is
         ACCEPTED and the host grows a ``spectrogram`` output — measured 2026-09-27, before the root.
+        The entries the refusal lists at that point are the host's two plus ``known_codes``, which the
+        pane's head step ``known`` writes (since 2026-09-30).
         """
         source = _bte_path().read_text()
         rooted = tmp_path / "bte_view.yaml"
@@ -665,7 +672,7 @@ class TestDerive:
         assert message.startswith(f"add_step 'floor_db' after 'floor' refused at {anchor}: {rooted}:floor_db: ")
         assert (
             "NoiseFloorEstimate needs the record entry 'spectrogram', which nothing before it produces — "
-            "the chain has input, regions at that point" in message
+            "the chain has input, known_codes, regions at that point" in message
         )
         assert doc.text == source
         assert not any(node.kind == "host" for node in doc.model.nodes)
@@ -844,8 +851,354 @@ class TestProblems:
 
 
 # ------------------------------------------------------------------------------------------------
-# set_param
+# a problem keeps its line in a folder whose name has a space
 # ------------------------------------------------------------------------------------------------
+
+#: A graph whose key ``flow`` is written twice: confluid refuses it while it LOADS, with the location in the message
+#: only (``duplicate key 'flow' at <file>:5:1``) — no YAML mark.
+DUPLICATE_KEY_TEXT = """\
+flow:
+  a:
+    op: !class:recordstream.ops.numpy.Threshold {}
+outputs: a
+flow: {}
+"""
+
+#: The steps INCLUDING_TEXT includes, sound.
+STEPS_TEXT = """\
+grey:
+  op: !class:recordstream.ops.image.ConvertMode {mode: L}
+scaled:
+  op: !class:recordstream.ops.numpy.Scale {source_min: 0.0, source_max: 255.0}
+"""
+
+#: The same steps with ``grey`` written twice (line 5): a load error located in the steps file by its message only.
+DUPLICATE_STEPS_TEXT = STEPS_TEXT + "grey:\n  op: !class:recordstream.ops.image.ConvertMode {mode: L}\n"
+
+SPACED = ["nospace", "with space"]
+
+
+class TestAFolderWithASpaceKeepsTheLine:
+    """Workspace data folders have spaces in their names. Measured 2026-09-30: an error with no
+    YAML mark was located by the pattern `` at (\\S+:\\d+:\\d+)``, which stops at a space — so in ``with space/`` the
+    problem pointed at the bare graph file while its message still named ``…/with space/demo.yaml:1:11``. Each test
+    runs the folder without a space too: both must give the same location."""
+
+    @pytest.mark.parametrize("folder", SPACED)
+    def test_a_build_error(self, tmp_path: Path, folder: str) -> None:
+        path = _write(tmp_path / folder, CONTRACT_FIRST_TEXT, "demo.yaml")
+        [problem] = Document.open(path).check()
+        assert problem.message.startswith(f"{path}: does not build: ConstructionError: Failed to construct ")
+        assert problem.loc == f"{path}:1:11"
+
+    @pytest.mark.parametrize("folder", SPACED)
+    def test_a_load_error(self, tmp_path: Path, folder: str) -> None:
+        path = _write(tmp_path / folder, DUPLICATE_KEY_TEXT, "demo.yaml")
+        [problem] = Document.open(path).check()
+        assert problem.message.startswith(f"{path}: does not load: ConfigurationError: duplicate key 'flow' at ")
+        assert problem.loc == f"{path}:5:1"
+
+    @pytest.mark.parametrize("folder", SPACED)
+    def test_a_load_error_in_a_held_steps_file_not_on_disk(self, tmp_path: Path, folder: str) -> None:
+        path = _write(tmp_path / folder, INCLUDING_TEXT, "demo.yaml")
+        steps = (tmp_path / folder / "prep.steps.yaml").resolve()
+        [problem] = Document(path, {path.resolve(): INCLUDING_TEXT, steps: DUPLICATE_STEPS_TEXT}).check()
+        assert f"duplicate key 'grey' at {steps}:5:1" in problem.message
+        assert problem.loc == f"{steps}:5:1"
+        assert not steps.exists()
+
+    @pytest.mark.parametrize("folder", SPACED)
+    def test_a_load_error_in_a_steps_file_on_disk(self, tmp_path: Path, folder: str) -> None:
+        """An included file the editor does not hold: a load that fails never says which files it read, so the file
+        is recognised on disk."""
+        path = _write(tmp_path / folder, INCLUDING_TEXT, "demo.yaml")
+        steps = _write(tmp_path / folder, DUPLICATE_STEPS_TEXT, "prep.steps.yaml")
+        [problem] = Document.open(path).check()
+        assert problem.loc == f"{steps}:5:1"
+
+    def test_a_message_naming_no_known_file_keeps_the_old_reading(self, tmp_path: Path) -> None:
+        """CON case: a location in a file the document does not know, and that is not on disk, is read as before — a
+        path without a space is taken as written, one with a space is not found and the problem points at the graph,
+        as does a message with no location at all."""
+        path = tmp_path / "with space" / "demo.yaml"
+        assert _load_problem(path, ValueError("bad at /nowhere/other.yaml:3:4: x")).loc == "/nowhere/other.yaml:3:4"
+        assert _load_problem(path, ValueError("bad at /no where/other.yaml:3:4: x")).loc == str(path)
+        assert _load_problem(path, ValueError("bad at /nowhere/other.yaml: x")).loc == str(path)
+
+    def test_the_known_file_named_first_wins(self, tmp_path: Path) -> None:
+        """Two known files in one message: the location is the one the message names FIRST, whatever the order of
+        the files — the longer path wins where both could match at one place."""
+        path = tmp_path / "a b" / "demo.yaml"
+        steps = tmp_path / "a b" / "demo.yaml.steps.yaml"
+        message = f"bad at {steps}:3:4 (first written at {path}:1:2)"
+        texts = {path: "", steps: ""}
+        assert _load_problem(path, ValueError(message), texts=texts).loc == f"{steps}:3:4"
+
+
+# ------------------------------------------------------------------------------------------------
+# a missing included file is named by the file that includes it, searched from that file's folder
+# ------------------------------------------------------------------------------------------------
+
+
+class TestAMissingIncludedFile:
+    """Measured 2026-09-30, working directory ``streamstudio/``: ``… does not load: ConfigFileNotFoundError:
+    /Users/…/streamstudio/string.yaml includes prep.steps.yaml: Not found: prep.steps.yaml (searched:
+    /Users/…/streamstudio/prep.steps.yaml, /Users/…/streamstudio/prep.steps.yaml, …)`` at the bare graph file — the
+    graph was handed to confluid as parsed data, which confluid names ``<cwd>/string.yaml``. The graph now reaches
+    confluid as its path, so the graph is the includer, its folder is searched first, and the problem is at the
+    ``include:`` line."""
+
+    @pytest.mark.parametrize("folder", SPACED)
+    def test_it_is_searched_from_the_graphs_folder_whatever_the_working_directory(
+        self, tmp_path: Path, folder: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        monkeypatch.chdir(elsewhere)
+        path = _write(tmp_path / folder, INCLUDING_TEXT, "demo.yaml")
+        [problem] = Document.open(path).check()
+        assert problem.message.startswith(
+            f"{path}: does not load: ConfigFileNotFoundError: {path} includes prep.steps.yaml: Not found: "
+            f"prep.steps.yaml (searched: {path.parent / 'prep.steps.yaml'}, {elsewhere / 'prep.steps.yaml'}, "
+        )
+        assert "string.yaml" not in problem.message
+        assert problem.loc == f"{path}:5:18"
+
+    def test_an_included_file_beside_the_graph_loads_whatever_the_working_directory(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """CON case: the file is there, beside the graph — found from any working directory, as before."""
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        monkeypatch.chdir(elsewhere)
+        path = _write(tmp_path / "graphs", INCLUDING_TEXT, "demo.yaml")
+        _write(tmp_path / "graphs", STEPS_TEXT, "prep.steps.yaml")
+        document = Document.open(path)
+        assert document.check() == []
+        assert [node.name for node in document.model.inside_of("prep").nodes if node.kind != "boundary"] == [
+            "prep/grey",
+            "prep/scaled",
+        ]
+
+    def test_a_missing_entry_of_an_include_list_is_located_at_that_entry(self, tmp_path: Path) -> None:
+        text = "include: [missing.yaml]\n" + DUPLICATE_KEY_TEXT.replace("flow: {}\n", "")
+        path = _write(tmp_path, text, "demo.yaml")
+        [problem] = Document.open(path).check()
+        assert f"ConfigFileNotFoundError: {path} includes missing.yaml: Not found: missing.yaml" in problem.message
+        assert problem.loc == f"{path}:1:11"
+
+    def test_a_missing_include_spelled_with_a_tilde_is_located_at_its_entry(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """confluid names a ``~`` entry expanded (``… includes <home>/nope.steps.yaml``). Measured before
+        2026-09-30: the problem pointed at the bare graph file."""
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        path = _write(tmp_path / "graphs", INCLUDING_TEXT.replace("prep.steps.yaml", "~/nope.steps.yaml"), "demo.yaml")
+        [problem] = Document.open(path).check()
+        assert f"{path} includes {home / 'nope.steps.yaml'}: Not found: {home / 'nope.steps.yaml'}" in problem.message
+        assert problem.loc == f"{path}:5:18"
+
+    @pytest.mark.parametrize("where", ["beside-the-graph", "in-the-working-directory"])
+    def test_an_include_naming_a_folder_is_located_at_its_entry(
+        self, tmp_path: Path, where: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """confluid names a folder it found by its full path (``… includes <folder>/adir.steps.yaml: … is a
+        directory, not a config file``) — wherever its search found it. Measured before 2026-09-30: the problem
+        pointed at the bare graph file."""
+        path = _write(tmp_path / "graphs", INCLUDING_TEXT.replace("prep.steps.yaml", "adir.steps.yaml"), "demo.yaml")
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        monkeypatch.chdir(elsewhere)
+        folder = (path.parent if where == "beside-the-graph" else elsewhere) / "adir.steps.yaml"
+        folder.mkdir()
+        [problem] = Document.open(path).check()
+        assert f"{path} includes {folder}: {folder} is a directory, not a config file" in problem.message
+        assert problem.loc == f"{path}:5:18"
+
+    def test_an_entry_before_the_missing_one_is_not_taken_for_it(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """CON case: the entries confluid DID find — one spelled with ``~`` among them — are never the location."""
+        home = tmp_path / "home"
+        _write(home, STEPS_TEXT, "a.steps.yaml")
+        monkeypatch.setenv("HOME", str(home))
+        graphs = tmp_path / "graphs"
+        _write(graphs, STEPS_TEXT, "b.steps.yaml")
+        entries = "[~/a.steps.yaml, b.steps.yaml, missing.steps.yaml]"
+        path = _write(graphs, INCLUDING_TEXT.replace("prep.steps.yaml", entries), "demo.yaml")
+        [problem] = Document.open(path).check()
+        assert f"{path} includes missing.steps.yaml: Not found" in problem.message
+        assert problem.loc == f"{path}:5:{18 + entries.index('missing')}"  # the list's `[` is column 18
+
+    def test_an_entry_for_a_user_this_machine_does_not_know_is_matched_as_written(self, tmp_path: Path) -> None:
+        """``~someone/x.yaml`` for an unknown user has no home to expand into: matched as written, never raised."""
+        assert _include_names("~nosuchuser-streamstudio/x.yaml", tmp_path) == {"~nosuchuser-streamstudio/x.yaml"}
+
+    def test_a_missing_include_inside_a_held_steps_file_is_located_in_that_file(self, tmp_path: Path) -> None:
+        path = _write(tmp_path, INCLUDING_TEXT, "demo.yaml")
+        steps = (tmp_path / "prep.steps.yaml").resolve()
+        nested = STEPS_TEXT.replace(
+            "scaled:",
+            "inner:\n  op: !class:recordstream.flow.subgraph.Subgraph\n    steps: {include: in.yaml}\nscaled:",
+        )
+        [problem] = Document(path, {path.resolve(): INCLUDING_TEXT, steps: nested}).check()
+        assert f"ConfigFileNotFoundError: {steps} includes in.yaml: Not found: in.yaml (searched: {tmp_path}" in (
+            problem.message
+        )
+        assert problem.loc == f"{steps}:5:22"
+
+    def test_a_missing_include_inside_a_steps_file_on_disk_points_at_the_graph(self, tmp_path: Path) -> None:
+        """CON case: the includer is a file the editor does not hold — the problem stays at the graph, the message
+        names the steps file."""
+        path = _write(tmp_path, INCLUDING_TEXT, "demo.yaml")
+        steps = _write(tmp_path, STEPS_TEXT.replace("scaled:", "x:\n  include: in.yaml\nscaled:"), "prep.steps.yaml")
+        [problem] = Document.open(path).check()
+        assert f"{steps} includes in.yaml: Not found" in problem.message
+        assert problem.loc == str(path)
+
+
+class TestEveryLoadHandsConfluidTheGraphsPath:
+    """confluid reads the graph as the FILE it is — its path — with the text the editor holds for it, and every other
+    held file, as ``texts=``: so an include is read beside the file that names it, never beside ``<cwd>/string.yaml``,
+    and what is loaded is what the editor shows, saved or not."""
+
+    def test_the_path_and_every_held_text_the_graphs_own_included(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        path = _write(tmp_path, INCLUDING_TEXT, "demo.yaml")
+        _write(tmp_path, STEPS_TEXT, "prep.steps.yaml")
+        real_load = streamstudio.document.confluid.load
+        calls: List[Tuple[Tuple[Any, ...], Dict[str, Any]]] = []
+
+        def load(*args: Any, **kwargs: Any) -> Any:  # confluid.load's own arguments and answer
+            calls.append((args, kwargs))
+            return real_load(*args, **kwargs)
+
+        monkeypatch.setattr(streamstudio.document.confluid, "load", load)
+        document = Document.open(path)
+        assert document.check() == []
+        document.set_param("prep/grey", "mode", "RGB")  # an edit of the included file: the editor holds it now
+        steps = (tmp_path / "prep.steps.yaml").resolve()
+        assert len(calls) >= 4
+        assert {args for args, _kwargs in calls} == {(path.resolve(),)}
+        assert calls[0][1]["texts"] == {path.resolve(): INCLUDING_TEXT}
+        held = calls[-1][1]["texts"]
+        assert held == {Path(key): text for key, text in document.held()["texts"].items()}
+        assert set(held) == {path.resolve(), steps} and "{mode: RGB}" in held[steps]
+
+    def test_a_graph_opened_through_a_symlink_names_the_real_file_and_still_edits(self, tmp_path: Path) -> None:
+        """confluid names a file by its resolved path — the steps files always were; the graph's own nodes now are
+        too (measured before 2026-09-30: ``link/demo.yaml:3:9`` for the graph's node beside ``real/prep.steps.yaml:2:7``
+        for its steps). The message still starts with the path the graph was opened by, and edits land."""
+        real = tmp_path / "real"
+        _write(real, INCLUDING_TEXT, "demo.yaml")
+        _write(real, STEPS_TEXT, "prep.steps.yaml")
+        (tmp_path / "link").symlink_to(real)
+        document = Document.open(tmp_path / "link" / "demo.yaml")
+        assert document.model.node("prep").loc == f"{real / 'demo.yaml'}:3:9"
+        assert document.model.inside_of("prep").node("prep/grey").loc == f"{real / 'prep.steps.yaml'}:2:7"
+        document.set_param("prep", "result", "grey")
+        document.set_param("prep/grey", "mode", "RGB")
+        assert "result: grey" in document.text and document.check() == []
+        document.save()
+        assert "result: grey" in (real / "demo.yaml").read_text()
+        assert "{mode: RGB}" in (real / "prep.steps.yaml").read_text()
+
+
+#: A Stream whose second op is a subgraph including ``prep.steps.yaml`` — Copy of ``stream.ops[1]`` inlines it.
+LIST_MEMBER_INCLUDING_TEXT = """\
+stream: !class:recordstream.core.stream.Stream
+  ops:
+    - !class:recordstream.ops.debug.PrintRecordOp {label: a}
+    - !class:recordstream.flow.subgraph.Subgraph
+      steps:
+        include: prep.steps.yaml
+      result: scaled
+"""
+
+#: A subgraph whose steps are written inline, one of them a subgraph including ``prep.steps.yaml`` — Save as
+#: template of ``prep`` inlines that nested include.
+NESTED_INCLUDING_TEXT = """\
+flow:
+  prep:
+    op: !class:recordstream.flow.subgraph.Subgraph
+      steps:
+        inner:
+          op: !class:recordstream.flow.subgraph.Subgraph
+            steps:
+              include: prep.steps.yaml
+            result: scaled
+      result: inner
+outputs: prep
+"""
+
+
+class TestAGraphFileThatIsASymbolicLink:
+    """``served/demo.yaml`` is a symbolic link to ``shared/demo.yaml``; ``shared/prep.steps.yaml`` says ``mode: L``
+    and a different ``served/prep.steps.yaml`` says ``mode: RGB``. confluid loads the graph by its real path, so
+    the canvas, Check graph, an edit and a run read ``shared/prep.steps.yaml`` (L). Measured 2026-09-30, before the
+    fix: Copy and Save as template read the steps file beside the LINK — ``{mode: RGB}`` — and with no steps file
+    beside the link they failed (``the steps file 'prep.steps.yaml' does not exist``) while the graph loaded clean.
+    Every case runs with the other file beside the link and without it: both must take the file the canvas shows."""
+
+    @staticmethod
+    def _linked(tmp_path: Path, text: str, beside: bool) -> Document:
+        shared, served = tmp_path / "shared", tmp_path / "served"
+        _write(shared, text, "demo.yaml")
+        _write(shared, STEPS_TEXT, "prep.steps.yaml")
+        served.mkdir()
+        if beside:
+            _write(served, STEPS_TEXT.replace("mode: L", "mode: RGB"), "prep.steps.yaml")
+        (served / "demo.yaml").symlink_to(shared / "demo.yaml")
+        document = Document.open(served / "demo.yaml")
+        assert document.check() == []
+        return document
+
+    @pytest.mark.parametrize("beside", [True, False], ids=["another-file-beside-the-link", "nothing-beside-the-link"])
+    def test_the_canvas_shows_the_real_folders_steps_file(self, tmp_path: Path, beside: bool) -> None:
+        document = self._linked(tmp_path, INCLUDING_TEXT, beside)
+        grey = document.model.inside_of("prep").node("prep/grey")
+        assert grey.params["mode"].value == "L"
+        assert grey.loc == f"{tmp_path / 'shared' / 'prep.steps.yaml'}:2:7"
+
+    @pytest.mark.parametrize("beside", [True, False], ids=["another-file-beside-the-link", "nothing-beside-the-link"])
+    def test_copy_of_a_flow_step_inlines_the_steps_file_the_canvas_shows(self, tmp_path: Path, beside: bool) -> None:
+        text, kind = self._linked(tmp_path, INCLUDING_TEXT, beside).copy_text(["prep"])
+        assert kind == "steps"
+        assert "ConvertMode {mode: L}" in text and "RGB" not in text and "include" not in text
+
+    @pytest.mark.parametrize("beside", [True, False], ids=["another-file-beside-the-link", "nothing-beside-the-link"])
+    def test_copy_of_a_list_member_inlines_the_steps_file_the_canvas_shows(self, tmp_path: Path, beside: bool) -> None:
+        text, kind = self._linked(tmp_path, LIST_MEMBER_INCLUDING_TEXT, beside).copy_text(["stream.ops[1]"])
+        assert kind == "ops"
+        assert "ConvertMode {mode: L}" in text and "RGB" not in text and "include" not in text
+
+    @pytest.mark.parametrize("beside", [True, False], ids=["another-file-beside-the-link", "nothing-beside-the-link"])
+    def test_a_template_of_an_included_subgraph_takes_the_steps_file_the_canvas_shows(
+        self, tmp_path: Path, beside: bool
+    ) -> None:
+        text = self._linked(tmp_path, INCLUDING_TEXT, beside).template_text(["prep"])
+        assert text == STEPS_TEXT
+
+    @pytest.mark.parametrize("beside", [True, False], ids=["another-file-beside-the-link", "nothing-beside-the-link"])
+    def test_a_template_of_inline_steps_inlines_a_nested_include_from_the_real_folder(
+        self, tmp_path: Path, beside: bool
+    ) -> None:
+        text = self._linked(tmp_path, NESTED_INCLUDING_TEXT, beside).template_text(["prep"])
+        assert "ConvertMode {mode: L}" in text and "RGB" not in text and "include" not in text
+
+    def test_a_graph_in_a_linked_folder_copies_the_same_steps_file(self, tmp_path: Path) -> None:
+        """CON case: a symbolic link to the FOLDER — ``link/prep.steps.yaml`` and ``real/prep.steps.yaml`` are one
+        file, so Copy and the template read it as before."""
+        real = tmp_path / "real"
+        _write(real, INCLUDING_TEXT, "demo.yaml")
+        _write(real, STEPS_TEXT, "prep.steps.yaml")
+        (tmp_path / "link").symlink_to(real)
+        document = Document.open(tmp_path / "link" / "demo.yaml")
+        assert "ConvertMode {mode: L}" in document.copy_text(["prep"])[0]
+        assert document.template_text(["prep"]) == STEPS_TEXT
 
 
 class TestSetParam:
@@ -940,21 +1293,21 @@ class TestSetParam:
             "hint": "a Bluetooth packet",
         }
 
-    def test_the_bluetooth_pane_keeps_its_152_comment_lines(self, tmp_path: Path) -> None:
-        """Measured on the shipped file: 275 lines, 148 of them comments — 152 since 2026-09-28, when the
-        pane gained its ``contract:`` root under a four-line comment; ``set_param`` on
-        ``size.max_band_hz`` changes ONE line and every comment survives."""
+    def test_the_bluetooth_pane_keeps_its_230_comment_lines(self, tmp_path: Path) -> None:
+        """Measured on the shipped file: 417 lines, 230 of them comments (2026-09-30, when the pane gained
+        five commented steps and its window limit dropped to 6 MHz; 284 / 152 the day before);
+        ``set_param`` on ``size.max_band_hz`` changes ONE line and every comment survives."""
         source = _bte_path()
         path = tmp_path / source.name
         path.write_text(source.read_text())
         doc = Document.open(path)
         before = doc.text
-        assert _comment_lines(before) == 152
+        assert _comment_lines(before) == 230
         doc.set_param("size", "max_band_hz", 30.0e6)
         after = doc.text
-        assert _comment_lines(after) == 152
+        assert _comment_lines(after) == 230
         differing = [(a, b) for a, b in zip(before.splitlines(), after.splitlines()) if a != b]
-        assert differing == [("      max_band_hz: 25.0e6", "      max_band_hz: 30000000.0")]
+        assert differing == [("      max_band_hz: 6.0e6", "      max_band_hz: 30000000.0")]
         assert len(after.splitlines()) == len(before.splitlines())
         assert doc.model.node("size").params["max_band_hz"].value == 30.0e6
 
@@ -1351,15 +1704,17 @@ class TestAMovedProblemIsNotAGainedOne:
     message, location included, so a step inserted ABOVE an existing problem moved it from ``graph.yaml:6:9`` to
     ``graph.yaml:9:9`` and the edit was refused for "gaining" the problem that was already there."""
 
+    @pytest.mark.parametrize("folder", SPACED)  # a location with a space is taken out as well as one without
     def test_a_step_inserted_above_an_existing_problem_is_accepted_and_the_problem_moves_with_it(
-        self, tmp_path: Path
+        self, tmp_path: Path, folder: str
     ) -> None:
-        document = Document.open(_write(tmp_path, MOVED_TEXT))
+        path = _write(tmp_path / folder, MOVED_TEXT)
+        document = Document.open(path)
         [before] = _bind_problems(document)
-        assert "graph.yaml:6:9" in before
+        assert f"{path}:6:9" in before
         document.add_step("mid", "probe", PROBE, {"label": "mid"})
         [after] = _bind_problems(document)
-        assert "graph.yaml:9:9" in after  # the same problem, three lines further down
+        assert f"{path}:9:9" in after  # the same problem, three lines further down
         assert "  mid:\n" in document.text
 
     def test_a_whole_text_that_only_moves_the_problem_is_accepted(self, tmp_path: Path) -> None:

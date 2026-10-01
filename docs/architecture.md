@@ -556,7 +556,7 @@ doc.set_param("count", "field", "image")          # ValueError: cannot wire deco
 out), which declaration a socket type is read from as long as it is a recordstream or confluid
 declaration, the first-layout algorithm. What must hold: the file is never re-emitted from the loaded
 object graph; a refused edit writes nothing; node names are the engine's names; positions stay out of
-the YAML. Pins: `tests/test_document.py::TestSetParam::test_the_bluetooth_pane_keeps_its_152_comment_lines`,
+the YAML. Pins: `tests/test_document.py::TestSetParam::test_the_bluetooth_pane_keeps_its_230_comment_lines`,
 `tests/test_document.py::TestProblems`, `tests/test_layout.py`.
 
 ## The canvas page is a build artifact beside the package, and a drawn wire is a proposal until a route can spell it (`frontend/`, `streamstudio.app.page_blueprint`, 2026-09-28)
@@ -774,9 +774,9 @@ So does a file the disk will not take (2026-09-30, the update below). Otherwise 
 graph's own last — and the sidecar. The trace, the check and every derive run the in-memory
 text. Holding text in memory brought four mechanisms, each from a measured break:
 
-- a load hands every file the editor holds, other than the graph itself, to confluid as `texts=`: confluid parses
-  a held text instead of reading the file, so an `include:` naming a steps file that exists only in the editor
-  loads, and nothing is written; saves, disk reads and loads run under one process-wide lock (`_DISK_LOCK`),
+- a load hands confluid the graph's path and every file the editor holds, the graph's own text included, as
+  `texts=`: confluid parses a held text instead of reading the file, so an `include:` naming a steps file that
+  exists only in the editor loads, and nothing is written; saves, disk reads and loads run under one process-wide lock (`_DISK_LOCK`),
   because Flask serves threaded and a save empties a file before it writes the new text;
 - an included file enters the held texts only when an EDIT changes it (a Copy or a template read goes to disk),
   and when it first enters, every older history entry gets the text it was read as;
@@ -803,7 +803,7 @@ text. Holding text in memory brought four mechanisms, each from a measured break
 
 The costs: a teammate's change is found at Save, not while you edit; what the editor holds lives only in the process
 until a stop writes it to the recovery file (the record "Unsaved work is kept in a hidden file of the served folder");
-the editor needs a confluid whose `load` takes `texts=`, and its `confluid` floor is raised when confluid releases it.
+the editor needs confluid 0.4.0, the release whose `load` takes `texts=`.
 
 **Example.**
 
@@ -850,9 +850,9 @@ load and put the old content back after, under the lock. That kept a steps file 
 graph folder during every check, edit and trace, left it there if the process died mid-load, and made a read-only
 folder refuse every edit. The user picked the option that has confluid take the texts: `confluid.load(..., texts=)`
 parses a held text in place of the file — through the same search, with every `file:line:col` naming the real
-path — so `_load_document` hands over every held file but the graph (which it parses itself) and writes nothing.
-`_anchor_entry` anchors a relative include naming a held file to that file even though the disk does not have it;
-an include inside a held file is found beside that file by confluid itself. Measured through the routes, a flow
+path — so `_load_document` hands over the graph's path and every held file, the graph's own text included, and
+writes nothing; every include, in the graph or in a held file, is found beside the file that names it by confluid
+itself (the update below). Measured through the routes, a flow
 holding one subgraph, Move to its own file…, then 5 checks and 5 edits with nothing saved:
 
 ```
@@ -885,11 +885,43 @@ Three consequences, found by the review of that change and settled in the same r
   The rejected alternative — refusing Move to its own file… in a folder that cannot be written — would take back
   what this update is for: working in a folder you may only read until you choose to save.
   The positions sidecar is written after the YAML files and is not in the check yet (`TASKS.md`).
-- **`texts=` is passed only when there is something to hand over.** Every load passed it, `texts={}` included, so
-  with the released confluid (0.3.1 — no such keyword; what CI installs) EVERY graph stopped loading:
-  `does not load: TypeError: load() got an unexpected keyword argument 'texts'`, and an edit answered
-  `404 no node 'mask' (the nodes are: [])`. Now only a graph in which the editor holds a steps file needs the
-  confluid carrying `texts=`.
+- **The graph reaches confluid as its path, with its own text among the `texts=`.** The first cut parsed the
+  graph's text itself and handed confluid the parsed data, rewriting each relative include beside the graph so
+  confluid would find it. confluid names parsed data `<cwd>/string.yaml`, so an include the rewrite could not
+  find — a missing file — was searched for in the editor's working directory. Measured, `graphs/demo.yaml` with
+  `steps: {include: prep.steps.yaml}` and no such file, the editor started in `streamstudio/`:
+
+  ```
+  before  …/graphs/demo.yaml: does not load: ConfigFileNotFoundError: …/streamstudio/string.yaml includes
+          prep.steps.yaml: Not found: prep.steps.yaml (searched: …/streamstudio/prep.steps.yaml,
+          …/streamstudio/prep.steps.yaml, …/streamstudio/config/prep.steps.yaml, ~/.config/…, /etc/xdg/…)
+          at …/graphs/demo.yaml
+  after   …/graphs/demo.yaml: does not load: ConfigFileNotFoundError: …/graphs/demo.yaml includes
+          prep.steps.yaml: Not found: prep.steps.yaml (searched: …/graphs/prep.steps.yaml,
+          …/streamstudio/prep.steps.yaml, …/streamstudio/config/prep.steps.yaml, ~/.config/…, /etc/xdg/…)
+          at …/graphs/demo.yaml:5:18
+  ```
+
+  Handing confluid the path makes ONE resolver — confluid's search tiers, the including file's folder first —
+  decide every include, the graph's and a steps file's alike; the editor keeps no second copy of that rule. The
+  location of the include line is the editor's (`_include_loc`: the entry the message names, in a file the
+  editor holds). Every load now passes `texts=`, so the editor needs confluid 0.4.0; a load that passed it only
+  when a steps file was held was dropped with the first cut — before 1.0 nothing is kept for an older confluid.
+  The cost, measured: a graph opened through a symbolic link names its REAL file in its nodes' locations
+  (`real/demo.yaml:3:9`, where the first cut said `link/demo.yaml:3:9`), because confluid names every file it
+  loads by its resolved path — as the graph's steps files always were; the messages keep the path the graph was
+  opened by, and every edit compares files resolved. For a graph that is a symbolic link to a FILE the choice
+  reaches further: confluid reads its includes from the REAL file's folder, so every place the editor reads an
+  include of the graph's own text itself — Copy's inlining, Save as template — starts there too
+  (`Document._folder`). Measured on the first cut, `served/demo.yaml` → `shared/demo.yaml` with a different
+  `prep.steps.yaml` in each folder: the canvas showed `shared/`'s (`mode: L`), Copy and the template took
+  `served/`'s (`mode: RGB`), and with none in `served/` both were refused for a graph that loaded clean. One folder
+  for all of them is the rule; the link's folder was never the one confluid read.
+  The location of a missing include matches the entry by every name confluid gives it — as written, and as its own
+  `resolve_config_path` made it (`~` expanded; a folder its search found, by its full path) — because confluid's
+  message names what it RESOLVED, not what was written: `include: ~/nope.steps.yaml` reads
+  `… includes /home/me/nope.steps.yaml: Not found`, and the first cut, comparing the text as written, pointed at
+  the bare graph file.
 - **A held file is matched by the path its include resolves to, spelled as written.** On a disk that ignores case
   the staged file used to be found under any spelling; a held one is not: an include respelled
   `PREP.steps.yaml` for a held, unsaved `prep.steps.yaml` is refused (`… includes PREP.steps.yaml: Not found`)
@@ -898,8 +930,9 @@ Three consequences, found by the review of that change and settled in the same r
   their identity on disk would give confluid a second identity for a file, which its own record rules out; the case
   is a documented limit.
 
-Pins: `tests/test_app_save.py::TestASaveTheDiskRefusesWritesNothing`, `::TestAConfluidWithoutHeldTexts`,
-`::TestAnIncludeSpelledInAnotherCase`.
+Pins: `tests/test_app_save.py::TestASaveTheDiskRefusesWritesNothing`, `::TestAnIncludeSpelledInAnotherCase`,
+`tests/test_document.py::TestEveryLoadHandsConfluidTheGraphsPath`, `::TestAMissingIncludedFile`,
+`::TestAGraphFileThatIsASymbolicLink`, `tests/test_app_clipboard.py::TestAGraphFileThatIsASymbolicLink`.
 
 ## A subgraph is one node outside and a nested model inside, its steps named `prep/grey` (`Model.inside`, 2026-09-29)
 

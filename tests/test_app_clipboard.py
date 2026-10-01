@@ -410,6 +410,40 @@ class TestCopyingAnIncludedSubgraph:
         assert "    steps:\n      grey:" in _copy(client, "sub", ["prep"])["text"]
 
 
+class TestAGraphFileThatIsASymbolicLink:
+    """The served ``demo.yaml`` is a symbolic link to ``shared/demo.yaml``; the steps file the canvas shows is
+    ``shared/prep.steps.yaml`` (``mode: L``), and ``served/prep.steps.yaml`` is another file (``mode: RGB``).
+    Measured 2026-09-30, before the fix: ``GET /api/graphs/demo`` showed L while ``POST …/copy {nodes: [prep]}``
+    answered ``{mode: RGB}``, and with no steps file beside the link Copy was refused — ``the steps file
+    'prep.steps.yaml' does not exist`` — for a graph that loaded clean."""
+
+    @pytest.fixture
+    def served(self, tmp_path: Path) -> Path:
+        shared, served = tmp_path / "shared", tmp_path / "served"
+        shared.mkdir()
+        served.mkdir()
+        (shared / "demo.yaml").write_text(INCLUDES)
+        (shared / "prep.steps.yaml").write_text(STEPS_FILE % "L")
+        (served / "prep.steps.yaml").write_text(STEPS_FILE % "RGB")
+        (served / "demo.yaml").symlink_to(shared / "demo.yaml")
+        return served
+
+    @pytest.mark.parametrize("beside", [True, False], ids=["another-file-beside-the-link", "nothing-beside-the-link"])
+    def test_copy_and_save_as_template_take_the_steps_file_the_canvas_shows(
+        self, served: Path, tmp_path: Path, beside: bool
+    ) -> None:
+        if not beside:
+            (served / "prep.steps.yaml").unlink()
+        client = create_app(served, templates_dir=tmp_path / "templates").test_client()
+        graph = client.get("/api/graphs/demo").get_json()
+        assert graph["model"]["problems"] == [] and _mode(graph, "prep") == "L"
+        assert _copy(client, "demo", ["prep"]) == {"text": INLINED, "kind": "steps"}
+        saved = client.post("/api/templates", json={"name": "prep", "graph": "demo", "nodes": ["prep"]})
+        assert saved.status_code == 200, saved.get_json()
+        written = (tmp_path / "templates" / "prep.steps.yaml").read_text()
+        assert "{mode: L}" in written and "RGB" not in written
+
+
 # ------------------------------------------------------------------------------------------------
 # several steps removed as ONE edit (Cut, Delete of a selection)
 # ------------------------------------------------------------------------------------------------

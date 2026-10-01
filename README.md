@@ -583,7 +583,22 @@ set_param(size, max_band_hz, 30e6):  1 line differs; 148 comment lines kept; $DA
 An edit that makes the document stop loading, or gain a problem (a wire whose types do not meet), is refused with
 a message naming `file:line:col`. A problem that was already there is not "gained" when an edit only moves it: a
 step inserted above a broken `bind:` moves that problem from `flow.yaml:6:9` to `flow.yaml:9:9`, and the edit goes
-through — while a second broken `bind:` is still refused. **Node names** are one scheme shared by the model, the engine, the sidecar and
+through — while a second broken `bind:` is still refused. A problem is at the line it is about in any folder, one
+whose name has a space included. A missing steps file is at the `include:` entry that names it, and is looked for
+beside the file holding that entry, whatever folder you started the editor in:
+
+```
+…/graphs/demo.yaml: does not load: ConfigFileNotFoundError: …/graphs/demo.yaml includes prep.steps.yaml:
+Not found: prep.steps.yaml (searched: …/graphs/prep.steps.yaml, <working directory>/prep.steps.yaml, …)
+at …/graphs/demo.yaml:5:18
+```
+
+The same holds for `include: ~/nope.steps.yaml` (the message names it with your home folder written out) and for an
+include that names a folder (`… is a directory, not a config file`). A graph file that is a symbolic link
+(`served/demo.yaml` → `shared/demo.yaml`) reads its steps files beside the file it points to, in `shared/` — the
+canvas, Check graph, a run, Copy and Save as template alike; a `prep.steps.yaml` beside the link is not read.
+
+**Node names** are one scheme shared by the model, the engine, the sidecar and
 the routes: a `flow:` step by its key (`floor`), a list member by `path[i]` (`stream.ops[1]`), a nested marker by
 its document path (`processor.stream`), a contract root by its key (`contract`), the host's side of a graph
 without a contract as one node, `<host>`, and a node inside a subgraph as `<subgraph>/<step>` (`prep/grey`), with
@@ -697,12 +712,10 @@ pip install git+https://github.com/Gearlux/streamstudio.git@main
 ```
 
 The canvas editor needs nothing more (plus a built page — [Building the canvas page](#building-the-canvas-page)),
-except a confluid whose `load` accepts `texts=`. The editor keeps every steps file you edit, and each one Move to
-its own file… makes, in memory, and hands them to confluid as text instead of writing them to disk. No confluid
-release carries `texts=` yet: with the released confluid a graph in which you have edited an included steps file, or
-moved steps to a file of their own, since you opened it does not load (`does not load: TypeError: load() got an
-unexpected keyword argument 'texts'`); every other graph works. Until a release carries it, install confluid from
-its repository too; the requirement is raised with that release.
+except confluid 0.4.0, the release whose `load` takes `texts=`. The editor keeps every file you edit — the graph, a
+steps file it includes, each one Move to its own file… makes — in memory, and hands them to confluid as text with the
+graph's own path, instead of writing them to disk; confluid then looks for every included file beside the file that
+names it, whatever folder you started the editor in.
 ComfyUI itself is **not** a Python dependency — `streamstudio --editor comfy` clones it on first run (see below).
 
 ### Domain node sets are plugins, not requirements

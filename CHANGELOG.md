@@ -20,6 +20,43 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **A problem in a folder whose name has a space keeps its line.** Check graph on a graph in `…/with space/demo.yaml`
+  whose contract is written before its flow answered the location `…/with space/demo.yaml` — no line — while the
+  message said `… Failed to construct GraphContract at …/with space/demo.yaml:1:11: …`; the same graph in a folder
+  without a space was at `…/nospace/demo.yaml:1:11`. Now both are at line 1, column 11 of their `demo.yaml`. The
+  same for an error confluid finds while loading (a key written twice: `duplicate key 'flow' at …/with
+  space/demo.yaml:5:1`), in the graph or in an included steps file, saved or not.
+- **A missing steps file is reported as missing from the graph that includes it, searched for in the graph's
+  folder.** A graph `graphs/demo.yaml` whose subgraph says `steps: {include: prep.steps.yaml}`, with no such file,
+  answered from an editor started in `~/work`:
+
+  ```
+  before  …/graphs/demo.yaml: does not load: ConfigFileNotFoundError: ~/work/string.yaml includes prep.steps.yaml:
+          Not found: prep.steps.yaml (searched: ~/work/prep.steps.yaml, ~/work/prep.steps.yaml,
+          ~/work/config/prep.steps.yaml, …)
+          at …/graphs/demo.yaml
+  after   …/graphs/demo.yaml: does not load: ConfigFileNotFoundError: …/graphs/demo.yaml includes prep.steps.yaml:
+          Not found: prep.steps.yaml (searched: …/graphs/prep.steps.yaml, ~/work/prep.steps.yaml,
+          ~/work/config/prep.steps.yaml, …)
+          at …/graphs/demo.yaml:5:18 — the include line
+  ```
+
+  `string.yaml` never existed. The graph now reaches confluid as its own file, with every text the editor holds,
+  so every include is looked for beside the file that names it, whatever folder the editor was started in. A graph
+  opened through a symbolic link now names its real file in its nodes' locations (`real/demo.yaml:3:9`, where it
+  said `link/demo.yaml:3:9`), as its steps files already did. A graph that is a symbolic link to a FILE
+  (`served/demo.yaml` → `shared/demo.yaml`) reads its steps files from the real file's folder (`shared/`), no longer
+  from the link's (`served/`) — the canvas, Check graph, a run, Copy and Save as template alike. Before, a
+  `served/prep.steps.yaml` beside the link was the one the canvas showed and Copy took; with none there the graph
+  did not load.
+
+  The same location for a missing steps file spelled with `~`, and for an include that names a folder:
+
+  ```
+  include: ~/nope.steps.yaml   before  at …/graphs/demo.yaml       after  at …/graphs/demo.yaml:5:18
+  include: adir.steps.yaml     before  at …/graphs/demo.yaml       after  at …/graphs/demo.yaml:5:18
+  (a folder)
+  ```
 - **A YAML error in an included steps file is located in that file.** A graph `demo.yaml` that includes
   `prep.steps.yaml`, whose brace on line 2 never closes, was reported by Check graph at `…/demo.yaml:3:7` — the
   graph with the steps file's line — while the message named `prep.steps.yaml`. It is now at
@@ -30,10 +67,9 @@ All notable changes to this project are documented here. The format follows
   folder read-only every edit was refused (`does not load: PermissionError: [Errno 13] Permission denied:
   '…/prep.steps.yaml'`). The editor now hands the files it holds to confluid as text (`confluid.load(...,
   texts=)`): during 5 checks and 5 edits the folder lists `['demo.yaml']` only, a read-only folder checks, edits and
-  runs, and Save writes `prep.steps.yaml`. Only a graph in which you have edited an included steps file, or moved
-  steps to a file of their own, needs a confluid whose `load` takes `texts=`; every other graph loads with the
-  released confluid. The `confluid` requirement is raised when confluid releases it. On a disk that ignores case, an
-  include respelling a steps file not saved yet (`PREP.steps.yaml` for `prep.steps.yaml`) is refused until Save.
+  runs, and Save writes `prep.steps.yaml`. The editor needs confluid 0.4.0, the release whose `load` takes `texts=`.
+  On a disk that ignores case, an include respelling a steps file not saved yet (`PREP.steps.yaml` for
+  `prep.steps.yaml`) is refused until Save.
 - **A Save the disk refuses for a steps file no longer rewrites the graph.** After Move to its own file… into a
   read-only `parts/`, Save answered `…/parts/prep.steps.yaml cannot be written: Permission denied` — with `run.yaml`
   already rewritten to include that file, so the graph on disk no longer loaded (`ConfigFileNotFoundError`); Save As

@@ -331,5 +331,5 @@ def test_the_full_scan_lists_every_installed_class() -> None:
     classify = by_name["ClassifyBluetooth"]
     outs = sockets(classify, "outputs")
     assert outs["ble"] == "Record" and outs["try_weak"] == "Record" and outs["report:classify"] == "object"
-    assert classify.flags == ["fsk", "ble", "bredr", "try_weak", "try_classic", "try_frame"]
+    assert classify.flags == ["fsk", "ble", "bredr", "try_weak", "try_classic", "try_frame", "try_edr"]
     assert classify.reports == ["classify"]
