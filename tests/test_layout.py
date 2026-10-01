@@ -390,10 +390,10 @@ def test_a_column_of_only_unwired_nodes_keeps_the_models_order() -> None:
     assert [pos[n] for n in "zyx"] == [(column(0), row(0)), (column(0), row(1)), (column(0), row(2))]
 
 
-def test_bte_view_derives_into_twenty_four_layers_one_column_apart() -> None:
-    """The shipped Bluetooth pane is a 24-step chain plus its contract root (the host's inputs, which no
-    step names by entry, so it carries no wire): the steps stay one row, 340 px apart, and the root sits
-    under the first step."""
+def test_bte_view_derives_into_twenty_nine_layers_one_column_apart() -> None:
+    """The shipped Bluetooth pane is a 29-step chain (24 before 2026-09-30) plus its contract root (the
+    host's inputs, which no step names by entry, so it carries no wire): the steps stay one row, 340 px
+    apart, and the root sits under the first step."""
     waivefront = pytest.importorskip("waivefront")
     try:
         from streamstudio.document import Document
@@ -402,9 +402,9 @@ def test_bte_view_derives_into_twenty_four_layers_one_column_apart() -> None:
     path = Path(waivefront.__file__).parent / "annotation" / "bte_view.yaml"
     model = Document.open(path).model
     pos = layered_layout(model)
-    assert len(pos) == 25
+    assert len(pos) == 30
     steps = {name: xy for name, xy in pos.items() if name != "contract"}
     xs = sorted(x for x, _ in steps.values())
-    assert xs == [column(i) for i in range(24)]
+    assert xs == [column(i) for i in range(29)]
     assert {y for _, y in steps.values()} == {row(0)}
     assert pos["contract"] == (column(0), row(1))

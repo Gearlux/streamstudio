@@ -3,12 +3,13 @@ patching the line a marker came from.
 
 The editor never keeps a second document (``docs/rewrite.md`` §2.1). :class:`Document` reads
 a YAML text, derives a :class:`Model` — nodes with typed sockets, wires, located problems —
-from ``confluid.load(text, until="document")`` (markers kept, ``!ref`` kept, every marker
-stamped ``file:line:col``), and every edit (``set_param``, ``add_step``, ``remove_step``,
-``rename_node``) patches the TEXT through :mod:`streamstudio._yamltext`, re-derives, and is
-refused before anything is written when the document no longer loads or :meth:`Document.check`
-gains a problem. Measured against the alternative: a re-dump of the shipped Bluetooth pane
-loses its 148 comment lines and bakes ``$DATA_ROOT`` in; a patch changes one line.
+from ``confluid.load(path, until="document", texts=…)`` — the file, as the texts it holds spell
+it (markers kept, ``!ref`` kept, every marker stamped ``file:line:col``) — and every edit
+(``set_param``, ``add_step``, ``remove_step``, ``rename_node``) patches the TEXT through
+:mod:`streamstudio._yamltext`, re-derives, and is refused before anything is written when the
+document no longer loads or :meth:`Document.check` gains a problem. Measured against the
+alternative: a re-dump of the shipped Bluetooth pane loses its 148 comment lines and bakes
+``$DATA_ROOT`` in; a patch changes one line.
 
 Three things the model is built from, and nothing else:
 
@@ -53,7 +54,6 @@ import copy
 import errno
 import importlib
 import inspect
-import io
 import os
 import re
 import threading
@@ -86,9 +86,16 @@ from typing import (
 
 import confluid
 import yaml
-from confluid import format_yaml_loc, input_specs, marks, output_specs, parse_param_docs, resolve_config_path
-from confluid.fluid import Fluid, Reference, ScopeBlock, Target
-from confluid.loader import ConfluidLoader
+from confluid import (
+    ConfigFileNotFoundError,
+    format_yaml_loc,
+    input_specs,
+    marks,
+    output_specs,
+    parse_param_docs,
+    resolve_config_path,
+)
+from confluid.fluid import Fluid, Reference, Target
 from confluid.registry import resolve_class
 from recordstream.algorithm import Algorithm, algorithm_spec
 from recordstream.flow.graph import FlowGraph
@@ -1427,48 +1434,8 @@ def _split_bind(ref: str) -> Tuple[str, str, str]:
 
 
 # ================================================================================================
-# loading: the text, with the real filename, includes anchored to the document's directory
+# loading: the graph's path and every text the editor holds, handed to confluid
 # ================================================================================================
-
-
-def _anchor_includes(data: Any, base_dir: Path, held: Collection[Path]) -> None:  # the raw parse: dicts, lists, markers
-    """Rewrite every relative ``include:`` entry to the file found beside the document.
-
-    The text is parsed in memory, so confluid would otherwise resolve a relative include against
-    the process's working directory (``load()`` anchors text at ``cwd/string.yaml``); the document
-    lives in a directory of its own, and an include is written relative to THAT. ``held`` are the
-    files the editor holds (resolved): an entry naming one of those is anchored to it even when it is
-    not on disk (:func:`_anchor_entry`).
-    """
-    if isinstance(data, list):
-        for item in data:
-            _anchor_includes(item, base_dir, held)
-    elif isinstance(data, Fluid):
-        _anchor_includes(data.kwargs, base_dir, held)
-    elif isinstance(data, ScopeBlock):
-        _anchor_includes(data.contents, base_dir, held)
-    elif isinstance(data, dict):
-        for value in data.values():
-            _anchor_includes(value, base_dir, held)
-        entries = data.get("include")
-        if isinstance(entries, str):
-            data["include"] = _anchor_entry(entries, base_dir, held)
-        elif isinstance(entries, list):
-            data["include"] = [_anchor_entry(entry, base_dir, held) for entry in entries]
-
-
-def _anchor_entry(entry: Any, base_dir: Path, held: Collection[Path]) -> Any:  # a path string, or malformed
-    """One include entry, anchored: the file beside the document when the editor HOLDS it — a steps file Move to its
-    own file… made exists only in the editor until Save, so the disk cannot say it is there — else the file confluid's
-    own search finds on disk (``base_dir`` is that search's first place, so a held file beside the document is where
-    confluid itself would look first), else the entry as written, for confluid's own not-found message."""
-    if not isinstance(entry, str) or not entry.strip():
-        return entry
-    beside = (base_dir / Path(entry).expanduser()).resolve()
-    if beside in held:
-        return str(beside)
-    found = resolve_config_path(entry, base_dir=base_dir)
-    return str(found) if found.exists() else entry
 
 
 #: Held around every read and every write of a file on disk. A write (:meth:`Document.save`, :meth:`Document.save_as`,
@@ -1487,12 +1454,19 @@ _DISK_LOCK = threading.RLock()
 def _load_document(
     path: Path, texts: Mapping[Path, str], *, build: bool = False, solidify: bool = False
 ) -> Tuple[Any, List[Path]]:
-    """``confluid.load(until="document")`` of the IN-MEMORY texts: the main text parsed with the file's real name (so
-    every marker's location names the file), and every other file the editor holds handed to confluid as ``texts=`` —
-    an ``include:`` naming one is parsed from the held text, never read from disk, so nothing this returns depends on
-    what a ``save()`` has not yet written, and nothing is written: a steps file Move to its own file… made stays in
-    the editor until Save, even in a folder that cannot be written. ``texts=`` is passed only when the editor holds a
-    file besides the graph, so only such a graph needs a confluid whose ``load`` takes it.
+    """``confluid.load(until="document")`` of the graph as the FILE it is — its path — with every text the editor
+    holds, the graph's own among them, handed over as ``texts=``. confluid parses a held text in place of the file
+    (it never reads the disk for one, and nothing is written: a steps file Move to its own file… made stays in the
+    editor until Save, even in a folder that cannot be written), resolves every ``include:`` from the folder of the
+    file that names it through its own search, and names the real file in every ``file:line:col`` and every message.
+    Needs confluid 0.4.0, the release carrying ``load(..., texts=)``.
+
+    Measured before 2026-09-30, when the graph's text was parsed here and handed over as DATA: confluid names data
+    ``<cwd>/string.yaml``, so a missing steps file was reported as ``/Users/…/streamstudio/string.yaml includes
+    prep.steps.yaml: Not found: prep.steps.yaml (searched: /Users/…/streamstudio/prep.steps.yaml, …)`` — included by
+    a file that does not exist, searched for in the editor's working directory and not in the graph's folder. Now:
+    ``…/graphs/demo.yaml includes prep.steps.yaml: Not found: prep.steps.yaml (searched:
+    …/graphs/prep.steps.yaml, …)``, whatever the working directory.
 
     ``build=True`` runs the load to the OBJECTS stage instead (without ``solidify`` by default:
     constructors do no work, and the expensive finish is not what is being checked) — the stage every
@@ -1501,21 +1475,9 @@ def _load_document(
 
     The load runs under :data:`_DISK_LOCK`: an included file the editor does not hold is read from disk, and a save
     (of another graph including the same file) is never read half-written."""
-    main = path.resolve()
-    held = {key: text for key, text in texts.items() if key != main}
-    stream = io.StringIO(texts[main])
-    stream.name = str(path)
-    raw = yaml.load(stream, Loader=ConfluidLoader)
-    _anchor_includes(raw, path.parent, held)
     until: Literal["objects", "document"] = "objects" if build else "document"  # ``solidify`` acts at "objects" only
     with _DISK_LOCK:
-        # ``texts=`` only when there is something to hand over: the released confluid (0.3.1, what CI installs) has no
-        # such keyword, and measured with it (2026-09-30) EVERY graph stopped loading while each load passed
-        # ``texts={}`` — ``does not load: TypeError: load() got an unexpected keyword argument 'texts'``.
-        if held:
-            doc, paths = confluid.load(raw, until=until, solidify=solidify, return_paths=True, texts=held)
-        else:
-            doc, paths = confluid.load(raw, until=until, solidify=solidify, return_paths=True)
+        doc, paths = confluid.load(path.resolve(), until=until, solidify=solidify, return_paths=True, texts=texts)
     return doc, [Path(p).resolve() for p in paths]
 
 
@@ -1538,29 +1500,102 @@ def _unwritable(path: Path) -> Optional[int]:
 
 
 def _load_problem(
-    path: Path, exc: BaseException, verb: str = "does not load", *, held: Collection[Path] = ()
+    path: Path,
+    exc: BaseException,
+    verb: str = "does not load",
+    *,
+    texts: Optional[Mapping[Path, str]] = None,
+    included: Collection[Path] = (),
 ) -> Problem:
     """A document that does not load (or does not build) is ONE located problem, never an exception.
 
-    The message always starts with the GRAPH (``<graph>: does not load: …``); the location is the file the error is
-    IN — for a YAML error, the file PyYAML's mark names (:func:`_mark_file`), which for a syntax error in an included
-    steps file is that steps file, not the graph. ``held`` are the files the editor holds (resolved)."""
-    loc = str(path)
+    The message always starts with the GRAPH (``<graph>: does not load: …``); the location is where the error is:
+    for a YAML error, the file PyYAML's mark names (:func:`_mark_file`), which for a syntax error in an included
+    steps file is that steps file, not the graph; for a missing included file, the ``include:`` entry naming it
+    (:func:`_include_loc`); else the ``file:line:col`` the message names (:func:`_message_loc`); else the graph.
+    ``texts`` are the files the editor holds (resolved path → text, the graph's own among them), ``included`` the
+    files the load read — known only when it got that far (a build error)."""
+    held: Mapping[Path, str] = texts or {}
     mark = getattr(exc, "problem_mark", None)
     if mark is not None:
         loc = f"{_mark_file(path, mark, held)}:{mark.line + 1}:{mark.column + 1}"
     else:
-        located = re.search(r" at (\S+:\d+:\d+)", str(exc))
-        if located:
-            loc = located.group(1)
+        found = _include_loc(str(exc), held) if isinstance(exc, ConfigFileNotFoundError) else None
+        loc = found or _message_loc(str(exc), [path, *held, *included]) or str(path)
     message = " ".join(str(exc).split())
     return Problem(f"{path}: {verb}: {type(exc).__name__}: {message}", loc)
 
 
+def _include_loc(message: str, texts: Mapping[Path, str]) -> Optional[str]:
+    """The ``file:line:col`` of the ``include:`` entry a missing-file message names — confluid's ``<file> includes
+    <entry>: Not found: …`` — when the including file is one the editor holds (the graph always is), else ``None``.
+
+    Measured before 2026-09-30: the problem pointed at the bare graph file (``…/demo.yaml``); now at the entry,
+    ``…/demo.yaml:5:18``. An entry is matched by every name confluid may give it (:func:`_include_names`); the first
+    one in the text wins (confluid stops at the first file it cannot find)."""
+    for file in sorted(texts, key=lambda key: len(str(key)), reverse=True):
+        named = re.match(re.escape(str(file)) + r" includes (.+?): ", message)
+        if named is None:
+            continue
+        text = YamlText(texts[file])
+        try:
+            nodes = text.nodes()
+        except yaml.YAMLError:
+            return None
+        for node in nodes:
+            pair = text.pair(node, _INCLUDE) if isinstance(node, yaml.MappingNode) else None
+            if pair is None:
+                continue
+            entries = pair[1].value if isinstance(pair[1], yaml.SequenceNode) else [pair[1]]
+            for entry in entries:
+                if isinstance(entry, yaml.ScalarNode) and named.group(1) in _include_names(entry.value, file.parent):
+                    return f"{file}:{entry.start_mark.line + 1}:{entry.start_mark.column + 1}"
+        return None
+    return None
+
+
+def _include_names(entry: str, folder: Path) -> Set[str]:
+    """The names confluid may give the ``include:`` entry of a file in ``folder`` after ``… includes``: the entry as
+    written (``str(Path(entry))``), and the path confluid's own resolver made of it — :func:`resolve_config_path`,
+    the function confluid resolved it with — which is ``~`` expanded (``~/nope.steps.yaml`` →
+    ``/home/me/nope.steps.yaml``) and, when its search found something there, the path found (a folder
+    ``adir.steps.yaml`` beside the file → ``<folder>/adir.steps.yaml``, one in the working directory →
+    ``<cwd>/adir.steps.yaml``). Measured before 2026-09-30: only the first was compared, so a missing
+    ``~/nope.steps.yaml`` and an include naming a folder pointed at the bare graph file."""
+    names = {str(Path(entry))}
+    try:
+        names.add(str(resolve_config_path(entry, base_dir=folder)))
+    except RuntimeError:  # `~someone/x` for a user this machine does not know: no home to expand into
+        pass
+    return names
+
+
+def _message_loc(message: str, known: Iterable[Path]) -> Optional[str]:
+    """The ``file:line:col`` a message names after `` at `` — how confluid locates an error it has no YAML mark for
+    (``Failed to construct GraphContract at <file>:1:11: …``, ``duplicate key 'flow' at <file>:5:1 …``) — or ``None``.
+
+    A path may hold spaces (the workspace's data folders do), so no pattern can tell where one begins. The location
+    is read as one of the files the document knows (``known``: the graph, the texts it holds, the files a load read;
+    the longest spelling first, the one the message names first wins), else as a file on disk (an included file the
+    editor does not hold — a load that fails never says which files it read), else as before: up to the first space.
+    Measured before 2026-09-30, with the last reading alone: in a folder ``with space/`` a build error pointed at the
+    bare graph file while its message named ``…/with space/demo.yaml:1:11``."""
+    names = sorted({str(file) for file in known}, key=len, reverse=True)
+    if names:
+        found = re.search(" at (" + "|".join(re.escape(name) for name in names) + r"):(\d+):(\d+)", message)
+        if found is not None:
+            return f"{found.group(1)}:{found.group(2)}:{found.group(3)}"
+    for found in re.finditer(r" at (?=(.+?):(\d+):(\d+))", message):
+        if os.path.isfile(found.group(1)):
+            return f"{found.group(1)}:{found.group(2)}:{found.group(3)}"
+    located = re.search(r" at (\S+:\d+:\d+)", message)
+    return located.group(1) if located else None
+
+
 def _mark_file(path: Path, mark: yaml.Mark, held: Collection[Path]) -> str:
-    """The file a PyYAML ``mark`` is in, as the mark spells it: the graph (parsed under its own name,
-    :func:`_load_document`), an included file on disk, or one the editor holds and has not saved (confluid parses a
-    held text under the file's real path) — else the graph, for a stream that is no file (``<unicode string>``).
+    """The file a PyYAML ``mark`` is in, as the mark spells it: the graph or an included file (confluid parses each
+    under its real path, :func:`_load_document`), on disk or held by the editor and not saved — else the graph, for a
+    stream that is no file (``<unicode string>``).
 
     Measured before 2026-09-30: a syntax error on line 3 of an included ``prep.steps.yaml`` was located at
     ``demo.yaml:3:7`` — the graph with the steps file's line — while the message named ``prep.steps.yaml``."""
@@ -1575,7 +1610,7 @@ def derive(path: Path, texts: Mapping[Path, str]) -> _Derivation:
     try:
         doc, included = _load_document(path, texts)
     except Exception as exc:  # noqa: BLE001 — every failure to load is reported as a problem
-        problem = _load_problem(path, exc, held=set(texts))
+        problem = _load_problem(path, exc, texts=texts)
         return _Derivation(Model(problems=[problem]), {}, None, [], None, (), [path.resolve()], {})
     derivation = _Builder(path).derive(doc)
     files = [path.resolve()] + [p for p in included if p != path.resolve()]
@@ -1587,7 +1622,8 @@ def derive(path: Path, texts: Mapping[Path, str]) -> _Derivation:
         try:
             _load_document(path, texts, build=True)
         except Exception as exc:  # noqa: BLE001 — every failure to build is reported as a problem
-            derivation.model.problems.append(_load_problem(path, exc, "does not build", held=set(texts)))
+            problem = _load_problem(path, exc, "does not build", texts=texts, included=files)
+            derivation.model.problems.append(problem)
     return derivation._replace(files=files)
 
 
@@ -2165,6 +2201,15 @@ class Document:
         return list(self._derivation().files)
 
     @property
+    def _folder(self) -> Path:
+        """The folder the graph's own ``include:`` entries are read from: its REAL file's, the folder confluid reads
+        them from (the graph reaches confluid resolved, :func:`_load_document`). For a graph that is a symbolic link
+        to a FILE the link's folder is another folder — measured before 2026-09-30: Copy and Save as template read a
+        ``prep.steps.yaml`` beside the link (``mode: RGB``) while the canvas, a check and a run read the one beside
+        the real file (``mode: L``), and with none beside the link they were refused for a graph that loaded clean."""
+        return self.path.resolve().parent
+
+    @property
     def sidecar_path(self) -> Path:
         return self.path.with_suffix(".layout.yaml")
 
@@ -2689,7 +2734,7 @@ class Document:
                 self._flow_step_in_main(model.node(name), derivation)
             flow_node = text.path("flow")
             assert isinstance(flow_node, yaml.MappingNode)
-            return self._inline_includes(self._steps_block(text, flow_node, step_names), self.path.parent), "steps"
+            return self._inline_includes(self._steps_block(text, flow_node, step_names), self._folder), "steps"
         pieces: List[Tuple[int, str]] = []
         for name in members:
             sequence, index = self._list_of(text, name, derivation)
@@ -2698,7 +2743,7 @@ class Document:
             block = text.lines(self._member_start(text, sequence, index), self._member_stop(text, sequence, index))
             column = int(sequence.start_mark.column)
             pieces.append((int(item.start_mark.index), dedent(block, column)))
-        return self._inline_includes("".join(piece for _at, piece in sorted(pieces)), self.path.parent), "ops"
+        return self._inline_includes("".join(piece for _at, piece in sorted(pieces)), self._folder), "ops"
 
     def paste_text(self, clip: str, after: str) -> List[str]:
         """Insert the clipboard ``clip`` after the node ``after`` as ONE edit; answer the new nodes' names.
@@ -3223,7 +3268,7 @@ class Document:
             return "".join(
                 self._inline_includes(
                     self._included_text(str(entry.value)),
-                    self._include_target(str(entry.value), self.path.parent).parent,
+                    self._include_target(str(entry.value), self._folder).parent,
                 )
                 for entry in entries
             )
@@ -3231,12 +3276,12 @@ class Document:
             return self.text[steps_node.start_mark.index : steps_node.end_mark.index] + "\n"
         block = text.lines(int(steps_key.start_mark.line) + 1, text.pair_stop_line(steps_key, steps_node))
         first_key = steps_node.value[0][0] if steps_node.value else steps_key
-        return self._inline_includes(dedent(block, int(first_key.start_mark.column)), self.path.parent)
+        return self._inline_includes(dedent(block, int(first_key.start_mark.column)), self._folder)
 
     def _included_text(self, entry: str) -> str:
         """The text of an included file as the editor holds it (a pending edit wins over the disk, and a steps
         file moved there and not saved yet is found)."""
-        found = self._include_target(entry, self.path.parent)
+        found = self._include_target(entry, self._folder)
         key = found.resolve()
         if key in self._texts:
             return self._texts[key]

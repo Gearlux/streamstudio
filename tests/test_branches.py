@@ -82,8 +82,9 @@ class TestTheOutcomeSockets:
             "try_weak",
             "try_classic",
             "try_frame",
+            "try_edr",
         ], "the outcomes, in the class's own order"
-        assert types[2:] == [RECORD] * 6, "an outcome carries the RECORD, so a branch hangs off it"
+        assert types[2:] == [RECORD] * 7, "an outcome carries the RECORD, so a branch hangs off it"
 
     def test_a_branch_node_has_no_gate_to_type(self) -> None:
         """`requires` is the converter's word: no widget, no socket — the wire is the gate."""
@@ -159,7 +160,7 @@ class TestTheCanvasDrawsTheBranches:
         workflow = self._workflow()
         joins = [n for n in workflow["nodes"] if n["type"] == JOIN_CLASS_TYPE]
         ops = [n for n in workflow["nodes"] if str(n["type"]).startswith("Taidal_waivefront")]
-        assert len(ops) == 24 and len(joins) == 2
+        assert len(ops) == 29 and len(joins) == 2
 
     def test_each_branch_hangs_off_its_outcome(self) -> None:
         workflow = self._workflow()
@@ -171,6 +172,7 @@ class TestTheCanvasDrawsTheBranches:
             ("CorrelateAccessAddress", "try_weak"),
             ("SearchClassicAccessCode", "try_classic"),
             ("FrameConnectionPacket", "try_frame"),
+            ("DetectEdrPayload", "try_edr"),
         ):
             assert _link_source(workflow, nodes[branch], "record") == (classifier, outcome)
 

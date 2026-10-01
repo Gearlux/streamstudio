@@ -885,53 +885,6 @@ class TestASaveTheDiskRefusesWritesNothing:
         assert list(other.iterdir()) == []
 
 
-class TestAConfluidWithoutHeldTexts:
-    """The released confluid (0.3.1, what CI installs from PyPI) has no ``load(..., texts=)``.
-
-    Measured 2026-09-30 with that confluid: EVERY graph stopped loading — a plain two-step flow's check answered
-    ``does not load: TypeError: load() got an unexpected keyword argument 'texts'`` and its edit ``404 no node 'mask'
-    (the nodes are: [])`` — because every load passed ``texts=``, even when the editor held no file but the graph.
-    Only a load that holds another file passes it now; that one still needs the confluid carrying ``texts=``."""
-
-    @pytest.fixture
-    def released(self, monkeypatch: pytest.MonkeyPatch) -> List[Dict[str, Any]]:
-        """``confluid.load`` as the released confluid has it: no ``texts`` keyword. Answers each call's keywords."""
-        real_load = document_module.confluid.load
-        calls: List[Dict[str, Any]] = []
-
-        def load(*args: Any, **kwargs: Any) -> Any:  # confluid.load's own arguments and answer
-            calls.append(kwargs)
-            if "texts" in kwargs:
-                raise TypeError("load() got an unexpected keyword argument 'texts'")
-            return real_load(*args, **kwargs)
-
-        monkeypatch.setattr(document_module.confluid, "load", load)
-        return calls
-
-    def test_a_graph_holding_no_other_file_checks_and_edits(self, client: Any, released: List[Dict[str, Any]]) -> None:
-        assert _ok(client.get("/api/graphs/demo/check"))["problems"] == []
-        assert _edit(client)["dirty"] is True
-        assert released and [call for call in released if "texts" in call] == []
-
-    def test_a_graph_including_a_file_it_does_not_hold_checks_and_edits(
-        self, client: Any, including: Path, released: List[Dict[str, Any]]
-    ) -> None:
-        assert _ok(client.get("/api/graphs/inc/check"))["problems"] == []
-        edited = _ok(client.post("/api/graphs/inc/param", json={"node": "mask", "param": "low_level", "value": 0.4}))
-        assert _canvas(edited) == (0.4, "L")
-        assert released and [call for call in released if "texts" in call] == []
-
-    def test_an_edit_of_the_included_file_needs_the_confluid_that_takes_texts(
-        self, client: Any, including: Path, released: List[Dict[str, Any]]
-    ) -> None:
-        """The limit the README states: the edit makes the editor HOLD the steps file; that load needs ``texts=``."""
-        refused = _error(
-            client.post("/api/graphs/inc/param", json={"node": "prep/grey", "param": "mode", "value": "RGB"})
-        )
-        assert "TypeError: load() got an unexpected keyword argument 'texts'" in refused
-        assert (including / "prep.steps.yaml").read_text() == STEPS_TEXT
-
-
 def _folds_case(folder: Path) -> bool:
     """Does the filesystem under ``folder`` ignore case (macOS APFS and Windows NTFS do, by default)?"""
     probe = folder / "case_probe.txt"
