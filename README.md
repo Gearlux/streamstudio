@@ -347,14 +347,15 @@ Run to here runs one record and pauses before the node.
 
 A graph opened without a positions file beside it (`<graph>.layout.yaml`) is laid out by the editor: one column per
 step of the chain, left to right along the wires, the nodes of a column stacked top to bottom. A card starts below
-the card above it — 200 px below that card's top when it is up to six rows tall (one row per input, parameter and
-output, under the title), further when it is taller: its height plus 19 px, on the canvas's 10-px grid. The
-Bluetooth pane, opened without a positions file:
+the card above it — 200 px below that card's top when it is up to 183 px tall, further when it is taller: its
+height plus 17 px, on the canvas's 10-px grid. 183 px is six rows under the title (one row per input, parameter and
+output), or five on a subgraph card, whose bar of inner steps adds 26 px. The Bluetooth pane, opened without a
+positions file:
 
 ```
                known (373 px tall)   contract
 before         (40, 40)              (40, 240)   only the last 8 px of contract showed
-after          (40, 40)              (40, 440)   27 px below known
+after          (40, 40)              (40, 430)   17 px below known
 ```
 
 A node the positions file does not name yet — a step an agent added — is laid out the same way, starting below the

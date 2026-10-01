@@ -33,9 +33,10 @@ so a step an agent added never lands on top of something the user arranged.
 
 Within a column a card starts below the card above it: the next card's y is the previous card's y plus
 ``max(ROW_DY, card_height(previous) + CARD_GAP)``, rounded up to the canvas's 10-px snap grid. ``ROW_DY`` is the
-MINIMUM pitch, so a column of cards up to six rows tall (181 px) keeps exactly the fixed 200-px grid, and a taller
+MINIMUM pitch and ``CARD_GAP`` is what it leaves under the tallest card it fits, so a column of cards the fixed pitch
+fitted (up to 183 px: six rows on an op card, five on a subgraph card) keeps exactly the fixed 200-px grid, and a taller
 card pushes the next one down instead of being drawn over it (measured 2026-10-01: the Bluetooth pane's ``contract``
-root sat at (40, 240), under its 373-px ``known`` card but for the last 8 px; it now sits at (40, 440)). The server
+root sat at (40, 240), under its 373-px ``known`` card but for the last 8 px; it now sits at (40, 430)). The server
 never sees the drawing, so :func:`card_height` ESTIMATES a card from what it draws — a title, one row per input
 socket, parameter and output socket, a note line, a subgraph's inner-steps bar — with part heights calibrated on the
 page's own drawn cards so the estimate is never below a measured one. The page's own *arrange* (dagre over the
@@ -55,8 +56,9 @@ import yaml
 
 #: Horizontal distance between two layers, in canvas pixels — a node card plus a wire's breathing room.
 COLUMN_DX = 340
-#: The SHORTEST vertical distance between two cards of one layer: a card up to six rows tall (181 px) takes exactly
-#: this, a taller one pushes the next card further down (:func:`card_height`, ``CARD_GAP``).
+#: The SHORTEST vertical distance between two cards of one layer: a card up to 183 px tall (six rows on an op card, five
+#: on a subgraph card) takes exactly this, a taller one pushes the next card further down (:func:`card_height`,
+#: ``CARD_GAP``).
 ROW_DY = 200
 #: Where the first column and the first row start, so a node is never flush against the canvas edge.
 MARGIN = 40
@@ -78,8 +80,10 @@ CARD_NOTE = 20
 #: A subgraph card's bar: its inner steps and the open button.
 CARD_SUBGRAPH_BAR = 26
 #: The clearance kept under a card before the next card of its column: what ``ROW_DY`` leaves under the tallest card
-#: that fits it (six rows: 200 - 181), so every card that fitted the fixed pitch keeps its place.
-CARD_GAP = 19
+#: that fits it — a five-row SUBGRAPH card, 37 + 5 × 24 + 26 = 183 px (a six-row op card is 181): 200 - 183 — so every
+#: card that fitted the fixed pitch keeps its place. Measured 2026-10-01: a gap of 19 (200 - 181, the subgraph bar left
+#: out) moved the card below a five-row subgraph card from (40, 240) to (40, 250) although nothing overlapped.
+CARD_GAP = 17
 
 #: A node position in canvas pixels, ``(x, y)`` of its top-left corner.
 Position = Tuple[float, float]
@@ -197,7 +201,8 @@ def card_height(node: Named) -> int:
 
 def _pitch(node: Named) -> float:
     """How far below ``node``'s top the next card of its column starts: its estimated bottom plus ``CARD_GAP``, up
-    to the snap grid, and never less than ``ROW_DY`` — measured: ``known`` (373 px) → 400, a six-row card → 200."""
+    to the snap grid, and never less than ``ROW_DY`` — ``known`` (373 px) → 390, a six-row op card (181 px) and a
+    five-row subgraph card (183 px) → 200."""
     return float(max(ROW_DY, math.ceil((card_height(node) + CARD_GAP) / GRID) * GRID))
 
 
@@ -233,9 +238,10 @@ def layered_layout(model: GraphLike) -> Dict[str, Position]:
     the first step of the chain down a row while the rest stays up (measured on the shipped Bluetooth
     pane, 2026-09-28). A graph with no wires at all keeps the model's order.
 
-    Each card starts below the one above it by that card's pitch (:func:`_pitch`): ``ROW_DY`` for a card up to six
-    rows, more for a taller one. Measured on the shipped Bluetooth pane, 2026-10-01: the fixed pitch put the root
-    at (40, 240), under the 373-px ``known`` card (40..413) but for its last 8 px; it now sits at (40, 440).
+    Each card starts below the one above it by that card's pitch (:func:`_pitch`): ``ROW_DY`` for a card the fixed
+    pitch fitted (six rows on an op card, five on a subgraph card), more for a taller one. Measured on the shipped
+    Bluetooth pane, 2026-10-01: the fixed pitch put the root at (40, 240), under the 373-px ``known`` card (40..413)
+    but for its last 8 px; it now sits at (40, 430), 17 px below it.
     """
     return _stack(model, [node.name for node in model.nodes], float(MARGIN))
 
