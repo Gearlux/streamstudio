@@ -3,9 +3,10 @@
  * wires — a pipeline is a one-direction chain with a few forks, which is exactly dagre's model (no ELK needed).
  *
  * Why on the client when the server has a layout too (`streamstudio/layout.py`, `POST …/layout`): the server
- * lays out on a fixed grid (a column per layer, a row per node) because it cannot know how tall a card is; the
- * page can, so dagre spaces the cards by their real sizes. Both are offered, the client's by default. The result
- * is written like any drag — `PUT …/positions` — so the sidecar is the one place a layout lives.
+ * lays out a column per layer and stacks each column by an ESTIMATE of every card's height (counted from its rows,
+ * never measured — it does not see the drawing); the page has the measured sizes, so dagre spaces the cards by
+ * their real sizes and crosses fewer wires. Both are offered, the client's by default. The result is written like
+ * any drag — `PUT …/positions` — so the sidecar is the one place a layout lives.
  */
 import dagre from "@dagrejs/dagre";
 

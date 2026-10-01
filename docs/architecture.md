@@ -559,6 +559,52 @@ object graph; a refused edit writes nothing; node names are the engine's names; 
 the YAML. Pins: `tests/test_document.py::TestSetParam::test_the_bluetooth_pane_keeps_its_230_comment_lines`,
 `tests/test_document.py::TestProblems`, `tests/test_layout.py`.
 
+**Update, 2026-10-01 — the first layout stacks a column by each card's height (`layout.card_height`).**
+*Context.* The first layout (`layout.layered_layout`, and `layout.positions` for a node the sidecar does not name)
+spaced the cards of one column by a fixed `ROW_DY = 200`, so a card taller than about 180 px was drawn over the next
+one. Measured on the shipped Bluetooth pane once its head step became `known` (`CollectKnownAccessCodes`, ten
+parameters): `known` at (40, 40) is 373 px tall, and the `contract` root at (40, 240) showed only its last 8 px. Over
+the 34 graph levels of the shipped annotation panes and annotation-workspace templates, 8 pairs of drawn cards
+overlapped. *Decision.* Within a column the next card's y is the previous card's y plus
+`max(ROW_DY, card_height(previous) + CARD_GAP)`, rounded up to the canvas's 10-px snap grid (`layout.GRID`, React
+Flow's `snapGrid`: a corner off it jumps on its first drag). `positions` starts fresh nodes below the lowest kept
+card's BOTTOM (its top plus that pitch) rather than its top + `ROW_DY`; a subgraph's inside goes through the same two
+functions. The server never sees the drawing, so `card_height` ESTIMATES it from what `GenericNode.tsx` draws: 37 for
+the title, 24 per input socket, parameter and output socket, 20 for a note line, 26 for a subgraph's inner-steps bar.
+The parts were calibrated on the page itself — every graph of a scratch copy of those folders plus a one-subgraph
+flow opened headless at 1400x900, each React Flow node's measured height beside its row counts from the model:
+
+| card | rows (in / params / out) | measured | estimate |
+| --- | --- | --- | --- |
+| `bte_view` `known` | 1 / 10 / 3 | 373 | 373 |
+| `bte_view` `contract` | 0 / 4 / 2 | 181 | 181 |
+| an op with a note | 1 / 3 / 2 | 201 | 201 |
+| a subgraph card | 1 / 1 / 2 | 159 | 159 |
+| a subgraph `<in>` pill (a note) | 1 / 0 / 0 | 80 | 81 |
+| the classification workspace value | 2 / 34 / 1 | 925 | 925 |
+
+Over all 197 cards the estimate is exact on 195 and 1 px over on the two pills — never under. `CARD_GAP = 19` is what
+`ROW_DY` leaves under a six-row card (200 − 181), so every card that fitted the fixed pitch keeps its place: 27 of
+the 34 levels lay out byte-identically, the 7 that moved are exactly the ones that overlapped, and 8 overlapping pairs
+became 0. Rejected: letting the page send its measured heights back (the graph answer carries positions before the
+page has drawn, and a layout that depends on an open page is no longer a function of the document); placing the
+unwired root where no step can be taller (it fixes one pane, not the other six levels). *Consequences.* The estimate
+mirrors the card's CSS: a new row type, a taller widget or a changed font makes it stale, and only the browser test
+(`tests/test_canvas.py::TestFirstLayout`) sees that, so such a change re-runs the calibration. `layout.py` still
+reads only the model's shape — the counts come through `getattr` with a default, and a node without them is a
+title-only card that keeps the fixed pitch. The page's *Arrange* (dagre over measured boxes) is unchanged.
+*Example.*
+
+```python
+layout.card_height(model.node("known"))      # 373 — 37 + 14 rows × 24; the page measured 373
+layout.layered_layout(model)["contract"]      # (40.0, 440.0) — was (40.0, 240.0), under `known`
+```
+
+*What you may change.* The part heights and the gap (re-calibrated), the rounding. What must hold: the estimate is
+never below a drawn card, `ROW_DY` stays the MINIMUM pitch so short cards keep their places, and `layout.py` imports
+no document code. Pins: `tests/test_layout.py::TestCardHeight`, `::TestTallCards`,
+`::test_bte_views_first_layout_overlaps_no_two_cards_of_a_column`, `tests/test_canvas.py::TestFirstLayout`.
+
 ## The canvas page is a build artifact beside the package, and a drawn wire is a proposal until a route can spell it (`frontend/`, `streamstudio.app.page_blueprint`, 2026-09-28)
 
 **Context.** Phase 3 of the rewrite (`docs/rewrite.md` §2.3) puts a React Flow page over the phase-2

@@ -20,6 +20,19 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **A graph opened for the first time no longer draws a card over another.** Within a column a card now starts
+  below the card above it — 200 px below that card's top for a card up to six rows tall, further for a taller one
+  (its height plus 19 px, on the canvas's 10-px grid). The Bluetooth pane, opened without a positions file:
+
+  ```
+                 known (373 px tall)   contract
+  before         (40, 40)              (40, 240)   only the last 8 px of contract showed
+  after          (40, 40)              (40, 440)   27 px below known
+  ```
+
+  Over 34 shipped graph levels, 8 pairs of cards overlapped on a first open before, none after; 27 of the 34 are
+  laid out exactly as before, as is any graph whose cards are all six rows or shorter. A node added later starts
+  below the lowest card already placed, no longer 200 px below its top.
 - **A problem in a folder whose name has a space keeps its line.** Check graph on a graph in `…/with space/demo.yaml`
   whose contract is written before its flow answered the location `…/with space/demo.yaml` — no line — while the
   message said `… Failed to construct GraphContract at …/with space/demo.yaml:1:11: …`; the same graph in a folder

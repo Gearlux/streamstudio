@@ -24,17 +24,30 @@ included.
 
 The first layout is the plainest one that reads as a pipeline: longest-path layering along the
 wires (a node's layer is one past the deepest node feeding it; a node nothing feeds sits in layer
-0), one column per layer, one row per node within a layer in the order the model lists them. No
-crossing minimisation — a pipeline is a one-direction chain with a few forks, and a stable
+0), one column per layer, the layer's nodes stacked down its column in the order the model lists
+them. No crossing minimisation — a pipeline is a one-direction chain with a few forks, and a stable
 result (the same document always draws the same way) is worth more than a prettier one that
 moves when a step is added. :func:`positions` merges the two: a node the sidecar names keeps its
-place, the rest are laid out in their layer's column starting one row BELOW the lowest kept node,
+place, the rest are laid out in their layer's column starting BELOW the lowest kept card's bottom,
 so a step an agent added never lands on top of something the user arranged.
 
+Within a column a card starts below the card above it: the next card's y is the previous card's y plus
+``max(ROW_DY, card_height(previous) + CARD_GAP)``, rounded up to the canvas's 10-px snap grid. ``ROW_DY`` is the
+MINIMUM pitch, so a column of cards up to six rows tall (181 px) keeps exactly the fixed 200-px grid, and a taller
+card pushes the next one down instead of being drawn over it (measured 2026-10-01: the Bluetooth pane's ``contract``
+root sat at (40, 240), under its 373-px ``known`` card but for the last 8 px; it now sits at (40, 440)). The server
+never sees the drawing, so :func:`card_height` ESTIMATES a card from what it draws — a title, one row per input
+socket, parameter and output socket, a note line, a subgraph's inner-steps bar — with part heights calibrated on the
+page's own drawn cards so the estimate is never below a measured one. The page's own *arrange* (dagre over the
+MEASURED cards) is a separate, client-side layout and is not touched by this one.
+
 Only the model's SHAPE is read (``.nodes`` with a ``.name``, ``.wires`` with ``.source`` and
-``.target``), so this module imports no document code and a test drives it with three dataclasses.
+``.target``), so this module imports no document code and a test drives it with three dataclasses. The rows a
+card draws (``inputs``, ``params``, ``outputs``, ``note``, ``kind``) are read with ``getattr`` and a default,
+so a node without them is a title-only card and keeps the fixed ``ROW_DY`` pitch.
 """
 
+import math
 from pathlib import Path
 from typing import Callable, Dict, List, Mapping, NotRequired, Optional, Protocol, Sequence, Tuple, TypedDict, cast
 
@@ -42,10 +55,31 @@ import yaml
 
 #: Horizontal distance between two layers, in canvas pixels — a node card plus a wire's breathing room.
 COLUMN_DX = 340
-#: Vertical distance between two rows of one layer — the tallest common node card plus a margin.
+#: The SHORTEST vertical distance between two cards of one layer: a card up to six rows tall (181 px) takes exactly
+#: this, a taller one pushes the next card further down (:func:`card_height`, ``CARD_GAP``).
 ROW_DY = 200
 #: Where the first column and the first row start, so a node is never flush against the canvas edge.
 MARGIN = 40
+#: The canvas's snap grid (React Flow's ``snapGrid`` in ``frontend/src/canvas/Canvas.tsx``, ``GRID`` in
+#: ``frontend/src/layout.ts``): a first-layout corner lands on it like a dragged or arranged one, because a corner off
+#: it jumps to it on the first drag. ``MARGIN``, ``COLUMN_DX`` and ``ROW_DY`` are multiples of it.
+GRID = 10
+
+#: How tall the page draws a node card (``frontend/src/canvas/GenericNode.tsx`` + ``styles.css``), in canvas pixels,
+#: part by part — calibrated 2026-10-01 on 197 drawn cards (every graph of the waivefront annotation panes, the
+#: annotaide workspace templates and a one-subgraph flow; headless chromium, the React Flow node's height at zoom 1):
+#: the sum is exact on 195 cards and 1 px over on the two subgraph boundary pills, never under. The title: the name,
+#: the kind badge and the class line.
+CARD_TITLE = 37
+#: One row of a card: an input socket, a parameter (with its widget) or an output socket.
+CARD_ROW = 24
+#: The note line under the rows (a types-only declaration, an alias).
+CARD_NOTE = 20
+#: A subgraph card's bar: its inner steps and the open button.
+CARD_SUBGRAPH_BAR = 26
+#: The clearance kept under a card before the next card of its column: what ``ROW_DY`` leaves under the tallest card
+#: that fits it (six rows: 200 - 181), so every card that fitted the fixed pitch keeps its place.
+CARD_GAP = 19
 
 #: A node position in canvas pixels, ``(x, y)`` of its top-left corner.
 Position = Tuple[float, float]
@@ -144,8 +178,42 @@ def _layers(model: GraphLike) -> Dict[str, int]:
     return layer
 
 
-def _place(layer: int, row: int) -> Position:
-    return (float(MARGIN + layer * COLUMN_DX), float(MARGIN + row * ROW_DY))
+def card_height(node: Named) -> int:
+    """How tall the page draws ``node``'s card, in canvas pixels — an upper bound (see ``CARD_TITLE``).
+
+    Counted from what the card draws: the title, one row per input socket, parameter and output socket, the note
+    line when there is a note, the inner-steps bar of a subgraph. The counts are read from the node's ``inputs``,
+    ``params``, ``outputs``, ``note`` and ``kind`` when it has them and as none when it does not, so this module
+    still needs only a node's NAME (``Named``): a shape without them is a title alone, which keeps ``ROW_DY``.
+    """
+    rows = sum(len(getattr(node, part, ())) for part in ("inputs", "params", "outputs"))
+    height = CARD_TITLE + rows * CARD_ROW
+    if getattr(node, "note", ""):
+        height += CARD_NOTE
+    if getattr(node, "kind", "") == "subgraph":
+        height += CARD_SUBGRAPH_BAR
+    return height
+
+
+def _pitch(node: Named) -> float:
+    """How far below ``node``'s top the next card of its column starts: its estimated bottom plus ``CARD_GAP``, up
+    to the snap grid, and never less than ``ROW_DY`` — measured: ``known`` (373 px) → 400, a six-row card → 200."""
+    return float(max(ROW_DY, math.ceil((card_height(node) + CARD_GAP) / GRID) * GRID))
+
+
+def _stack(model: GraphLike, names: List[str], top: float) -> Dict[str, Position]:
+    """``names`` laid out from ``top`` down: each in its layer's column, taking the column's rows in the ONE row
+    order (:func:`_row_order`), each card below the one above it by that card's pitch (:func:`_pitch`)."""
+    layers = _layers(model)
+    nodes = {node.name: node for node in model.nodes}
+    tops: Dict[int, float] = {}
+    placed: Dict[str, Position] = {}
+    for name in _row_order(model, names):
+        depth = layers[name]
+        y = tops.get(depth, top)
+        placed[name] = (float(MARGIN + depth * COLUMN_DX), y)
+        tops[depth] = y + _pitch(nodes[name])
+    return placed
 
 
 def _row_order(model: GraphLike, names: List[str]) -> List[str]:
@@ -157,22 +225,19 @@ def _row_order(model: GraphLike, names: List[str]) -> List[str]:
 
 
 def layered_layout(model: GraphLike) -> Dict[str, Position]:
-    """A position per node: one column per layer, one row per node within it.
+    """A position per node: one column per layer, the layer's nodes stacked down it.
 
     Within a column the nodes that carry a wire take the top rows and the unwired ones follow, each
     group in the model's order. Without that, an unwired node that the model lists first — a graph's
     contract root whose host inputs no step names by entry — takes row 0 of the first column and pushes
     the first step of the chain down a row while the rest stays up (measured on the shipped Bluetooth
     pane, 2026-09-28). A graph with no wires at all keeps the model's order.
+
+    Each card starts below the one above it by that card's pitch (:func:`_pitch`): ``ROW_DY`` for a card up to six
+    rows, more for a taller one. Measured on the shipped Bluetooth pane, 2026-10-01: the fixed pitch put the root
+    at (40, 240), under the 373-px ``known`` card (40..413) but for its last 8 px; it now sits at (40, 440).
     """
-    layers = _layers(model)
-    rows: Dict[int, int] = {}
-    placed: Dict[str, Position] = {}
-    for name in _row_order(model, [n.name for n in model.nodes]):
-        depth = layers[name]
-        placed[name] = _place(depth, rows.get(depth, 0))
-        rows[depth] = rows.get(depth, 0) + 1
-    return placed
+    return _stack(model, [node.name for node in model.nodes], float(MARGIN))
 
 
 # ----------------------------------------------------------------------------------------------
@@ -348,8 +413,9 @@ def map_members(groups: Sequence[Group], moved: Callable[[str], Optional[str]]) 
 def positions(model: GraphLike, sidecar: Path, *, kept: Optional[Mapping[str, Position]] = None) -> Dict[str, Position]:
     """Every node's position, in the model's order: the sidecar's where it names the node, laid out otherwise.
 
-    Fresh nodes keep their layer's column and take rows among THEMSELVES, starting one row below the
-    lowest kept node — never on top of an arranged one. A sidecar name the model no longer has is
+    Fresh nodes keep their layer's column and stack among THEMSELVES (:func:`layered_layout`'s rule), starting
+    below the lowest BOTTOM of the kept nodes — a kept card's top plus its pitch, so a tall card reaches further
+    down than a short one below it — never on top of an arranged one. A sidecar name the model no longer has is
     left out; :func:`stale_positions` names it. ``kept`` replaces the sidecar's positions when the caller
     holds a whole set of its own (the editor's, after a list's members were re-keyed — the sidecar then
     places a member under a name another member had).
@@ -359,15 +425,8 @@ def positions(model: GraphLike, sidecar: Path, *, kept: Optional[Mapping[str, Po
     fresh = [name for name in names if name not in kept]
     placed: Dict[str, Position] = {}
     if fresh:
-        layers = _layers(model)
-        lowest = max((kept[name][1] for name in names if name in kept), default=float(MARGIN) - ROW_DY)
-        shift = lowest + ROW_DY - MARGIN
-        rows: Dict[int, int] = {}
-        for name in _row_order(model, fresh):
-            depth = layers[name]
-            x, y = _place(depth, rows.get(depth, 0))
-            placed[name] = (x, y + shift)
-            rows[depth] = rows.get(depth, 0) + 1
+        bottoms = (kept[node.name][1] + _pitch(node) for node in model.nodes if node.name in kept)
+        placed = _stack(model, fresh, max(bottoms, default=float(MARGIN)))
     return {name: kept[name] if name in kept else placed[name] for name in names}
 
 

@@ -343,6 +343,25 @@ number changes (`stream.ops[3]` → `stream.ops[2]`), and an undo moves the numb
 A right-click on a node that is not selected selects it first, so the node menu acts on what you see highlighted.
 Run to here runs one record and pauses before the node.
 
+### Where a node is drawn — the first layout
+
+A graph opened without a positions file beside it (`<graph>.layout.yaml`) is laid out by the editor: one column per
+step of the chain, left to right along the wires, the nodes of a column stacked top to bottom. A card starts below
+the card above it — 200 px below that card's top when it is up to six rows tall (one row per input, parameter and
+output, under the title), further when it is taller: its height plus 19 px, on the canvas's 10-px grid. The
+Bluetooth pane, opened without a positions file:
+
+```
+               known (373 px tall)   contract
+before         (40, 40)              (40, 240)   only the last 8 px of contract showed
+after          (40, 40)              (40, 440)   27 px below known
+```
+
+A node the positions file does not name yet — a step an agent added — is laid out the same way, starting below the
+lowest card already placed. **View ▸ Arrange in columns** lays the whole graph out this way again; **View ▸ Arrange**
+spaces the cards by the sizes the page drew, left to right. Delete a line of the positions file to lay that node
+out again, the file to lay out everything.
+
 ### Groups
 
 Select nodes and press `G` for a titled, coloured box that moves its members with it. **Graph ▸ Add group** drops
