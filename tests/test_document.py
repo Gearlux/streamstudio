@@ -645,6 +645,38 @@ class TestDerive:
         assert [(s.name, s.type) for s in root.outputs] == [("input", "Signal"), ("regions", "Regions")]
         assert not any(node.kind == "host" for node in model.nodes)
 
+    def test_the_selection_graph_derives_its_root_two_gates_and_no_problem(self) -> None:
+        """Measured 2026-10-01 on the shipped ``selection_stats.yaml`` — the graph the signal workspace runs
+        over a selection for its info panel, rooted like a pane since that day: six steps plus the
+        ``contract:`` root (the host's ``input`` and ``regions``) — 7 nodes — and 12 wires: 5 ``from:``
+        record wires, the two gate wires from the floor-method chooser's outcomes to the floor node each
+        one runs, and 5 entry wires. No step reads ``input`` or ``regions`` by name, so the root wires to
+        nothing and no ``<host>`` node is drawn; the document reports no problem.
+
+        This pins the waivefront file's declarations from here; a change there shows up here first.
+        """
+        doc = Document.open(_bte_path().with_name("selection_stats.yaml"))
+        model = doc.model
+        assert doc.check() == []
+        assert [node.name for node in model.nodes] == [
+            "contract",
+            "window",
+            "psd",
+            "method",
+            "mean",
+            "median",
+            "levels",
+        ]
+        kinds: Dict[str, int] = {}
+        for wire in model.wires:
+            kinds[wire.kind] = kinds.get(wire.kind, 0) + 1
+        assert kinds == {"record": 5, "gate": 2, "entry": 5}
+        assert _wires(model, "gate") == [("method", "mean", "mean", "record"), ("method", "median", "median", "record")]
+        root = model.node("contract")
+        assert root.kind == "contract"
+        assert [(s.name, s.type) for s in root.outputs] == [("input", "Signal"), ("regions", "Regions")]
+        assert not any(node.kind == "host" for node in model.nodes)
+
     def test_a_step_whose_entry_nothing_produces_is_refused_on_the_shipped_bluetooth_pane(self, tmp_path: Path) -> None:
         """The PRO case the pane's ``contract:`` root exists for (2026-09-28): ``NoiseFloorEstimate``
         reads ``spectrogram``, which no step of the Bluetooth pane writes and the host does not provide
