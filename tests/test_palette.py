@@ -321,7 +321,12 @@ def test_the_full_scan_lists_every_installed_class() -> None:
     floor = by_name["NoiseFloorEstimate"]
     assert floor.kind == "algorithm"
     assert sockets(floor, "inputs") == {"record": "Record", "spectrogram": "Spectrogram"}
-    assert sockets(floor, "outputs") == {"record": "Record", "op": "Op", "noise_floor_db": "number"}
+    assert sockets(floor, "outputs") == {
+        "record": "Record",
+        "op": "Op",
+        "noise_floor_db": "number",
+        "noise_floor_method": "string",
+    }
     assert floor.params_schema["percentile"]["minimum"] == 0.0
     # the registry holds a class whose constructor annotations do not resolve; it is listed, not dropped
     broken = [s for s in specs if s.problem]
@@ -331,5 +336,5 @@ def test_the_full_scan_lists_every_installed_class() -> None:
     classify = by_name["ClassifyBluetooth"]
     outs = sockets(classify, "outputs")
     assert outs["ble"] == "Record" and outs["try_weak"] == "Record" and outs["report:classify"] == "object"
-    assert classify.flags == ["fsk", "ble", "bredr", "try_weak", "try_classic", "try_frame"]
+    assert classify.flags == ["fsk", "ble", "bredr", "try_weak", "try_classic", "try_frame", "try_edr"]
     assert classify.reports == ["classify"]
