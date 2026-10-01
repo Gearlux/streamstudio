@@ -560,21 +560,21 @@ class TestDerive:
         with pytest.raises(KeyError, match="decode.*count"):
             model.node("nope")
 
-    def test_the_bluetooth_pane_derives_24_nodes_and_49_wires(self) -> None:
-        """Measured 2026-09-27 and again today on the shipped ``bte_view.yaml``: 24 steps, 23 ``from:``
-        record wires, 9 gate wires (one per ``requires:``), 17 entry wires (who produced what a
-        node reads), and no host wire — the head node (``WindowSignal``) declares nothing.
+    def test_the_bluetooth_pane_derives_29_nodes_and_59_wires(self) -> None:
+        """Measured 2026-10-01 on the shipped ``bte_view.yaml``: 29 steps, 28 ``from:`` record
+        wires, 10 gate wires (one per ``requires:``), 21 entry wires (who produced what a node
+        reads), and no host wire — the head node (``CollectKnownAccessCodes``) declares nothing.
 
         This pins the waivefront file's declarations from here; a change there shows up here first.
         """
         path = _bte_path()
         model = Document.open(path).model
-        assert len(model.nodes) == 24
-        assert len(model.wires) == 49
+        assert len(model.nodes) == 29
+        assert len(model.wires) == 59
         kinds: Dict[str, int] = {}
         for wire in model.wires:
             kinds[wire.kind] = kinds.get(wire.kind, 0) + 1
-        assert kinds == {"record": 23, "gate": 9, "entry": 17}
+        assert kinds == {"record": 28, "gate": 10, "entry": 21}
         assert model.problems == []
         gates = {(w.source, w.source_socket, w.target) for w in model.wires if w.kind == "gate"}
         assert ("pick", "plain", "burst") in gates
@@ -791,20 +791,20 @@ class TestSetParam:
             "hint": "a Bluetooth packet",
         }
 
-    def test_the_bluetooth_pane_keeps_its_148_comment_lines(self, tmp_path: Path) -> None:
-        """Measured on the shipped file: 275 lines, 148 of them comments; ``set_param`` on
+    def test_the_bluetooth_pane_keeps_its_255_comment_lines(self, tmp_path: Path) -> None:
+        """Measured on the shipped file (2026-10-01): 448 lines, 255 of them comments; ``set_param`` on
         ``size.max_band_hz`` changes ONE line and every comment survives."""
         source = _bte_path()
         path = tmp_path / source.name
         path.write_text(source.read_text())
         doc = Document.open(path)
         before = doc.text
-        assert _comment_lines(before) == 148
+        assert _comment_lines(before) == 255
         doc.set_param("size", "max_band_hz", 30.0e6)
         after = doc.text
-        assert _comment_lines(after) == 148
+        assert _comment_lines(after) == 255
         differing = [(a, b) for a, b in zip(before.splitlines(), after.splitlines()) if a != b]
-        assert differing == [("      max_band_hz: 25.0e6", "      max_band_hz: 30000000.0")]
+        assert differing == [("      max_band_hz: 6.0e6", "      max_band_hz: 30000000.0")]
         assert len(after.splitlines()) == len(before.splitlines())
         assert doc.model.node("size").params["max_band_hz"].value == 30.0e6
 

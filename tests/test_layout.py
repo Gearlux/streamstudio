@@ -231,8 +231,8 @@ class TestPositions:
         assert positions(g, side) == positions(g, side)
 
 
-def test_bte_view_derives_into_twenty_four_layers_one_column_apart() -> None:
-    """The shipped Bluetooth pane is a 24-step chain: every step is its own layer, 340 px from the last."""
+def test_bte_view_derives_into_twenty_nine_layers_one_column_apart() -> None:
+    """The shipped Bluetooth pane is a 29-step chain: every step is its own layer, 340 px from the last."""
     waivefront = pytest.importorskip("waivefront")
     try:
         from streamstudio.document import Document
@@ -241,7 +241,7 @@ def test_bte_view_derives_into_twenty_four_layers_one_column_apart() -> None:
     path = Path(waivefront.__file__).parent / "annotation" / "bte_view.yaml"
     model = Document.open(path).model
     pos = layered_layout(model)
-    assert len(pos) == 24
+    assert len(pos) == 29
     xs = sorted(x for x, _ in pos.values())
-    assert xs == [column(i) for i in range(24)]
+    assert xs == [column(i) for i in range(29)]
     assert {y for _, y in pos.values()} == {row(0)}
