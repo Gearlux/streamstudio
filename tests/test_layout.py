@@ -4,26 +4,34 @@ The document holds no positions (``docs/rewrite.md`` §2.1: positions live in a 
 ``<document>.layout.yaml``, a ``positions:`` block keyed by node name beside a ``groups:`` block the
 canvas draws — a group is a title, a colour and member names, stored as the page spells it).
 ``layered_layout`` draws a graph nobody has arranged
-yet — longest-path layering along the wires, one column per layer, one row per node within a layer,
-in the order the model lists them. ``positions`` merges the two: a node named in the sidecar keeps its
-place, the rest are laid out BELOW the lowest kept row so they never land on top of something the user
-arranged, and a sidecar name the model no longer has is dropped (``stale_positions`` reports it).
+yet — longest-path layering along the wires, one column per layer, the nodes of a layer stacked down
+their column in the order the model lists them, each below the card above it: that card's estimated
+height (``card_height``) plus ``CARD_GAP``, on the snap grid, never closer than ``ROW_DY``. ``positions``
+merges the two: a node named in the sidecar keeps its place, the rest are laid out BELOW the lowest kept
+card's bottom so they never land on top of something the user arranged, and a sidecar name the model no
+longer has is dropped (``stale_positions`` reports it).
 
 The tests build tiny stand-ins for the model — ``layout`` depends only on the SHAPE (``.nodes`` with a
-``.name``, ``.wires`` with ``.source``/``.target``), never on ``streamstudio.document``.
+``.name``, ``.wires`` with ``.source``/``.target``, and — read when a node has them — the rows a card
+draws), never on ``streamstudio.document``: a bare ``Node`` keeps the fixed ``ROW_DY`` pitch, a ``Card``
+carries the rows.
 """
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Tuple, cast
+from typing import TYPE_CHECKING, Dict, List, Tuple, cast
 
 import pytest
 
 from streamstudio.layout import (
+    CARD_GAP,
+    CARD_TITLE,
     COLUMN_DX,
+    GRID,
     MARGIN,
     ROW_DY,
     Group,
+    card_height,
     layered_layout,
     positions,
     read_groups,
@@ -33,6 +41,9 @@ from streamstudio.layout import (
     stale_positions,
     write_sidecar,
 )
+
+if TYPE_CHECKING:  # the annotation only: these tests drive the layout with stand-ins, never the document code
+    from streamstudio.document import Model
 
 
 @dataclass
@@ -47,8 +58,32 @@ class Wire:
 
 
 @dataclass
+class Card:
+    """A node that carries the rows the canvas draws — the attributes of ``streamstudio.document.Node`` that
+    ``card_height`` reads (``inputs``, ``params``, ``outputs``, ``note``, ``kind``); a bare ``Node`` carries none."""
+
+    name: str
+    inputs: List[str] = field(default_factory=list)
+    params: Dict[str, float] = field(default_factory=dict)
+    outputs: List[str] = field(default_factory=list)
+    note: str = ""
+    kind: str = "op"
+
+
+def card(name: str, inputs: int, params: int, outputs: int, *, note: str = "", kind: str = "op") -> Card:
+    return Card(
+        name,
+        [f"in{i}" for i in range(inputs)],
+        {f"p{i}": float(i) for i in range(params)},
+        [f"out{i}" for i in range(outputs)],
+        note,
+        kind,
+    )
+
+
+@dataclass
 class Graph:
-    nodes: List[Node] = field(default_factory=list)
+    nodes: List[Node | Card] = field(default_factory=list)
     wires: List[Wire] = field(default_factory=list)
 
 
@@ -128,6 +163,99 @@ class TestLayeredLayout:
 
     def test_an_empty_model_lays_out_nothing(self) -> None:
         assert layered_layout(Graph()) == {}
+
+
+#: Cards the page DREW, measured 2026-10-01 (headless chromium, 1400x900, the React Flow node's height at zoom 1) on
+#: every graph of a scratch copy of the waivefront annotation panes, the annotaide workspace templates and a
+#: one-subgraph flow — 197 cards. ``card_height`` is EXACT on 195 of them and 1 px over on the two boundary pills.
+MEASURED = [
+    pytest.param(card("known", 1, 10, 3), 373, id="bte_view known: 1 input, 10 parameters, 3 outputs"),
+    pytest.param(card("contract", 0, 4, 2, kind="contract"), 181, id="bte_view contract: 4 parameters, 2 outputs"),
+    pytest.param(card("window", 1, 3, 2), 181, id="bte_view window: 1 input, 3 parameters, 2 outputs"),
+    pytest.param(card("op", 1, 3, 2, note="types only"), 201, id="an op with a note line"),
+    pytest.param(card("value", 0, 1, 2, kind="value"), 109, id="a value: 1 parameter, 2 outputs"),
+    pytest.param(card("workspace", 2, 34, 1, kind="value"), 925, id="the classification workspace: 34 parameters"),
+    pytest.param(card("op", 5, 12, 10), 685, id="an op with 27 rows"),
+    pytest.param(card("prep", 1, 1, 2, kind="subgraph"), 159, id="a subgraph card with its inner-steps bar"),
+    pytest.param(card("prep/<in>", 1, 0, 0, note="the record", kind="boundary"), 80, id="a subgraph's <in> pill"),
+]
+
+
+class TestCardHeight:
+    """``card_height``: how tall the page draws a node, from what the card holds — an UPPER bound of the measured
+    card, so a layout that clears the estimate clears the drawing."""
+
+    @pytest.mark.parametrize("node, measured", MEASURED)
+    def test_the_estimate_is_never_below_the_drawn_card_and_at_most_one_pixel_over(
+        self, node: Card, measured: int
+    ) -> None:
+        assert measured <= card_height(node) <= measured + 1
+
+    def test_a_node_carrying_no_rows_is_a_title_alone(self) -> None:
+        """The three stand-in dataclasses carry no ``inputs``/``params``/``outputs`` — read with a default, so a
+        model shape without them is a title-only card and keeps the fixed pitch."""
+        assert card_height(Node("a")) == CARD_TITLE
+        assert CARD_TITLE + CARD_GAP <= ROW_DY
+
+
+class TestTallCards:
+    """Within a column the next card starts below the previous card's estimated BOTTOM plus ``CARD_GAP``, rounded up
+    to the canvas's 10-px snap grid — and never closer than ``ROW_DY``, so short cards keep today's grid."""
+
+    def test_a_tall_card_pushes_the_next_card_of_its_column_below_its_bottom(self) -> None:
+        # no wires: one column, in the model's order — the Bluetooth pane's first column in miniature
+        g = Graph([card("tall", 1, 10, 3), card("short", 0, 4, 2, kind="contract")])
+        pos = layered_layout(g)
+        assert pos["tall"] == (column(0), row(0))
+        # was (40, 240) = row(1): inside the tall card (40..413). Now 40 + 373 + 19 = 432, up to the grid: 440.
+        assert pos["short"] == (column(0), 440.0)
+        assert pos["short"][1] >= pos["tall"][1] + card_height(g.nodes[0]) + CARD_GAP
+
+    def test_a_short_card_above_a_tall_one_keeps_todays_pitch(self) -> None:
+        g = Graph([card("short", 0, 4, 2), card("tall", 1, 10, 3), card("last", 1, 1, 1)])
+        pos = layered_layout(g)
+        assert pos["short"] == (column(0), row(0))
+        assert pos["tall"] == (column(0), row(1))
+        assert pos["last"] == (column(0), row(1) + 400.0)  # 240 + (373 + 19 → 400)
+
+    def test_cards_of_six_rows_or_fewer_keep_todays_coordinates_exactly(self) -> None:
+        """CON case: 181 px (six rows) + the gap is exactly ``ROW_DY`` — every such card stays on today's grid, so
+        a graph of short cards lays out byte-identically to the fixed pitch (a bare ``Node`` the same)."""
+        g = Graph(
+            [card("a", 1, 3, 2), card("b", 0, 4, 2), Node("c"), card("d", 2, 1, 2), card("e", 1, 1, 1)],
+            [Wire("a", "d"), Wire("b", "d"), Wire("c", "e")],
+        )
+        bare = Graph([Node(n.name) for n in g.nodes], g.wires)
+        assert layered_layout(g) == layered_layout(bare)
+        assert layered_layout(g) == {
+            "a": (column(0), row(0)),
+            "b": (column(0), row(1)),
+            "c": (column(0), row(2)),
+            "d": (column(1), row(0)),
+            "e": (column(1), row(1)),
+        }
+
+    def test_a_seven_row_card_is_the_first_to_push(self) -> None:
+        """The boundary: 205 px + 19 = 224, up to the grid: 230 — one row more than fits today's 200-px pitch."""
+        g = Graph([card("seven", 1, 4, 2), card("next", 1, 1, 1)])
+        assert card_height(g.nodes[0]) == 205
+        assert layered_layout(g)["next"] == (column(0), MARGIN + 230.0)
+
+    def test_every_first_layout_corner_is_on_the_canvas_snap_grid(self) -> None:
+        g = Graph([card(f"n{i}", 1, i, 2, note="n" if i % 2 else "") for i in range(12)])
+        assert all(x % GRID == 0 and y % GRID == 0 for x, y in layered_layout(g).values())
+
+    def test_each_column_stacks_on_its_own(self) -> None:
+        """A tall card pushes only the cards of ITS column: column 1 below ``tall`` moves, column 0 does not."""
+        g = Graph(
+            [card("a", 1, 1, 1), card("b", 1, 1, 1), card("tall", 1, 10, 3), card("c", 1, 1, 1)],
+            [Wire("a", "tall"), Wire("b", "c")],
+        )
+        pos = layered_layout(g)
+        assert pos["a"] == (column(0), row(0))
+        assert pos["b"] == (column(0), row(1))
+        assert pos["tall"] == (column(1), row(0))
+        assert pos["c"] == (column(1), row(0) + 400.0)
 
 
 class TestSidecar:
@@ -362,6 +490,30 @@ class TestPositions:
         write_sidecar(side, {"c": (700.0, 700.0)})
         assert positions(g, side) == positions(g, side)
 
+    def test_a_fresh_node_goes_below_a_tall_kept_nodes_bottom(self, tmp_path: Path) -> None:
+        """Fresh nodes start below the lowest BOTTOM of the kept ones (its top + its pitch), not its top + ``ROW_DY``
+        — before, a fresh card landed at 100 + 200 = 300, inside the kept tall card (100..473)."""
+        g = Graph([card("tall", 1, 10, 3), card("fresh", 0, 4, 2)])
+        side = tmp_path / "g.layout.yaml"
+        write_sidecar(side, {"tall": (500.0, 100.0)})
+        assert positions(g, side)["fresh"] == (column(0), 100.0 + 400.0)
+
+    def test_the_lowest_bottom_counts_not_the_lowest_top(self, tmp_path: Path) -> None:
+        """A tall kept card whose top is HIGHER than a short kept card's can still reach further down."""
+        g = Graph([card("tall", 1, 10, 3), card("short", 1, 1, 1), card("fresh", 1, 1, 1)])
+        side = tmp_path / "g.layout.yaml"
+        write_sidecar(side, {"tall": (40.0, 40.0), "short": (700.0, 100.0)})
+        # the short card's bottom row ends at 100 + 200 = 300; the tall one's at 40 + 400 = 440
+        assert positions(g, side)["fresh"] == (column(0), 440.0)
+
+    def test_fresh_tall_cards_stack_by_their_own_heights(self, tmp_path: Path) -> None:
+        g = Graph([card("kept", 1, 1, 1), card("tall", 1, 10, 3), card("after", 1, 1, 1)])
+        side = tmp_path / "g.layout.yaml"
+        write_sidecar(side, {"kept": (40.0, 40.0)})
+        pos = positions(g, side)
+        assert pos["tall"] == (column(0), 40.0 + ROW_DY)
+        assert pos["after"] == (column(0), 40.0 + ROW_DY + 400.0)
+
 
 def test_a_node_without_wires_goes_below_the_wired_ones_in_its_column() -> None:
     """An unwired node (a graph's contract root whose host inputs no step names) must not push the
@@ -390,21 +542,41 @@ def test_a_column_of_only_unwired_nodes_keeps_the_models_order() -> None:
     assert [pos[n] for n in "zyx"] == [(column(0), row(0)), (column(0), row(1)), (column(0), row(2))]
 
 
+def _bte_view_model() -> "Model":
+    """The shipped Bluetooth pane's model — skipped where waivefront is not installed."""
+    waivefront = pytest.importorskip("waivefront")
+    from streamstudio.document import Document
+
+    return Document.open(Path(waivefront.__file__).parent / "annotation" / "bte_view.yaml").model
+
+
 def test_bte_view_derives_into_twenty_nine_layers_one_column_apart() -> None:
     """The shipped Bluetooth pane is a 29-step chain (24 before 2026-09-30) plus its contract root (the
     host's inputs, which no step names by entry, so it carries no wire): the steps stay one row, 340 px
-    apart, and the root sits under the first step."""
-    waivefront = pytest.importorskip("waivefront")
-    try:
-        from streamstudio.document import Document
-    except ImportError as exc:  # document.py lands in the same phase from another change
-        pytest.skip(f"streamstudio.document is not importable yet: {exc}")
-    path = Path(waivefront.__file__).parent / "annotation" / "bte_view.yaml"
-    model = Document.open(path).model
-    pos = layered_layout(model)
+    apart, and the root sits under the first step — below its BOTTOM. Measured 2026-10-01: the root was at
+    (40, 240) = ``row(1)``, inside ``known`` (373 px, 40..413) but for its last 8 px; now (40, 440)."""
+    pos = layered_layout(_bte_view_model())
     assert len(pos) == 30
     steps = {name: xy for name, xy in pos.items() if name != "contract"}
     xs = sorted(x for x, _ in steps.values())
     assert xs == [column(i) for i in range(29)]
     assert {y for _, y in steps.values()} == {row(0)}
-    assert pos["contract"] == (column(0), row(1))
+    assert pos["known"] == (column(0), row(0))
+    assert pos["contract"] == (column(0), 440.0)
+
+
+def test_bte_views_first_layout_overlaps_no_two_cards_of_a_column() -> None:
+    """By the ESTIMATED boxes (``card_height``, an upper bound of the drawn card): within every column each card
+    ends at least ``CARD_GAP`` above the next one's top; ``known`` is estimated at its measured 373 px."""
+    model = _bte_view_model()
+    pos = layered_layout(model)
+    height = {node.name: card_height(node) for node in model.nodes}
+    assert height["known"] == 373
+    columns: Dict[float, List[str]] = {}
+    for name, (x, _) in pos.items():
+        columns.setdefault(x, []).append(name)
+    for names in columns.values():
+        stacked = sorted(names, key=lambda name: pos[name][1])
+        for upper, lower in zip(stacked, stacked[1:]):
+            assert pos[upper][1] + height[upper] + CARD_GAP <= pos[lower][1], (upper, lower)
+    assert pos["contract"][1] >= pos["known"][1] + height["known"] + CARD_GAP
