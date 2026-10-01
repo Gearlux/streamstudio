@@ -1293,19 +1293,19 @@ class TestSetParam:
             "hint": "a Bluetooth packet",
         }
 
-    def test_the_bluetooth_pane_keeps_its_230_comment_lines(self, tmp_path: Path) -> None:
-        """Measured on the shipped file: 417 lines, 230 of them comments (2026-09-30, when the pane gained
-        five commented steps and its window limit dropped to 6 MHz; 284 / 152 the day before);
-        ``set_param`` on ``size.max_band_hz`` changes ONE line and every comment survives."""
+    def test_the_bluetooth_pane_keeps_its_259_comment_lines(self, tmp_path: Path) -> None:
+        """Measured on the shipped file (2026-10-01): 457 lines, 259 of them comments — the other clone's
+        grown chain (448 / 255 without it) plus this workspace's ``contract:`` root; ``set_param`` on
+        ``size.max_band_hz`` changes ONE line and every comment survives."""
         source = _bte_path()
         path = tmp_path / source.name
         path.write_text(source.read_text())
         doc = Document.open(path)
         before = doc.text
-        assert _comment_lines(before) == 230
+        assert _comment_lines(before) == 259
         doc.set_param("size", "max_band_hz", 30.0e6)
         after = doc.text
-        assert _comment_lines(after) == 230
+        assert _comment_lines(after) == 259
         differing = [(a, b) for a, b in zip(before.splitlines(), after.splitlines()) if a != b]
         assert differing == [("      max_band_hz: 6.0e6", "      max_band_hz: 30000000.0")]
         assert len(after.splitlines()) == len(before.splitlines())

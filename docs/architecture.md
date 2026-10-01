@@ -556,7 +556,7 @@ doc.set_param("count", "field", "image")          # ValueError: cannot wire deco
 out), which declaration a socket type is read from as long as it is a recordstream or confluid
 declaration, the first-layout algorithm. What must hold: the file is never re-emitted from the loaded
 object graph; a refused edit writes nothing; node names are the engine's names; positions stay out of
-the YAML. Pins: `tests/test_document.py::TestSetParam::test_the_bluetooth_pane_keeps_its_230_comment_lines`,
+the YAML. Pins: `tests/test_document.py::TestSetParam::test_the_bluetooth_pane_keeps_its_259_comment_lines`,
 `tests/test_document.py::TestProblems`, `tests/test_layout.py`.
 
 **Update, 2026-10-01 — the first layout stacks a column by each card's height (`layout.card_height`).**
