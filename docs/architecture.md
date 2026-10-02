@@ -7,8 +7,9 @@ User-facing usage lives in the README; agent-facing rules in `AGENTS.md` — thi
 
 ## The plugin seam: `streamstudio.plugins` + the widget-kind stamp (2026-08-25)
 
-**Context.** StreamStudio is published, but some node producers integrate with private,
-vendor-specific platforms — a dataset picker backed by a credentialed platform API, for example.
+**Context.** StreamStudio is built to ship as a generic package (it is not on PyPI yet), but some node
+producers integrate with private, vendor-specific platforms — a dataset picker backed by a
+credentialed platform API, for example.
 Such an integration needs three things a plain node cannot carry: a backend route on the editor's
 server, a frontend JS extension, and a per-param widget tag telling that JS which field to
 decorate. All three used to be hard-coded here (a guarded vendor import, an inline route, a
