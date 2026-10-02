@@ -634,7 +634,8 @@ meet becomes a dashed PROPOSAL edge with a toast naming the spelling the documen
 written and the next model refresh drops it.
 
 **Consequences.** `pip install streamstudio` gives the API and the placeholder, never a page that is out
-of step with its routes; a developer builds once and the checkout serves it. The wheel does not carry
+of step with its routes; a developer builds once and the checkout serves it (since 2026-10-02 a server's start
+builds it whenever its source changed — "The canvas page builds itself at a server's start" below). The wheel does not carry
 the page — the deferred item in `TASKS.md` is to build it in the release workflow, which needs node on
 the runner. Every element the page renders is addressable by `data-*` (`data-node`, `data-socket`,
 `data-type`, `data-kind`, `data-param`, `data-problem`, `data-toast`, `data-saves`), so the playwright
@@ -1321,7 +1322,7 @@ Rejected — the two larger alternatives first:
   samples as a numpy array, the regions drawn on it — so every Run would serialise it into the browser and back into the
   server it came from; the folder a Save writes into would be whatever a page last said, while the host moves that
   folder on the server; and a Save made through the routes by a tool (phase 5's agent tools) or a second tab would go
-  unheard. The page does speak to its host page through three messages ("The page in a host's panel" below), but
+  unheard. The page does speak to its host page through its messages ("The page in a host's panel" below), but
   only for what a page decides — which graph and tab to show, and that a Save happened, so the host's own page can
   re-draw; what runs and where files go is the server's, through these three methods.
 
@@ -1464,6 +1465,17 @@ fitted: at zoom 1 from the top-left a 900x700 panel showed 1 of the Bluetooth pa
 host's `open` until the person is done (the host's page has moved on — its pane, its selection; the panel must follow
 it), and refusing it while a dialog is up (the host cannot see the panel's dialogs).
 
+**Update 2026-10-02 (a page that is not the editor).** When there is no editor to serve — the page is not built,
+Node was missing at the server's start, or the start's build failed — `/` answers a short page that says which and
+what to do. In a host's panel that page used to say nothing to its parent, and a host that covers its panel until
+the editor's first `state` (so a graph is never shown under another's name) covered it for good — measured: the
+panel read `loading sink…` over `The editor's page is not built and Node is not installed — run aisland setup`.
+That page now posts a fourth message, `{source: "streamstudio", type: "unavailable"}`, under the same rules (`?embed`
+only, its parent, same origin): no editor will answer here, so the host uncovers the page and, to show another graph,
+loads the frame again rather than posting `open`. Rejected: posting `state` from it (the host would then post `open`
+to a page that cannot take it, and the next button would hang the same way), and having the host read the frame's
+document to guess whether it is the editor (couples the host to the bundle's markup).
+
 **What you may change.** The panel's styling, what `state` adds (a new field is harmless to a host that ignores it),
 further commands. What must hold: the same-origin and own-parent checks; an `open` never reloads the page; an unknown
 graph is said, never replaced by another; the server, not the page, decides whose record a Run runs; nothing begun on
@@ -1471,3 +1483,182 @@ one graph lands in another. Pins:
 `tests/test_canvas.py::TestTheHostHearsAndFollows::test_the_hosts_panel_hears_state_and_saved_and_opens_a_graph_by_command`,
 `::TestMountedInAHost`, `::TestTheHostsOpenKeepsEachEditInItsGraph`, `::TestTheEmbeddedPanelOpensFitted`,
 `frontend/src/__tests__/host.test.ts`, `link.test.ts`.
+
+## A short class name is looked up one entry point at a time, and the page asks for the catalogue on first need (`document._import_until`, `frontend/src/catalogue.ts`, 2026-10-02)
+
+**Context.** A document may name a class by its registry key (`!class:AnnotationUpdateSink`), and a key resolves only
+once the module defining it has been imported. On a miss the editor imported EVERY `confluid.configurables` entry
+point (`confluid.load_configurables`) — 127 of them on the development machine, torch, transformers and every
+training and detection backend among them. Measured 2026-10-02, the editor mounted in a host app over a sink graph
+naming one class from `waivefront.sinks`: the first `GET /studio/api/graphs` took 13.9 s on a cold disk cache, 6.0 s
+on a warm one, all of it that import. Second, the page asked `GET api/palette` as it opened — the whole catalogue,
+which runs the same full import in another request thread. The two contend for the import locks: with only the
+lookup narrowed, the first graph list still took 7.2 s in one run of two while the catalogue was being built beside
+it (1.2 s alone). A page opened to look at a graph or change a value paid for both.
+
+**Decision.** Two halves, because either alone leaves the wait.
+
+1. **Server.** A short-name miss imports the entry points ONE AT A TIME and stops at the first after which the name
+   resolves (`document._import_until`). Entry points of a package that is already imported go first — their
+   dependencies are loaded, and the key usually lives there — then the rest in their listed order. An entry point
+   whose module is already imported is loaded all the same: that costs nothing, and it WAITS when another thread is
+   still running the module's body — Python lists a module in `sys.modules` before its body runs, and the catalogue
+   imports every entry point in its own request thread. A failing one is skipped with the warning line
+   `confluid.load_configurables` writes for it. Each entry point is imported at most once per process: the walk
+   takes it off one shared list, so a later miss starts where the last stopped, and a name nothing defines ends with
+   all of them imported once and costs nothing afterwards. The walk holds a lock, and a request that waited for it
+   looks the name up again before walking on: the walk it waited for may have registered the name and taken its entry
+   point off the list.
+2. **Page.** The catalogue is asked for when something that lists it is first shown — the Nodes sidebar (also when
+   the page starts with it open), Add Node ▸, the palette, Set source… — once per page; each shows "loading the
+   catalogue…" until it arrives. A failed answer is a toast and the next need asks again. `data-palette-ready` still
+   means "the catalogue has arrived".
+
+Rejected: a background thread that warms the catalogue at server start (the same import-lock contention, moved to
+the first seconds of every session, and paid by a host that never opens the editor); a persisted name → module index
+(a second source of truth that goes stale when a package is installed — not decided, see below); keeping the page's
+fetch at open and only narrowing the server's lookup (measured: 7.2 s for the graph list while the catalogue builds
+beside it).
+
+**Consequences.** Measured the same day, warm cache, a fresh host process each run: the first graph list 6.0 s →
+1.1–1.3 s (the lookup imports 15 of the 127 entry points and stops at the sink's); the first graph read after it
+0.002 s either way; the catalogue costs its 6.5–8.4 s only when a list of it is opened. **What it does not fix:** an
+editor started on its own, whose graphs name a class in a package nothing has imported yet. Over the 21 shipped
+annotation panes the first graph list stays at 6.1 s (5.7 s before): `WindowSignal`'s package is not imported yet,
+so nothing ranks its entry points first, and the walk loads 85 entry points — every backend listed before them —
+until `waivefront-detection`, the 116th listed, registers it. **A short name two installed classes share** resolves to
+the first one the walk imports, because the other is not imported yet: before, every entry point was imported first,
+so the name was ambiguous and resolved to nothing. With every package installed 18 short names are shared (measured
+2026-10-02, e.g. `FourierOp` in `waivefront.fourier` and `waivefront.fourier_torch`); no shipped graph spells one.
+Measured on `FourierOp` in a fresh process:
+
+```
+first lookup:          <class 'waivefront.fourier.fourier.FourierOp'>
+after the catalogue:   None                     (the graph: cannot resolve the class 'FourierOp')
+a run (strict):        AmbiguousClassError 'FourierOp' is registered by 2 classes, so a bare lookup cannot choose …
+```
+
+Walking on through the rest of the defining package (`waivefront.*`) would settle the 14 shared within one package
+(4 are shared between two packages) and costs the sink lookup 0.12 s on a warm disk, 9.5 s on a cold one (the
+torchsig backend); not done — the shared name is a documented limit, and its dotted path is the spelling that works
+everywhere.
+**Two lookups at once**, both measured before the fix with module bodies held half-way by events: a lookup beside the
+catalogue's import of the defining module skipped it as imported and answered "cannot resolve" (`walk answered:
+None`, the class registered a moment later), and a request that waited for another's walk answered "cannot resolve"
+when nothing was left to walk, or imported an entry point nobody needed when something was. A test that counts what
+a document load imports must reset `_pending_entry_points` (and serve its own entry points), since a walk earlier in
+the process has already consumed part of the list.
+
+**Example.**
+
+```
+# a host app, its sink graph spelling !class:AnnotationUpdateSink, first GET /studio/api/graphs
+before:  confluid.load_configurables()          127 entry points imported      6.0 s
+after:   document._import_until("AnnotationUpdateSink")
+           waivefront-lte, recordstream-ops-predict, …, waivefront-sinks  ->  found after 15     1.1 s
+
+# the page
+before:  page open  ->  GET api/graphs, GET api/types, GET api/workspace, GET api/palette
+after:   page open  ->  GET api/graphs, GET api/types, GET api/workspace
+         N (Nodes sidebar)  ->  GET api/palette   (once; the sidebar, Add Node ▸, the palette and Set source… share it)
+```
+
+**What you may change.** The order of the walk (a better guess of which entry point defines a key — a persisted
+index, say — is the open question for the standalone case), and which surfaces count as a need. What must hold: a
+miss never imports an entry point twice in one process; an already-imported module's body never runs again; a lookup
+never answers "not found" for a name another request's import is about to register; the page
+asks for the catalogue at most once while an answer is on its way or has arrived, and never while it opens. Pins:
+`tests/test_short_name_lookup.py`, `tests/test_canvas.py::TestTheCatalogueIsAskedForOnFirstNeed`,
+`frontend/src/__tests__/catalogue.test.ts`.
+
+## The canvas page builds itself at a server's start when its source changed (`streamstudio.page.ensure_page_built`, 2026-10-02)
+
+**Context.** The page is TypeScript/React in `frontend/` (committed), built by `npm run build` into `frontend/dist`
+(gitignored, never in the wheel — the 2026-09-28 record above). Nothing rebuilt it but a person: after a `git pull`
+that changed the page, every start on that machine served the page built BEFORE the pull — its routes and its page
+out of step — and a machine that had never built it served the placeholder `The canvas page is not built. Build it
+once — cd streamstudio/frontend && npm install && npm run build — and reload`. A host app that mounts the editor showed
+the same stale page in its panel. And `page_blueprint` decided ONCE, when it was made, whether a page existed, so a
+page built while the server ran was never served. A packaged editor sidesteps all of this by shipping its page
+prebuilt inside a Python package (ComfyUI's frontend is a pip-installed wheel of built assets); a source checkout
+cannot — the page in it is whatever the last build left.
+
+**Decision.** A server's START builds the page when what the build reads changed since the last build.
+
+1. ONE public function, `ensure_page_built()` (`streamstudio/page.py`, re-exported by `streamstudio.app`), called by
+   the editor's CLI after a taken port is refused and before its app is made (the port is asked again after it), and
+   by a host app before it announces its server anywhere and before its app is made. Never at app or blueprint
+   creation: tests make apps by the hundred.
+2. The source fingerprint is a SHA-256 over every input's relative path and bytes — `src/` and `public/` minus the
+   page's tests and hidden files, plus `index.html`, `package.json`, `package-lock.json`, `vite.config.*`,
+   `tsconfig*.json` and the four `.env` files `vite build` loads in production mode — and the STAMP is
+   `dist/.built-from`, written after a successful build. vite empties `dist` as a build starts, so an interrupted
+   build, or one run by hand, leaves no stamp, and the next start builds.
+3. `npm ci` runs first only when `node_modules/.package-lock.json` — npm's own record of its last install — is
+   missing or older than `package-lock.json`. By time: npm keeps no fingerprint of the lock it installed from.
+4. Nothing about it stops a start: without Node, or when npm fails or outlives its time limit (300 s for `npm ci`,
+   120 s for the build; npm runs in a session of its own and its whole process group is stopped), the start prints
+   why, and the page at `/` — decided per request now — says the same instead of serving an out-of-date page. A page
+   with NO stamp and no Node to rebuild it is served as it is (it may well be current). Ctrl+C during the check stops
+   npm and ends the start in one line.
+5. An answer that did not make the page current is kept per page folder with the fingerprint it was given for: a
+   second check in the same process repeats neither npm nor its lines, and a server process the start launches takes
+   it over from its environment (`page_check_environment()`) instead of running npm where nobody sees the output.
+6. Only a build takes an exclusive `flock` on the page folder (macOS and Linux), so two starts from one checkout build
+   once; the second says it waits.
+
+Rejected: **committing `dist`** (every page change becomes a second, generated diff that merges badly, and a commit
+that forgets it ships a page out of step with its routes — the very drift this removes); **building in `aisland
+setup`** (setup runs once per machine, not after each pull, so the stale page after a pull stays); **building by hand**
+(what existed — the measured stale page and placeholder); **building at app creation** (a test suite makes hundreds of
+apps and must never run npm); **deciding whether the PAGE is current by modification times instead of contents** (a
+branch switched away and back changes every time and nothing in the page). The install decision (item 3) does use
+times, because the only record of what npm installed is npm's own file; its cost is one extra `npm ci` when a lock is
+rewritten with the same bytes and the page needs a build anyway.
+
+**Consequences.** Measured on a copy of the page folder, the real npm: a start after one source file changed prints
+two lines and serves 2.0 s later; an unchanged start prints nothing and the check costs 2.1 ms (56 inputs, 570 KB); a
+start without Node prints one line and starts at once; two starts at once from the same folder build once — the
+second printed `another start is building the editor's page — waiting for it` and served at the same moment as the
+first. The first install of the page's libraries takes about a minute and is said before it starts. A page built by
+hand has no stamp, so the next start builds it once more (2 s). Each start that FAILED to build tries again; the
+failure's last 20 lines are printed and shown, and `/` keeps saying so until the next start (a page built by hand
+meanwhile is not served — the page tells the person to start the server again). A host that registers its server
+before checking would make a server still building look gone to anything that prunes unanswered servers — so the
+check comes first. Two starts on ONE port released together by the lock still race between the second port probe and
+the bind, exactly as two plain starts always did. Where `fcntl` does not exist (Windows) there is no lock between two
+starts.
+
+**Example.**
+
+```python
+import os, subprocess
+from streamstudio.app import ensure_page_built, editor_blueprint, page_blueprint, page_check_environment
+
+def serve(app, host):                       # a host app's start
+    ensure_page_built()                     # silent when the page is current — before the server is announced
+    app.register_blueprint(editor_blueprint(host=host), url_prefix="/studio")
+    app.register_blueprint(page_blueprint(), url_prefix="/studio")
+    app.run(port=8195)
+
+def serve_in_background(argv):              # the start checks in the terminal; the child takes its answer over
+    ensure_page_built()
+    subprocess.Popen(argv, env={**os.environ, **page_check_environment()}, stdout=subprocess.DEVNULL)
+```
+
+```
+# after a pull that changed frontend/src/toast.ts
+streamstudio: the editor's page changed since its last build — building it
+streamstudio: built the editor's page in 2.0 s
+# the next start: nothing
+# the same change, no Node on PATH: the server starts, and GET / answers
+The editor's page is out of date and Node is not installed — run aisland setup, then start this server again.
+```
+
+**What you may change.** The list of inputs (as long as it covers everything the build reads — a missed input is a
+stale page that looks current), the stamp's name and place inside `dist`, the time limits, the wording, how many of
+npm's lines are shown. What must hold: only a START checks, never the making of an app; a current page costs no
+process, no lock and prints nothing; a start never fails because of the page (Ctrl+C is the person ending it); the
+page at `/` never shows a page the start knows is out of date; two starts never build in one folder at once; a folder
+without page source is never checked; an answer is never repeated in the process that gave it. Pins:
+`tests/test_page_build.py`.

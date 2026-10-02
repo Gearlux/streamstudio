@@ -24,6 +24,10 @@
  *
  * which shows that graph (and tab) without reloading the page — a reload of a page holding unsaved work asks
  * "Leave site?" first.
+ *
+ * When there is no page to show — not built, no Node at the server's start, a failed build — the server answers a
+ * short page of its own instead, which posts `{source: "streamstudio", type: "unavailable"}` (`app._TELL_THE_HOST`):
+ * no editor will answer `open` in that frame. This page never posts it.
  */
 import type { Json, Model } from "./model";
 import { SIDE_TABS, type SideTab } from "./link";

@@ -666,6 +666,10 @@ def _serve_canvas(graph_dir: Optional[Path], port: int, templates_dir: Optional[
     and the ``finally`` keeps the unsaved work in the folder's recovery file (``Studio.stash``) before the process
     exits. Measured before: SIGTERM ended the process at once (exit -15), SIGHUP too (exit -1), and every unsaved edit
     was gone. A kill -9 or a crash still cannot keep anything.
+
+    Before it serves — after a taken port was refused — the start builds the canvas page when its source changed
+    since its last build (``streamstudio.page.ensure_page_built``; silent when it did not), then asks for the port
+    again: another start may have taken it while the page was built.
     """
     directory, templates = _canvas_folders(graph_dir, templates_dir)
     if _port_in_use(port):
@@ -673,8 +677,17 @@ def _serve_canvas(graph_dir: Optional[Path], port: int, templates_dir: Optional[
         raise SystemExit(1)
     # Imported here, not at module top: the app pulls in the document model and the palette, which
     # every other command (a converter, `stop`, the ComfyUI launch) has no use for.
-    from streamstudio.app import create_app, studio_of
+    from streamstudio.app import create_app, ensure_page_built, studio_of
 
+    # The page is checked HERE, at the start, never when an app is made: when its source changed since its last
+    # build it is built now (a line says so), and without Node or with a failing build the server still starts.
+    ensure_page_built()
+    # Asked again after the check: a build takes seconds (about a minute for the first install), and another start may
+    # have taken the port meanwhile — measured before: the second of two starts on one port passed the first probe
+    # during a 5 s build and died in werkzeug's words, "Address already in use".
+    if _port_in_use(port):
+        _report_port_in_use(port, "canvas", directory, templates)
+        raise SystemExit(1)
     app = create_app(directory, templates_dir=templates)
     studio = studio_of(app)
     notice = _recovery_notice(studio.workspace())
