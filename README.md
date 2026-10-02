@@ -11,8 +11,9 @@ streamstudio --editor comfy      # the ComfyUI editor:                  http://1
 
 The two are separate servers and can run side by side. The canvas editor is the rewrite
 ([`docs/rewrite.md`](docs/rewrite.md)) and is described first. From [Installation](#installation) down, this page
-describes the ComfyUI editor, which a consuming annotation workspace still opens until the rewrite's phase 4
-([what is not there yet](#what-is-not-there-yet)).
+describes the ComfyUI editor, which the rewrite deletes in its last step
+([what is not there yet](#what-is-not-there-yet)); a consuming annotation workspace no longer opens it — it mounts
+the canvas editor in its own page ([Mounting the editor in a host app](#mounting-the-editor-in-a-host-app)).
 
 ## The canvas editor
 
@@ -634,10 +635,11 @@ A refused edit changes nothing. The message is the server's, verbatim (paths sho
 
 ### What is not there yet
 
-- **The flip.** A consuming annotation workspace still opens the ComfyUI canvases (`streamstudio run --editor
-  comfy`), not this editor. The editor can now be mounted in its page with a host
-  ([Mounting the editor in a host app](#mounting-the-editor-in-a-host-app)); the workspace's switch is the next
-  step of phase 4, and the ComfyUI extension described from [Installation](#installation) down is deleted after it.
+- **Deleting the ComfyUI editor.** A consuming annotation workspace mounts this editor in its own page with a host
+  ([Mounting the editor in a host app](#mounting-the-editor-in-a-host-app)), runs the YAML it writes, and converts a
+  folder of ComfyUI canvases saved earlier once, when it opens it. The ComfyUI extension described from
+  [Installation](#installation) down (`streamstudio --editor comfy`) stays until the workspace has run on this editor
+  for a while, and is deleted then — phase 4's last step.
 - **A host's fills inside a subgraph.** A host's window and band reach the ops on the graph's own level — a step of
   a `flow:`, a member of the `Stream`'s `ops` — not an op inside a subgraph step.
 - **A source the host fills.** A graph whose source is wired but empty until the HOST fills it when it runs the graph

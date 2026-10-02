@@ -1747,8 +1747,8 @@ def _is_object_member_class(obj: Any) -> bool:
     category-driven form-spec pickers.
 
     The target may be a class OR a plain builder/factory FUNCTION — confluid ``register`` stamps the
-    same markers on a function (e.g. ``raidar.configurables`` registers the torchvision detection
-    builders ``fasterrcnn_*`` with ``role="model"``), and ``_build_object_node`` introspects either
+    same markers on a function (e.g. ``raidar.torchvision_detection`` registers the torchvision
+    detection builders ``fasterrcnn_*`` with ``role="model"``), and ``_build_object_node`` introspects either
     via ``inspect.signature``. So the gate is "callable + marked", not "class + marked".
     """
     if not callable(obj):
@@ -3253,7 +3253,7 @@ def register_module_nodes(
             continue
         member = getattr(mod, name, None)
         # A re-exported configurable may be a class OR a registered builder FUNCTION
-        # (``raidar.configurables`` registers torchvision's ``fasterrcnn_*`` builders) — admit any
+        # (``raidar.torchvision_detection`` registers torchvision's ``fasterrcnn_*`` builders) — admit any
         # callable carrying the configurable marker; the admission filter below classifies it.
         if callable(member) and marks(member).configurable:
             candidates[name] = member
