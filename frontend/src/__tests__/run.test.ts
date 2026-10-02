@@ -7,7 +7,7 @@
 import { describe, expect, it } from "vitest";
 import type { Run, TraceNode } from "../api";
 import type { ModelNode, Param } from "../model";
-import { changedParams, nextNode, plainParams, runRows, summaryCells } from "../run";
+import { changedParams, nextNode, plainParams, rerunSends, rerunStart, runRows, summaryCells } from "../run";
 import { searchMatches } from "../steps";
 
 const run = (paused: string | null, names = ["s.ops[0]", "s.ops[1]", "s.ops[2]"]): Run => ({
@@ -129,6 +129,29 @@ describe("changedParams — what a rerun sends", () => {
   });
   it("compares lists by value and sends a key the run never recorded", () => {
     expect(changedParams({ names: ["a"], extra: 3 }, { names: ["a"] })).toEqual({ extra: 3 });
+  });
+});
+
+describe("rerunStart and rerunSends — a node the host filled keeps the host's values", () => {
+  // the shipped pane spells `start_s: 0` / `stop_s: 0`; the host filled 0.001 / 0.003 into the op before the run
+  const spelled = { start_s: 0, stop_s: 0, fft_size: 1024 };
+  const recorded = { start_s: 0.001, stop_s: 0.003, fft_size: 1024 };
+  const filled = { start_s: 0.001, stop_s: 0.003 };
+  it("the form starts from the host's value, never the document's 0 (measured before: the form showed 0 and 0)", () => {
+    expect(rerunStart("start_s", { touched: {}, filled, spelled, recorded })).toBe(0.001);
+    expect(rerunStart("fft_size", { touched: {}, filled, spelled, recorded })).toBe(1024);
+    expect(rerunStart("start_s", { touched: { start_s: 0.002 }, filled, spelled, recorded })).toBe(0.002);
+  });
+  it("a plain rerun sends nothing for them (measured before: {start_s: 0, stop_s: 0} — the window became the capture)", () => {
+    expect(rerunSends({ touched: {}, filled, spelled, recorded })).toEqual({});
+  });
+  it("a value typed for a filled parameter is sent, and a document edit of another parameter still is", () => {
+    expect(rerunSends({ touched: { stop_s: 0.004 }, filled, spelled, recorded })).toEqual({ stop_s: 0.004 });
+    expect(rerunSends({ touched: {}, filled, spelled: { ...spelled, fft_size: 2048 }, recorded })).toEqual({ fft_size: 2048 });
+  });
+  it("CON: with nothing filled (a graph's own record) the document's spelled value is what is sent, as before", () => {
+    expect(rerunSends({ touched: {}, filled: {}, spelled, recorded })).toEqual({ start_s: 0, stop_s: 0 });
+    expect(rerunStart("start_s", { touched: {}, filled: {}, spelled, recorded })).toBe(0);
   });
 });
 

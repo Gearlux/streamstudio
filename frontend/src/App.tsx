@@ -30,13 +30,25 @@
  * Unsaved work of the last session (DESIGN2 §1): before any graph is loaded the page asks `GET api/workspace`; when
  * the last stop kept unsaved work, the recovery dialog asks Restore / Open the saved files first (`recovery.ts`).
  *
- * `?graph=<name>` picks the graph on load (the first listed otherwise — after a Restore, the first restored) and
- * `?level=<subgraph>` the level drawn; both are kept in step with what the canvas shows, so a reload or a link opens
- * that graph at that level (a level the document no longer holds falls back to the deepest one it does). The root
- * carries `data-graph`, `data-ready`, `data-saves` (accepted writes so far), `data-dirty`, `data-level` (the level
- * drawn, `""` at the top), `data-palette-ready`, `data-selection` (the document nodes a gesture acts on) and
- * `data-recovery` (`pending` | `asking` | `confirming` | `restored` | `discarded` | `none`) — what a test waits on
- * instead of timing.
+ * `?graph=<name>` picks the graph on load (the first listed otherwise — after a Restore, the first restored),
+ * `?level=<subgraph>` the level drawn and `?tab=settings|run` the side panel's tab; all three are kept in step with what
+ * the page shows, so a reload or a link opens that graph at that level on that tab (a level the document no longer
+ * holds falls back to the deepest one it does). A `?graph=` the editor does not list opens NOTHING: the canvas names the
+ * graph and the graphs there are, one button each (`link.pickGraph`, `[data-graph-missing]`).
+ *
+ * Mounted in a host app (DESIGN5 step 1; `link.ts`, `host.ts`): the page answers under the host's prefix (`/studio/`),
+ * `?embed=1` fits it into the host's panel — the menus and every function, no brand of its own, no minimap until asked
+ * — and posts what it shows and holds to the host (its `state` and `saved` messages), taking the host's `open` command.
+ * When `GET api/workspace` names a host, Run on a graph without its own source runs the record the host has selected.
+ * The settings tab lists a graph's `app:` fields until "all parameters" is ticked (`settings.ts`); a field's pickers —
+ * the folder chooser, the HuggingFace lists — are the ONE widget's (`pickers.ts`); Set source… puts a class and its
+ * values into a Stream's source slot (`slots.ts`, `dialogs/SetSlotDialog.tsx`).
+ *
+ * The root carries `data-graph`, `data-ready`, `data-saves` (accepted writes so far), `data-dirty`, `data-level` (the
+ * level drawn, `""` at the top), `data-palette-ready`, `data-selection` (the document nodes a gesture acts on),
+ * `data-recovery` (`pending` | `asking` | `confirming` | `restored` | `discarded` | `none`), `data-side-tab` (the side panel's
+ * tab), `data-embed` (`true` in a host's panel) and `data-host` (the host's name, `""` standalone) — what a test waits
+ * on instead of timing.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ReactFlowProvider, useReactFlow } from "@xyflow/react";
@@ -77,6 +89,7 @@ import {
   saveGraphAs,
   saveTemplate,
   setParam as postParam,
+  setSlot,
   trace,
   undo as postUndo,
   type Copied,
@@ -93,6 +106,7 @@ import { CheckDialog } from "./dialogs/CheckDialog";
 import { FileDialog, type FileAnswer, type FileRequest } from "./dialogs/FileDialog";
 import { NewDialog, type NewAnswer } from "./dialogs/NewDialog";
 import { RecoveryDialog } from "./dialogs/RecoveryDialog";
+import { SetSlotDialog } from "./dialogs/SetSlotDialog";
 import { anyDirty, fileTitle, markDirty, pageTitle, pickerLabel } from "./dirty";
 import { baseName, dirName, stepsFileName } from "./files";
 import {
@@ -109,6 +123,17 @@ import {
   type XY,
 } from "./groups";
 import { Timeline, type TimelineEntry } from "./history";
+import {
+  hasOwnSource,
+  hostOf,
+  parseHostCommand,
+  runRecord,
+  savedMessage,
+  stateMessage,
+  type HostInfo,
+  type OpenCommand,
+  type PageMessage,
+} from "./host";
 import { arrange } from "./layout";
 import {
   EMPTY_MODEL,
@@ -119,7 +144,6 @@ import {
   innerSteps as innerStepsOf,
   levelAnchor,
   levelFromSearch,
-  levelHref,
   levelModel,
   levelPredecessor,
   parentLevel,
@@ -131,6 +155,16 @@ import {
   stepNames,
   type NameShift,
 } from "./levels";
+import {
+  SIDE_TABS,
+  embedFromSearch,
+  graphFromSearch,
+  missingGraphMessage,
+  pageHref,
+  pickGraph,
+  tabFromSearch,
+  type SideTab,
+} from "./link";
 import { AddNodeMenu } from "./menu/AddNodeMenu";
 import { ContextMenu } from "./menu/ContextMenu";
 import type { Entry } from "./menu/entries";
@@ -144,13 +178,13 @@ import { addedMember, beside, inputTarget, insertTarget, shiftsMembers, stepFiel
 import {
   answered as recoveryAnswered,
   discardQuestion,
-  firstGraph,
   restoredNames as restoredIn,
   type Recovery,
   type RecoveryPhase,
 } from "./recovery";
 import { nextNode } from "./run";
 import { addableSpecs } from "./sidebar";
+import { sourceSlots, type Slot } from "./slots";
 import { spotBeside, stepName, uniqueName } from "./steps";
 import { useToasts } from "./toast";
 import "./styles.css";
@@ -162,9 +196,6 @@ export default function App() {
     </ReactFlowProvider>
   );
 }
-
-const SIDE_TABS = ["text", "settings", "run"] as const;
-type SideTab = (typeof SIDE_TABS)[number];
 
 /** A card's size until React Flow has measured it. */
 const CARD = { width: 240, height: 120 };
@@ -216,7 +247,15 @@ function Editor() {
   const [selection, setSelection] = useState<string[]>([]);
   const [groupsSelected, setGroupsSelected] = useState<string[]>([]);
   const [palette, setPalette] = useState<PaletteRequest | null>(null);
-  const [tab, setTab] = useState<SideTab>("text");
+  /** In a host's panel (`?embed=1`): the menus and every function, no app chrome (`link.ts`, `host.ts`). */
+  const [embed] = useState(() => embedFromSearch(window.location.search));
+  /** The side panel's tab — the one a link asks for (`?tab=settings`), then the person's. */
+  const [tab, setTab] = useState<SideTab>(() => tabFromSearch(window.location.search));
+  /**
+   * The settings tab's "all parameters" tick, per graph, for the page's life — kept here, not in the tab, which unmounts
+   * when another tab is shown (measured before: the tick was lost every time the person looked at the run tab).
+   */
+  const [allParams, setAllParams] = useState<Record<string, boolean>>({});
   const [run, setRun] = useState<Run | null>(null);
   const [runError, setRunError] = useState<string | null>(null);
   const [answers, setAnswers] = useState(0);
@@ -224,7 +263,8 @@ function Editor() {
   const [running, setRunning] = useState(false);
   const [inspected, setInspected] = useState<string | undefined>(undefined);
   const [sidebar, setSidebar] = useState(readSidebar);
-  const [minimap, setMinimap] = useState(true);
+  // a host's panel starts without the minimap — its corner of a small canvas (View ▸ Minimap shows it)
+  const [minimap, setMinimap] = useState(() => !embedFromSearch(window.location.search));
   const [menuOpen, setMenuOpen] = useState<MenuId | null>(null);
   const [context, setContext] = useState<CanvasMenuRequest | null>(null);
   const [dialog, setDialog] = useState<Dialog | null>(null);
@@ -243,6 +283,12 @@ function Editor() {
   const [recovery, setRecovery] = useState<Recovery | null>(null);
   /** The folder the editor serves (`GET api/workspace`): the recovery question names files by their way from it. */
   const [folder, setFolder] = useState("");
+  /** The app the editor is mounted in (`GET api/workspace`'s `host`): a graph without its own source runs ITS record. */
+  const [host, setHost] = useState<HostInfo | null>(null);
+  /** A link (or the host) named a graph the list does not hold: the page says so instead of opening another one. */
+  const [missing, setMissing] = useState<string | null>(null);
+  /** Set source…: the slot whose class picker and form are up (`slots.ts`). */
+  const [slotAsked, setSlotAsked] = useState<Slot | null>(null);
   /** A Restore or a discard the server refused, in its words — shown in the dialog, which stays up. */
   const [recoveryRefused, setRecoveryRefused] = useState<string | null>(null);
   const [recoveryBusy, setRecoveryBusy] = useState(false);
@@ -295,6 +341,7 @@ function Editor() {
       (workspace) => {
         joinSession(workspace.session); // every request from now on says which editor it was meant for (R1, P1)
         setFolder(workspace.folder);
+        setHost(hostOf(workspace));
         setRecovery(workspace.recovery);
         setRecoveryPhase(workspace.recovery === null ? "none" : "asking");
       },
@@ -308,6 +355,7 @@ function Editor() {
   /** Show a graph the server answered, with its form: a fresh timeline, no run, nothing selected. */
   const present = useCallback((loaded: Graph, schema: Form) => {
     timeline.current.clear();
+    setMissing(null);
     setForm(schema);
     setGraph(loaded);
     setGraphs((list) => markDirty(list, loaded.name, Boolean(loaded.dirty)));
@@ -319,6 +367,9 @@ function Editor() {
     setPalette(null);
     setContext(null);
     setEditing(null);
+    // Set source… is about the graph it was opened on: measured before, a host's `open` left it up over the next graph,
+    // and Set wrote the source into THAT one (every Stream names its stream `stream`, so the slot is there too)
+    setSlotAsked(null);
     // a link's ?level= opens that level once (it falls back to the deepest one the document holds); any other load
     // starts at the top
     setLevel(linkedLevel.current);
@@ -352,14 +403,21 @@ function Editor() {
     [present, push],
   );
 
+  // The graph a link names, once the list is known and the recovery question answered — and when the list does not
+  // hold it, NOTHING: the canvas names it and the graphs there are (`link.pickGraph`; measured before, `?graph=nosuch`
+  // opened the first graph of the folder without a word).
   useEffect(() => {
-    if (graph !== null || graphs.length === 0 || !recoveryAnswered(recoveryPhase)) return;
-    const wanted = new URLSearchParams(window.location.search).get("graph");
-    const first = firstGraph(graphs, wanted, restoredNames.current);
-    if (first === undefined) return;
-    linkedLevel.current = first === wanted ? levelFromSearch(window.location.search) : "";
-    void load(first);
-  }, [graph, graphs, load, recoveryPhase]);
+    if (graph !== null || missing !== null || !listed || !recoveryAnswered(recoveryPhase)) return;
+    const wanted = graphFromSearch(window.location.search);
+    const pick = pickGraph(graphs, wanted, restoredNames.current);
+    if (pick.kind === "missing") {
+      setMissing(pick.wanted);
+      return;
+    }
+    if (pick.kind === "none") return;
+    linkedLevel.current = pick.name === wanted ? levelFromSearch(window.location.search) : "";
+    void load(pick.name);
+  }, [graph, graphs, listed, load, missing, recoveryPhase]);
 
   // ---- the unsaved work of the last session (DESIGN2 §1) ---------------------------------------------------------
 
@@ -444,6 +502,7 @@ function Editor() {
       const [workspace, list] = await Promise.all([getWorkspace(), listGraphs()]);
       joinSession(workspace.session);
       setFolder(workspace.folder);
+      setHost(hostOf(workspace));
       setGraphs(list);
       setListed(true);
       setRecovery(workspace.recovery);
@@ -460,13 +519,14 @@ function Editor() {
     return () => onRestarted(null);
   }, [rejoin]);
 
-  // `?graph=` and `?level=` follow what the canvas shows, so a reload or a shared link opens the same graph and level.
+  // `?graph=`, `?level=` and `?tab=` follow what the page shows, so a reload or a shared link opens the same graph, level
+  // and tab (`link.pageHref`; `?embed=` is the host's and stays as given).
   const shownName = graph?.name;
   useEffect(() => {
     if (shownName === undefined) return;
-    const href = levelHref(window.location.href, shownName, shown);
+    const href = pageHref(window.location.href, shownName, shown, tab);
     if (href !== window.location.href) window.history.replaceState(null, "", href);
-  }, [shownName, shown]);
+  }, [shownName, shown, tab]);
 
   // A node the form has never described (a step just added, a node renamed — on ANY level, the settings tab lists the
   // level shown) gets its schema from the server; once per answer, so a name the form never holds cannot loop.
@@ -499,12 +559,39 @@ function Editor() {
    * layout after the conversion) must build on this answer, not on the render before it (measured: it drew the steps
    * the conversion had removed, and the next edit named them).
    */
-  const accept = useCallback((next: Graph, entry?: TimelineEntry, count = true) => {
-    graphRef.current = next;
-    setGraph(next);
+  const accept = useCallback((next: Graph, entry?: TimelineEntry, count = true, replaces?: string) => {
     setGraphs((list) => markDirty(list, next.name, Boolean(next.dirty)));
     if (count) setSaves((saved) => saved + 1);
+    // An answer for a graph no longer shown — the host opened another while the write was on its way (a field left as
+    // the host switched, `openAsked`) — only marks the list: drawing it would switch the canvas back. `replaces` is the
+    // name the answer takes over (Save As answers the graph under its new name).
+    const showing = graphRef.current;
+    if (showing !== null && showing.name !== next.name && showing.name !== replaces) return;
+    graphRef.current = next;
+    setGraph(next);
     if (entry) timeline.current.record(entry);
+  }, []);
+
+  /** Tell the host whose panel the page sits in (`?embed=1`, same origin only) — `host.ts`'s messages. */
+  const postToHost = useCallback(
+    (message: PageMessage) => {
+      if (!embed || window.parent === window) return;
+      window.parent.postMessage(message, window.location.origin);
+    },
+    [embed],
+  );
+
+  /**
+   * Ask the editor where its folder is NOW and keep it — the server follows a host that moved its folder at every
+   * request, the page only when it asks (measured before: read once at join, so after a move New… said it writes
+   * `state/fresh.yaml` and wrote `saved.d/fresh.yaml`, and a missing graph was looked for in the old folder).
+   */
+  const refreshFolder = useCallback(async (): Promise<void> => {
+    try {
+      setFolder((await getWorkspace()).folder);
+    } catch {
+      // the page keeps the folder it knew: the dialog still works, its default is only a suggestion
+    }
   }, []);
 
   // ---- dialogs as promises ---------------------------------------------------------------------------------------
@@ -516,6 +603,16 @@ function Editor() {
   const ask = useCallback(
     (request: AskRequest) => new Promise<AskAnswer | null>((resolve) => setDialog({ kind: "ask", request, resolve })),
     [],
+  );
+  /** A path field's `…` (`pickers.ts`): the file browser for a folder or any file — the path chosen, or `null`. */
+  const browse = useCallback(
+    (picker: "directory" | "file", start?: string) =>
+      askFile(
+        picker === "directory"
+          ? { mode: "folder", title: "Choose a folder", confirm: "Choose", dir: start }
+          : { mode: "file", title: "Choose a file", confirm: "Choose", dir: start },
+      ).then((answer) => answer?.path ?? null),
+    [askFile],
   );
 
   /**
@@ -624,6 +721,84 @@ function Editor() {
     },
     [goTo, push],
   );
+
+  // ---- the host's panel (`?embed=1`, `host.ts`): what the page tells it, and the one command it takes ---------------
+
+  /**
+   * The host asks for a graph (`{type: "open", graph, tab?, level?}`): the list is asked afresh (the host may just have
+   * written the file), then the graph opens — or, when the list does not hold it, the canvas says so. Before the
+   * recovery question is answered nothing loads: the link is pointed at the graph, which opens once it is.
+   */
+  const openAsked = useCallback(
+    async (command: OpenCommand) => {
+      // A field the person typed into and has not left is committed NOW, to the graph it was typed in: its blur writes
+      // through `graphRef` before anything below changes the graph shown. Measured before: the card of a node of the
+      // same name in the next graph kept the typed value and committed it THERE when the field was left.
+      const typing = document.activeElement;
+      if (typing instanceof HTMLElement && typing !== document.body) typing.blur();
+      if (command.tab !== undefined) setTab(command.tab);
+      // the link names what is asked for at once: a reload, or the load after the recovery question, opens it
+      window.history.replaceState(null, "", pageHref(window.location.href, command.graph, command.level ?? "", command.tab ?? tab));
+      if (!recoveryAnswered(recoveryPhase)) return;
+      let list = graphs;
+      try {
+        // the list and the folder afresh: the host may just have written the file, or moved its folder
+        const [listedNow] = await Promise.all([listGraphs(), refreshFolder()]);
+        list = listedNow;
+        setGraphs(list);
+      } catch (exc) {
+        push("error", errorMessage(exc));
+      }
+      const current = graphRef.current;
+      if (current !== null && current.name === command.graph) {
+        // The host may have rewritten the file: the editor reads a graph holding nothing unsaved again, so the answer
+        // is what the file says now — shown when it differs (measured before: the panel kept the first text read).
+        try {
+          const fresh = await getGraph(command.graph);
+          if (graphRef.current?.name === command.graph && fresh.text !== graphRef.current.text) {
+            linkedLevel.current = command.level ?? levelRef.current;
+            present(fresh, await getForm(command.graph));
+            return;
+          }
+        } catch (exc) {
+          push("error", errorMessage(exc));
+        }
+        if (command.level !== undefined) goTo(existingLevel(current.model, command.level));
+        return;
+      }
+      if (!list.some((entry) => entry.name === command.graph)) {
+        graphRef.current = null;
+        setGraph(null);
+        setMissing(command.graph);
+        return;
+      }
+      linkedLevel.current = command.level ?? "";
+      await load(command.graph);
+    },
+    [goTo, graphs, load, present, push, recoveryPhase, refreshFolder, tab],
+  );
+  const openAskedRef = useRef(openAsked);
+  openAskedRef.current = openAsked;
+  useEffect(() => {
+    if (!embed) return;
+    const onMessage = (event: MessageEvent) => {
+      if (event.source !== window.parent || event.origin !== window.location.origin) return; // its own host only
+      const command = parseHostCommand(event.data);
+      if (command !== undefined) void openAskedRef.current(command);
+    };
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, [embed]);
+
+  // what the page shows and holds, posted to the host on every change — it warns before closing a panel with unsaved work
+  const unsavedKey = graphs
+    .filter((entry) => entry.dirty)
+    .map((entry) => entry.name)
+    .join("\n");
+  const shownDirty = Boolean(graph?.dirty);
+  useEffect(() => {
+    postToHost(stateMessage(shownName ?? "", shownDirty, unsavedKey === "" ? [] : unsavedKey.split("\n"), tab));
+  }, [postToHost, shownName, shownDirty, unsavedKey, tab]);
 
   // ---- document edits: the server's text history holds them ------------------------------------------------------
 
@@ -1119,11 +1294,15 @@ function Editor() {
     const current = graphRef.current;
     if (current === null) return;
     try {
-      accept(await saveGraph(current.name));
+      const { host_error: hostError, ...saved } = await saveGraph(current.name);
+      accept(saved);
+      postToHost(savedMessage(saved.name, saved.path)); // a host re-runs what reads this file at once
+      // the file IS written; the host failed on the news of it — in its words
+      if (hostError !== undefined) push("warning", `${fileOf(saved)} is saved, but ${host?.name ?? "the host"} said: ${hostError}`);
     } catch (exc) {
       push("error", errorMessage(exc));
     }
-  }, [accept, push]);
+  }, [accept, host, postToHost, push]);
 
   const saveAs = useCallback(async () => {
     const current = graphRef.current;
@@ -1137,14 +1316,16 @@ function Editor() {
     });
     if (answer === null) return;
     try {
-      const next = await saveGraphAs(current.name, answer.path, answer.overwrite);
+      const { host_error: hostError, ...next } = await saveGraphAs(current.name, answer.path, answer.overwrite);
       setGraphs(await listGraphs());
       timeline.current.clear(); // the page's layout entries were the old entry's
-      accept(next); // ?graph= follows the new name (the URL effect)
+      accept(next, undefined, true, current.name); // ?graph= follows the new name (the URL effect)
+      postToHost(savedMessage(next.name, next.path));
+      if (hostError !== undefined) push("warning", `${fileOf(next)} is saved, but ${host?.name ?? "the host"} said: ${hostError}`);
     } catch (exc) {
       push("error", errorMessage(exc));
     }
-  }, [accept, askFile, push]);
+  }, [accept, askFile, host, postToHost, push]);
 
   const revert = useCallback(async () => {
     const current = graphRef.current;
@@ -1182,6 +1363,12 @@ function Editor() {
     }
   }, [askFile, push, show]);
 
+  /** New ▸ <kind>: the dialog opens once the page has asked where the editor's folder is now (`refreshFolder`). */
+  const openNew = useCallback(
+    (newKind: NewGraphKind) => void refreshFolder().then(() => setDialog({ kind: "new", newKind })),
+    [refreshFolder],
+  );
+
   /**
    * New…'s Create (DESIGN3): the server WRITES the starter file and answers the graph, not dirty; the dialog closes and
    * the graph opens. A refusal writes nothing — the file exists, the folder does not, the name is refused — and goes
@@ -1190,16 +1377,19 @@ function Editor() {
   const create = useCallback(
     async (answer: NewAnswer): Promise<string | null> => {
       let made: Graph;
+      let hostError: string | undefined;
       try {
-        made = await newGraph(answer.name, answer.kind, answer.dir);
+        ({ host_error: hostError, ...made } = await newGraph(answer.name, answer.kind, answer.dir));
       } catch (exc) {
         return errorMessage(exc);
       }
       setDialog(null);
+      postToHost(savedMessage(made.name, made.path)); // New… WROTE a graph file: the host hears it as it hears a Save
+      if (hostError !== undefined) push("warning", `${fileOf(made)} is written, but ${host?.name ?? "the host"} said: ${hostError}`);
       await show(made); // the file is written: whatever this says, the dialog has done its part
       return null;
     },
-    [show],
+    [host, postToHost, push, show],
   );
 
   const check = useCallback(async () => {
@@ -1401,6 +1591,47 @@ function Editor() {
     [accept, askFile, push],
   );
 
+  // ---- set source… (`slots.ts`): a class and its values into a source slot ---------------------------------------------
+
+  /** The source slot `slot` of `node` on the level drawn, with what fills it now; `undefined` when it is not one. */
+  const slotOf = useCallback(
+    (node: string, slot: string): Slot | undefined => {
+      const view = viewNow();
+      const found = view.nodes.find((candidate) => candidate.name === node);
+      return found === undefined ? undefined : sourceSlots(view, found).find((candidate) => candidate.slot === slot);
+    },
+    [viewNow],
+  );
+
+  /** Open the class picker and form for a slot (its card's `set…`, the node menu, a wire dropped out of it). */
+  const chooseSlot = useCallback(
+    (node: string, slot: string) => {
+      const found = slotOf(node, slot);
+      setContext(null);
+      setPalette(null);
+      if (found !== undefined) setSlotAsked(found);
+    },
+    [slotOf],
+  );
+
+  /** Set: ONE edit (`POST …/slot`), one undo entry; a refusal goes back to the dialog, which shows it. */
+  const writeSlot = useCallback(
+    async (classPath: string, params: Record<string, Json>): Promise<string | null> => {
+      const current = graphRef.current;
+      const slot = slotAsked;
+      if (current === null || slot === null) return null;
+      try {
+        const { set: _set, ...next } = await setSlot(current.name, slot.node, slot.slot, classPath, params);
+        setSlotAsked(null);
+        accept(next, { kind: "document" });
+        return null;
+      } catch (exc) {
+        return errorMessage(exc);
+      }
+    },
+    [accept, slotAsked],
+  );
+
   // ---- the palette ---------------------------------------------------------------------------------------------
 
   const onPalette = useCallback((gesture: PaletteGesture) => {
@@ -1408,6 +1639,12 @@ function Editor() {
     if (current === null) return;
     const view = viewNow();
     const level = levelRef.current;
+    // a wire dragged OUT of a source slot and dropped on nothing: the slot is filled by a class and its values (Set
+    // source…), never by an inserted step — a Stream's source is not a step of its ops
+    if (gesture.from?.kind === "in" && slotOf(gesture.from.node, gesture.from.socket) !== undefined) {
+      chooseSlot(gesture.from.node, gesture.from.socket);
+      return;
+    }
     if (!gesture.from) {
       const selected = gesture.selected ?? [];
       setPalette({
@@ -1434,7 +1671,7 @@ function Editor() {
           ? { kind: "none", why: `nothing feeds ${node} — a step can only be inserted after another one` }
           : wireTarget(view, level, current.kind, after)),
     });
-  }, [viewNow]);
+  }, [chooseSlot, slotOf, viewNow]);
 
   const pick = useCallback(
     (spec: NodeSpec) => {
@@ -1462,12 +1699,13 @@ function Editor() {
       if (current === null) return;
       setRunning(true);
       try {
-        answered(await trace(current.name, record, until), null);
+        // the host's record for a graph without its own source when a host is there, else record #N (`host.runRecord`)
+        answered(await trace(current.name, runRecord(host, current.model, record), until), null);
       } catch (exc) {
         answered(null, errorMessage(exc));
       }
     },
-    [answered, record],
+    [answered, host, record],
   );
 
   const until = selection[selection.length - 1];
@@ -1516,11 +1754,11 @@ function Editor() {
       setContext(null);
       switch (id) {
         case "new-flow":
-          return setDialog({ kind: "new", newKind: "flow" });
+          return openNew("flow");
         case "new-pipeline":
-          return setDialog({ kind: "new", newKind: "pipeline" });
+          return openNew("pipeline");
         case "new-source":
-          return setDialog({ kind: "new", newKind: "source" });
+          return openNew("source");
         case "open":
           return void open();
         case "save":
@@ -1591,6 +1829,7 @@ function Editor() {
       onRun,
       onStep,
       open,
+      openNew,
       paste,
       renameSelected,
       revert,
@@ -1647,8 +1886,9 @@ function Editor() {
   useEffect(() => {
     for (const part of [bar.current, body.current]) part?.toggleAttribute("inert", recovering);
   }, [recovering]);
-  const keys = useRef({ runCommand, stateNow, menuOpen, context, dialog, palette, level: shown, goTo, recovering });
-  keys.current = { runCommand, stateNow, menuOpen, context, dialog, palette, level: shown, goTo, recovering };
+  const asking = dialog !== null || slotAsked !== null;
+  const keys = useRef({ runCommand, stateNow, menuOpen, context, asking, palette, level: shown, goTo, recovering });
+  keys.current = { runCommand, stateNow, menuOpen, context, asking, palette, level: shown, goTo, recovering };
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       const now = keys.current;
@@ -1658,7 +1898,7 @@ function Editor() {
         setContext(null);
         return;
       }
-      if (now.dialog !== null || now.palette !== null || now.recovering || isTyping(event.target)) return;
+      if (now.asking || now.palette !== null || now.recovering || isTyping(event.target)) return;
       if (event.key === "Escape" && now.level !== "") {
         event.preventDefault(); // inside a subgraph, Escape goes up one level (the breadcrumb's crumb before it)
         now.goTo(parentLevel(now.level));
@@ -1748,14 +1988,21 @@ function Editor() {
         void startRun(node.name);
       },
       extract: () => void extract(node.name),
+      slots: (graph === null ? [] : sourceSlots(levelModel(graph.model, shown) ?? EMPTY_MODEL, node)).map((slot) => ({
+        slot: slot.slot,
+        filled: slot.filled,
+        choose: () => chooseSlot(node.name, slot.slot),
+      })),
       // Open shows the inside the server sent; without one it stays greyed
       openSubgraph: graph && levelModel(graph.model, node.name) !== undefined ? () => openSubgraph(node.name) : undefined,
     });
   };
 
   const model = graph?.model;
+  const shownGraph = graph?.name ?? "";
   const editor = useMemo<EditorApi>(
     () => ({
+      graph: shownGraph,
       form,
       types,
       run,
@@ -1768,11 +2015,15 @@ function Editor() {
       setEditing,
       openSubgraph,
       innerSteps: (name: string) => (model === undefined ? [] : innerStepsOf(model, name)),
+      browse,
+      chooseSlot,
     }),
-    [form, types, run, setParam, rename, updateGroup, ungroup, resizeGroup, editing, openSubgraph, model],
+    [shownGraph, form, types, run, setParam, rename, updateGroup, ungroup, resizeGroup, editing, openSubgraph, model, browse, chooseSlot],
   );
 
   const inspectedNode = graph !== null && inspected !== undefined ? findNode(graph.model, inspected) : undefined;
+  /** Run sends the host's record: a host is there and the graph has no source of its own (`host.runRecord`). */
+  const fromHost = graph !== null && host !== null && !hasOwnSource(graph.model);
   const targetShown: InsertTarget = graph
     ? insertTarget(levelModel(graph.model, shown) ?? EMPTY_MODEL, shown, graph.kind, until)
     : { kind: "none" };
@@ -1780,7 +2031,10 @@ function Editor() {
   return (
     <EditorContext.Provider value={editor}>
       <div
-        className="app"
+        className={`app${embed ? " embed" : ""}`}
+        data-embed={embed ? "true" : "false"}
+        data-host={host?.name ?? ""}
+        data-side-tab={tab}
         data-graph={graph?.name ?? ""}
         data-ready={graph === null ? "false" : "true"}
         data-saves={saves}
@@ -1792,15 +2046,18 @@ function Editor() {
         style={{ ["--nodes-width" as string]: sidebar ? "300px" : "0px" }}
       >
         <header className="bar" ref={bar}>
-          <span className="brand" title="streamstudio">
-            <svg viewBox="0 0 20 20" aria-hidden="true">
-              <circle cx="4" cy="10" r="2.6" />
-              <circle cx="16" cy="4.5" r="2.6" />
-              <circle cx="16" cy="15.5" r="2.6" />
-              <path d="M6.3 9 13.7 5.5M6.3 11l7.4 3.5" strokeWidth="1.6" fill="none" />
-            </svg>
-            streamstudio
-          </span>
+          {/* in a host's panel the host's own page says what app this is: no second brand */}
+          {!embed && (
+            <span className="brand" title="streamstudio">
+              <svg viewBox="0 0 20 20" aria-hidden="true">
+                <circle cx="4" cy="10" r="2.6" />
+                <circle cx="16" cy="4.5" r="2.6" />
+                <circle cx="16" cy="15.5" r="2.6" />
+                <path d="M6.3 9 13.7 5.5M6.3 11l7.4 3.5" strokeWidth="1.6" fill="none" />
+              </svg>
+              streamstudio
+            </span>
+          )}
           <MenuBar menus={barMenus(menuContext)} open={menuOpen} onOpen={openMenu} />
           <div className="bar-doc">
             {graph && (
@@ -1814,7 +2071,7 @@ function Editor() {
               title="the graphs of this folder, and every one opened"
               onChange={(event) => !recovering && void load(event.target.value)}
             >
-              {graph === null && <option value="">{listed ? "no graph" : "loading…"}</option>}
+              {graph === null && <option value="">{missing !== null ? `no graph '${missing}'` : listed ? "no graph" : "loading…"}</option>}
               {graphs.map((entry) => (
                 <option key={entry.name} value={entry.name}>
                   {pickerLabel(entry)}
@@ -1867,6 +2124,7 @@ function Editor() {
               types={types}
               level={shown}
               showMinimap={minimap}
+              fitOnOpen={embed}
               onLayout={onLayout}
               onProposal={(message) => push("warning", message)}
               onSelection={(names, groups) => {
@@ -1882,7 +2140,30 @@ function Editor() {
             />
           ) : (
             <div className="canvas empty-canvas">
-              {listed && graphs.length === 0 && (
+              {missing !== null && (
+                <div className="empty-state graph-missing" data-graph-missing={missing}>
+                  <h2>No graph '{missing}' here</h2>
+                  <p data-graph-missing-message>{missingGraphMessage(missing, graphs, folder)}</p>
+                  <div>
+                    {graphs.map((entry) => (
+                      <button key={entry.name} type="button" className="button" data-graph-choice={entry.name} onClick={() => void load(entry.name)}>
+                        {pickerLabel(entry)}
+                      </button>
+                    ))}
+                    {graphs.length === 0 && (
+                      <>
+                        <button type="button" className="button primary" onClick={() => runCommand("new-flow")}>
+                          New flow graph…
+                        </button>
+                        <button type="button" className="button" onClick={() => runCommand("open")}>
+                          Open…
+                        </button>
+                      </>
+                    )}
+                  </div>
+                </div>
+              )}
+              {missing === null && listed && graphs.length === 0 && (
                 <div className="empty-state">
                   <h2>No graph in this folder yet</h2>
                   <p>Make one with New, or open a .yaml from anywhere on this machine.</p>
@@ -1912,7 +2193,15 @@ function Editor() {
                 <pre data-yaml>{graph?.text ?? ""}</pre>
               </>
             )}
-            {tab === "settings" && graph !== null && <SettingsForm graph={graph} level={shown} />}
+            {tab === "settings" && graph !== null && (
+              <SettingsForm
+                key={graph.name}
+                graph={graph}
+                level={shown}
+                all={allParams[graph.name] === true}
+                onAll={(all) => setAllParams((ticked) => ({ ...ticked, [graph.name]: all }))}
+              />
+            )}
             {tab === "run" && graph !== null && (
               <RunPanel
                 file={fileOf(graph)}
@@ -1925,6 +2214,8 @@ function Editor() {
                 inspected={inspectedNode}
                 form={form}
                 busy={running}
+                host={host}
+                fromHost={fromHost}
                 onRun={onRun}
                 onStep={onStep}
                 onRerun={(node, params) => void onRerun(node, params)}
@@ -1937,6 +2228,16 @@ function Editor() {
         )}
         {context !== null && (
           <ContextMenu at={context.screen} kind={context.kind} entries={contextEntries(context)} onClose={closeContext} />
+        )}
+        {slotAsked !== null && graph !== null && (
+          <SetSlotDialog
+            slot={slotAsked}
+            specs={addable}
+            types={types}
+            model={levelModel(graph.model, shown) ?? EMPTY_MODEL}
+            onSet={writeSlot}
+            onCancel={() => setSlotAsked(null)}
+          />
         )}
         {dialog?.kind === "file" && (
           <FileDialog

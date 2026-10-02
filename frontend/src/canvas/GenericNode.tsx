@@ -19,14 +19,16 @@
  * Every element a test needs is addressable by `data-*`: the root by `data-node` / `data-kind` / `data-class`
  * (and `data-run-status` / `data-generation` after a run), a handle by `data-node` / `data-socket` / `data-type` /
  * `data-kind`, a widget by `data-param`, the rename field by `data-rename`, a subgraph's open button by
- * `data-open-subgraph` and its step list by `data-inner-steps`.
+ * `data-open-subgraph` and its step list by `data-inner-steps`, a source slot's Set source… button by `data-set-slot`
+ * (`slots.ts` — a source goes into a slot as a class and its values, never as a drawn wire).
  */
 import { useEffect, useState, type KeyboardEvent } from "react";
 import { Handle, Position, type NodeProps } from "@xyflow/react";
 import { useEditor } from "../context";
 import { isBoundary, levelOfNode, renamedTo, shortName } from "../levels";
 import { handleId, shortClass, socketColor, type GenericNode, type HandleKind, type ModelNode } from "../model";
-import { ParamWidget } from "./ParamWidget";
+import { isSourceSlot } from "../slots";
+import { ParamWidget, valuesOf } from "./ParamWidget";
 
 /** What the class line says for a node without a class of its own. */
 function classLine(node: ModelNode): string {
@@ -41,10 +43,11 @@ function classLine(node: ModelNode): string {
 }
 
 export function GenericNodeView({ data, selected }: NodeProps<GenericNode>) {
-  const { form, run, setParam } = useEditor();
+  const { graph, form, run, setParam, chooseSlot } = useEditor();
   const node = data.node;
   const schemas = form[node.name] ?? {};
   const params = Object.values(node.params);
+  const values = valuesOf(node.params);
   const status = run?.statuses[node.name];
   const traced = status === undefined ? undefined : run?.trace.nodes.find((entry) => entry.node === node.name);
   const generation = run?.generations[node.name];
@@ -81,6 +84,21 @@ export function GenericNodeView({ data, selected }: NodeProps<GenericNode>) {
             {socket.required && <b title="an input nothing may leave unwired">*</b>}
             <i>{socket.type}</i>
           </span>
+          {isSourceSlot(socket) && (
+            <button
+              type="button"
+              className="set-slot nodrag"
+              data-set-slot={socket.name}
+              title={`choose the ${socket.name} — a class and its values (Set ${socket.name}…)`}
+              onDoubleClick={(event) => event.stopPropagation()}
+              onClick={(event) => {
+                event.stopPropagation(); // the card's own click shows its run entry; this one is the slot's
+                chooseSlot(node.name, socket.name);
+              }}
+            >
+              set…
+            </button>
+          )}
         </div>
       ))}
       {params.map((param) => (
@@ -88,9 +106,11 @@ export function GenericNodeView({ data, selected }: NodeProps<GenericNode>) {
           <SocketHandle node={node} kind="in" name={param.name} type={param.type} doc={param.doc} small />
           <label title={param.doc}>{param.name}</label>
           <ParamWidget
+            key={graph} // another graph's node of the same name gets fresh widgets, never this graph's typed draft
             param={param}
             schema={{ ...param.schema, ...(schemas[param.name] ?? {}) }}
             onCommit={(value) => setParam(node.name, param.name, value)}
+            values={values}
           />
         </div>
       ))}

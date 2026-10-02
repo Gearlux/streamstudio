@@ -490,6 +490,8 @@ class TestClosedSets:
 
     def test_a_file_entry_kind_is_a_closed_set_the_answers_keep_to(self, client: Any, graph_dir: Path) -> None:
         (graph_dir / "sub").mkdir()
-        assert get_args(FileEntryKind) == ("dir", "yaml")
+        assert get_args(FileEntryKind) == ("dir", "yaml", "file")
         kinds = {entry["kind"] for entry in client.get("/api/files").get_json()["entries"]}
-        assert kinds == set(get_args(FileEntryKind))
+        assert kinds == {"dir", "yaml"}, "the graph browser lists folders and graphs"
+        every = {entry["kind"] for entry in client.get("/api/files?show=all").get_json()["entries"]}
+        assert every == {"dir", "file"}, "a file picker lists folders and every file (tests/test_pickers.py)"

@@ -8,6 +8,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **`import streamstudio.app` no longer runs the ComfyUI node discovery**: 0.2 s instead of 6.2–8.0 s, and no
+  torch. The ComfyUI mappings are made when ComfyUI reads them (and at import inside ComfyUI); `streamstudio`
+  commands start in 0.1 s. It also leaves the importing app's environment and logging alone: `NO_COLOR=1` (and
+  loggair's colourless reconfiguration) is set only inside ComfyUI and when the ComfyUI half is made — a host that
+  mounts the canvas editor, and every process it starts, keeps its console colours.
+- **`page_blueprint()` without an argument serves the built page** (`web_dist()`), not the placeholder.
 - **Bare `streamstudio` starts the canvas editor**, on port 8190, over the folder it is given (default: the
   current directory): `streamstudio path/to/graphs`. **`streamstudio --editor comfy`** starts the ComfyUI editor on
   port 8188, with every ComfyUI option (`--comfy-dir`, `-b`, `--default-nodes-`, `--only-taidal-nodes`,
@@ -111,6 +117,52 @@ All notable changes to this project are documented here. The format follows
   the same file.
 
 ### Added
+
+- **The editor mounts in another app with a HOST** (`editor_blueprint(host=…)`): an object with a `name` (answered by
+  `GET /api/workspace` as `host: {name}`, `null` standalone) and three methods —
+  `folder()`, asked at each request, so a host that moves its folder is followed and the graphs held unsaved move
+  with their edits and undo history; `record(graph, path)`, the record a **Run** of a graph with no source of its
+  own runs (a `flow:` alone, a `Stream` with an empty `source`), with the window and band the host fills into the
+  ops — the run answers `record: null` and `host: {label, filled}`; `saved(paths)`, told which graph files every
+  Save, Save As and New… wrote. Every path the host is handed is spelled under `folder()` as `folder()` spells it.
+  Whatever `record()` or `folder()` raises (but a `ValueError`, the host's own refusal, answered as written), and a
+  `record()` answer that is no `HostRecord` of a mapping, is a 400 in words naming the host. A graph holding nothing
+  unsaved whose file changed on disk is read again when it is next asked for; relative `include:` entries out of a
+  folder the host moves are rewritten to name the same file. A graph whose own source yields no record says so in
+  words (a source a host fills when it runs the graph is not handed to the editor). `studio_of(app).stash()` keeps
+  the unsaved work across the host's own stop. Without a host such a Run is refused as before.
+- **`GET /api/graphs/<name>/app`** — a graph's `app:` fields: `{declared, fields: [{node, param, loc}], form,
+  problems}` (the Bluetooth pane: 30 fields instead of 247; `deviation_hz__lo` / `__hi` name one field). The gate
+  a branch sets (`requires`) is never a field, in this form or in `GET …/form`.
+- **`POST /api/graphs/<name>/slot {node, slot, class_path, params}`** — put a new object into one slot
+  (`stream.source`), replacing what it held, comments kept, one undo; answers `set` (the node now in it).
+- **Pickers.** A parameter's form schema carries `picker` — `directory`, `file`, `hf_dataset`, `hf_feature`,
+  `hf_split`, `hf_metadata`, or a producer's stamped tag — by the rules the ComfyUI nodes' widgets followed;
+  `GET /api/files?show=all` lists every file for a file picker (and a `$VAR` in `dir` is expanded; one this machine
+  does not have is a 404 naming it: `DATA_ROOT is not set on the editor's machine ($DATA_ROOT/captures)`);
+  `GET /api/hf/datasets`, `…/features`, `…/splits` answer the HuggingFace lookups.
+- **The page in a host's panel.** It works under a host's prefix (`/studio/`); `?embed=1` fits it into a panel (no
+  logo, a narrower side panel, the minimap off until asked; every menu and function kept); it posts `state` and
+  `saved` messages to its parent window (`saved` after Save, Save As and New…) and takes an `open` command (same
+  origin only). An `open` first writes a value typed and not left yet to the graph it was typed in, closes Set
+  source…, reads the graph shown again when it is the one asked for, and asks the editor's folder afresh (New… does
+  too), so a folder the host moved is the one named and written to. A graph's top level opens whole in the panel (a
+  fit, never above zoom 1). Run on a graph without a source of its own runs the host's record (`record: <host>'s
+  selection`) and names what ran and what the host filled in; *rerun this node* starts from, and keeps, the values
+  the host filled in.
+- **`?tab=settings|run`** opens a side tab from a link, and follows the tab shown. **`?graph=` naming a graph the
+  editor does not list opens nothing** and says so, with the graphs there are — it used to open the first graph.
+- **The settings tab lists a graph's `app:` fields**, with a tick box *all parameters* that stays for the graph while
+  another tab is looked at; a `(min, max)` pair is one field of two numbers, and a box being typed into keeps what is
+  typed while the other box's answer arrives. A graph without an `app:` block names no settings: the tab says so, and
+  *all parameters* lists every one.
+- **Set source…** — the `set…` button on a Stream's `source` row, the node menu, or a wire dragged out of the slot:
+  a class (sources first) and its form, written by `POST …/slot`. The keyboard stays in it (the first field after a
+  pick; the highlighted class in view), and a slot holding a reference says the referenced node stays, unwired.
+- **Pickers on the page**: a `…` file browser beside folder and file fields, and lists of the cached HuggingFace
+  datasets, a dataset's splits and columns beside a HuggingFace source's fields — asked only when you point at them;
+  an empty list says why, and a failed one asks again the next time. Every dialog takes the keyboard when it opens and
+  gives it back when it closes: Escape in the file browser over Set source… closes the browser alone.
 
 - **The graph editor without ComfyUI — phase 2 of the rewrite (`docs/rewrite.md`).** `streamstudio.document`
   derives a typed node/wire model from a confluid graph document and edits it by patching the marker's own line

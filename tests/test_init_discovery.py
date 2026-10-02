@@ -41,10 +41,13 @@ def _reset_discovery_cache() -> Iterator[None]:
 
     ``_discover_and_register_nodes`` caches its result on the ``sys`` singleton so a
     second module identity (editable install + ComfyUI custom_nodes symlink) reuses
-    it instead of re-scanning. That cache is populated during the real
-    ``import streamstudio`` at collection time, so the direct-call tests below must
-    reset it to exercise a fresh scan.
+    it instead of re-scanning. That cache is populated when the ComfyUI half is made, so
+    the direct-call tests below must reset it to exercise a fresh scan.
+
+    The half is made on first READ of the mappings (lazy since 2026-10-01 — ``test_lazy_package.py``), so it is read
+    here first: made after the reset, its own scan would fill the cache again before the test runs.
     """
+    streamstudio.NODE_CLASS_MAPPINGS  # the read that makes the ComfyUI half — before the cache is reset
     sys.__dict__.pop("_streamstudio_discovered_nodes", None)
     yield
     sys.__dict__.pop("_streamstudio_discovered_nodes", None)

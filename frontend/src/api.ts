@@ -14,6 +14,7 @@
  * inside a subgraph): the routes take it as `<path:node>`, so each segment is encoded on its own (`nodePath`).
  */
 import type { Group } from "./groups";
+import type { HostRun } from "./host";
 import type { Form, Graph, GraphSummary, Json, NewGraphKind, Positions, Problem, Supertypes } from "./model";
 import type { NameShift } from "./levels";
 import type { RestoredSummary, Workspace } from "./recovery";
@@ -109,20 +110,26 @@ export const putText = (name: string, text: string): Promise<Graph> => call("PUT
  * writing nothing, when that file exists, the folder does not exist or cannot be written, or the name is one the
  * server's rule refuses — the refusal names the file or the rule.
  */
-export const newGraph = (name: string, kind: NewGraphKind, dir?: string): Promise<Graph> =>
+export const newGraph = (name: string, kind: NewGraphKind, dir?: string): Promise<Saved> =>
   call("POST", "api/graphs", dir === undefined ? { name, kind } : { name, kind, dir });
 
 /** `POST api/graphs/open` `{path}` — open any `.yaml` on the editor's machine and list it (a taken name → `demo~2`). */
 export const openGraph = (path: string): Promise<Graph> => call("POST", "api/graphs/open", { path });
 
 /**
+ * What a Save answers: the graph as written — plus, in an editor mounted in a host, `host_error` when the host failed on
+ * the news of the files written (the files ARE written; the page shows the host's words).
+ */
+export type Saved = Graph & { host_error?: string };
+
+/**
  * `POST api/graphs/<name>/save` — write every changed file and the sidecar. Refused, writing nothing, when a file
  * changed on disk since the editor read it (the message says to Revert or Save As).
  */
-export const saveGraph = (name: string): Promise<Graph> => call("POST", `${graphPath(name)}/save`);
+export const saveGraph = (name: string): Promise<Saved> => call("POST", `${graphPath(name)}/save`);
 
 /** `POST api/graphs/<name>/save-as` `{path, overwrite?}` — write it to `path`; the list entry now names the new file. */
-export const saveGraphAs = (name: string, path: string, overwrite = false): Promise<Graph> =>
+export const saveGraphAs = (name: string, path: string, overwrite = false): Promise<Saved> =>
   call("POST", `${graphPath(name)}/save-as`, overwrite ? { path, overwrite } : { path });
 
 /** `POST api/graphs/<name>/revert` — read the file again; the in-memory history, positions and groups are dropped. */
@@ -136,10 +143,11 @@ export const checkGraph = (name: string): Promise<{ problems: Problem[] }> => ca
 // ---------------------------------------------------------------------------------------------------
 
 /**
- * `GET api/workspace` — `{folder, session, recovery}`: `session` is the editor's (the page joins it, `joinSession`);
- * `recovery` is `null`, or the unsaved work the last session kept in the folder's hidden
- * `.streamstudio-workspace.json` when it stopped (`recovery.ts`). Answered whatever session a page sends: it is how a
- * page joins again after a restart.
+ * `GET api/workspace` — `{folder, session, recovery, host}`: `session` is the editor's (the page joins it,
+ * `joinSession`); `recovery` is `null`, or the unsaved work the last session kept in the folder's hidden
+ * `.streamstudio-workspace.json` when it stopped (`recovery.ts`); `host` is `{name}` when the editor is mounted in an
+ * app that supplies the record a graph without its own source runs on (`host.ts`), else `null` or absent. Answered
+ * whatever session a page sends: it is how a page joins again after a restart.
  */
 export const getWorkspace = (): Promise<Workspace> => call("GET", "api/workspace");
 
@@ -161,8 +169,12 @@ export const discardRecovery = (): Promise<GraphSummary[]> => call("POST", "api/
 export interface FileEntry {
   name: string;
   path: string;
-  kind: "dir" | "yaml";
+  /** A folder, a graph file (the graph browser's listing), or any file (`show=all`, a file picker's listing). */
+  kind: "dir" | "yaml" | "file";
 }
+
+/** What a listing shows besides folders: the graph files (`graphs`, the default), or every file (`all`). */
+export type FileShow = "graphs" | "all";
 
 export interface FileListing {
   dir: string;
@@ -172,9 +184,17 @@ export interface FileListing {
   entries: FileEntry[];
 }
 
-/** `GET api/files?dir=<absolute dir>` — no `dir` is the graph folder; a missing one is a 404 naming it. */
-export const listFiles = (dir?: string): Promise<FileListing> =>
-  call("GET", dir === undefined ? "api/files" : `api/files?dir=${encodeURIComponent(dir)}`);
+/**
+ * `GET api/files?dir=<dir>&show=<graphs|all>` — no `dir` is the graph folder (a `$VAR` in it is expanded by the server);
+ * a missing one is a 404 naming it. `show=all` lists every file — a file picker's listing (`pickers.ts`).
+ */
+export const listFiles = (dir?: string, show: FileShow = "graphs"): Promise<FileListing> => {
+  const query = new URLSearchParams();
+  if (dir !== undefined) query.set("dir", dir);
+  if (show !== "graphs") query.set("show", show);
+  const asked = query.toString();
+  return call("GET", asked === "" ? "api/files" : `api/files?${asked}`);
+};
 
 // ---------------------------------------------------------------------------------------------------
 // editing — each answers the whole graph after the edit
@@ -219,6 +239,20 @@ export const removeStep = (name: string, node: string): Promise<Graph> =>
  */
 export const removeSteps = (name: string, nodes: string[]): Promise<Graph> =>
   call("POST", `${graphPath(name)}/steps/remove`, { nodes });
+
+/**
+ * `POST api/graphs/<name>/slot` `{node, slot, class_path, params}` — Set source… (`slots.ts`): put ONE marker of
+ * `class_path` built with `params` into the slot `slot` of `node` (`{node: "stream", slot: "source"}`), replacing what
+ * fills it now; held until Save like every edit, one undo entry. The answer is the graph, plus `set` — the node the new
+ * marker is drawn as (`stream.source`) — when the server names it.
+ */
+export const setSlot = (
+  name: string,
+  node: string,
+  slot: string,
+  classPath: string,
+  params: Record<string, Json>,
+): Promise<Graph & { set?: string }> => call("POST", `${graphPath(name)}/slot`, { node, slot, class_path: classPath, params });
 
 /** `POST api/graphs/<name>/rename` `{node, new}` — the key, every reference to it, and the sidecar entry. */
 export const renameNode = (name: string, node: string, newName: string): Promise<Graph> =>
@@ -351,11 +385,88 @@ export interface NodeSpec {
 export const getPalette = (refresh = false): Promise<NodeSpec[]> =>
   call("GET", refresh ? "api/palette?refresh=1" : "api/palette");
 
-/** `GET api/graphs/<name>/form` — `{node: JSON-schema properties}`. */
+/**
+ * `GET api/graphs/<name>/form` — `{node: JSON-schema properties}`: every parameter of every node (a step's gate,
+ * `requires`, is never one); a fragment the palette marked with `picker` gets that picker (`pickers.ts`).
+ */
 export const getForm = (name: string): Promise<Form> => call("GET", `${graphPath(name)}/form`);
+
+/** One field a graph's `app:` block names: a node (each node of a class it names) and its parameter. */
+export interface AppField {
+  node: string;
+  param: string;
+  /** The `app:` entry's `file:line:col`. */
+  loc: string;
+}
+
+/**
+ * `GET api/graphs/<name>/app` — the graph's SETTINGS, its `app:` block resolved against what the editor holds:
+ * `declared` (the document has an `app:` block), the `fields` in the block's order (a `__lo`/`__hi` pair is one
+ * field; a class two nodes share gives one field each), their `form` in `GET …/form`'s shape, and every entry that
+ * names nothing as a located `problem`. `{declared: false, fields: [], form: {}, problems: []}` without a block.
+ */
+export interface AppForm {
+  declared: boolean;
+  fields: AppField[];
+  form: Form;
+  problems: Problem[];
+}
+
+export const getApp = (name: string): Promise<AppForm> => call("GET", `${graphPath(name)}/app`);
 
 /** `GET api/types` — `{socket type: [the types it may be wired into]}`, the meet rule's table. */
 export const getTypes = (): Promise<Supertypes> => call("GET", "api/types");
+
+// ---------------------------------------------------------------------------------------------------
+// the HuggingFace pickers (`pickers.ts`) — asked of the EDITOR's machine, whose cache a source reads
+// ---------------------------------------------------------------------------------------------------
+
+/** A lookup's list, whether the server answers it bare or under its key (`{datasets: […]}`); anything else is `[]`. */
+function names(answer: unknown, key: string): string[] {
+  const list = Array.isArray(answer)
+    ? answer
+    : typeof answer === "object" && answer !== null && Array.isArray((answer as Record<string, unknown>)[key])
+      ? ((answer as Record<string, unknown>)[key] as unknown[])
+      : [];
+  return list.filter((item): item is string => typeof item === "string");
+}
+
+const query = (params: Record<string, string>): string => {
+  const given = Object.entries(params).filter(([, value]) => value !== "");
+  return given.length === 0 ? "" : `?${new URLSearchParams(given).toString()}`;
+};
+
+/**
+ * What a lookup answers: the names to offer, and — when there are none — why, in the server's words (`""` when it gave
+ * no reason). An empty list that explains nothing looks like a broken one (`streamstudio.cached_hf_datasets`: "no
+ * datasets cached at <the cache this process reads>").
+ */
+export interface Listed {
+  names: string[];
+  reason: string;
+}
+
+/** The `reason` an answer carries, when it carries one as text. */
+const reasonOf = (answer: unknown): string =>
+  typeof answer === "object" && answer !== null && typeof (answer as Record<string, unknown>).reason === "string"
+    ? ((answer as Record<string, unknown>).reason as string)
+    : "";
+
+const listed = (answer: unknown, key: string): Listed => ({ names: names(answer, key), reason: reasonOf(answer) });
+
+/** `GET api/hf/datasets` → `{datasets: [repo ids], reason}`: the datasets cached on the editor's machine, and why none. */
+export const hfDatasets = async (): Promise<Listed> => listed(await call<unknown>("GET", "api/hf/datasets"), "datasets");
+
+/**
+ * `GET api/hf/features?path=&name=&split=` → `{features: [columns], all_columns: "*"}`: the columns of one dataset
+ * (`[]` when unknown, and when no dataset is named).
+ */
+export const hfFeatures = async (path: string, name = "", split = ""): Promise<Listed> =>
+  listed(await call<unknown>("GET", `api/hf/features${query({ path, name, split })}`), "features");
+
+/** `GET api/hf/splits?path=&name=` → `{splits: [names]}`: the splits of one dataset (`[]` when unknown). */
+export const hfSplits = async (path: string, name = ""): Promise<Listed> =>
+  listed(await call<unknown>("GET", `api/hf/splits${query({ path, name })}`), "splits");
 
 // ---------------------------------------------------------------------------------------------------
 // runs
@@ -377,7 +488,14 @@ export type TraceNode = {
 export interface Run {
   run: string;
   graph: string;
-  record: number;
+  /** Which record of the graph's own source ran; `null` when the host supplied it. */
+  record: number | null;
+  /**
+   * What the host supplied, when the record was the host's (`host.ts`): `label` in its own words (`rec_0042 · 0.25–0.75
+   * s · 1–2 MHz`) and `filled` — per node, the values it filled in (the window, the band); `null` for a record of the
+   * graph's own source.
+   */
+  host?: HostRun | null;
   trace: { nodes: TraceNode[]; check: ({ node: string } & Record<string, unknown>)[]; paused_at: string | null } & Record<
     string,
     unknown
@@ -387,9 +505,14 @@ export interface Run {
   paused_at: string | null;
 }
 
-/** `POST api/graphs/<name>/trace` `{record, until}` — run one record of the graph's own source, pausing before `until`. */
-export const trace = (name: string, record = 0, until?: string): Promise<Run> =>
-  call("POST", `${graphPath(name)}/trace`, until === undefined ? { record } : { record, until });
+/**
+ * `POST api/graphs/<name>/trace` — run ONE record, pausing before `until`: `{record: N}` draws record #N of the graph's
+ * own source; with `record` `null` the body carries no record number (`{}`) and a graph WITHOUT a source of its own runs
+ * the record the host the editor is mounted in supplies — its selection, with the window and band it fills in. Either
+ * way the editor's UNSAVED text is what runs.
+ */
+export const trace = (name: string, record: number | null = 0, until?: string): Promise<Run> =>
+  call("POST", `${graphPath(name)}/trace`, { ...(record === null ? {} : { record }), ...(until === undefined ? {} : { until }) });
 
 /** `POST api/runs/<run>/rerun` `{node, params}` — rebuild one node through its constructor and rerun from it. */
 export const rerun = (run: string, node: string, params: Record<string, Json>): Promise<Run> =>

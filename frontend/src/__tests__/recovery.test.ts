@@ -18,7 +18,6 @@ import { describe, expect, it } from "vitest";
 import {
   RECOVERY_PHASES,
   answered,
-  firstGraph,
   recoveryError,
   recoveryRows,
   restoredNames,
@@ -61,8 +60,6 @@ const BROKEN: Recovery = {
   error: "/w/.streamstudio-workspace.json cannot be read: Expecting value: line 1 column 1 (char 0)",
   aside: "/w/.streamstudio-workspace.broken-2.json",
 };
-
-const summary = (name: string, dirty = false): GraphSummary => ({ name, path: `/w/${name}.yaml`, kind: "flow", dirty });
 
 describe("savedAtLabel — when the last session stopped, as the dialog says it", () => {
   it("day, month, hour:minute in the page's own time", () => {
@@ -174,25 +171,6 @@ describe("answered — the editor loads no graph until the question is answered"
   it("the phases, and which of them let a graph load", () => {
     expect(RECOVERY_PHASES).toEqual(["pending", "asking", "confirming", "restored", "discarded", "none"]);
     expect(RECOVERY_PHASES.filter(answered)).toEqual(["restored", "discarded", "none"]);
-  });
-});
-
-describe("firstGraph — which graph the editor shows once the question is answered", () => {
-  const list = [summary("alpha"), summary("demo", true), summary("fresh", true)];
-
-  it("the one the link names (?graph=), when listed", () => {
-    expect(firstGraph(list, "fresh", ["demo"])).toBe("fresh");
-  });
-
-  it("else the first RESTORED one — the work the person just brought back", () => {
-    expect(firstGraph(list, null, ["demo", "fresh"])).toBe("demo");
-    expect(firstGraph(list, "gone", ["fresh"])).toBe("fresh");
-  });
-
-  it("else the first listed; nothing when the list is empty", () => {
-    expect(firstGraph(list, null, [])).toBe("alpha");
-    expect(firstGraph(list, null, ["not-listed"])).toBe("alpha");
-    expect(firstGraph([], null, ["demo"])).toBeUndefined();
   });
 });
 

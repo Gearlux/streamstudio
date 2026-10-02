@@ -1,35 +1,58 @@
-"""ComfyUI Entry Point for Taidal/Waivefront nodes."""
+"""The streamstudio package: the canvas editor (``streamstudio.app`` and the modules it imports) and, until phase 4
+deletes it, the ComfyUI editor's custom-node entry point (this module, read by ComfyUI's loader).
+
+The ComfyUI half is LAZY. ComfyUI reads ``NODE_CLASS_MAPPINGS`` / ``NODE_DISPLAY_NAME_MAPPINGS`` off this module as
+attributes; they are made on first read (:func:`__getattr__` → :func:`_load_comfy`: the entry-point node discovery,
+the hand-written adapter nodes, the item-type family, the plugin seam) — and at import when the package is loaded
+INSIDE ComfyUI (its ``server`` module is imported before any custom node is, and the ``/taidal/*`` routes must be
+registered while it loads them). Measured 2026-10-01: ``import streamstudio.app`` — what a host app mounting the
+canvas editor imports — ran that discovery at import, 6.2–8.0 s with torch and 432 ComfyUI node classes, for an
+editor it never starts; now 0.2 s without torch, and the first read of the mappings pays the discovery once.
+``WEB_DIRECTORY`` and the HuggingFace lookups (which the canvas editor's pickers call too) stay plain module
+attributes.
+"""
 
 import importlib.metadata
 import json
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import loggair
 
-# StreamStudio runs inside ComfyUI: its logs land in ComfyUI's own console/log
-# capture, where ANSI color escapes are noise. force_no_color() sets the standard
-# NO_COLOR=1 AND reloads loggair if some earlier ComfyUI import already configured
-# it (inheriting/copying the env is NOT enough once a coloring decision is baked
-# into the console sink). Must run before the get_logger() / streamstudio.* imports
-# below that pull loggair in. To re-allow colors, pre-set NO_COLOR= (empty).
-# See loggair's force_no_color.
-loggair.force_no_color()
+# INSIDE ComfyUI (its `server` module is imported before any custom node) the ComfyUI half's logs land in ComfyUI's
+# own console/log capture, where ANSI color escapes are noise. force_no_color() sets the standard NO_COLOR=1 AND
+# reloads loggair if some earlier ComfyUI import already configured it (inheriting/copying the env is NOT enough once a
+# coloring decision is baked into the console sink). It must run before the get_logger() below and every
+# streamstudio.* import that pulls loggair in. ONLY there: a host app that mounts the canvas editor imports this
+# package too, and measured before 2026-10-01 the unconditional call set NO_COLOR=1 in the host's process and in every
+# child it started. The ComfyUI half made outside ComfyUI (the mappings read first, `_load_comfy`) forces it there.
+# To re-allow colors, pre-set NO_COLOR= (empty). See loggair's force_no_color.
+if "server" in sys.modules:
+    loggair.force_no_color()
 
 from loggair import get_logger  # (import follows force_no_color above)
 
-from streamstudio.bridge import (
-    hide_default_comfy_nodes,
-    kept_default_node_names,
-    only_taidal_nodes,
-    register_module_nodes,
-)
-from streamstudio.export import UnsupportedTopologyError, chain_output_paths, collect_export_marks, export_flow_yamls
-from streamstudio.nodes import NODE_CLASS_MAPPINGS as _STATIC_NODE_CLASS_MAPPINGS
-from streamstudio.nodes import NODE_DISPLAY_NAME_MAPPINGS as _STATIC_NODE_DISPLAY_NAME_MAPPINGS
-from streamstudio.nodes import build_item_type_nodes as _build_item_type_nodes
+# The ComfyUI modules (``bridge``, ``export``, ``nodes`` — torch among their imports) are imported by
+# :func:`_load_comfy`, never here: see the module docstring. The type checker reads what it makes from here.
+if TYPE_CHECKING:
+    from streamstudio.bridge import (
+        hide_default_comfy_nodes,
+        kept_default_node_names,
+        only_taidal_nodes,
+        register_module_nodes,
+    )
+    from streamstudio.export import (
+        UnsupportedTopologyError,
+        chain_output_paths,
+        collect_export_marks,
+        export_flow_yamls,
+    )
+
+    # Bound here for the checkers only — never at run time, where a binding would stop __getattr__ from firing.
+    NODE_CLASS_MAPPINGS: Dict[str, Any] = {}  # a node key -> its generated ComfyUI node class (any class)
+    NODE_DISPLAY_NAME_MAPPINGS: Dict[str, str] = {}
 
 try:
     # Single source of truth: the installed distribution's metadata, i.e. pyproject.toml's
@@ -40,8 +63,27 @@ except importlib.metadata.PackageNotFoundError:  # pragma: no cover - uninstalle
 
 logger = get_logger(__name__)
 
-NODE_CLASS_MAPPINGS: Dict[str, Any] = {}
-NODE_DISPLAY_NAME_MAPPINGS: Dict[str, str] = {}
+#: ``NODE_CLASS_MAPPINGS`` / ``NODE_DISPLAY_NAME_MAPPINGS`` and the ComfyUI functions the route handlers and the
+#: discovery below call are module globals made by :func:`_load_comfy`; reading one first loads them
+#: (:func:`__getattr__`). Tests patch them on this module, so the handlers look them up here at call time.
+_COMFY_NAMES = frozenset(
+    {
+        "NODE_CLASS_MAPPINGS",
+        "NODE_DISPLAY_NAME_MAPPINGS",
+        "register_module_nodes",
+        "hide_default_comfy_nodes",
+        "kept_default_node_names",
+        "only_taidal_nodes",
+        "UnsupportedTopologyError",
+        "chain_output_paths",
+        "collect_export_marks",
+        "export_flow_yamls",
+    }
+)
+#: Whether :func:`_load_comfy` ran in this module identity (a reload starts over, as the old import-time body did).
+_comfy_loaded = False
+
+WEB_DIRECTORY = "./web"
 
 
 def cached_hf_datasets() -> "tuple[List[str], str]":
@@ -383,336 +425,390 @@ def _discover_and_register_plugins() -> None:
     setattr(sys, "_streamstudio_discovered_plugins", tuple(loaded))
 
 
-_discover_and_register_nodes()
-_discover_and_register_plugins()
-
-# Re-apply no-color after discovery: some scanned packages configure their own colorized handlers
-# (logger.remove() + logger.add(colorize=True)) at import time, undoing the force_no_color()
-# above.  NO_COLOR=1 is already set; this call only triggers the reconfigure() branch that strips
-# any stray handlers and re-adds loggair's sinks with colorize=False.
-loggair.force_no_color()
-
-# Merge the statically-defined StreamStudio adapter nodes (dataset walker + record viewer) on top of
-# the auto-discovered RecordStream/Waivefront nodes.
-NODE_CLASS_MAPPINGS.update(_STATIC_NODE_CLASS_MAPPINGS)
-NODE_DISPLAY_NAME_MAPPINGS.update(_STATIC_NODE_DISPLAY_NAME_MAPPINGS)
-
-# The item TYPE family is built HERE, not at nodes.py import: item types are registered BY the
-# scan above, so building it earlier would carry only the record engine's own types and silently
-# miss every domain one. Rebuilding also refreshes ``Extract from Record``'s item outputs, so a
-# type can never have a node without the extract output that feeds it.
-for _key, _cls in _build_item_type_nodes().items():
-    NODE_CLASS_MAPPINGS[_key] = _cls
-    NODE_DISPLAY_NAME_MAPPINGS[_key] = getattr(_cls, "__confluid_display_name__", _key)
-
-WEB_DIRECTORY = "./web"
-
-
-# Add backend route for the directory chooser if running inside ComfyUI
-try:
-    import subprocess
-
-    import server  # type: ignore[import-not-found]
-    from aiohttp import web
-
-    # Hide ComfyUI's built-in nodes when the CLI's --no-default-nodes flag is active, so only the
-    # Taidal nodes remain in the palette. Idempotent across the two streamstudio module identities
-    # (editable install + custom_nodes symlink), so only log when something was actually removed.
-    if hide_default_comfy_nodes():
-        _pruned = _prune_default_comfy_nodes()
-        if _pruned:
-            logger.info(f"StreamStudio: hid {_pruned} default ComfyUI nodes (--no-default-nodes).")
-
-    # Palette config for web/palette_filter.js. When --only-taidal-nodes is set, the frontend removes
-    # every non-Taidal node from the Add-Node menu (built-ins AND other third-party custom packs)
-    # EXCEPT the keep-list. This is done frontend-side, post-load, because custom packs that load AFTER
-    # streamstudio aren't in the global registry at our import time but ARE by the time the browser asks.
-    palette_route_exists = any(
-        r.path == "/taidal/palette_config" and r.method == "GET" for r in server.PromptServer.instance.routes
+def _load_comfy() -> None:
+    """Make the ComfyUI half — once per module identity: import its modules, discover the nodes (and the
+    plugins), merge the hand-written adapter nodes and the item-type family, and register the ``/taidal/*`` routes
+    when ComfyUI's ``server`` is importable. What ran at import before the canvas editor needed a cheap package.
+    """
+    global _comfy_loaded, NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
+    global register_module_nodes, hide_default_comfy_nodes, kept_default_node_names, only_taidal_nodes
+    global UnsupportedTopologyError, chain_output_paths, collect_export_marks, export_flow_yamls
+    if _comfy_loaded:
+        return
+    # Set first: a module the imports below load may read the mappings back (``from streamstudio import
+    # NODE_CLASS_MAPPINGS``), and must find these dicts rather than start a second load.
+    _comfy_loaded = True
+    # The ComfyUI half is colorless wherever it is made (inside ComfyUI the import above already forced it; a reader of
+    # the mappings outside it — a converter — gets the same logs): before the imports below configure anything.
+    loggair.force_no_color()
+    NODE_CLASS_MAPPINGS = {}
+    NODE_DISPLAY_NAME_MAPPINGS = {}
+    from streamstudio.bridge import (
+        hide_default_comfy_nodes,
+        kept_default_node_names,
+        only_taidal_nodes,
+        register_module_nodes,
     )
-    if not palette_route_exists:
-
-        @server.PromptServer.instance.routes.get("/taidal/palette_config")
-        async def palette_config_handler(request: Any) -> Any:
-            return web.json_response({"only_taidal": only_taidal_nodes(), "keep": sorted(kept_default_node_names())})
-
-    route_exists = any(
-        r.path == "/taidal/choose_directory" and r.method == "POST" for r in server.PromptServer.instance.routes
+    from streamstudio.export import (
+        UnsupportedTopologyError,
+        chain_output_paths,
+        collect_export_marks,
+        export_flow_yamls,
     )
+    from streamstudio.nodes import NODE_CLASS_MAPPINGS as static_classes
+    from streamstudio.nodes import NODE_DISPLAY_NAME_MAPPINGS as static_names
+    from streamstudio.nodes import build_item_type_nodes
 
-    if not route_exists:
+    _discover_and_register_nodes()
+    _discover_and_register_plugins()
 
-        @server.PromptServer.instance.routes.post("/taidal/choose_directory")
-        async def choose_directory_handler(request: Any) -> Any:
-            try:
-                # Pop up native macOS folder picker on the host machine
-                result = subprocess.run(
-                    [
-                        "osascript",
-                        "-e",
-                        'POSIX path of (choose folder with prompt "Select a directory:")',
-                    ],
-                    capture_output=True,
-                    text=True,
-                    check=True,
+    # Re-apply no-color after discovery: some scanned packages configure their own colorized handlers
+    # (logger.remove() + logger.add(colorize=True)) at import time, undoing the force_no_color()
+    # at the start of this function.  NO_COLOR=1 is already set; this call only triggers the reconfigure() branch that
+    # strips any stray handlers and re-adds loggair's sinks with colorize=False.
+    loggair.force_no_color()
+
+    # Merge the statically-defined StreamStudio adapter nodes (dataset walker + record viewer) on top of
+    # the auto-discovered RecordStream/Waivefront nodes.
+    NODE_CLASS_MAPPINGS.update(static_classes)
+    NODE_DISPLAY_NAME_MAPPINGS.update(static_names)
+
+    # The item TYPE family is built HERE, not at nodes.py import: item types are registered BY the
+    # scan above, so building it earlier would carry only the record engine's own types and silently
+    # miss every domain one. Rebuilding also refreshes ``Extract from Record``'s item outputs, so a
+    # type can never have a node without the extract output that feeds it.
+    for key, cls in build_item_type_nodes().items():
+        NODE_CLASS_MAPPINGS[key] = cls
+        NODE_DISPLAY_NAME_MAPPINGS[key] = getattr(cls, "__confluid_display_name__", key)
+
+    _register_comfy_routes()
+
+
+def __getattr__(name: str) -> Any:  # a module attribute: the mappings or a ComfyUI function, of any type
+    """PEP 562: the ComfyUI names are made on first read (:func:`_load_comfy`); any other miss is the usual
+    ``AttributeError`` — ``from streamstudio import app`` relies on it to import the submodule instead."""
+    if name in _COMFY_NAMES:
+        _load_comfy()
+        return globals()[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def _register_comfy_routes() -> None:
+    """The ``/taidal/*`` routes of the ComfyUI editor, registered on ComfyUI's ``server`` — a silent no-op outside
+    ComfyUI (no ``server`` module to import)."""
+    try:
+        import subprocess
+
+        import server  # type: ignore[import-not-found]
+        from aiohttp import web
+
+        # Hide ComfyUI's built-in nodes when the CLI's --no-default-nodes flag is active, so only the
+        # Taidal nodes remain in the palette. Idempotent across the two streamstudio module identities
+        # (editable install + custom_nodes symlink), so only log when something was actually removed.
+        if hide_default_comfy_nodes():
+            _pruned = _prune_default_comfy_nodes()
+            if _pruned:
+                logger.info(f"StreamStudio: hid {_pruned} default ComfyUI nodes (--no-default-nodes).")
+
+        # Palette config for web/palette_filter.js. When --only-taidal-nodes is set, the frontend removes
+        # every non-Taidal node from the Add-Node menu (built-ins AND other third-party custom packs)
+        # EXCEPT the keep-list. This is done frontend-side, post-load, because custom packs that load AFTER
+        # streamstudio aren't in the global registry at our import time but ARE by the time the browser asks.
+        palette_route_exists = any(
+            r.path == "/taidal/palette_config" and r.method == "GET" for r in server.PromptServer.instance.routes
+        )
+        if not palette_route_exists:
+
+            @server.PromptServer.instance.routes.get("/taidal/palette_config")
+            async def palette_config_handler(request: Any) -> Any:
+                return web.json_response(
+                    {"only_taidal": only_taidal_nodes(), "keep": sorted(kept_default_node_names())}
                 )
-                folder_path = result.stdout.strip()
-                return web.json_response({"path": folder_path})
-            except subprocess.CalledProcessError:
-                # User likely clicked Cancel in the dialog
-                return web.json_response({"path": ""})
-            except Exception as e:
-                return web.json_response({"error": str(e)}, status=500)
 
-    # The FILE twin of the directory chooser: a param tagged ``taidal_widget="FILE"``
-    # (``checkpoint_path`` and friends) browses for a single file — a folder dialog cannot
-    # select one (user report 2026-08-31). Same idempotent guard, same macOS osascript approach.
-    file_route_exists = any(
-        r.path == "/taidal/choose_file" and r.method == "POST" for r in server.PromptServer.instance.routes
-    )
-    if not file_route_exists:
+        route_exists = any(
+            r.path == "/taidal/choose_directory" and r.method == "POST" for r in server.PromptServer.instance.routes
+        )
 
-        @server.PromptServer.instance.routes.post("/taidal/choose_file")
-        async def choose_file_handler(request: Any) -> Any:
-            try:
-                # Pop up the native macOS file picker on the host machine
-                result = subprocess.run(
-                    [
-                        "osascript",
-                        "-e",
-                        'POSIX path of (choose file with prompt "Select a file:")',
-                    ],
-                    capture_output=True,
-                    text=True,
-                    check=True,
-                )
-                return web.json_response({"path": result.stdout.strip()})
-            except subprocess.CalledProcessError:
-                # User likely clicked Cancel in the dialog
-                return web.json_response({"path": ""})
-            except Exception as e:
-                return web.json_response({"error": str(e)}, status=500)
+        if not route_exists:
 
-    # List locally-cached HuggingFace datasets so the HF dataset-id field
-    # (web/hf_dataset_chooser.js) can offer them as an optional picker. Free-text entry
-    # is preserved on the widget itself; this only surfaces what's already downloaded.
-    hf_route_exists = any(
-        r.path == "/taidal/hf_datasets" and r.method == "GET" for r in server.PromptServer.instance.routes
-    )
-    if not hf_route_exists:
+            @server.PromptServer.instance.routes.post("/taidal/choose_directory")
+            async def choose_directory_handler(request: Any) -> Any:
+                try:
+                    # Pop up native macOS folder picker on the host machine
+                    result = subprocess.run(
+                        [
+                            "osascript",
+                            "-e",
+                            'POSIX path of (choose folder with prompt "Select a directory:")',
+                        ],
+                        capture_output=True,
+                        text=True,
+                        check=True,
+                    )
+                    folder_path = result.stdout.strip()
+                    return web.json_response({"path": folder_path})
+                except subprocess.CalledProcessError:
+                    # User likely clicked Cancel in the dialog
+                    return web.json_response({"path": ""})
+                except Exception as e:
+                    return web.json_response({"error": str(e)}, status=500)
 
-        @server.PromptServer.instance.routes.get("/taidal/hf_datasets")
-        async def hf_datasets_handler(request: Any) -> Any:
-            datasets, reason = cached_hf_datasets()
-            return web.json_response({"datasets": datasets, "reason": reason})
+        # The FILE twin of the directory chooser: a param tagged ``taidal_widget="FILE"``
+        # (``checkpoint_path`` and friends) browses for a single file — a folder dialog cannot
+        # select one (user report 2026-08-31). Same idempotent guard, same macOS osascript approach.
+        file_route_exists = any(
+            r.path == "/taidal/choose_file" and r.method == "POST" for r in server.PromptServer.instance.routes
+        )
+        if not file_route_exists:
 
-    # List the feature/column names of the dataset named in a node's HF dataset-id field so the
-    # feature picker (web/hf_feature_chooser.js) can offer them for input_feature / target_feature
-    # instead of free-text. Query params: path (required), name (HF subset), split.
-    features_route_exists = any(
-        r.path == "/taidal/hf_dataset_features" and r.method == "GET" for r in server.PromptServer.instance.routes
-    )
-    if not features_route_exists:
+            @server.PromptServer.instance.routes.post("/taidal/choose_file")
+            async def choose_file_handler(request: Any) -> Any:
+                try:
+                    # Pop up the native macOS file picker on the host machine
+                    result = subprocess.run(
+                        [
+                            "osascript",
+                            "-e",
+                            'POSIX path of (choose file with prompt "Select a file:")',
+                        ],
+                        capture_output=True,
+                        text=True,
+                        check=True,
+                    )
+                    return web.json_response({"path": result.stdout.strip()})
+                except subprocess.CalledProcessError:
+                    # User likely clicked Cancel in the dialog
+                    return web.json_response({"path": ""})
+                except Exception as e:
+                    return web.json_response({"error": str(e)}, status=500)
 
-        @server.PromptServer.instance.routes.get("/taidal/hf_dataset_features")
-        async def hf_dataset_features_handler(request: Any) -> Any:
-            query = request.query
-            path = query.get("path", "")
-            name = query.get("name") or None
-            split = query.get("split") or None
-            return web.json_response({"features": list_hf_dataset_features(path, name=name, split=split)})
+        # List locally-cached HuggingFace datasets so the HF dataset-id field
+        # (web/hf_dataset_chooser.js) can offer them as an optional picker. Free-text entry
+        # is preserved on the widget itself; this only surfaces what's already downloaded.
+        hf_route_exists = any(
+            r.path == "/taidal/hf_datasets" and r.method == "GET" for r in server.PromptServer.instance.routes
+        )
+        if not hf_route_exists:
 
-    # List the available split names of the dataset named in a node's HF dataset-id field so the
-    # split picker (web/hf_split_chooser.js) can offer them for the `split` field. Query params:
-    # path (required), name (HF subset).
-    splits_route_exists = any(
-        r.path == "/taidal/hf_dataset_splits" and r.method == "GET" for r in server.PromptServer.instance.routes
-    )
-    if not splits_route_exists:
+            @server.PromptServer.instance.routes.get("/taidal/hf_datasets")
+            async def hf_datasets_handler(request: Any) -> Any:
+                datasets, reason = cached_hf_datasets()
+                return web.json_response({"datasets": datasets, "reason": reason})
 
-        @server.PromptServer.instance.routes.get("/taidal/hf_dataset_splits")
-        async def hf_dataset_splits_handler(request: Any) -> Any:
-            query = request.query
-            path = query.get("path", "")
-            name = query.get("name") or None
-            return web.json_response({"splits": list_hf_dataset_splits(path, name=name)})
+        # List the feature/column names of the dataset named in a node's HF dataset-id field so the
+        # feature picker (web/hf_feature_chooser.js) can offer them for input_feature / target_feature
+        # instead of free-text. Query params: path (required), name (HF subset), split.
+        features_route_exists = any(
+            r.path == "/taidal/hf_dataset_features" and r.method == "GET" for r in server.PromptServer.instance.routes
+        )
+        if not features_route_exists:
 
-    # Compile the current canvas into Confluid ``flow:`` documents (drops the source +
-    # Walk/Extract adapters) so the graph can be reattached to any source via
-    # ``FlowGraph.from_yaml(path)``. A graph with several disconnected op components yields
-    # ONE document per component.
-    # Backs web/export_flow.js: the button POSTs ``{prompt: graphToPrompt(), path?: ...}``.
-    export_route_exists = any(
-        r.path == "/taidal/export_flow" and r.method == "POST" for r in server.PromptServer.instance.routes
-    )
-    if not export_route_exists:
+            @server.PromptServer.instance.routes.get("/taidal/hf_dataset_features")
+            async def hf_dataset_features_handler(request: Any) -> Any:
+                query = request.query
+                path = query.get("path", "")
+                name = query.get("name") or None
+                split = query.get("split") or None
+                return web.json_response({"features": list_hf_dataset_features(path, name=name, split=split)})
 
-        @server.PromptServer.instance.routes.post("/taidal/export_flow")
-        async def export_flow_handler(request: Any) -> Any:
-            try:
-                body = await request.json()
-                prompt = body.get("prompt", body)  # accept a bare prompt or {prompt: ...}
-                workflow = body.get("workflow") if isinstance(body, dict) else None
-                # AUTO-DETECT by payload shape: a UI-form workflow (a dict carrying a top-level
-                # ``nodes`` list — the editor's native save, e.g. a consuming workspace's owned
-                # graph file) may arrive as {"workflow": ...} with no prompt, or as the bare
-                # body. The flow compiler consumes prompt form only, so it is converted first
-                # (graphio owns the workflow.json knowledge).
-                if isinstance(prompt, dict) and isinstance(prompt.get("nodes"), list):
-                    workflow = workflow if workflow is not None else prompt
-                    prompt = None
-                elif prompt is body and workflow is not None:
-                    prompt = None  # {"workflow": ...} alone — nothing prompt-shaped was posted
-                if prompt is None and workflow is not None:
-                    from streamstudio.graphio import ui_workflow_to_prompt
+        # List the available split names of the dataset named in a node's HF dataset-id field so the
+        # split picker (web/hf_split_chooser.js) can offer them for the `split` field. Query params:
+        # path (required), name (HF subset).
+        splits_route_exists = any(
+            r.path == "/taidal/hf_dataset_splits" and r.method == "GET" for r in server.PromptServer.instance.routes
+        )
+        if not splits_route_exists:
 
-                    prompt = ui_workflow_to_prompt(workflow, NODE_CLASS_MAPPINGS)
-                # Export marks (properties["taidal_export"] == "skip"/"target") are read in PYTHON
-                # from the full UI ``workflow`` web/export_flow.js posts alongside the prompt — the
-                # prompt strips node properties, and only the workflow carries the subgraph
-                # definitions, so a mark placed INSIDE a subgraph is collected here (subgraph-aware,
-                # one source of truth) and resolved to the expanded prompt ids by the compiler.
-                # Explicit skip_ids/target_ids (older clients / programmatic callers) still merge in.
-                skip_ids = list(body.get("skip_ids") or []) if isinstance(body, dict) else []
-                target_ids = list(body.get("target_ids") or []) if isinstance(body, dict) else []
-                if workflow is not None:
-                    wf_skip, wf_target = collect_export_marks(workflow)
-                    skip_ids += wf_skip
-                    target_ids += wf_target
-                yaml_docs = export_flow_yamls(
-                    prompt, NODE_CLASS_MAPPINGS, skip_ids=skip_ids or None, target_ids=target_ids or None
-                )
-                # ``yaml`` (first doc) kept alongside ``yamls`` for older clients of the route.
-                payload: Dict[str, Any] = {"yamls": yaml_docs, "yaml": yaml_docs[0]}
-                out_path = body.get("path")
-                if out_path:
-                    paths = [str(p) for p in chain_output_paths(out_path, len(yaml_docs))]
-                    for chain_path, yaml_doc in zip(paths, yaml_docs):
-                        with open(chain_path, "w") as fh:
-                            fh.write(yaml_doc)
-                    payload.update({"paths": paths, "path": paths[0]})
-                return web.json_response(payload)
-            except UnsupportedTopologyError as e:
-                # 400: the graph is structurally not exportable (fan-in, cycle, link-driven
-                # widget, …) — an actionable user error, not a server fault.
-                return web.json_response({"error": str(e)}, status=400)
-            except Exception as e:
-                return web.json_response({"error": str(e)}, status=500)
+            @server.PromptServer.instance.routes.get("/taidal/hf_dataset_splits")
+            async def hf_dataset_splits_handler(request: Any) -> Any:
+                query = request.query
+                path = query.get("path", "")
+                name = query.get("name") or None
+                return web.json_response({"splits": list_hf_dataset_splits(path, name=name)})
 
-    # Extract JUST the op-DAG nodes from the current canvas as a standalone workflow.json — the
-    # GRAPH counterpart of /taidal/export_flow (which compiles them to Confluid YAML). Same node set
-    # (op-kind nodes + the Mix fan-in), but the RAW DAG as drawn (no Stash/Unstash/Mix compilation);
-    # the source / Walk / Extract / viewer / value nodes are dropped. Backs web/export_flow.js's
-    # "Export Taidal Ops → Graph" command, which POSTs ``{workflow: graphToPrompt().workflow}`` and
-    # downloads the returned graph. An optional ``path`` writes it server-side (a future CLI twin).
-    export_ops_graph_route_exists = any(
-        r.path == "/taidal/export_ops_graph" and r.method == "POST" for r in server.PromptServer.instance.routes
-    )
-    if not export_ops_graph_route_exists:
-        from streamstudio.graphio import extract_ops_workflow
+        # Compile the current canvas into Confluid ``flow:`` documents (drops the source +
+        # Walk/Extract adapters) so the graph can be reattached to any source via
+        # ``FlowGraph.from_yaml(path)``. A graph with several disconnected op components yields
+        # ONE document per component.
+        # Backs web/export_flow.js: the button POSTs ``{prompt: graphToPrompt(), path?: ...}``.
+        export_route_exists = any(
+            r.path == "/taidal/export_flow" and r.method == "POST" for r in server.PromptServer.instance.routes
+        )
+        if not export_route_exists:
 
-        @server.PromptServer.instance.routes.post("/taidal/export_ops_graph")
-        async def export_ops_graph_handler(request: Any) -> Any:
-            try:
-                body = await request.json()
-                workflow = body.get("workflow") if isinstance(body, dict) else None
-                if not isinstance(workflow, dict):
-                    return web.json_response({"error": "no workflow provided"}, status=400)
-                # flatten=False keeps subgraph instances intact; flatten=True inlines + contracts to raw ops.
-                flatten = bool(body.get("flatten")) if isinstance(body, dict) else False
-                graph = extract_ops_workflow(workflow, NODE_CLASS_MAPPINGS, flatten=flatten)
-                payload: Dict[str, Any] = {"workflow": graph}
-                out_path = body.get("path") if isinstance(body, dict) else None
-                if out_path:
-                    with open(out_path, "w") as fh:
-                        json.dump(graph, fh, indent=2)
-                    payload["path"] = str(out_path)
-                return web.json_response(payload)
-            except Exception as e:
-                return web.json_response({"error": str(e)}, status=500)
+            @server.PromptServer.instance.routes.post("/taidal/export_flow")
+            async def export_flow_handler(request: Any) -> Any:
+                try:
+                    body = await request.json()
+                    prompt = body.get("prompt", body)  # accept a bare prompt or {prompt: ...}
+                    workflow = body.get("workflow") if isinstance(body, dict) else None
+                    # AUTO-DETECT by payload shape: a UI-form workflow (a dict carrying a top-level
+                    # ``nodes`` list — the editor's native save, e.g. a consuming workspace's owned
+                    # graph file) may arrive as {"workflow": ...} with no prompt, or as the bare
+                    # body. The flow compiler consumes prompt form only, so it is converted first
+                    # (graphio owns the workflow.json knowledge).
+                    if isinstance(prompt, dict) and isinstance(prompt.get("nodes"), list):
+                        workflow = workflow if workflow is not None else prompt
+                        prompt = None
+                    elif prompt is body and workflow is not None:
+                        prompt = None  # {"workflow": ...} alone — nothing prompt-shaped was posted
+                    if prompt is None and workflow is not None:
+                        from streamstudio.graphio import ui_workflow_to_prompt
 
-    # Convert a Confluid YAML config → a whole ComfyUI workflow.json (nodes + links + groups +
-    # subgraphs). Backs web/import_yaml.js ("Import Taidal YAML" menu commands). The POST body is
-    # ``{yaml: "<text>", as: "graph"|"group"|"subgraph", name?: "<title>"}``.
-    import_route_exists = any(
-        r.path == "/taidal/import_yaml" and r.method == "POST" for r in server.PromptServer.instance.routes
-    )
-    if not import_route_exists:
-        from streamstudio.graphio import workflow_to_yaml, yaml_to_workflow
+                        prompt = ui_workflow_to_prompt(workflow, NODE_CLASS_MAPPINGS)
+                    # Export marks (properties["taidal_export"] == "skip"/"target") are read in PYTHON
+                    # from the full UI ``workflow`` web/export_flow.js posts alongside the prompt — the
+                    # prompt strips node properties, and only the workflow carries the subgraph
+                    # definitions, so a mark placed INSIDE a subgraph is collected here (subgraph-aware,
+                    # one source of truth) and resolved to the expanded prompt ids by the compiler.
+                    # Explicit skip_ids/target_ids (older clients / programmatic callers) still merge in.
+                    skip_ids = list(body.get("skip_ids") or []) if isinstance(body, dict) else []
+                    target_ids = list(body.get("target_ids") or []) if isinstance(body, dict) else []
+                    if workflow is not None:
+                        wf_skip, wf_target = collect_export_marks(workflow)
+                        skip_ids += wf_skip
+                        target_ids += wf_target
+                    yaml_docs = export_flow_yamls(
+                        prompt, NODE_CLASS_MAPPINGS, skip_ids=skip_ids or None, target_ids=target_ids or None
+                    )
+                    # ``yaml`` (first doc) kept alongside ``yamls`` for older clients of the route.
+                    payload: Dict[str, Any] = {"yamls": yaml_docs, "yaml": yaml_docs[0]}
+                    out_path = body.get("path")
+                    if out_path:
+                        paths = [str(p) for p in chain_output_paths(out_path, len(yaml_docs))]
+                        for chain_path, yaml_doc in zip(paths, yaml_docs):
+                            with open(chain_path, "w") as fh:
+                                fh.write(yaml_doc)
+                        payload.update({"paths": paths, "path": paths[0]})
+                    return web.json_response(payload)
+                except UnsupportedTopologyError as e:
+                    # 400: the graph is structurally not exportable (fan-in, cycle, link-driven
+                    # widget, …) — an actionable user error, not a server fault.
+                    return web.json_response({"error": str(e)}, status=400)
+                except Exception as e:
+                    return web.json_response({"error": str(e)}, status=500)
 
-        @server.PromptServer.instance.routes.post("/taidal/import_yaml")
-        async def import_yaml_handler(request: Any) -> Any:
-            try:
-                body = await request.json()
-                yaml_text = body.get("yaml", "")
-                name = body.get("name", "Imported")
-                if not yaml_text and body.get("path"):
-                    # A server-side config path instead of inline text — how a launching
-                    # viewer reopens the graph it was last handed (web/open_graph.js).
-                    config = Path(str(body["path"]))
-                    if not config.is_file():
-                        return web.json_response({"error": f"no such file: {config}"}, status=400)
-                    yaml_text = config.read_text()
-                    if name == "Imported":
-                        name = config.stem
-                workflow = yaml_to_workflow(
-                    yaml_text,
-                    NODE_CLASS_MAPPINGS,
-                    as_=body.get("as", "graph"),
-                    name=name,
-                )
-                return web.json_response({"workflow": workflow})
-            except Exception as e:
-                return web.json_response({"error": str(e)}, status=400)
+        # Extract JUST the op-DAG nodes from the current canvas as a standalone workflow.json — the
+        # GRAPH counterpart of /taidal/export_flow (which compiles them to Confluid YAML). Same node set
+        # (op-kind nodes + the Mix fan-in), but the RAW DAG as drawn (no Stash/Unstash/Mix compilation);
+        # the source / Walk / Extract / viewer / value nodes are dropped. Backs web/export_flow.js's
+        # "Export Taidal Ops → Graph" command, which POSTs ``{workflow: graphToPrompt().workflow}`` and
+        # downloads the returned graph. An optional ``path`` writes it server-side (a future CLI twin).
+        export_ops_graph_route_exists = any(
+            r.path == "/taidal/export_ops_graph" and r.method == "POST" for r in server.PromptServer.instance.routes
+        )
+        if not export_ops_graph_route_exists:
+            from streamstudio.graphio import extract_ops_workflow
 
-        @server.PromptServer.instance.routes.get("/taidal/read_graph")
-        async def read_graph_handler(request: Any) -> Any:
-            # A launching viewer names its workspace's source-graph FILE (?taidal_graph=…/source.json);
-            # this serves it raw so web/open_graph.js can put it on the canvas.
-            target = Path(str(request.query.get("path", "")))
-            if not target.is_file():
-                return web.json_response({"error": f"no such file: {target}"}, status=404)
-            try:
-                return web.json_response({"workflow": json.loads(target.read_text())})
-            except ValueError as e:
-                return web.json_response({"error": f"{target.name}: not a workflow JSON — {e}"}, status=400)
+            @server.PromptServer.instance.routes.post("/taidal/export_ops_graph")
+            async def export_ops_graph_handler(request: Any) -> Any:
+                try:
+                    body = await request.json()
+                    workflow = body.get("workflow") if isinstance(body, dict) else None
+                    if not isinstance(workflow, dict):
+                        return web.json_response({"error": "no workflow provided"}, status=400)
+                    # flatten=False keeps subgraph instances intact; flatten=True inlines + contracts to raw ops.
+                    flatten = bool(body.get("flatten")) if isinstance(body, dict) else False
+                    graph = extract_ops_workflow(workflow, NODE_CLASS_MAPPINGS, flatten=flatten)
+                    payload: Dict[str, Any] = {"workflow": graph}
+                    out_path = body.get("path") if isinstance(body, dict) else None
+                    if out_path:
+                        with open(out_path, "w") as fh:
+                            json.dump(graph, fh, indent=2)
+                        payload["path"] = str(out_path)
+                    return web.json_response(payload)
+                except Exception as e:
+                    return web.json_response({"error": str(e)}, status=500)
 
-        @server.PromptServer.instance.routes.post("/taidal/write_graph")
-        async def write_graph_handler(request: Any) -> Any:
-            # The mirror half: every native workflow SAVE in a launched editor also lands in
-            # the workspace's source-graph file (web/open_graph.js posts it here). The FILE,
-            # not a network push, is how the canvas reaches the viewer.
-            try:
-                body = await request.json()
-                target = Path(str(body.get("path", "")))
-                workflow = body.get("workflow")
-                if not str(target) or str(target) == ".":
-                    return web.json_response({"error": "a 'path' is required"}, status=400)
-                if not isinstance(workflow, dict) or "nodes" not in workflow:
-                    return web.json_response({"error": "a 'workflow' (UI form, with nodes) is required"}, status=400)
-                if not target.parent.exists():
-                    target.parent.mkdir(parents=True)
-                target.write_text(json.dumps(workflow))
-                return web.json_response({"written": str(target)})
-            except Exception as e:
-                return web.json_response({"error": str(e)}, status=500)
+        # Convert a Confluid YAML config → a whole ComfyUI workflow.json (nodes + links + groups +
+        # subgraphs). Backs web/import_yaml.js ("Import Taidal YAML" menu commands). The POST body is
+        # ``{yaml: "<text>", as: "graph"|"group"|"subgraph", name?: "<title>"}``.
+        import_route_exists = any(
+            r.path == "/taidal/import_yaml" and r.method == "POST" for r in server.PromptServer.instance.routes
+        )
+        if not import_route_exists:
+            from streamstudio.graphio import workflow_to_yaml, yaml_to_workflow
 
-        # Convert a WHOLE workflow.json (UI form) → a hoisted-!ref: Confluid YAML. Backs
-        # web/export_workflow.js ("Export Graph → Taidal YAML"). Body: ``{workflow: {...}}``.
-        @server.PromptServer.instance.routes.post("/taidal/export_workflow")
-        async def export_workflow_handler(request: Any) -> Any:
-            try:
-                body = await request.json()
-                graph = body.get("workflow", body)
-                return web.json_response({"yaml": workflow_to_yaml(graph, NODE_CLASS_MAPPINGS)})
-            except UnsupportedTopologyError as e:
-                return web.json_response({"error": str(e)}, status=400)
-            except Exception as e:
-                return web.json_response({"error": str(e)}, status=500)
+            @server.PromptServer.instance.routes.post("/taidal/import_yaml")
+            async def import_yaml_handler(request: Any) -> Any:
+                try:
+                    body = await request.json()
+                    yaml_text = body.get("yaml", "")
+                    name = body.get("name", "Imported")
+                    if not yaml_text and body.get("path"):
+                        # A server-side config path instead of inline text — how a launching
+                        # viewer reopens the graph it was last handed (web/open_graph.js).
+                        config = Path(str(body["path"]))
+                        if not config.is_file():
+                            return web.json_response({"error": f"no such file: {config}"}, status=400)
+                        yaml_text = config.read_text()
+                        if name == "Imported":
+                            name = config.stem
+                    workflow = yaml_to_workflow(
+                        yaml_text,
+                        NODE_CLASS_MAPPINGS,
+                        as_=body.get("as", "graph"),
+                        name=name,
+                    )
+                    return web.json_response({"workflow": workflow})
+                except Exception as e:
+                    return web.json_response({"error": str(e)}, status=400)
 
-except ImportError:
-    # Not running inside ComfyUI
-    pass
+            @server.PromptServer.instance.routes.get("/taidal/read_graph")
+            async def read_graph_handler(request: Any) -> Any:
+                # A launching viewer names its workspace's source-graph FILE (?taidal_graph=…/source.json);
+                # this serves it raw so web/open_graph.js can put it on the canvas.
+                target = Path(str(request.query.get("path", "")))
+                if not target.is_file():
+                    return web.json_response({"error": f"no such file: {target}"}, status=404)
+                try:
+                    return web.json_response({"workflow": json.loads(target.read_text())})
+                except ValueError as e:
+                    return web.json_response({"error": f"{target.name}: not a workflow JSON — {e}"}, status=400)
 
-# Export for ComfyUI
+            @server.PromptServer.instance.routes.post("/taidal/write_graph")
+            async def write_graph_handler(request: Any) -> Any:
+                # The mirror half: every native workflow SAVE in a launched editor also lands in
+                # the workspace's source-graph file (web/open_graph.js posts it here). The FILE,
+                # not a network push, is how the canvas reaches the viewer.
+                try:
+                    body = await request.json()
+                    target = Path(str(body.get("path", "")))
+                    workflow = body.get("workflow")
+                    if not str(target) or str(target) == ".":
+                        return web.json_response({"error": "a 'path' is required"}, status=400)
+                    if not isinstance(workflow, dict) or "nodes" not in workflow:
+                        return web.json_response(
+                            {"error": "a 'workflow' (UI form, with nodes) is required"}, status=400
+                        )
+                    if not target.parent.exists():
+                        target.parent.mkdir(parents=True)
+                    target.write_text(json.dumps(workflow))
+                    return web.json_response({"written": str(target)})
+                except Exception as e:
+                    return web.json_response({"error": str(e)}, status=500)
+
+            # Convert a WHOLE workflow.json (UI form) → a hoisted-!ref: Confluid YAML. Backs
+            # web/export_workflow.js ("Export Graph → Taidal YAML"). Body: ``{workflow: {...}}``.
+            @server.PromptServer.instance.routes.post("/taidal/export_workflow")
+            async def export_workflow_handler(request: Any) -> Any:
+                try:
+                    body = await request.json()
+                    graph = body.get("workflow", body)
+                    return web.json_response({"yaml": workflow_to_yaml(graph, NODE_CLASS_MAPPINGS)})
+                except UnsupportedTopologyError as e:
+                    return web.json_response({"error": str(e)}, status=400)
+                except Exception as e:
+                    return web.json_response({"error": str(e)}, status=500)
+
+    except ImportError:
+        # Not running inside ComfyUI
+        pass
+
+
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]
+
+# Inside ComfyUI the half is made NOW: its loader imports this package while it loads custom nodes, after its
+# ``server`` module (main.py imports it first), and the routes must be on its table before it serves.
+if "server" in sys.modules:
+    _load_comfy()

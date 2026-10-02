@@ -8,6 +8,7 @@ with the first op hoisted as an orphan; the side branch then raised ``KeyError``
 first record). Order is load-bearing: the compute chain is sequential.
 """
 
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -85,7 +86,8 @@ class TestTheShippedThresholdDetectorCanvasRoundTrips:
         import json
 
         waivefront_annotation = pytest.importorskip("waivefront.annotation")
-        path = waivefront_annotation.templates()["detection"]["model"]
+        # the CANVAS beside the document the domain hands out (YAML since 2026-10-01)
+        path = Path(waivefront_annotation.templates()["detection"]["model"]).with_suffix(".json")
         exported = workflow_to_yaml(json.loads(path.read_text()), NODE_CLASS_MAPPINGS)
         ops = _exported_stream_ops(exported)
         assert [type(op).__name__ for op in ops] == [

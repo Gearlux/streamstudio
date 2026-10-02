@@ -3,10 +3,12 @@
  * file… and New…'s folder all use it. It is not an upload: the editor edits a file in place on the machine it runs
  * on, so the browser's own file picker (which hands over a copy) is the wrong tool (decision 2 of the scope).
  *
- * Three modes: `open` picks a `.yaml` (a click selects, a double-click opens), `save` picks a folder and types a name
- * (a name that exists turns the button into Replace, and the answer says to overwrite), `folder` picks a folder.
- * A click on a folder enters it; ↑ goes to the one above; the path field takes a typed folder (Enter). A folder the
- * server cannot list shows the server's message and keeps the last listing.
+ * Four modes: `open` picks a `.yaml` (a click selects, a double-click opens), `save` picks a folder and types a name
+ * (a name that exists turns the button into Replace, and the answer says to overwrite), `folder` picks a folder, and
+ * `file` picks ANY file (a `file` field's chooser, `pickers.ts` — the listing is `show=all`). A click on a folder enters
+ * it; ↑ goes to the one above; the path field takes a typed folder (Enter). A folder the server cannot list shows the
+ * server's message and keeps the last listing — and when the folder the dialog was opened on cannot be listed (a field
+ * naming a folder that is not there yet), the graph folder is listed under the message instead of nothing.
  *
  * The path field shows the END of the path — the folder's own name — whenever a folder is shown: a deep path is
  * longer than the field, and scrolled to its start the name was off to the right (measured: 907 px of text in 566).
@@ -16,11 +18,11 @@
  * `data-file-confirm`.
  */
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { errorMessage, listFiles, type FileListing } from "../api";
+import { errorMessage, listFiles, type FileListing, type FileShow } from "../api";
 import { joinPath, yamlName } from "../files";
 import { Modal } from "./Modal";
 
-export type FileMode = "open" | "save" | "folder";
+export type FileMode = "open" | "save" | "folder" | "file";
 
 export interface FileRequest {
   mode: FileMode;
@@ -61,21 +63,32 @@ export function FileDialog({ request, onDone }: { request: FileRequest; onDone: 
   const [name, setName] = useState(request.name ?? "");
   const normalise = request.normalise ?? yamlName;
   const pathField = useRef<HTMLInputElement>(null);
+  const show: FileShow = request.mode === "file" ? "all" : "graphs";
 
-  const go = useCallback(async (dir?: string) => {
-    try {
-      const next = await listFiles(dir);
-      setListing(next);
-      setTypedDir(next.dir);
-      setError(null);
-      setPicked(null);
-    } catch (exc) {
-      setError(errorMessage(exc));
-    }
-  }, []);
+  /** List `dir`: `null` once listed, else the server's message (shown). `keep` is a message to show over the listing. */
+  const go = useCallback(
+    async (dir?: string, keep?: string): Promise<string | null> => {
+      try {
+        const next = await listFiles(dir, show);
+        setListing(next);
+        setTypedDir(next.dir);
+        setError(keep ?? null);
+        setPicked(null);
+        return null;
+      } catch (exc) {
+        const said = errorMessage(exc);
+        setError(said);
+        return said;
+      }
+    },
+    [show],
+  );
 
   useEffect(() => {
-    void go(request.dir);
+    void go(request.dir).then((said) => {
+      // the folder asked for cannot be listed (a field naming one not there yet): the editor's folder, under the reason
+      if (said !== null && request.dir !== undefined) void go(undefined, `${said} — showing the editor's folder instead`);
+    });
   }, [go, request.dir]);
 
   // a folder shown: its name, at the end of the path, is what shows in the field
@@ -88,7 +101,7 @@ export function FileDialog({ request, onDone }: { request: FileRequest; onDone: 
   const target = (): string | null => {
     if (listing === null) return null;
     if (request.mode === "folder") return listing.dir;
-    if (request.mode === "open") return picked;
+    if (request.mode === "open" || request.mode === "file") return picked;
     return name.trim() === "" ? null : joinPath(listing.dir, normalise(name));
   };
   const exists =
@@ -107,7 +120,7 @@ export function FileDialog({ request, onDone }: { request: FileRequest; onDone: 
       footer={
         <>
           <span className="file-chosen" title={chosen ?? ""}>
-            {chosen ?? (request.mode === "open" ? "pick a .yaml file" : "")}
+            {chosen ?? (request.mode === "open" ? "pick a .yaml file" : request.mode === "file" ? "pick a file" : "")}
           </span>
           <button type="button" className="button" data-file-cancel onClick={() => onDone(null)}>
             Cancel
@@ -150,7 +163,9 @@ export function FileDialog({ request, onDone }: { request: FileRequest; onDone: 
         {error && <div className="file-error">{error}</div>}
         <ul className="file-list" role="listbox">
           {listing === null && !error && <li className="file-empty">reading the folder…</li>}
-          {listing !== null && listing.entries.length === 0 && <li className="file-empty">this folder holds no folder and no .yaml</li>}
+          {listing !== null && listing.entries.length === 0 && (
+            <li className="file-empty">{request.mode === "file" ? "this folder is empty" : "this folder holds no folder and no .yaml"}</li>
+          )}
           {listing?.entries.map((entry) => (
             <li
               key={entry.path}
@@ -162,10 +177,12 @@ export function FileDialog({ request, onDone }: { request: FileRequest; onDone: 
               title={entry.path}
               onClick={() => {
                 if (entry.kind === "dir") void go(entry.path);
-                else if (request.mode === "open") setPicked(entry.path);
+                else if (request.mode === "open" || request.mode === "file") setPicked(entry.path);
                 else if (request.mode === "save") setName(entry.name);
               }}
-              onDoubleClick={() => entry.kind === "yaml" && request.mode === "open" && onDone({ path: entry.path, overwrite: false })}
+              onDoubleClick={() =>
+                entry.kind !== "dir" && (request.mode === "open" || request.mode === "file") && onDone({ path: entry.path, overwrite: false })
+              }
             >
               {entry.kind === "dir" ? <FolderIcon /> : <FileIcon />}
               <span className="file-name">{entry.name}</span>

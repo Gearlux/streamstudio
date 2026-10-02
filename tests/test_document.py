@@ -677,6 +677,92 @@ class TestDerive:
         assert [(s.name, s.type) for s in root.outputs] == [("input", "Signal"), ("regions", "Regions")]
         assert not any(node.kind == "host" for node in model.nodes)
 
+    def test_the_detection_model_derives_its_root_and_no_problem(self) -> None:
+        """Measured 2026-10-01 on the shipped ``threshold_detector_model.yaml`` — the detection workspace's
+        MODEL graph, rooted that day: the ``contract:`` root (the host's ``input`` and ``target`` and the IQ
+        ``signal`` the first step reads), seven steps, and the ``threshold`` step's ``ConfigureOp`` members
+        (its two floor ops and the ``Threshold`` it configures) — 11 nodes — and 9 wires: 6 ``from:``
+        record wires, the 2 list members and the configured target. No step reads ``input``, ``target``
+        or ``signal`` by name, so the root wires to nothing and no ``<host>`` node is drawn; the document
+        reports no problem.
+
+        This pins the waivefront file's declarations from here; a change there shows up here first.
+        """
+        doc = Document.open(_bte_path().with_name("threshold_detector_model.yaml"))
+        model = doc.model
+        assert doc.check() == []
+        assert [node.name for node in model.nodes] == [
+            "contract",
+            "spectrogram",
+            "magnitude",
+            "threshold",
+            "threshold.ops[0]",
+            "threshold.ops[1]",
+            "threshold.target",
+            "components",
+            "regions",
+            "prediction",
+            "narrowed",
+        ]
+        kinds: Dict[str, int] = {}
+        for wire in model.wires:
+            kinds[wire.kind] = kinds.get(wire.kind, 0) + 1
+        assert kinds == {"record": 6, "list": 2, "ref": 1}
+        root = model.node("contract")
+        assert root.kind == "contract"
+        assert [(s.name, s.type) for s in root.outputs] == [
+            ("input", "Image"),
+            ("target", "Boxes"),
+            ("signal", "Signal"),
+        ]
+        assert root.inputs == [], "the graph hands back each record: it declares no output slot to wire"
+        assert not any(node.kind == "host" for node in model.nodes)
+
+    def test_the_detection_models_root_is_what_its_chain_is_checked_against(self, tmp_path: Path) -> None:
+        """The root's entries are what the chain check starts from — shown on a COPY of the shipped model
+        whose ``threshold`` step is a plain ``Threshold``, because on the shipped file the check does not
+        run at all: a flow step whose settings hold markers (the ``ConfigureOp``) is never built, and one
+        unbuilt step skips the whole flow's check (measured 2026-10-01: a head step reading ``spectrogram``
+        is accepted there, rooted or not — tracked in this project's ``TASKS.md``).
+
+        PRO: a head step reading ``spectrogram``, which nothing before it produces, is refused, and the
+        refusal lists the root's three entries. CON: the same copy with the root cut off is fed by a
+        ``<host>`` that supplies anything, so the same step is accepted and the host grows a
+        ``spectrogram`` output.
+        """
+        source = _bte_path().with_name("threshold_detector_model.yaml").read_text()
+        start, stop = source.index("  threshold:\n"), source.index("  components:\n")
+        plain = (
+            source[:start]
+            + "  threshold:\n    op: !class:recordstream.ops.numpy.Threshold\n      field: spectrogram\n"
+            + "    from: magnitude\n"
+            + source[stop:]
+        )
+        head = (
+            "flow:\n  floor_first:\n    op: !class:waivefront.processing.NoiseFloorEstimate {}\n"
+            "  spectrogram:\n    from: floor_first\n"
+        )
+        assert "flow:\n  spectrogram:\n" in plain
+        plain = plain.replace("flow:\n  spectrogram:\n", head, 1)
+
+        rooted = tmp_path / "model.yaml"
+        rooted.write_text(plain)
+        problems = [problem.message for problem in Document.open(rooted).check()]
+        assert len(problems) == 1
+        assert problems[0].startswith(f"{rooted}:floor_first: ")
+        assert (
+            "NoiseFloorEstimate needs the record entry 'spectrogram', which nothing before it produces — "
+            "the chain has input, signal, target at that point" in problems[0]
+        )
+
+        mark = "# The graph's ROOT"
+        assert mark in plain, "the shipped model carries its contract block (appended after its last entry)"
+        unrooted = tmp_path / "model_without_its_root.yaml"
+        unrooted.write_text(plain[: plain.index(mark)])
+        doc = Document.open(unrooted)
+        assert doc.check() == []
+        assert [(s.name, s.type) for s in doc.model.node("<host>").outputs] == [("spectrogram", "Spectrogram")]
+
     def test_a_step_whose_entry_nothing_produces_is_refused_on_the_shipped_bluetooth_pane(self, tmp_path: Path) -> None:
         """The PRO case the pane's ``contract:`` root exists for (2026-09-28): ``NoiseFloorEstimate``
         reads ``spectrogram``, which no step of the Bluetooth pane writes and the host does not provide

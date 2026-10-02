@@ -216,6 +216,36 @@ class YamlText:
                     else len(self.text)
                 )
                 return self.apply([(key_node.end_mark.index, stop, f": {spelled}\n")])
+        return self._insert_pair(node, line, col, key, spelled)
+
+    def set_marker(self, line: int, col: int, key: str, marker: str) -> str:
+        """The text with ``key: <marker>`` set on the marker located at 1-based ``line:col`` — ``marker`` already
+        spelled (``!class:x.Y {a: 1}``): a slot of the marker gets a new object.
+
+        What the key holds is REPLACED and every comment outside it stays: a one-line value in place (a comment
+        after it on its line stays too), a block value through its last line of CONTENT — the comment lines below
+        it belong to what follows, where :meth:`set_kwarg` would take them along — and an empty ``key:`` gets the
+        marker after its colon. A key the marker does not spell is inserted as :meth:`set_kwarg` inserts one.
+        """
+        node = self.node_at(line, col)
+        if isinstance(node, yaml.MappingNode):
+            found = self.pair(node, key)
+            if found is not None:
+                key_node, value_node = found
+                if isinstance(value_node, yaml.ScalarNode) and value_node.tag == _NULL_TAG and value_node.value == "":
+                    colon = self.text.index(":", key_node.end_mark.index)
+                    return self.apply([(colon + 1, colon + 1, f" {marker}")])
+                if value_node.start_mark.line == value_node.end_mark.line:
+                    return self.apply([(value_node.start_mark.index, value_node.end_mark.index, marker)])
+                stop = self.line_start(_last_content_line(value_node) + 1)
+                return self.apply([(key_node.end_mark.index, stop, f": {marker}\n")])
+        return self._insert_pair(node, line, col, key, marker)
+
+    def _insert_pair(self, node: yaml.Node, line: int, col: int, key: str, spelled: str) -> str:
+        """The text with ``key: <spelled>`` inserted into the marker ``node`` (located at ``line:col``), which does not
+        spell ``key``: right under its head line in block form, appended inside the braces of a one-line flow mapping,
+        or as ``{key: value}`` after a bare tag."""
+        if isinstance(node, yaml.MappingNode):
             if node.flow_style:
                 if node.start_mark.line != node.end_mark.line:
                     raise ValueError(f"the flow mapping at {line}:{col} spans several lines — spell it in block form")
@@ -341,6 +371,21 @@ class YamlText:
                         if isinstance(ref, yaml.ScalarNode) and _bind_step(ref.value) == old:
                             edits.append(self.replace_scalar_edit(ref, new + ref.value[len(old) :]))
         return edits
+
+
+#: The tag PyYAML's resolver gives a plain empty value (``key:`` with nothing after it).
+_NULL_TAG = "tag:yaml.org,2002:null"
+
+
+def _last_content_line(node: yaml.Node) -> int:
+    """The 0-based line of the last character a value's own content occupies. A BLOCK collection's end mark is the
+    NEXT token's position — past the blank and comment lines between — so the walk goes down to its last child; a
+    scalar or a flow collection ends on its own last line (a block scalar's end mark sits at the start of the line
+    after it)."""
+    while isinstance(node, (yaml.MappingNode, yaml.SequenceNode)) and not node.flow_style and node.value:
+        node = node.value[-1][1] if isinstance(node, yaml.MappingNode) else node.value[-1]
+    end = node.end_mark
+    return int(end.line) if end.column > 0 else int(end.line) - 1
 
 
 def dedent(block: str, by: int) -> str:

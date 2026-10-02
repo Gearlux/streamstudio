@@ -168,6 +168,22 @@ describe("nodeMenu — right-click on a node", () => {
     expect(item(entries, "Open").disabled).toBe(true);
     expect(item(entries, "Open").hint).toBe("the editor sent no inside for this subgraph");
   });
+
+  it("a node with a source slot (a Stream) offers Set source… — filling it, or replacing what fills it", () => {
+    const choose = vi.fn();
+    const empty = nodeMenu({ ...context(), node: node("engine"), ...actions, slots: [{ slot: "source", filled: undefined, choose }] });
+    expect(labels(empty).slice(-1)).toEqual(["Set source…"]);
+    expect(item(empty, "Set source…").attrs).toEqual({ "data-command": "set-slot", "data-slot": "source" });
+    expect(item(empty, "Set source…").hint).toBe("choose a class for the empty source slot, and its values");
+    item(empty, "Set source…").onSelect();
+    expect(choose).toHaveBeenCalled();
+    const filled = nodeMenu({ ...context(), node: node("engine"), ...actions, slots: [{ slot: "source", filled: "stream.source", choose }] });
+    expect(item(filled, "Set source…").hint).toBe("replace stream.source: a class and its values");
+  });
+
+  it("CON: a node without source slots has no Set item", () => {
+    expect(labels(nodeMenu({ ...context(), node: node("op"), ...actions, slots: [] }))).not.toContain("Set source…");
+  });
 });
 
 describe("groupMenu — right-click on a group's title", () => {
