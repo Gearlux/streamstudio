@@ -5,8 +5,13 @@
  * The dialog keeps the keyboard (P5): Tab and Shift+Tab cycle through its own controls (`focus.nextFocus`) — measured
  * before, the fourth Tab of the recovery question reached the menu bar behind it, and New ▸ Flow graph… made a graph
  * while the question was still asked.
+ *
+ * It TAKES the keyboard when it opens — its box gets the focus unless a control of its own asked for it (`autoFocus`) —
+ * and gives it back, when it closes, to what had it: a dialog opened over another (the folder browser over Set source…)
+ * then answers Escape itself. Measured before: the focus stayed on Set source…'s `…`, so Escape closed Set source… under
+ * the browser, and the folder chosen next went nowhere; on a card, Escape did nothing.
  */
-import { useRef, type KeyboardEvent, type ReactNode } from "react";
+import { useEffect, useRef, type KeyboardEvent, type ReactNode } from "react";
 import { FOCUSABLE, nextFocus } from "../focus";
 
 export interface ModalProps {
@@ -20,6 +25,17 @@ export interface ModalProps {
 
 export function Modal({ title, kind, onCancel, children, footer, wide }: ModalProps) {
   const box = useRef<HTMLDivElement>(null);
+  /** What had the focus when the dialog was drawn — read during the first render, before any `autoFocus` moved it. */
+  const opener = useRef<Element | null>(document.activeElement);
+  useEffect(() => {
+    const own = box.current;
+    if (own !== null && !own.contains(document.activeElement)) own.focus();
+    const back = opener.current;
+    return () => {
+      const lost = document.activeElement === null || document.activeElement === document.body;
+      if (lost && back instanceof HTMLElement && back.isConnected) back.focus();
+    };
+  }, []);
   const keepFocus = (event: KeyboardEvent<HTMLDivElement>) => {
     if (event.key !== "Tab" || box.current === null) return;
     const controls = Array.from(box.current.querySelectorAll<HTMLElement>(FOCUSABLE));
@@ -34,6 +50,7 @@ export function Modal({ title, kind, onCancel, children, footer, wide }: ModalPr
         className={`modal${wide ? " wide" : ""}`}
         role="dialog"
         aria-modal="true"
+        tabIndex={-1}
         aria-label={title}
         data-dialog={kind}
         onKeyDown={(event) => {

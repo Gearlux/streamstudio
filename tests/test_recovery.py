@@ -200,6 +200,7 @@ class TestTheWorkspaceRoute:
             "folder": str(graph_dir),
             "session": editor.studio.session,
             "recovery": None,
+            "host": None,
         }
 
     def test_the_next_editor_lists_what_a_restore_would_open(
@@ -212,6 +213,7 @@ class TestTheWorkspaceRoute:
         assert answer == {
             "folder": str(graph_dir),
             "session": editor.studio.session,
+            "host": None,
             "recovery": {
                 "saved_at": saved_at,
                 "error": None,

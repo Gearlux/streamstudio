@@ -62,10 +62,14 @@ export function NewDialog({ kind, folder: editorFolder, onCreate, onCancel }: Ne
   /** Bumped when the folder is SET (the editor's, or one browsed to): the field then shows the END of the path. */
   const [placed, setPlaced] = useState(0);
 
-  // opened before the page learnt its folder: the field takes it when it arrives, unless something was typed
+  // opened before the page learnt its folder — or the host moved it since: the field takes the editor's folder when it
+  // arrives, unless the person typed another one
+  const offered = useRef(editorFolder);
   useEffect(() => {
     if (editorFolder === "") return;
-    setFolder((typed) => (typed.trim() === "" ? editorFolder : typed));
+    const before = offered.current;
+    offered.current = editorFolder;
+    setFolder((typed) => (typed.trim() === "" || typed === before ? editorFolder : typed));
     setPlaced((count) => count + 1);
   }, [editorFolder]);
 

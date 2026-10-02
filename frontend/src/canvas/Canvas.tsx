@@ -34,7 +34,8 @@
  * breadcrumb `demo › prep` sits above the drawing; a click on a crumb shows that level (`onLevel`). Each level keeps
  * its own viewport for the page's life: going up puts back the view the level was left at. Entering a subgraph the
  * first time shows its inside at ZOOM 1 — fitted when it fits, else panned so its `<in>` shows — never a fit that
- * shrinks the cards (measured: a four-card inside fitted at 0.66 drew its text at 6–8 px). `data-view-level` names the
+ * shrinks the cards (measured: a four-card inside fitted at 0.66 drew its text at 6–8 px). In a host's panel
+ * (`fitOnOpen`) a graph's TOP opens fitted, the whole graph in view (never above zoom 1). `data-view-level` names the
  * level once its viewport is set — what a test waits on.
  *
  * Zoom, pan, minimap, snap to a 10-px grid and box select (Shift + drag on empty canvas) are React Flow's own
@@ -144,6 +145,12 @@ export interface CanvasProps {
   /** The subgraph level drawn (`""` = the top): only its groups are drawn and changed. */
   level?: string;
   showMinimap?: boolean;
+  /**
+   * Show a graph's top level WHOLE the first time it is drawn (a fit, never above zoom 1) — a host's panel (`?embed=1`):
+   * measured before, zoom 1 from the top-left showed 1 of the Bluetooth pane's 30 cards in a 900x700 panel. The
+   * standalone page keeps `START` (zoom 1), where a drag's effect is measured.
+   */
+  fitOnOpen?: boolean;
   /** A drag changed the layout — the app writes it (positions and, when they changed, groups) as one gesture. */
   onLayout: (change: LayoutChange) => void;
   /** A wire was drawn that the document cannot express yet; `message` says why and what it would be spelled as. */
@@ -200,6 +207,7 @@ export function Canvas({
   types,
   level = "",
   showMinimap = true,
+  fitOnOpen = false,
   onLayout,
   onProposal,
   onSelection,
@@ -269,7 +277,13 @@ export function Canvas({
     let live = true;
     setViewLevel(null);
     const saved = viewports.current[viewKey];
-    const set = saved ? flow.setViewport(saved) : level !== "" ? openInside(level) : Promise.resolve(true);
+    const set = saved
+      ? flow.setViewport(saved)
+      : level !== ""
+        ? openInside(level)
+        : fitOnOpen
+          ? flow.fitView({ padding: 0.05, maxZoom: 1 })
+          : Promise.resolve(true);
     void set.then(() => {
       if (live) setViewLevel(level);
     });
@@ -277,7 +291,7 @@ export function Canvas({
       live = false;
       viewports.current[viewKey] = flow.getViewport();
     };
-  }, [flow, level, openInside, viewKey]);
+  }, [fitOnOpen, flow, level, openInside, viewKey]);
 
   useOnSelectionChange<CanvasNode, CanvasEdge>({
     onChange: useCallback(
@@ -518,7 +532,9 @@ export function Canvas({
           else onContextMenu({ kind: "pane", ...menuAt(event) });
         }}
         defaultViewport={START}
-        minZoom={0.1}
+        // low enough for a host's panel to show a large graph whole (`fitOnOpen`): the Bluetooth pane's 30 cards fit a
+        // 580-px canvas at about 0.06, and React Flow clamps a fit to this bound (measured at 0.1: 17 of the 30 cards)
+        minZoom={0.02}
         snapToGrid
         snapGrid={[10, 10]}
         nodeDragThreshold={0}

@@ -139,7 +139,8 @@ that line to its `.gitignore` (this repository's own `.gitignore` carries it).
 ### The window
 
 A menu bar across the top, the canvas in the middle, a side panel on the right with three tabs — **text** (the
-YAML as the editor holds it), **settings** (a form of every node on the level the canvas shows) and **run**.
+YAML as the editor holds it), **settings** (a form of every node on the level the canvas shows — of the graph's
+`app:` fields when it declares them, [below](#settings-a-graphs-app-fields)) and **run**.
 
 | menu | items (shortcut; on a Mac ⌘ for Ctrl) |
 | --- | --- |
@@ -153,6 +154,23 @@ YAML as the editor holds it), **settings** (a form of every node on the level th
 An item that cannot act is greyed — Save while nothing changed, Copy with nothing selected. Keys are ignored
 while you type in a field. `Escape` closes an open menu; with none open, it goes up one subgraph level. The bar
 also has a **Nodes** button (the sidebar) and a green **▶ Run**.
+
+**A link opens a view.** The address follows what the page shows, so a reload or a shared link opens the same
+graph, subgraph level and side tab:
+
+```
+/?graph=view_bte                     the graph view_bte, the text tab
+/?graph=view_bte&tab=settings        the same graph, the settings tab open
+/?graph=demo&level=prep              the inside of the subgraph prep
+/?graph=nosuch                       nothing opens; the canvas says
+                                     "There is no graph 'nosuch' in /w/state — the graphs there are: source, view_bte and view_fft."
+                                     with one button per graph
+```
+
+**The settings tab** of a graph with an `app:` block lists only the fields it names (the Bluetooth pane: 30 of its
+247 parameters), one section per node in the block's order, and a tick box **all parameters** lists every one. A
+`(min, max)` pair (`deviation_hz`) is ONE field of two numbers. An `app:` entry that names nothing is listed under the
+fields in the server's words.
 
 **The graph list** (the dropdown in the bar) holds every `*.yaml` of the folder, every file opened with
 File ▸ Open…, and every file New… wrote in another folder. It leaves out `*.layout.yaml` (the positions sidecars)
@@ -332,12 +350,48 @@ number changes (`stream.ops[3]` → `stream.ops[2]`), and an undo moves the numb
   that says which, answers `this graph holds 2 op lists (stream.ops, other.ops) — select a member of one, or the node
   holding it, to add to it`.
 
+### Set source… — putting a source into a `Stream`
+
+A `Stream`'s `source` is a SLOT that one object fills, not a list, and a wire drawn into it cannot say which object
+to build — so the canvas asks for a class and its values instead. Three ways in, one dialog: the **set…** button on
+the `source` row of the card, **Set source…** in the node's right-click menu, or a wire dragged out of the `source`
+slot and dropped on empty canvas. The dialog lists the classes the slot takes (the sources first, then the engines —
+a `Stream` is a source too), then the chosen class's form, with the [pickers](#pickers); **Set source** sends only the
+values you changed from the class's defaults. Starting from this file:
+
+```yaml
+# read_files — a stream over the files of one folder
+stream: !class:recordstream.core.stream.Stream
+  source:   # nothing yet — Set source… fills it
+  ops:
+    - !class:recordstream.ops.debug.PrintRecordOp {}
+```
+
+choosing `FilesSource` and typing `/data/captures` into its `root` changes ONE line (measured through
+`POST …/slot`):
+
+```yaml
+  source: !class:recordstream.sources.files.FilesSource {root: /data/captures}   # nothing yet — Set source… fills it
+```
+
+What the slot held is replaced — a marker, a `!ref:` or nothing — and the comments around it stay; one Ctrl+Z
+restores the text byte for byte. A slot holding a REFERENCE (`source: !ref:files`) gets the new class in the
+reference's place, and the dialog says so before you press Set: `FilesSource goes into stream's source slot in place
+of its reference to files; files (FilesSource) stays in the document, unwired.` What `POST …/slot` refuses (the page
+offers neither), changing nothing:
+
+```
+the ops list                     stream.ops is a list — add a member to it, or remove one; it is never set whole
+an op into the source slot       stream.source = !class:recordstream.ops.numpy.Threshold {} refused at …/read_files.yaml:2:9:
+                                 cannot wire stream.source.op (Op) into stream.source (Source) at …/read_files.yaml:2:9: the types do not meet
+```
+
 ### Right-click menus
 
 | on | items |
 | --- | --- |
 | empty canvas | Add Node ▸ (by kind, with a search) · Add Group · Paste · Insert template ▸ · Insert steps file… · Arrange |
-| a node | Rename… · Delete · Copy · Group · Convert to subgraph · Save as template… · Run to here — and on a subgraph node also Open · Move to its own file… |
+| a node | Rename… · Delete · Copy · Group · Convert to subgraph · Save as template… · Run to here — on a `Stream` also Set source… ([above](#set-source--putting-a-source-into-a-stream)), and on a subgraph node also Open · Move to its own file… |
 | a group's title bar | Rename… · Colour ▸ · Ungroup · Convert group to subgraph |
 
 A right-click on a node that is not selected selects it first, so the node menu acts on what you see highlighted.
@@ -540,7 +594,13 @@ the server's located message.
 | *Arrange* (left to right by the cards' sizes) / *Arrange in columns* (the server's layers), then the view fits the whole level (never above zoom 1) | `PUT …/positions` / `POST …/layout` | unchanged |
 | `Ctrl+Z` / `Ctrl+Shift+Z` | a document edit: `POST …/undo` / `…/redo`; a move or group: the page writes the old layout back | the text history is the server's — an agent's edit is undone the same way |
 | **run** tab: *run* (record #N, pausing before the selected node), *step*, click a node | `POST …/trace`, `GET/POST /api/runs/<run>…` | unchanged — each node shows its status, time and generation |
-| in a node's entry: change a value, *rerun this node* | `POST /api/runs/<run>/rerun` with the values that differ | unchanged — the value is a trial; the node and what follows are recomputed |
+| **run** tab in an editor mounted in a host, on a graph with no source of its own: *run* | `POST …/trace {}` — no record number; the host's record runs | unchanged — the panel says `record: the workspace's selection` before (the host's `name`), and after names what ran (`run_… · rec_7 · 0.25–0.75 s · 1–2 MHz`) and what the host filled in (`window: start_s = 0.25, stop_s = 0.75`) |
+| *set…* on a Stream's `source` row, **Set source…** in its right-click menu, or a wire dragged out of the `source` slot onto nothing; pick a class (sources first), fill its form, **Set source** | `POST …/slot {node, slot, class_path, params}` with the values changed from the defaults | `  source: !class:recordstream.sources.files.FilesSource {root: /data/captures}` — what was in the slot is replaced; one undo takes it out. A slot holding a REFERENCE (`source: !ref:files`) gets the new class in the reference's place, and the dialog says the referenced node stays, unwired: `FilesSource goes into stream's source slot in place of its reference to files; files (FilesSource) stays in the document, unwired.` After a pick the keyboard is in the form's first field (Escape cancels, Tab moves on); the arrows keep the highlighted class in view |
+| the `…` beside a folder or file field ([Pickers](#pickers)) | `GET /api/files` (a folder) or `GET /api/files?show=all` (any file) — the editor's machine | the path chosen, as if typed |
+| point at the list beside a HuggingFace source's `path`, `split`, `input_feature` / `target_feature`, or *add column…* beside `metadata_features` | `GET /api/hf/datasets`, `…/splits?path=`, `…/features?path=&split=` — asked once per question, only when you reach for the list | the name picked, as if typed (`*` replaces the column list, a column is appended) |
+| **settings** tab: tick *all parameters* | `GET …/form` (already read) | unchanged — every parameter of the level shown instead of the `app:` fields; the tick stays for that graph while you look at another tab |
+| a `(min, max)` pair: type the min, Tab, type the max | `POST …/param` twice, in that order: `[min, old max]`, then `[min, max]` | the pair as typed — the max box keeps what you type while the first answer arrives |
+| in a node's entry: change a value, *rerun this node* | `POST /api/runs/<run>/rerun` with the values that differ | unchanged — the value is a trial; the node and what follows are recomputed. On a host's record the form starts from what the host FILLED (the window, the band — what ran), and those are sent only when you type new ones: a pane spelling `start_s: 0` reruns on the host's 0.001–0.003 s, not on the whole capture |
 | **Graph ▸ Check graph** | `GET …/check` | unchanged — every problem, with its `file:line:col` |
 
 ### What it refuses, and how it says so
@@ -559,14 +619,25 @@ A refused edit changes nothing. The message is the server's, verbatim (paths sho
 | add a class on a graph holding two op lists, nothing selected | `this graph holds 2 op lists (stream.ops, other.ops) — select a member of one, or the node holding it, to add to it` (the page's words; nothing is sent) |
 | drag a wire out of the FIRST member's `record` input and drop it on nothing | `nothing feeds stream.ops[0] — a step can only be inserted after another one` (the page's words) |
 | rename a node to a name in use | `'gain' is already a node (the nodes are: ['gain', 'clip'])` — the title goes back |
-| *run* a graph with no source of its own | `clip.yaml: this graph has no source to draw a record from — a host supplies the record (mount the editor in one) or wire a source` |
+| *run* a graph with no source of its own, in the standalone editor (mounted in a host, the host's record runs — [Mounting the editor in a host app](#mounting-the-editor-in-a-host-app)) | `clip.yaml: this graph has no source to draw a record from — a host supplies the record (mount the editor in one) or wire a source` |
+| *run* such a graph while the host has no record to give | the host's own words, as it raised them: `no record is selected in the page — open one there, then press Run` |
+| put a class into a list slot (`stream.ops`) with *set source…* | `stream.ops is a list — add a member to it, or remove one; it is never set whole` |
+| put a class whose output does not meet the slot into it (an op into `stream.source`) | `stream.source = !class:recordstream.ops.numpy.Threshold {} refused at …/source.yaml:15:3: cannot wire stream.source.op (Op) into stream.source (Source) at …/source.yaml:15:3: the types do not meet` — nothing changes |
 | undo with nothing to undo | `wires.yaml: nothing to undo — the editor holds no earlier edit of this document` |
 
 ### What is not there yet
 
 - **The flip.** A consuming annotation workspace still opens the ComfyUI canvases (`streamstudio run --editor
-  comfy`), not this editor. Mounting this editor in their place is phase 4, and the ComfyUI extension described
-  from [Installation](#installation) down is deleted in the same phase.
+  comfy`), not this editor. The editor can now be mounted in its page with a host
+  ([Mounting the editor in a host app](#mounting-the-editor-in-a-host-app)); the workspace's switch is the next
+  step of phase 4, and the ComfyUI extension described from [Installation](#installation) down is deleted after it.
+- **A host's fills inside a subgraph.** A host's window and band reach the ops on the graph's own level — a step of
+  a `flow:`, a member of the `Stream`'s `ops` — not an op inside a subgraph step.
+- **A source the host fills.** A graph whose source is wired but empty until the HOST fills it when it runs the graph
+  (a workspace's files graph: a `FilesSource` with no files) is refused by Run in the editor, in words — the host
+  hands the editor a record, never the files for a source.
+- **Folding the side panel in a host's panel.** It stays 320 px wide; a large graph opens fitted, every card shown,
+  and you zoom in to read it.
 - **Writing a wire.** A drawn wire stays a dashed proposal until a route can write `from:`, `bind:` or `!ref:`.
 - **A member at the START of a list.** Adding goes after a member or at the end, so a new first member is made by
   adding it and deleting the ones before it. Paste, Insert template and Insert steps file place by the older rule:
@@ -581,8 +652,6 @@ A refused edit changes nothing. The message is the server's, verbatim (paths sho
   ([what a stop cannot keep](#unsaved-work-survives-a-stop)).
 - **A subgraph held in another op's slot** (`RandomApply(op=Subgraph(…))`) is drawn and edited as a subgraph node
   (`maybe.op`), but the run tab shows no rows for its inside.
-- **The HuggingFace pickers and the directory chooser** of the ComfyUI nodes. The settings tab lists every
-  parameter; it does not yet narrow to a pane's `app:` field list.
 - **The page inside the package.** An install from GitHub serves a placeholder until a release builds the page
   in ([Building the canvas page](#building-the-canvas-page)).
 
@@ -639,13 +708,13 @@ script, a tool — is served as always.
 
 | verb | path | what it does |
 | --- | --- | --- |
-| GET | `/api/workspace` | `{folder, session, recovery}` — `recovery` is `null`, or the unsaved work a stop kept: `{saved_at, graphs: [{name, path, disk: unchanged\|changed\|gone\|unreadable, reason, changed_on_disk, saved_at}], error, aside}`; for a file that cannot be used, `graphs` is empty, `error` says why and `aside` is where discard moves it |
+| GET | `/api/workspace` | `{folder, session, recovery, host}` — `host` is `{name}` for an editor mounted with a host ([Mounting the editor in a host app](#mounting-the-editor-in-a-host-app)), `null` standalone; `recovery` is `null`, or the unsaved work a stop kept: `{saved_at, graphs: [{name, path, disk: unchanged\|changed\|gone\|unreadable, reason, changed_on_disk, saved_at}], error, aside}`; for a file that cannot be used, `graphs` is empty, `error` says why and `aside` is where discard moves it |
 | POST | `/api/workspace/recovery/restore` | open the kept graphs (unsaved, no undo history) and remove the file; answers the graph list, each entry with `restored`; `404` when there is nothing kept |
 | POST | `/api/workspace/recovery/discard` | remove the file (move an unreadable one aside); answers the graph list; `404` when there is nothing kept |
 | GET | `/api/graphs` | `[{name, path, kind, dirty}]` — `kind` is `flow`, `graph` or `contract` |
 | POST | `/api/graphs` | `{name, kind: flow\|pipeline\|source, dir?}` — WRITE the starter to `<dir or the graph folder>/<name>.yaml` at once and add it to the list; answers the graph with `dirty: false` (its `name` may be `fresh~2`). Refused, writing nothing, when the file exists, the name breaks the file-name rule, or the folder is not a writable folder (`404` when it does not exist) |
 | POST | `/api/graphs/open` | `{path}` — add any `.yaml` on this machine to the list |
-| GET | `/api/files?dir=` | `{dir, parent, entries: [{name, path, kind: dir\|yaml}]}` — the file browser; no `dir` = the graph folder |
+| GET | `/api/files?dir=&show=` | `{dir, parent, entries: [{name, path, kind: dir\|yaml\|file}]}` — folders first; `show=graphs` (the default: File ▸ Open, a folder picker) adds the `*.yaml` files but the layout sidecars, `show=all` (a file picker) every file as `file`; hidden entries never; no `dir` = the graph folder; `$VAR` in `dir` is expanded |
 | GET | `/api/graphs/<name>` | `{name, path, kind, text, model, positions, groups, history_depth, dirty}`; `model.inside` holds each subgraph's inside, recursively |
 | PUT | `/api/graphs/<name>` | `{text}` replaces the whole document in the editor; the history starts over |
 | POST | `/api/graphs/<name>/save` | write every changed file and the sidecar — refused when a file changed on disk |
@@ -653,6 +722,7 @@ script, a tool — is served as always.
 | POST | `/api/graphs/<name>/revert` | read the file again, dropping unsaved changes |
 | GET | `/api/graphs/<name>/check` | `{problems: [{message, loc}]}` |
 | POST | `/api/graphs/<name>/param` | `{node, param, value}` — patch one value on its own line, or insert it when the file left the default |
+| POST | `/api/graphs/<name>/slot` | `{node, slot, class_path, params}` — put a new object into a single slot (`stream.source`), replacing what it held; one edit. Answers the graph plus `set` (the node now in the slot, `stream.source`) |
 | POST | `/api/graphs/<name>/steps` | `{name?, after?, list?, class_path, params}` — `after` a flow step: a new step on its level named `name`, and what read `after` now reads it; `after` an op-list member (`stream.ops[1]`): a new member after it; no `after` and `list: "stream.ops"`: a new member at the end. Answers the graph plus `added` (the new node's name) |
 | DELETE | `/api/graphs/<name>/steps/<node>` | remove one step (what read it now reads what it read from) or one list member |
 | POST | `/api/graphs/<name>/steps/remove` | `{nodes}` — remove several steps or members as ONE edit, all or nothing; removing every member leaves `ops: []` |
@@ -671,28 +741,279 @@ script, a tool — is served as always.
 | POST | `/api/graphs/<name>/layout` | lay every level out afresh (longest-path layering) |
 | PUT | `/api/graphs/<name>/groups` | `{groups: [{id, title, color, nodes, bounds?, parent?}, …]}` — stored as sent |
 | GET | `/api/types` | `{socket type: [the types it may be wired into]}` — the meet rule the canvas applies while you drag |
-| GET | `/api/graphs/<name>/form` | `{node: JSON-schema properties}` from `confluid.to_pydantic` — the settings form, every level |
+| GET | `/api/graphs/<name>/form` | `{node: JSON-schema properties}` from `confluid.to_pydantic` — the settings form, every level; a parameter with a picker carries `picker` ([Pickers](#pickers)); `requires` (the gate a branch sets) is never a field |
+| GET | `/api/graphs/<name>/app` | `{declared, fields: [{node, param, loc}], form, problems: [{message, loc}]}` — the graph's `app:` fields ([Settings: a graph's `app:` fields](#settings-a-graphs-app-fields)); `declared: false` and nothing else without an `app:` block |
+| GET | `/api/hf/datasets` | `{datasets, reason}` — the HuggingFace datasets this machine has cached, and why there are none when there are none |
+| GET | `/api/hf/features?path=&name=&split=` | `{features, all_columns}` — the columns of that dataset (`[]` without one, or when it cannot be read) and the `metadata_features` word for "every other column" (`*`) |
+| GET | `/api/hf/splits?path=&name=` | `{splits}` — the split names of that dataset |
 | GET | `/api/palette` | every configurable class as a typed node spec; `?refresh=1` rescans the registry |
-| POST | `/api/graphs/<name>/trace` | `{record, until}` — run record `#record` of the graph's own source through what the editor holds, pausing before `until` (`prep/scaled` pauses inside) |
+| POST | `/api/graphs/<name>/trace` | `{record, until}` — run record `#record` of the graph's own source through what the editor holds, pausing before `until` (`prep/scaled` pauses inside); a graph with no source runs the record its host supplies (`record` does not apply). Answers the run: `{run, graph, record, host, trace, statuses, generations, paused_at}` — `record: null` and `host: {label, filled: {node: {attribute: value}}}` for a host's record |
 | GET | `/api/runs/<run>` | the trace: per node its params, inputs, outputs, status and milliseconds; inner rows carry `parent` |
 | POST | `/api/runs/<run>/rerun` | `{node, params}` — rebuild one node through its constructor and rerun from it |
 
-A consuming Flask app mounts the API and the page under ONE prefix — the page calls `api/…` relative to its own
-address, so the two must sit side by side:
+### Mounting the editor in a host app
+
+A consuming Flask app mounts the API and the page under ONE prefix of its own — the page calls `api/…` relative to
+its own address, so the two must sit side by side — and gives the editor a HOST: any object with a `name` and three
+methods.
 
 ```python
-from streamstudio.app import editor_blueprint, page_blueprint, web_dist
+from pathlib import Path
+from typing import Sequence
 
-app.register_blueprint(editor_blueprint(graph_dir, templates_dir=templates), url_prefix="/editor")   # /editor/api/…
-app.register_blueprint(page_blueprint(web_dist()), url_prefix="/editor")                              # the page at /editor/
+from streamstudio.app import HostRecord, editor_blueprint, page_blueprint, studio_of
+
+
+class WorkspaceHost:
+    name = "the workspace"                                     # how the page names it: "record: the workspace's selection"
+
+    def folder(self) -> Path:                                  # asked at EACH request
+        return workspace.state_dir()
+
+    def record(self, graph: str, path: Path) -> HostRecord:    # a Run of a graph with no source of its own
+        record, (t0, t1), (f0, f1), name = workspace.selection()   # raise ValueError("…") when there is none
+        return HostRecord(
+            record=record,
+            fills=({"start_s": t0, "stop_s": t1}, {"f0_hz": f0, "f1_hz": f1}),
+            label=f"{name} · {t0:.3f}–{t1:.3f} s",
+        )
+
+    def saved(self, paths: Sequence[Path]) -> None:            # after every Save, Save As and New… that wrote one
+        workspace.rerun_panes_reading(paths)                   # spelled under folder() as folder() spells it
+
+
+app.register_blueprint(editor_blueprint(host=WorkspaceHost()), url_prefix="/studio")   # /studio/api/…
+app.register_blueprint(page_blueprint(), url_prefix="/studio")                          # the page at /studio/
+...
+studio_of(app).stash()   # on the host's own stop: the unsaved work is offered at the next start
 ```
 
 ```
-API at /editor, page_blueprint(web_dist()):   GET /editor/ -> the built page     GET /editor/api/graphs -> 200
-API at the root, page_blueprint():            GET /editor/ -> the placeholder    GET /editor/api/graphs -> 404
+GET /studio            -> 308 /studio/            GET /studio/api/graphs    -> the host folder's graphs
+GET /studio/           -> the built page          GET /api/workspace        -> the HOST's own route, untouched
+GET /studio/assets/…   -> the page's assets       GET /studio/api/workspace -> {folder: <the host's folder>, …,
+                                                                                 host: {name: "the workspace"}}
 ```
 
-The editor's state lives on `app.extensions["streamstudio"]`, so two apps in one process are two editors.
+The smallest host, whole — a folder holding one graph with no source of its own, and a record of one image. It runs
+as written (Flask's test client, no server); the three answers below are what it printed:
+
+```yaml
+# state/pane.yaml
+flow:
+  mask:
+    op: !class:recordstream.ops.numpy.Threshold {low_level: 0.5}
+```
+
+```python
+import sys
+from pathlib import Path
+
+import numpy as np
+from flask import Flask
+from recordstream.items import Image
+
+from streamstudio.app import HostRecord, editor_blueprint, page_blueprint
+
+
+class Host:
+    name = "demo"
+
+    def __init__(self, folder: Path) -> None:
+        self._folder = folder
+
+    def folder(self) -> Path:
+        return self._folder
+
+    def record(self, graph: str, path: Path) -> HostRecord:
+        image = Image(np.linspace(0, 1, 16, dtype=np.float32).reshape(4, 4))
+        return HostRecord({"image": image}, fills=({"low_level": 0.25},), label="the demo image")
+
+    def saved(self, paths) -> None:
+        print("saved:", [p.name for p in paths])
+
+
+app = Flask(__name__)
+app.register_blueprint(editor_blueprint(host=Host(Path(sys.argv[1]))), url_prefix="/studio")
+app.register_blueprint(page_blueprint(), url_prefix="/studio")
+
+client = app.test_client()
+print(client.get("/studio/api/workspace").get_json()["host"])
+run = client.post("/studio/api/graphs/pane/trace", json={}).get_json()
+print(run["record"], run["host"], run["statuses"])
+client.post("/studio/api/graphs/pane/param", json={"node": "mask", "param": "low_level", "value": 0.75})
+client.post("/studio/api/graphs/pane/save")
+```
+
+```
+$ python smallest_host.py state
+{'name': 'demo'}
+None {'filled': {'mask': {'low_level': 0.25}}, 'label': 'the demo image'} {'mask': 'ok'}
+saved: ['pane.yaml']
+```
+
+The Run asked the host for its record and set its fill on `mask` (`Threshold` has a `low_level`); the Save wrote
+`low_level: 0.75` into `state/pane.yaml` and told the host.
+
+- **`name`** is how the page names the host (`record: the workspace's selection`); `GET /api/workspace` answers it
+  as `host: {name}` — `null` for a standalone editor — which is also how the page knows Run asks the host.
+- **`folder()`** is asked at each request. When it names another folder than before — a workspace's first save
+  MOVES its state folder out of a temporary one, a save-as COPIES it — every graph of the old folder is the same
+  file in the new one: the list follows, and a graph held unsaved keeps its edits and its undo history and saves
+  into the new folder. A graph opened from elsewhere (File ▸ Open) stays where it is.
+- **`record(graph, path)`** answers what a **Run** of a graph WITHOUT a source of its own runs — a `flow:` alone, a
+  `Stream` whose `source` is empty. The run takes it through the text the editor holds, unsaved values included,
+  on the same tracer as a graph's own record (step, pause before a node, rerun a node all work). Each `fills` group
+  is set on every op holding ALL its attributes, on the graph's own level, before the run: the window above fills
+  `WindowSignal` (it has `start_s` and `stop_s`), the band fills a tuner (`f0_hz`, `f1_hz`), and an op with
+  `start_s` alone gets nothing. A rerun keeps them — it rebuilds a node from its current values. The run answers
+  `record: null` and `host: {label, filled: {node: {attribute: value}}}`. A host with no record raises
+  `ValueError("no record is selected in the page — open one there, then press Run")`, and that sentence is the
+  run's refusal. Anything else going wrong is a refusal in words naming the host, never a bare server error:
+
+  ```
+  record() raises IndexError  ->  400 …/view_x.yaml: the workspace could not give a record: IndexError: list index out of range
+  record() answers a dict     ->  400 …/view_x.yaml: the workspace answered a dict, not a HostRecord
+  HostRecord(record=None)     ->  400 …/view_x.yaml: the record the workspace gave is None, not a mapping of entries
+  folder() raises             ->  400 the workspace could not name its folder: LookupError: …   (every request)
+  ```
+
+  A graph WITH a source draws its own record; the host is not asked. When that source yields NOTHING — a source the
+  host fills itself when IT runs the graph (the files a workspace hands its files graph) — the run says so:
+  `files.yaml: stream.source (FilesSource) yields no records, so there is no record #0 to run. The editor runs a source
+  as the document spells it — what the workspace fills into it when the workspace runs this graph is not handed to the
+  editor; spell what the source reads (a folder, files) to run it here`.
+- **`saved(paths)`** is told, after every Save, Save As and New… (New writes its starter file at once), which graph
+  files it wrote — the graph's own last: `[…/prep.steps.yaml, …/sub.yaml]`. A Save of positions alone writes only the
+  layout sidecar and tells nothing; Save as template… writes no graph and tells nothing. If `saved` raises, the write
+  stands: the answer is the graph plus `host_error: "RuntimeError: …"`, for the page to show.
+- **Every path the host is handed is spelled ONE way** — under `folder()` exactly as `folder()` spells it, for a file
+  in that folder (else resolved): `record(graph, path)` and `saved(paths)` name `/var/…/T/workspace-x/view_x.yaml`
+  for a folder given as `/var/…/T/workspace-x`, never its resolved `/private/var/…` twin. A host can match a path with
+  `path.parent == folder()` or `path.relative_to(folder())`.
+- **A graph file the host writes itself** (a conversion, an edit of its own source graph) is read again the next
+  time the editor is asked for it — when the editor holds NOTHING unsaved of it: the list, the panel and Run then
+  show what the file says. A graph holding unsaved edits keeps them, and its Save refuses ("changed on disk since
+  the editor read it — Revert to load it, or Save As to keep both"). Post `open` for the graph shown (below) to make
+  the panel show the new text at once.
+- **Relative `include:` entries follow a moved folder**: when `folder()` names another folder, a graph the editor holds
+  that includes a file OUT of the old folder (`../../home/gert/steps/prep.steps.yaml`, as Insert steps file… writes
+  it) is rewritten to name the same file from the new place (`../../steps/prep.steps.yaml`), in its undo history
+  too, as Save As does; the graph is then unsaved, and Save writes the corrected include. An include between two
+  files of the moved folder is left as written.
+- **`studio_of(app).stash()`** on the host's stop keeps the unsaved work in the host folder's recovery file
+  ([Unsaved work survives a stop](#unsaved-work-survives-a-stop)); the next mount over that folder offers it, and
+  the page asks the same question as the standalone editor.
+
+#### The page in the host's panel
+
+The host shows the page in an `<iframe>` of its own page, `?embed=1` added to the link: the menus and every function
+stay; the streamstudio logo goes (the host's page says what app this is), the side panel is narrower and the minimap
+is off until View ▸ Minimap. The page and the host then talk through `postMessage`, same origin only, and the page
+listens to its own parent window only:
+
+```html
+<iframe id="studio" src="/studio/?graph=view_bte&tab=settings&embed=1"></iframe>
+<script>
+  // what the page posts — on every change of what it shows or holds, and after a Save wrote a file
+  window.addEventListener("message", (event) => {
+    if (event.origin !== location.origin || event.data?.source !== "streamstudio") return;
+    // {source: "streamstudio", type: "state", graph: "view_bte", dirty: true, unsaved: ["view_bte"], tab: "settings"}
+    // {source: "streamstudio", type: "saved", graph: "view_bte", path: "/w/state/view_bte.yaml"}
+  });
+  // what the host asks: show another graph (and tab) WITHOUT reloading — a reload asks "Leave site?" when unsaved
+  studio.contentWindow.postMessage({target: "streamstudio", type: "open", graph: "view_fft", tab: "run"}, location.origin);
+</script>
+```
+
+`unsaved` lists every graph holding unsaved edits — what closing the panel would leave unsaved (the edits stay in the
+editor; `studio_of(app).stash()` keeps them over the host's stop). `saved` is posted after Save, Save As and New….
+An `open` naming a graph the editor does not list shows the missing-graph message, as a link does, naming the folder
+the editor serves NOW (the page asks again at every `open` and before New…, so a folder the host moved is the one
+shown and written to).
+
+What an `open` does to what the person was doing in the panel:
+
+- a value typed into a field and not left yet is written to the graph it was typed in — the field is left first —
+  and the next graph draws its own values (a node of the same name included);
+- Set source… closes: it was about the graph it was opened on (the palette and the context menu close too);
+- an `open` of the graph already shown reads it again: a file the host rewrote is shown as the file says.
+
+In the panel a graph's top level opens WHOLE (a fit, never above zoom 1): measured at 900x700, the shipped Bluetooth
+pane's 30 cards all show at zoom 0.057, where zoom 1 from the top-left showed 1 of them. The standalone page keeps
+its zoom-1 first view.
+
+`editor_blueprint(graph_dir)` (the standalone editor's) and `editor_blueprint(host=…)` are the two ways; both, or
+neither, is refused before anything is registered. `page_blueprint()` serves the checkout's build (`web_dist()`),
+the placeholder when there is none. The editor's state lives on `app.extensions["streamstudio"]` (`studio_of`), so
+two apps in one process are two editors.
+
+`import streamstudio.app` loads neither torch nor the ComfyUI editor's node discovery: measured 2026-10-01, 0.2 s
+(it was 6.2–8.0 s, with torch and 432 ComfyUI node classes). The ComfyUI editor's mappings are made when ComfyUI
+reads them.
+
+### Settings: a graph's `app:` fields
+
+A graph may say which of its parameters are its SETTINGS — an `app:` block listing `[Class, param]` pairs (the ComfyUI
+editor's App view showed only those). `GET …/app` answers them, for the settings tab to open on that short form:
+
+```yaml
+app:
+  inputs:
+    - [RefuseLargeWindow, max_band_hz]
+    - [ClassifyBluetooth, deviation_hz__lo]   # the two halves of one range field …
+    - [ClassifyBluetooth, deviation_hz__hi]   # … are ONE field, deviation_hz
+```
+
+```
+bte_view: GET …/form -> 247 fields on 30 nodes      GET …/app -> 30 fields (32 entries; two ranges as __lo/__hi)
+```
+
+A class may be named short (`ClassifyBluetooth`) or dotted; a class used by two nodes gives a field on each. An
+entry that names no node, no parameter of its class, or `requires` (the gate a branch sets — never a field, here or
+in `GET …/form`) is a problem in words, at the entry's `file:line:col`:
+
+```
+…/pane.yaml:19:7: the app input [Missing, level] names no node of this graph (its classes are: FormKnobs, FormOther)
+```
+
+The settings tab lists those fields until **all parameters** is ticked, which lists every parameter of the level the
+canvas shows. A graph WITHOUT an `app:` block names no settings, and the tab says so rather than listing its Stream's
+plumbing, the values a host fills in at Run and its root contract as though they were settings:
+
+```
+☐ all parameters   the graph has no app: block
+This graph names no settings — it has no app: block. Its parameters are on the canvas; tick all parameters to list every one here.
+```
+
+### Pickers
+
+`GET …/form` (and the palette) marks a parameter that gets a picker with `picker` — the rules the ComfyUI nodes'
+widgets followed, read off the class:
+
+| the parameter | `picker` |
+| --- | --- |
+| a name holding `file` / `checkpoint` / `ckpt` and no folder word (`checkpoint_path`, `log_file`) | `file` — browse `GET /api/files?show=all` |
+| a name holding `path` / `dir` / `root` / `folder`, or annotated `pathlib.Path` (`output_dir`, `checkpoint_dir`) | `directory` — browse `GET /api/files` |
+| a bool, int or float (`checkpoint_strict`, `root_count`), or a `Literal` (its choices are already a list) | none |
+| on a `HuggingFace*` source: `path` / `repo_id` | `hf_dataset` — `GET /api/hf/datasets` (`path` is a hub id there, not a folder) |
+| … `input_feature` / `target_feature` | `hf_feature` — `GET /api/hf/features?path=<its dataset>` |
+| … `split` | `hf_split` — `GET /api/hf/splits?path=<its dataset>` |
+| … `metadata_features` | `hf_metadata` — the same columns, plus `*` (every other column) |
+| a parameter a producer stamps (`__taidal_widget_params__ = {"output_dir": "PLATFORM_DATASET_ID"}`) | the stamp, whatever the rules above say |
+
+A picker fills the field; the field stays editable. The HuggingFace lookups never fail a request: no dataset, or
+one that cannot be read, answers `[]` (the datasets list says why).
+
+On the page a `directory` or `file` field gets a `…` button that opens the editor's file browser — on the editor's
+machine, starting at the folder the field names — and the HuggingFace fields a list beside them. A field naming
+`$DATA_ROOT/captures` starts where the variable points; when the editor's machine does not have the variable, the
+browser says so and shows the editor's folder (`DATA_ROOT is not set on the editor's machine ($DATA_ROOT/captures) —
+showing the editor's folder instead`). The browser takes the keyboard while it is open: Escape closes it alone (over
+Set source…, Set source… stays with what was typed). A list is asked for only when you point at it (a column lookup
+can open a dataset on the editor's machine, which nobody asked for by opening a graph), each question once for the
+page's life; an empty list says why in its tooltip, in the server's words (`no datasets cached at
+/home/me/.cache/huggingface/hub`), and a list whose lookup FAILED asks again the next time you point at it.
 
 ### Building the canvas page
 

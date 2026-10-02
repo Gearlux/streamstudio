@@ -24,6 +24,7 @@
  * `confirming` (the discard question is up), then `restored` / `discarded` / `none` (nothing to ask) — only those
  * three let the editor load a graph.
  */
+import type { HostInfo } from "./host";
 import type { GraphSummary } from "./model";
 
 /**
@@ -65,11 +66,16 @@ export interface Recovery {
 
 /** `GET api/workspace`. */
 export interface Workspace {
-  /** The folder the editor was started on. */
+  /** The folder the editor serves (a host may move it — it is answered afresh on every ask). */
   folder: string;
   /** Which editor process answered: the page sends it back with every request (`api.joinSession`). */
   session: string;
   recovery: Recovery | null;
+  /**
+   * The app the editor is mounted in, when it supplies the record a graph without its own source runs on (`host.ts`):
+   * `{name}`; `null` or absent for a standalone editor.
+   */
+  host?: HostInfo | null;
 }
 
 export const RECOVERY_PHASES = ["pending", "asking", "confirming", "restored", "discarded", "none"] as const;
@@ -177,16 +183,6 @@ export function discardQuestion(recovery: Recovery, folder: string): DiscardQues
     confirm: "Discard",
     danger: true,
   };
-}
-
-/**
- * The graph shown once the question is answered: the one a link names (`?graph=`) when listed, else the first
- * RESTORED one (the work just brought back), else the first listed.
- */
-export function firstGraph(list: GraphSummary[], wanted: string | null, restored: string[]): string | undefined {
-  const listed = new Set(list.map((entry) => entry.name));
-  if (wanted !== null && listed.has(wanted)) return wanted;
-  return restored.find((name) => listed.has(name)) ?? list[0]?.name;
 }
 
 /** An entry of the list `POST api/workspace/recovery/restore` answers: whether the restore opened it. */

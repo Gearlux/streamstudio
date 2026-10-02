@@ -391,3 +391,58 @@ button { font: inherit; }
 .run-nodes tr.run-inner td { font-size: 11.5px; }
 .run-nodes .run-indent { color: var(--faint); font-family: var(--mono); }
 .run-nodes .run-sub { color: #4fc3f7; font-size: 10px; opacity: .8; }
+
+/* ---------------------------------------------------------------- mounted in a host's panel (?embed=1, host.ts) */
+/* the host's page says what app this is: no brand, a narrower side panel, the bar a little tighter */
+.app.embed { --side-width: 320px; }
+.app.embed .bar { padding: 0 6px; }
+.app.embed .bar-doc { margin-left: 4px; }
+.app.embed .doc-title { max-width: 180px; }
+/* a ?graph= the editor does not list: the graph named, and the graphs there are */
+.graph-missing p { max-width: 560px; margin: 6px auto 0; line-height: 1.45; }
+.graph-missing div { flex-wrap: wrap; max-width: 640px; margin-left: auto; margin-right: auto; }
+.graph-missing .button { font-family: var(--mono); font-size: 12px; }
+
+/* ---------------------------------------------------------------- the settings tab: the app: fields, or all */
+.settings-mode { display: flex; align-items: center; gap: 6px; margin: 0 0 8px; font-size: 12px; }
+.settings-mode .dim { padding: 0 0 0 4px; }
+.settings-problem { margin: 4px 0; font-size: 11px; color: var(--warn); }
+
+/* ---------------------------------------------------------------- a field's pickers and a (min, max) pair */
+.picked { display: flex; align-items: center; gap: 3px; min-width: 0; }
+.field .picked input[type=text] { flex: 1; min-width: 0; }
+.field .picked select.picker { flex: none; width: 96px; }
+.gnode .row .picked select.picker { width: 24px; padding: 1px 0; }
+.picker:disabled { opacity: .45; }
+.picker-browse { flex: none; height: 18px; padding: 0 6px; background: #2a2a40; color: #eee; border: 1px solid #444; border-radius: 3px; font-size: 11px; line-height: 1; cursor: pointer; }
+.picker-browse:hover { background: var(--accent-strong); }
+.pair { display: flex; gap: 3px; min-width: 0; }
+.field .pair input[type=number] { flex: 1; width: auto; min-width: 0; }
+.gnode .row .pair input[type=number] { width: 58px; }
+/* a source slot's Set source… on a card: inside the row's height, so the card keeps its calibrated size (layout.py) */
+.gnode .row .set-slot { margin-left: auto; height: 16px; padding: 0 6px; background: #00897b33; color: #c8f2ec; border: 1px solid #26a69a; border-radius: 4px; font-size: 10px; line-height: 14px; cursor: pointer; }
+.gnode .row .set-slot:hover { background: #00897b; color: #fff; }
+
+/* ---------------------------------------------------------------- the run panel: the host's record */
+.run-from-host { font-size: 12px; color: #c8f2ec; }
+
+/* ---------------------------------------------------------------- Set source… */
+.set-slot-search { width: 100%; box-sizing: border-box; padding: 7px 9px; background: #111118; color: var(--text); border: 1px solid var(--line-2); border-radius: 6px; font-size: 13px; outline: none; }
+.set-slot-search:focus { border-color: var(--accent); box-shadow: 0 0 0 2px #5c6bc033; }
+.set-slot-list { list-style: none; margin: 8px 0 0; padding: 4px; height: 300px; overflow-y: auto; background: #15151d; border: 1px solid var(--line); border-radius: 8px; }
+.set-slot-list li { display: grid; grid-template-columns: auto auto 1fr; align-items: baseline; gap: 2px 8px; padding: 5px 8px; border-radius: 5px; cursor: pointer; }
+.set-slot-list li.active { background: var(--accent-strong); }
+.set-slot-list li b { font-size: 13px; }
+.set-slot-list .badge { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; padding: 1px 6px; border-radius: 8px; background: color-mix(in srgb, var(--kind, #555) 45%, #222); }
+.set-slot-path { font-family: var(--mono); font-size: 10px; color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.set-slot-doc { grid-column: 1 / -1; font-size: 11.5px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.set-slot-list li.active .set-slot-path, .set-slot-list li.active .set-slot-doc { color: #dfe3ff; }
+.set-slot-form .field { grid-template-columns: 150px 1fr; }
+.set-slot-form .field b { color: var(--warn); }
+.set-slot-form .field input[type=text], .set-slot-form .field input[type=number], .set-slot-form .field select { padding: 4px 6px; }
+.run-filled { margin: -2px 0 0; padding: 0 0 0 14px; font-family: var(--mono); font-size: 11px; opacity: .7; }
+
+/* a dialog's box takes the focus when it opens (Modal.tsx): the keyboard is the dialog's, no ring around the box */
+.modal:focus {
+  outline: none;
+}

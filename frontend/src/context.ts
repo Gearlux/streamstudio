@@ -3,7 +3,8 @@
  * meet-rule table (`GET api/types`), the latest run (its statuses, wall times and generations are painted on the
  * nodes), the mutations a node or a box performs itself — a parameter, a rename, a group's title/colour, an ungroup,
  * a resize — which title is being renamed in place (F2 and the menus' Rename… open the same field a double-click
- * does), and a subgraph node's two needs: opening its inside and naming the steps it holds. Everything else
+ * does), a subgraph node's two needs: opening its inside and naming the steps it holds, a path field's file browser,
+ * and a source slot's Set source… (the dialogs are the app's). Everything else
  * (positions, wires, steps, the graph switch, the level shown) is the canvas's or the app's, so a node stays ONE
  * component for every class (docs/rewrite.md §2.3) with no knowledge of routes.
  *
@@ -19,6 +20,12 @@ import type { Form, Json, Supertypes } from "./model";
 export type Editing = `node:${string}` | `group:${string}` | null;
 
 export interface EditorApi {
+  /**
+   * The graph shown (`""` while none is) — a node's widgets are keyed by it, so a host's `open` of another graph that
+   * holds a node of the same name draws FRESH widgets: measured before, the card kept a value typed in the first graph
+   * and committed it into the second when the field was left.
+   */
+  graph: string;
   form: Form;
   types: Supertypes;
   /** The latest run of this graph, or `null` — what the nodes paint their status from. */
@@ -40,11 +47,19 @@ export interface EditorApi {
   openSubgraph: (name: string) => void;
   /** The steps inside the subgraph node `name`, by their own names — what its card lists. */
   innerSteps: (name: string) => string[];
+  /**
+   * The editor's file browser for a field (`…`, `pickers.ts`): a folder (`directory`) or any file (`file`), starting at
+   * `start` when given — the path chosen, or `null` when the person cancelled.
+   */
+  browse: (picker: "directory" | "file", start?: string) => Promise<string | null>;
+  /** Set source…: the class picker and form for the slot `slot` of the node `node` (`slots.ts`). */
+  chooseSlot: (node: string, slot: string) => void;
 }
 
 const refused = async () => false;
 
 export const EditorContext = createContext<EditorApi>({
+  graph: "",
   form: {},
   types: {},
   run: null,
@@ -57,6 +72,8 @@ export const EditorContext = createContext<EditorApi>({
   setEditing: () => undefined,
   openSubgraph: () => undefined,
   innerSteps: () => [],
+  browse: async () => null,
+  chooseSlot: () => undefined,
 });
 
 export const useEditor = (): EditorApi => useContext(EditorContext);

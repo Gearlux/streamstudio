@@ -65,6 +65,7 @@ from types import ModuleType
 from typing import (
     TYPE_CHECKING,
     Any,
+    Callable,
     Collection,
     Dict,
     Iterable,
@@ -1931,17 +1932,22 @@ class _Edits:
         return {key: text.apply(edits) for key, (text, edits) in self._by_file.items()}
 
 
-def rebase_includes(text: str, old_dir: Path, new_dir: Path, held: Collection[Path] = ()) -> str:
-    """``text`` with every RELATIVE ``include:`` entry rewritten so that, read from ``new_dir``, it names
-    the file it named from ``old_dir`` — what Save As needs, since confluid reads an include beside the
-    document (measured 2026-09-29: the unchanged text one folder over does not load,
-    ``ConfigFileNotFoundError``). An absolute, ``~`` or ``$VAR`` entry reads the same from anywhere, and an
-    entry that names no file beside the old place was not resolving through it: both are left as written —
-    a file the editor HOLDS but has not saved yet (``held``: a subgraph's steps just moved to their own file)
-    counts as there. A text that is not YAML is returned unchanged (the document's own problem says why).
-    """
-    if old_dir == new_dir:
-        return text
+def rebase_path(path: Path, old: Path, new: Path) -> Path:
+    """``path`` with the folder ``old`` it sits under replaced by ``new`` — compared as given and resolved (a
+    folder named through a symbolic link, ``/var/…`` for ``/private/var/…``, matches a resolved path under it and
+    gives the resolved ``new``); a path under neither comes back unchanged."""
+    for before, after in ((old, new), (old.resolve(), new.resolve())):
+        if path.is_relative_to(before):
+            return after / path.relative_to(before)
+    return path
+
+
+def _rewrite_includes(text: str, new_dir: Path, locate: Callable[[str], Optional[Path]]) -> str:
+    """``text`` with every RELATIVE ``include:`` entry that ``locate`` maps to a file rewritten so that, read from
+    ``new_dir``, it names that file. An absolute, ``~`` or ``$VAR`` entry reads the same from anywhere and is left as
+    written, as is an entry ``locate`` answers ``None`` for (one that was not resolving beside the file — confluid's
+    search tiers found it, or nothing did). A text that is not YAML is returned unchanged (the document's own problem
+    says why)."""
     try:
         patched = YamlText(text)
         nodes = patched.nodes()
@@ -1962,13 +1968,53 @@ def rebase_includes(text: str, old_dir: Path, new_dir: Path, held: Collection[Pa
             entry = str(scalar.value)
             if not entry or entry.startswith("~") or "$" in entry or Path(entry).is_absolute():
                 continue
-            named = old_dir / entry
-            if not named.exists() and named.resolve() not in held:
+            named = locate(entry)
+            if named is None:
                 continue
             rebased = os.path.relpath(named, new_dir)
             if rebased != entry:
                 edits.append(patched.replace_scalar_edit(scalar, spell(rebased)))
     return patched.apply(edits)
+
+
+def rebase_includes(text: str, old_dir: Path, new_dir: Path, held: Collection[Path] = ()) -> str:
+    """``text`` with every RELATIVE ``include:`` entry rewritten so that, read from ``new_dir``, it names
+    the file it named from ``old_dir`` — what Save As needs, since confluid reads an include beside the
+    document (measured 2026-09-29: the unchanged text one folder over does not load,
+    ``ConfigFileNotFoundError``). An entry that names no file beside the old place was not resolving through it
+    and is left as written — a file the editor HOLDS but has not saved yet (``held``: a subgraph's steps just moved
+    to their own file) counts as there (:func:`_rewrite_includes` has the rest of the rules).
+    """
+    if old_dir == new_dir:
+        return text
+
+    def beside_the_old_place(entry: str) -> Optional[Path]:
+        named = old_dir / entry
+        return named if named.exists() or named.resolve() in held else None
+
+    return _rewrite_includes(text, new_dir, beside_the_old_place)
+
+
+def follow_includes(
+    text: str, file_before: Path, file_after: Path, old: Path, new: Path, held: Collection[Path] = ()
+) -> str:
+    """``text`` — a file that was ``file_before`` until the folder ``old`` was moved to ``new`` and is ``file_after``
+    now — with every RELATIVE ``include:`` entry rewritten to name, from ``file_after``'s folder, the file it named
+    before: one that sat inside ``old`` moved with it (to the same place under ``new``), one outside it stayed where it
+    was. So an include between two files of the moved folder reads the same, and one out of it is rewritten — what a
+    host's move of its folder needs (``Document.moved``). Measured before 2026-10-01: Insert steps file… wrote
+    ``../../home/gert/steps/prep.steps.yaml`` from a temporary folder; after the host moved that folder the entry
+    named nothing, check said ``does not load: ConfigFileNotFoundError`` and Save wrote a graph that did not load.
+    The old folder is gone when this runs, so the entry is read LEXICALLY from ``file_before``'s folder (a ``..``
+    is never resolved through a folder that is no longer there); ``held`` (the files the editor holds, by their NEW
+    paths) counts as there, as for :func:`rebase_includes`."""
+    before_dir = file_before.parent
+
+    def where_it_is_now(entry: str) -> Optional[Path]:
+        named = rebase_path(Path(os.path.normpath(before_dir / entry)), old, new)
+        return named if named.exists() or named.resolve() in held else None
+
+    return _rewrite_includes(text, file_after.parent, where_it_is_now)
 
 
 #: A shift of the positional names of one list's members: ``(owner, first, shift)`` — every member
@@ -2183,6 +2229,22 @@ class Document:
             return "changed", None
         return ("gone", None) if gone else ("unchanged", None)
 
+    def changed_on_disk(self) -> bool:
+        """Whether a file this document holds a text of says something else on disk than the editor last read or wrote
+        — what makes ``streamstudio.app.Studio.document`` read a document holding nothing unsaved again. A file gone
+        from disk, one never written yet, and one that cannot be read do not count: never raises."""
+        with _DISK_LOCK:
+            for key in self._texts:
+                if key not in self._saved or not key.is_file():
+                    continue
+                try:
+                    text = key.read_text()
+                except (OSError, UnicodeDecodeError):
+                    continue
+                if text != self._saved[key]:
+                    return True
+        return False
+
     def load(self) -> Any:  # the built document: a mapping of top-level objects, or the root object itself
         """The document BUILT from the texts the editor holds — saved or not, what the canvas shows — to
         the objects stage, solidified: what a run executes. Every call builds fresh objects (a run's ops
@@ -2253,6 +2315,39 @@ class Document:
         key = Path(file).resolve()
         patched = YamlText(self._text_of(key)).set_kwarg(line, col, param, value)
         self._commit({key: patched}, f"{node}.{param} = {value!r}", found.loc)
+
+    def set_slot(self, node: str, slot: str, class_path: str, params: Dict[str, Any]) -> str:
+        """Put a new object into the single slot ``slot`` of ``node`` — ``slot: !class:<class_path> {<params>}`` —
+        replacing what it held (a marker, a ``!ref:``, nothing), and answer the name of the node now wired into it
+        (``stream.source``). ONE edit, held until Save; every comment outside the replaced value stays
+        (:meth:`YamlText.set_marker`). The canvas's *set source…*: a source into ``stream.source``.
+
+        Refused, changing nothing, in words: a LIST slot (``stream.ops`` — a member is added or removed, the list is
+        never set whole), a typed parameter (its value is set, not an object), a name that is neither; and — the
+        edit's own test — a class whose output does not meet the slot's type, or that does not resolve.
+        """
+        found = self.model.node(node)
+        slots = [socket.name for socket in found.inputs if not socket.entry and socket.name != "record"]
+        singles = [name for name in slots if "[" not in name]
+        listed = ", ".join(singles) or "none"
+        if any(name.startswith(f"{slot}[") for name in slots):
+            raise ValueError(f"{node}.{slot} is a list — add a member to it, or remove one; it is never set whole")
+        if slot not in singles:
+            if slot in found.params:
+                raise ValueError(
+                    f"{slot} is a parameter of {node}, not a slot — set its value instead (the slots of {node} are: "
+                    f"{listed})"
+                )
+            raise ValueError(f"{node} has no slot {slot!r} (its slots are: {listed})")
+        if not found.loc:
+            raise ValueError(f"{node} has no location in the document — nothing to patch")
+        file, line, col = _split_loc(found.loc)
+        key = Path(file).resolve()
+        marker = f"!class:{class_path} {spell_mapping(params)}"
+        patched = YamlText(self._text_of(key)).set_marker(line, col, slot, marker)
+        self._commit({key: patched}, f"{node}.{slot} = {marker}", found.loc)
+        wired = (wire.source for wire in self.model.wires if wire.target == node and wire.target_socket == slot)
+        return next(wired, f"{node}.{slot}")
 
     def add_step(
         self,
@@ -2610,8 +2705,10 @@ class Document:
         self._redo.clear()
         self._cache = (self._key(), derivation, after)
 
-    def save(self) -> None:
-        """Write every file whose text changed, and the sidecar when positions or groups were set.
+    def save(self) -> List[Path]:
+        """Write every file whose text changed, and the sidecar when positions or groups were set; answer the DOCUMENT
+        files written (resolved, in the order written — the graph's own last; never the sidecar), ``[]`` when only
+        the sidecar was — what a host that mounts the editor is told (``streamstudio.app.EditorHost.saved``).
 
         Refused — nothing written, not even the sidecar — when a file about to be written changed on disk
         since the editor read or wrote it (:data:`CHANGED_ON_DISK`, :data:`CHANGED_ON_DISK_INCLUDED`): the
@@ -2627,20 +2724,24 @@ class Document:
         """
         main = self.path.resolve()
         pending = {key: text for key, text in self._texts.items() if self._saved.get(key) != text}
+        written: List[Path] = []
         with _DISK_LOCK:
             self._refuse_changed_on_disk(pending)
             self._refuse_unwritable(pending)
             for key in sorted(pending, key=lambda key: key == main):  # the graph's own file last (False sorts first)
                 self._write(key, pending[key])
                 self._saved[key] = pending[key]
+                written.append(key)
         if self._positions is not None or self._groups is not None:
             layout = _layout()
             kept = self.positions if self._positions is not None else layout.read_sidecar(self.sidecar_path)
             layout.write_sidecar(self.sidecar_path, kept, groups=self.groups)
         self._layout_dirty = False
+        return written
 
-    def save_as(self, target: Path, *, overwrite: bool = False) -> None:
-        """Write the held document to ``target`` and make ``target`` this document's file from now on.
+    def save_as(self, target: Path, *, overwrite: bool = False) -> List[Path]:
+        """Write the held document to ``target`` and make ``target`` this document's file from now on; answer the
+        document files written, resolved and in the order written (the changed included files, then ``target``).
 
         The old file is left as it was. A relative ``include:`` is rewritten so it still names the same
         file from the new place (:func:`rebase_includes`) — in the held text and in every history entry,
@@ -2653,8 +2754,7 @@ class Document:
         target = Path(target)
         old_main, new_main = self.path.resolve(), target.resolve()
         if new_main == old_main:
-            self.save()
-            return
+            return self.save()
         if target.exists() and not overwrite:
             raise ValueError(f"{target} already exists — pass overwrite: true to replace it")
         others = {key: text for key, text in self._texts.items() if key != old_main and self._saved.get(key) != text}
@@ -2662,6 +2762,7 @@ class Document:
             self._refuse_changed_on_disk(others)
             self._refuse_unwritable([*others, target])
             self._save_as_write(target, old_main, new_main, others)
+        return [*others, new_main]
 
     def _save_as_write(self, target: Path, old_main: Path, new_main: Path, others: _Texts) -> None:
         """The writes of :meth:`save_as`, once nothing is refused (under :data:`_DISK_LOCK`)."""
@@ -2690,6 +2791,42 @@ class Document:
         self.path = target
         self._cache = None
         self._layout_dirty = False
+
+    def moved(self, old: Path, new: Path) -> None:
+        """The folder ``old`` holding this document's files is now ``new`` — a host moved (or copied) its folder and
+        the editor serves the new one (``streamstudio.app.Studio.graph_dir``). Every path under ``old`` — the graph's
+        own, every text held or read, what each was last saved as, every undo and redo entry's — becomes the same
+        path under ``new``; nothing is written, the unsaved edits and the history stay, and a Save writes into
+        ``new``. A file outside ``old`` (an include from another folder) keeps its path.
+
+        ``old`` is compared as given and resolved, like the recovery file's rebase: a temporary folder is often named
+        through a symbolic link (``/var/…`` for ``/private/var/…``) while the texts are keyed by resolved paths.
+
+        A RELATIVE ``include:`` in a text the editor holds is rewritten so it still names its file
+        (:func:`follow_includes` — one out of the moved folder changes, one inside it does not), in every history entry
+        too, as Save As does; a graph whose include changed is unsaved afterwards, since the file on disk still names
+        the old way.
+        """
+
+        held = frozenset(rebase_path(key, old, new) for key in self._texts)
+
+        def move(texts: _Texts) -> _Texts:
+            return {rebase_path(key, old, new): text for key, text in texts.items()}
+
+        def follow(texts: _Texts) -> _Texts:
+            moved: _Texts = {}
+            for key, text in texts.items():
+                after = rebase_path(key, old, new)
+                moved[after] = follow_includes(text, key, after, old, new, held)
+            return moved
+
+        self.path = rebase_path(self.path, old, new)
+        # What the disk holds moved as it was (the baseline Save checks against); what the editor holds follows its
+        # includes, so a graph that named a file out of the old folder still names it — and is unsaved until Save.
+        self._texts, self._saved, self._read = follow(self._texts), move(self._saved), move(self._read)
+        self._history = [entry._replace(texts=follow(entry.texts)) for entry in self._history]
+        self._redo = [entry._replace(texts=follow(entry.texts)) for entry in self._redo]
+        self._cache = None
 
     # -- the clipboard -----------------------------------------------------------------------
 

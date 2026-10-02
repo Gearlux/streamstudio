@@ -7,12 +7,21 @@ import {
   addStep,
   discardRecovery,
   getWorkspace,
+  hfDatasets,
+  hfFeatures,
+  hfSplits,
   joinSession,
+  getApp,
+  listFiles,
+  listGraphs,
+  saveGraph,
   newGraph,
   onRestarted,
   removeSteps,
   restoreRecovery,
   setParam,
+  setSlot,
+  trace,
   undo,
 } from "../api";
 
@@ -144,5 +153,121 @@ describe("the session a page joined — a tab left open across a restart is told
   it("an undo answers how member names moved (P7)", async () => {
     stub({ changed: true, shifts: [{ list: "stream.ops", first: 0, by: 1 }] });
     expect((await undo("demo")).shifts).toEqual([{ list: "stream.ops", first: 0, by: 1 }]);
+  });
+});
+
+describe("POST …/trace — record #N of the graph's own source, or the host's record (DESIGN5 item 1)", () => {
+  it("a record number, as before; `until` beside it", async () => {
+    const sent = stub({});
+    await trace("demo");
+    await trace("demo", 2, "stream.ops[1]");
+    expect(sent.map((request) => request.body)).toEqual([{ record: 0 }, { record: 2, until: "stream.ops[1]" }]);
+  });
+
+  it("the host's record: no record number at all — `{}`, the server asks its host", async () => {
+    const sent = stub({});
+    await trace("view_bte", null);
+    await trace("view_bte", null, "classify");
+    expect(sent).toEqual([
+      { path: "api/graphs/view_bte/trace", method: "POST", body: {} },
+      { path: "api/graphs/view_bte/trace", method: "POST", body: { until: "classify" } },
+    ]);
+  });
+});
+
+describe("POST …/slot — Set source… writes ONE marker into a slot (DESIGN5 item 5)", () => {
+  it("the node, the slot, the class and only the values set", async () => {
+    const answer = { name: "source", dirty: true, set: "stream.source" };
+    const sent = stub(answer);
+    expect(await setSlot("source", "stream", "source", "recordstream.sources.huggingface.HuggingFaceSource", { path: "ylecun/mnist" })).toEqual(
+      answer,
+    );
+    expect(sent).toEqual([
+      {
+        path: "api/graphs/source/slot",
+        method: "POST",
+        body: { node: "stream", slot: "source", class_path: "recordstream.sources.huggingface.HuggingFaceSource", params: { path: "ylecun/mnist" } },
+      },
+    ]);
+  });
+
+  it("a refusal carries the server's located words, for the dialog to show", async () => {
+    const said = "/w/source.yaml:7:5: stream has no slot 'sink'";
+    stub({ error: said }, 400);
+    await expect(setSlot("source", "stream", "sink", "m.X", {})).rejects.toMatchObject({ status: 400, error: said });
+  });
+});
+
+describe("the HuggingFace lookups — asked of the editor's machine (DESIGN5 item 6)", () => {
+  it("GET api/hf/datasets answers the cached datasets, bare or under its key", async () => {
+    const sent = stub({ datasets: ["ylecun/mnist", "kitofrank/RFUAV"], reason: "" });
+    expect(await hfDatasets()).toEqual({ names: ["ylecun/mnist", "kitofrank/RFUAV"], reason: "" });
+    stub(["ylecun/mnist"]);
+    expect(await hfDatasets()).toEqual({ names: ["ylecun/mnist"], reason: "" });
+    expect(sent).toEqual([{ path: "api/hf/datasets", method: "GET", body: undefined }]);
+  });
+
+  it("GET api/hf/features and api/hf/splits name the dataset in the query; an empty part is left out", async () => {
+    const sent = stub({ features: ["image", "label"], all_columns: "*" });
+    expect(await hfFeatures("ylecun/mnist", "", "train")).toEqual({ names: ["image", "label"], reason: "" });
+    stub({ splits: ["train", "test"] });
+    expect(await hfSplits("ylecun/mnist")).toEqual({ names: ["train", "test"], reason: "" });
+    expect(sent[0].path).toBe("api/hf/features?path=ylecun%2Fmnist&split=train");
+  });
+
+  it("an empty list keeps the server's reason; an answer without the list is no list", async () => {
+    stub({ datasets: [], reason: "no datasets cached at /home/me/.cache/huggingface/hub" });
+    expect(await hfDatasets()).toEqual({ names: [], reason: "no datasets cached at /home/me/.cache/huggingface/hub" });
+    stub({ reason: "huggingface_hub is not installed" });
+    expect(await hfDatasets()).toEqual({ names: [], reason: "huggingface_hub is not installed" });
+    stub({ features: [1, "label", null] });
+    expect(await hfFeatures("x")).toEqual({ names: ["label"], reason: "" });
+  });
+});
+
+describe("under a mount prefix — every request is relative to the page (DESIGN5 item 7)", () => {
+  it("a page at /studio/?graph=view_bte&embed=1 asks /studio/api/…, never the host's own /api/…", async () => {
+    const sent = stub([]);
+    await listGraphs();
+    await getWorkspace();
+    await trace("view_bte", null);
+    const page = "http://127.0.0.1:8789/studio/?graph=view_bte&embed=1";
+    expect(sent.map((request) => new URL(request.path, page).pathname)).toEqual([
+      "/studio/api/graphs",
+      "/studio/api/workspace",
+      "/studio/api/graphs/view_bte/trace",
+    ]);
+  });
+});
+
+describe("GET …/app — the graph's settings (DESIGN5 item 2)", () => {
+  it("asks the graph's app route and answers what the server resolved", async () => {
+    const answer = { declared: true, fields: [{ node: "classify", param: "line_db", loc: "/w/bte.yaml:412:7" }], form: {}, problems: [] };
+    const sent = stub(answer);
+    expect(await getApp("view_bte")).toEqual(answer);
+    expect(sent).toEqual([{ path: "api/graphs/view_bte/app", method: "GET", body: undefined }]);
+  });
+});
+
+describe("GET api/files — the graph browser's listing, or every file for a file picker", () => {
+  it("no query for the graph folder; dir and show=all only when asked", async () => {
+    const sent = stub({ dir: "/w", parent: "/", entries: [] });
+    await listFiles();
+    await listFiles("/data/x y");
+    await listFiles("$DATA_ROOT/models", "all");
+    await listFiles(undefined, "all");
+    expect(sent.map((request) => request.path)).toEqual([
+      "api/files",
+      "api/files?dir=%2Fdata%2Fx+y",
+      "api/files?dir=%24DATA_ROOT%2Fmodels&show=all",
+      "api/files?show=all",
+    ]);
+  });
+});
+
+describe("a Save mounted in a host carries the host's failure, the file written all the same", () => {
+  it("host_error rides on the saved graph", async () => {
+    stub({ name: "pane", dirty: false, host_error: "RuntimeError: the workspace is closing" });
+    expect((await saveGraph("pane")).host_error).toBe("RuntimeError: the workspace is closing");
   });
 });

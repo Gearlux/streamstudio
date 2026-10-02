@@ -1283,3 +1283,191 @@ POST …/undo  → changed: true, shifts: [{list: stream.ops, first: 2, by: 1}, 
 are the engine's positional names; every edit that moves a member re-keys what is kept by name in the same
 operation; undo and redo say how they renamed. Pins: `tests/test_op_lists.py::TestPositionsFollowTheMembers`,
 `tests/test_op_lists.py::TestTheRoutes`, `tests/test_canvas.py::TestAnUndoInsideASubgraphMember`.
+
+## A host mounts the editor through three methods, and the editor follows it (`app.EditorHost`, `editor_blueprint(host=…)`, 2026-10-01)
+
+**Context.** A consuming workspace shows the editor in a panel of its own page, mounted in its own Flask app (no
+second process, no second tab). Three things it needs could not be expressed by mounting the blueprint over a
+folder: its graphs sit in a STATE folder it moves on its first save (and copies on a save-as), so a folder fixed at
+registration would list and save into a folder that no longer exists; its panes are graphs WITHOUT a source — the
+record is whatever the person has selected in the workspace's page, with the window and band it shows filled into
+the chain's ops — so the run refused them ("a host supplies the record (mount the editor in one) or wire a source")
+with nothing behind the sentence; and it re-runs its panes when a graph file changes, which with an explicit Save
+means "when a Save wrote one". A bespoke route per consumer would spell the same three needs differently each time.
+
+**Decision.** The mounting app passes a HOST — a `typing.Protocol` of three methods and a `name`, no base class:
+`folder() -> Path` (asked at each request), `record(graph, path) -> HostRecord` (a Run of a graph that has no
+source of its own) and `saved(paths)` (after every Save that wrote a document file); `name` is what the page calls
+the host, and `GET /api/workspace` answering `host: {name}` is how the page knows it is mounted. `editor_blueprint` takes a
+folder OR a host, never both. The folder is a property of the `Studio` that asks the host and, when the answer
+changed, rebases every registry entry and every held document under the old folder — the document's texts, its
+saved baseline and its undo history re-keyed, nothing read or written (`Document.moved`). A host's record runs
+through the texts the editor holds on recordstream's tracer, with the host's `fills` set on the top-level ops that
+hold every attribute of a group — the same rule a consuming workspace applies to its own chains — so pause, step and
+rerun work as for a graph's own record, and the run says what it filled. `Document.save` answers the files it wrote
+so `saved` gets exactly those; a host failing on the news never turns a written file into a refused Save.
+
+Rejected — the two larger alternatives first:
+
+- **A second editor in the consuming workspace** (it keeps the ComfyUI canvases, or grows its own form, run and save
+  over the same YAML). Two editors over one document is two answers to "what does this graph run": the measurement
+  that started this phase was exactly that — an edit saved in the canvas editor (`fft_size` 1024 → 2048) was not what
+  the pane ran (it read the JSON copy the other editor wrote, its cache keyed on that file's time) and was thrown away
+  at the next start when the copy check rebuilt the YAML from the JSON. A second editor also brings back what the
+  rewrite removes: a second process, a JSON copy and a converter between them. One editor mounted where the person
+  works keeps one document, one save and one undo history.
+- **An iframe-only bridge** (the page asks the host's PAGE for the record and the folder through `postMessage`, and
+  tells it of a Save the same way; no server-side host). The record a pane runs is a server-side object — a capture's
+  samples as a numpy array, the regions drawn on it — so every Run would serialise it into the browser and back into the
+  server it came from; the folder a Save writes into would be whatever a page last said, while the host moves that
+  folder on the server; and a Save made through the routes by a tool (phase 5's agent tools) or a second tab would go
+  unheard. The page does speak to its host page through three messages ("The page in a host's panel" below), but
+  only for what a page decides — which graph and tab to show, and that a Save happened, so the host's own page can
+  re-draw; what runs and where files go is the server's, through these three methods.
+
+And three narrower ones: re-opening the documents of a moved folder (loses the undo history of exactly the graphs the
+person was editing); reading a record from the host over HTTP (the host is in-process — a route would add a second
+protocol for one function call); a fill table keyed by class (a closed list that drifts — attributes are what the ops
+declare, and "every attribute of the group" keeps a window from half-applying to an op with only a `start_s`).
+
+**Consequences.** A standalone editor is unchanged (no host: the old refusal, word for word). The host's `folder()`
+is called on every request, so it must be cheap. Fills reach the graph's own level only — an op inside a subgraph
+step keeps its own values (a documented limit). The stop of a host is the host's: it calls
+`studio_of(app).stash()`, the same method the CLI calls, so the recovery file and the page's restore question are
+one mechanism for both.
+
+**Example.**
+
+```python
+class Host:
+    name = "the workspace"
+    def folder(self): return workspace.state_dir()
+    def record(self, graph, path):
+        return HostRecord({"input": capture, "regions": regions}, fills=({"start_s": 0.001, "stop_s": 0.003},))
+    def saved(self, paths): workspace.rerun_panes_reading(paths)
+
+app.register_blueprint(editor_blueprint(host=Host()), url_prefix="/studio")
+# POST /studio/api/graphs/view_psd/trace {}  ->  record: null,
+#      host: {label: "…", filled: {"stream.ops[0]": {start_s: 0.001, stop_s: 0.003}}}, statuses: {… "ok"}
+```
+
+**Update 2026-10-01 (the review of the mount).** Five things a host met, each measured, and the rule each became:
+
+- **One spelling for a path.** `record()` got `<folder>/view_x.yaml` as the host spelled its folder, `saved()` the
+  resolved `/private/…/view_x.yaml` — not under `folder()` for a macOS temporary folder, so a host matching the two
+  missed every save. Every path the host is handed is now spelled under `folder()` as `folder()` spells it
+  (`Studio._spelled`; resolved only for a file outside the folder). Rejected: resolving everything (the host would
+  have to resolve its own folder before every comparison — the trap it fell into).
+- **New… is a write.** It writes its starter at once, so the host hears it through `saved()` like a Save (a host
+  finding its panes through `saved` never heard of a new one).
+- **The host writes files too.** A conversion, an edit of its own source graph: the editor kept the first text it
+  read for the process's life. A document holding NOTHING unsaved is now read again when its file changed on disk
+  (`Studio.document`); a document holding unsaved work keeps it, and its Save refuses as before. Rejected: a host
+  call "I wrote this file" (a contract for the host to forget; the disk is the truth either way).
+- **A move rewrites includes out of the folder.** Insert steps file… writes an include relative to the graph's
+  folder; after the host moved that folder the include named nothing, and Save wrote a graph that did not load. A
+  move now rewrites the held texts' relative includes the way Save As does (`document.follow_includes`): read
+  lexically from the old folder (gone by then), a target inside moved with it, one outside stayed. The graph is then
+  unsaved — the file on disk still names the old way — and Save writes the corrected one.
+- **Every failure of the host is words.** A `record()` raising anything but `ValueError`, or answering no
+  `HostRecord`, reached the page as werkzeug's HTML 500 (a `KeyError` as a 404 `'rec_0042'`); a `folder()` raising
+  broke every request the same way. Both are now the request's 400 naming the host and the error. A graph whose own
+  source yields NOTHING (a source the host fills when IT runs the graph — the files graph) says so instead of
+  `the source yields only 0 records`: the editor runs the source as the document spells it.
+
+**What you may change.** What a host adds beyond the three methods, how a run labels the record, the fill rule's
+reach (into subgraphs, once the tracer exposes their ops). What must hold: the editor never caches the host's folder
+across requests; a moved folder keeps the held documents' edits and history; a host's record runs the held texts,
+never the files; `saved` hears only of document files actually written, every path spelled one way; a clean
+document never shows an older text than its file. Pins: `tests/test_host.py`.
+
+## The package root is lazy about the ComfyUI half (`streamstudio.__init__.__getattr__`, `_load_comfy`, 2026-10-01)
+
+**Context.** `streamstudio/__init__.py` is both the package of the canvas editor and the ComfyUI editor's custom-node
+entry point, and it ran the ComfyUI node discovery at import. A host app mounting the canvas editor imports
+`streamstudio.app` and paid for the other editor: measured 6.2–8.0 s, torch and 432 ComfyUI node classes loaded, for
+an editor it never starts; every `streamstudio` command paid the same before it could print a refusal.
+
+**Decision.** The ComfyUI names — `NODE_CLASS_MAPPINGS`, `NODE_DISPLAY_NAME_MAPPINGS` and the functions the routes
+and the discovery call — are made on first READ by a module `__getattr__` (PEP 562), which ComfyUI's loader reaches
+through its own `getattr`/`hasattr`; and at import when the package is loaded INSIDE ComfyUI, told by its `server`
+module already being imported (its `main.py` imports `server` before it loads any custom node), because the
+`/taidal/*` routes must be on the server's table while it loads them. The names are bound at module level only for
+the type checkers (`if TYPE_CHECKING:`): a run-time binding would stop `__getattr__` from firing.
+
+**Consequences.** `import streamstudio.app` is 0.19–0.20 s with no torch; `import streamstudio.cli` 0.09 s. The first
+read of the mappings pays the discovery once (6.2 s, the same 432 classes). A test that patches a ComfyUI name or
+resets the discovery cache reads the mappings first, so the half is made before the patch. The half is deleted with
+the ComfyUI editor in phase 4; `WEB_DIRECTORY` and the HuggingFace lookups (which the canvas editor's pickers call)
+stay plain attributes. The ComfyUI half's colourless console moved with it: `force_no_color()` runs at import only
+inside ComfyUI and when the half is made — measured before, `import streamstudio.app` set `NO_COLOR=1` in a host's
+own process and in every child it started.
+
+**Example.**
+
+```
+python -c "import streamstudio.app, sys; print('torch' in sys.modules)"            -> False   (0.2 s)
+python -c "import streamstudio; print(len(streamstudio.NODE_CLASS_MAPPINGS))"      -> 432     (the discovery, once)
+```
+
+**What you may change.** Which names are lazy. What must hold: nothing a canvas-editor import reaches imports a
+ComfyUI module or torch; inside ComfyUI the half is made at import. Pins: `tests/test_lazy_package.py`,
+`tests/test_init_discovery.py` (the routes registered at import with a `server` present).
+
+## The page in a host's panel speaks through its link and three messages (`?embed=1`, `frontend/src/host.ts`, `link.ts`, 2026-10-01)
+
+**Context.** A consuming workspace shows the page in a panel of its own page (an `<iframe>`), not in a second tab. Its
+buttons must open a graph on a given tab ("graph", "settings"); before it closes the panel it must know whether the
+person holds unsaved edits; and the moment a Save writes a graph its own panes must re-run. Measured before: the
+page always opened on the text tab (no link could ask for the settings), a `?graph=` naming a graph the folder did
+not hold opened the FIRST graph without a word, and a switch by setting the iframe's `src` reloads a page that may
+hold unsaved work — the browser then asks "Leave site?".
+
+**Decision.** The link says what to show — `?graph=`, `?level=`, `?tab=text|settings|run`, and `?embed=1` for the
+panel (chrome removed, every function kept) — and follows what the page shows, so a reload opens the same view. A
+graph the list does not hold opens NOTHING: the canvas names it and the graphs there are. Three `postMessage`
+messages, same origin only, between the page and its OWN parent window: the page posts `state` (the graph shown,
+dirty, every unsaved graph, the tab) on every change and `saved` (graph, path) after a Save; it takes one command,
+`open` (graph, tab, level). Run on a graph without a source of its own sends no record number and the server asks
+the host (the server decides; the page's `hasOwnSource` only words the panel).
+
+Rejected: switching graphs by setting the iframe's `src` (the "Leave site?" question over unsaved work, and the
+page's own state — the run, the undo of the layout — lost); a JavaScript API the host calls into the iframe (couples
+the host to the bundle's internals, and a cross-origin mount could not call it); telling the host of a Save only
+through `postMessage` (a Save made by a tool through the routes would go unheard — the server's `EditorHost.saved`
+is the authoritative one; the message is for the host's PAGE).
+
+**Consequences.** A host needs no code of the editor's: an iframe, a listener and one `postMessage` call. The
+messages are a contract with the hosts that read them — a field renamed here is a host broken there. A message from
+any window other than the parent, or another origin, is ignored.
+
+**Example.**
+
+```js
+// the host's page
+studio.src = "/studio/?graph=view_bte&tab=settings&embed=1";            // first open
+addEventListener("message", (e) => e.data?.type === "saved" && rerunPanes(e.data.path));
+studio.contentWindow.postMessage({target: "streamstudio", type: "open", graph: "view_fft", tab: "run"}, location.origin);
+// the page posts: {source: "streamstudio", type: "state", graph: "view_fft", dirty: false, unsaved: [], tab: "run"}
+```
+
+**Update 2026-10-01 (the review of the panel).** An `open` arrives while the person is doing something in the panel,
+with no click inside it — measured before: a value typed into `gain` and not left was committed into the NEXT graph's
+`gain` (the card is the same React component, and its draft survived), and Set source… stayed up over the next graph
+and wrote its source THERE (every Stream names its stream `stream`). The rule is that a gesture belongs to the graph
+it began on: an `open` first blurs the focused field (its commit goes out through `graphRef` to the graph shown),
+then closes Set source… with the palette and the context menu; an answer arriving for a graph no longer shown only
+marks the list (`accept`); a node's widgets are keyed by the graph. An `open` of the graph already shown reads it
+again (the host may have rewritten it), and every `open` (and New…) asks the editor's folder afresh — the page used to
+read it once, so after a move New… named one folder and wrote into another. The panel opens a graph's top level
+fitted: at zoom 1 from the top-left a 900x700 panel showed 1 of the Bluetooth pane's 30 cards. Rejected: queueing the
+host's `open` until the person is done (the host's page has moved on — its pane, its selection; the panel must follow
+it), and refusing it while a dialog is up (the host cannot see the panel's dialogs).
+
+**What you may change.** The panel's styling, what `state` adds (a new field is harmless to a host that ignores it),
+further commands. What must hold: the same-origin and own-parent checks; an `open` never reloads the page; an unknown
+graph is said, never replaced by another; the server, not the page, decides whose record a Run runs; nothing begun on
+one graph lands in another. Pins:
+`tests/test_canvas.py::TestTheHostHearsAndFollows::test_the_hosts_panel_hears_state_and_saved_and_opens_a_graph_by_command`,
+`::TestMountedInAHost`, `::TestTheHostsOpenKeepsEachEditInItsGraph`, `::TestTheEmbeddedPanelOpensFitted`,
+`frontend/src/__tests__/host.test.ts`, `link.test.ts`.

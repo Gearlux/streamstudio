@@ -125,7 +125,9 @@ class TestTheShippedCanvasesConvertWhole:
         import json
 
         annotation = pytest.importorskip("waivefront.annotation")
-        path = annotation.templates()["signal"][slot]
+        # the CANVAS beside the document the domain hands out (its templates are YAML since
+        # 2026-10-01; the canvas stays for the ComfyUI editor, which is what this converter serves)
+        path = Path(annotation.templates()["signal"][slot]).with_suffix(".json")
         exported = workflow_to_yaml(json.loads(path.read_text()), NODE_CLASS_MAPPINGS)
         assert [c for c in _skipped(exported) if c not in NODE_CLASS_MAPPINGS] == []
         assert exported.count("_target_:") == ops + 1, "every op plus the Stream"
@@ -137,7 +139,7 @@ class TestTheShippedCanvasesConvertWhole:
         import json
 
         annotation = pytest.importorskip("waivefront.annotation")
-        canvas = json.loads(Path(annotation.templates()["signal"]["view_bte"]).read_text())
+        canvas = json.loads(Path(annotation.templates()["signal"]["view_bte"]).with_suffix(".json").read_text())
         # The CANVAS's own measure/bluetooth ops — not every such node the registry happens to
         # carry today, which grows as the domain adds nodes and has nothing to do with this canvas.
         newer = sorted(

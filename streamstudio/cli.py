@@ -673,10 +673,10 @@ def _serve_canvas(graph_dir: Optional[Path], port: int, templates_dir: Optional[
         raise SystemExit(1)
     # Imported here, not at module top: the app pulls in the document model and the palette, which
     # every other command (a converter, `stop`, the ComfyUI launch) has no use for.
-    from streamstudio.app import EXTENSION, Studio, create_app
+    from streamstudio.app import create_app, studio_of
 
     app = create_app(directory, templates_dir=templates)
-    studio: Studio = app.extensions[EXTENSION]
+    studio = studio_of(app)
     notice = _recovery_notice(studio.workspace())
     if notice is not None:
         print(notice, flush=True)

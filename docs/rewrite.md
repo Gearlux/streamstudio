@@ -256,7 +256,7 @@ on (LangGraph has one shared state); one node can be rerun alone with its cached
 | project | new | deleted |
 | --- | --- | --- |
 | recordstream | `flow/trace.py` (the tracer, 797 lines) | nothing |
-| streamstudio | `app.py` (blueprint + `create_app`), `document.py` (derive, patch, history, sidecar), `palette.py` (registry → node specs), `layout.py`, `cli.py` (bare `streamstudio` standalone; `--editor comfy` for ComfyUI until phase 4), `frontend/` (vite + React Flow), tests | `bridge.py`, `graphio.py`, `export.py`, `nodes.py`, `web/*.js`, the ComfyUI clone and launch, 12,857 Python lines and 3,705 JS lines. The HuggingFace pickers and the directory chooser are ported as Flask routes. |
+| streamstudio | `app.py` (blueprint + `create_app`), `document.py` (derive, patch, history, sidecar), `palette.py` (registry → node specs), `layout.py`, `cli.py` (bare `streamstudio` standalone; `--editor comfy` for ComfyUI until phase 4's step 3, §6d), `frontend/` (vite + React Flow), tests | `bridge.py`, `graphio.py`, `export.py`, `nodes.py`, `web/*.js`, the ComfyUI clone and launch, 12,857 Python lines and 3,705 JS lines. The HuggingFace pickers and the directory chooser are ported as Flask routes. |
 | annotaide | mounts the blueprint; *set source…*, *graph*, *settings* open it in a pane | the resident converter, seeding through the CLI, the graph-copy re-check, the waiting room, tab naming: 743 lines and 30 rules |
 | navigaitor | registers the graph tools once and the per-node tools of any graph a session opens | nothing |
 | the op author | writes the op class only | |
@@ -286,8 +286,8 @@ runs `check()` on every one, and keeps JSON and YAML side by side until the flip
   "unverifiable" and the run shows the truth; the by-name refusal stays for complete
   declarations. The 12 signal ops that declare tuples are reported to recordstream's
   backlog, not fixed here.
-- The `app:` block in 7 shipped pane files stays as the settings form's field list; the
-  `__lo`/`__hi` names go.
+- The `app:` block in 9 shipped pane files stays as the settings form's field list (`GET …/app`, landed
+  2026-10-01 with phase 4a); a `__lo`/`__hi` pair names ONE field, so the shipped blocks still read as written.
 - A `Stream` with an `ops:` list is drawn as a chain of record wires between the ops.
 - A hand-drawn wire is a PROPOSAL until a route can spell it (phase 3 part 1, 2026-09-28): no phase-2 route writes
   a wire — a Stream's record wires ARE its `ops:` order, a flow's are `from:` / `bind:`, a contract's `!ref:` — so
@@ -320,8 +320,9 @@ Taken while landing phase 2 (2026-09-28):
   `streamstudio --editor comfy` on 8188; the two servers coexist on one machine (§6a, decision 3).
 - The HuggingFace pickers and the directory chooser arrive in phase 3 as routes beside the page that
   calls them; phase 2 ships no route without a caller. **Not landed with phase 3** (2026-09-28): no node of the page
-  calls one yet, so the same rule keeps them out; they are deferred to `streamstudio/TASKS.md` and must land before
-  phase 4 deletes the ComfyUI versions.
+  called one yet, so the same rule kept them out. **Landed with phase 4a (2026-10-01)**: the routes
+  (`GET /api/hf/*`, `GET /api/files?show=all`) and their callers — a field's `…` file browser and the HuggingFace
+  lists beside a source's fields, chosen by the `picker` mark the palette puts on the schema.
 - The first layout is streamstudio's own layered one (`layout.py`: longest-path layering along the
   wires, one column per layer; a node the sidecar names keeps its place, a new node lands below the
   lowest kept one), not dagre on the server — the page may still run dagre client-side.
@@ -442,20 +443,88 @@ until Save" (its 2026-09-29 update: why New… writes at once) and "An op-list m
 What a stop still cannot keep, stated in the README: a `kill -9`, a crash, and the undo history. Closing the
 editor's terminal (SIGHUP) keeps the work since 2026-09-30 (the user's pick).
 
+## 6d. Phase 4 — four decisions and three steps (decided 2026-10-01)
+
+The user, 2026-10-01: *"switch annotaide to the new streamstudio if not already done"*. It was not done: the
+annotation workspace still opened the ComfyUI editor, and a survey measured why the switch could not be a URL
+change — an edit saved in the canvas editor (`fft_size` 1024 → 2048 in `view_fft.yaml`) was not what the pane ran
+(`PsdSlice.fft_size = 1024`; the pane read the JSON copy, its cache keyed on that file's time) and was thrown away at
+the next start (`check_graph_copies(): rebuilt view_fft.yaml from view_fft.json`). The four answers:
+
+| # | the question | decided |
+| --- | --- | --- |
+| 1 | Where does the editor open? | **inside the workspace's own page**, as a panel — not a second browser tab |
+| 2 | The ComfyUI editor? | **kept for a while** — `streamstudio --editor comfy`, the converter and the ComfyUI node code stay; deleting them is step 3 |
+| 3 | Workspaces saved with JSON graphs? | **converted once, now** — a folder's `<graph>.json` files become `<graph>.yaml` (the old converter, one last time) when the workspace opens it; the JSON is left untouched and nothing reads it afterwards |
+| 4 | The pickers? | **both now** — the folder/file chooser and the HuggingFace pickers |
+
+What the person sees, before → after the whole phase:
+
+| | before | after |
+| --- | --- | --- |
+| *graph* / *open…* | a waiting page, then ComfyUI in a second tab on port 8188 | the editor in a panel of the workspace's page, at once (`/studio/?graph=view_bte&embed=1`) |
+| *settings* | ComfyUI's App view: the graph's `app:` fields | the editor's settings tab narrowed to the `app:` fields (`?tab=settings`; the Bluetooth pane: 30 fields instead of 247) |
+| **Run** in the editor | previews on the workspace's selected record and window | the run panel runs the chain on the selected record and window, with the editor's unsaved values |
+| saving | ComfyUI writes `view_bte.json`; the workspace converts it before every run | Save writes `view_bte.yaml`; the workspace runs that file; no JSON, no converter process |
+| processes | ComfyUI on 8188 and a converter child | none: the editor is mounted in the workspace's own server |
+
+**Step 1 — the editor gains what a host needs (streamstudio; landed 2026-10-01).** Eight items, each in the README
+and with its reason in `docs/architecture.md`:
+
+1. **A host supplies the record** — `editor_blueprint(host=…)`, a `name` and three methods: `folder()` (asked at each
+   request, so a folder the host moves is followed), `record(graph, path)` (what a Run of a graph without a source of
+   its own runs, with the window and band the host fills in), `saved(paths)` (after every Save, Save As and New…).
+   README → "Mounting the editor in a host app"; architecture → "A host mounts the editor through three methods".
+2. **Settings narrowed to the `app:` fields**, with *all parameters*; `requires` is never a field; `?tab=settings`
+   opens the tab. README → "Settings: a graph's `app:` fields".
+3. **An unknown `?graph=` says so**, naming the graphs there are, instead of opening the first one.
+4. **Unsaved edits survive the host's stop**: `studio_of(app).stash()`, and the mounted page asks the restore question.
+5. **Set source…** on the canvas — `POST …/slot`, reached from the card, the node menu or a wire out of the slot.
+   README → "Set source… — putting a source into a `Stream`".
+6. **Both pickers** — the `picker` mark on the form schema, `GET /api/files?show=all`, `GET /api/hf/*`, and the page's
+   `…` browser and lists. README → "Pickers".
+7. **Embedded mode** — `?embed=1`, the page under a prefix (`/studio/`), and its `state` / `saved` / `open` messages.
+   README → "The page in the host's panel"; architecture → "The page in a host's panel speaks through its link and
+   three messages".
+8. **Loading speed** — `import streamstudio.app` 6.2–8.0 s → 0.2 s, no torch. Architecture → "The package root is
+   lazy about the ComfyUI half".
+
+**Step 2 — the workspace runs the YAML and mounts the editor** (the annotation workspace and the signal domain's
+templates; landed 2026-10-01). The workspace implements the host — `folder()` its state folder, `record()` the selected record
+with `{start_s, stop_s}` and `{f0_hz, f1_hz}` as its fills, `saved()` re-running the panes that read the files —
+mounts both blueprints under `/studio`, calls `studio_of(app).stash()` on its stop, shows the page in an `<iframe>`
+and switches graphs with the `open` message. YAML is the truth: templates are YAML, the chain loaders run `flow:`
+documents as well as `stream:` ones, caches are keyed on the YAML's time. Deleted from the workspace: the converter
+calls, the resident converter child, the start-time copy check, the JSON watcher, seeding through
+`/taidal/import_yaml`, the preview nodes' address rewrite, the waiting room, the launch / stop / restart of the editor
+process, the editor-address setting and the tab naming. The one-time conversion of decision 3 runs there, and the
+cell pane's step order is pinned so the switch changes no pane's answer (the truth set is run on the other computer).
+Open items from step 1 it meets: a files graph run in the panel on the workspace's own files, a host's fills inside a
+subgraph, and the panel's fixed side panel (`streamstudio/TASKS.md`).
+
+**Step 3 — the ComfyUI editor is deleted** (streamstudio; after the workspace has run on the canvas editor for a
+while, decision 2): `bridge.py`, `graphio.py`, `export.py`, `nodes.py`, `web/`, `--editor comfy`, the custom-node entry
+point, the ComfyUI half of `__init__.py` and the `torch` / `numpy` declarations only `nodes.py` needs, with the tests that
+import them; outside streamstudio, the signal domain's twenty-one `.json` canvases and the tests that convert them (its
+`templates()` hands out the YAML documents since step 2), and the annotation workspace's one-time conversion, which calls
+the converter (each project's `TASKS.md` lists what goes).
+
 ## 7. Phases, tests first
 
 Each phase ends with its gates green and the previous path still working.
 
 | phase | tests written first | code | status |
 | --- | --- | --- | --- |
-| 0 templates | every converted YAML loads, carries its contract, passes `check()` | the 17 conversions | in progress 2026-09-28 |
+| 0 templates | every converted YAML loads, carries its contract, passes `check()` | the 17 conversions | landed; see §9 |
 | 1 engine, landed 2026-09-28 | `recordstream/tests/test_trace.py`: 39 tests — overhead bound, rerun recomputes only downstream, refused parameter leaves the trace untouched, gated chain runs whole, in-place edit is flagged, lazy constructor | `recordstream/flow/trace.py`, exported as `recordstream.flow.Tracer`, user page `docs/trace.md` | tests in progress 2026-09-28 |
 | 2 document and app, landed 2026-09-28 | `streamstudio/tests/test_document.py` (58): bte_view derives 24 nodes and 49 wires, patch keeps comments and `$VAR`, new parameter shifts nothing, wire mismatch refused, rename is atomic, sidecar round trip; `test_app.py` (47): every route through Flask's test client; `test_palette.py` (72); `test_layout.py` (28) | `document.py`, `_yamltext.py`, `palette.py`, `layout.py`, `app.py`, `cli.py` | 205 tests green; whole suite `730 passed, 1 skipped in 30.83s`; mypy `Success: no issues found in 50 source files` |
 | 3 canvas, landed 2026-09-28 | the playwright proof turned into `tests/test_canvas.py` against the built page: sockets refuse a mismatch, palette of the real 419 types, save produces the same YAML the model came from | `frontend/` | landed 2026-09-28 in two parts — part 1, the scaffold: 14 playwright + 9 vitest; part 2 (palette of the real 447 classes, groups, undo/redo, copy/paste, arrange, rename, run panel, settings): `tests/test_canvas.py` 44 + vitest 57, with `test_app.py` 61, `test_layout.py` 37, `test_document.py` 59. Deferred to `streamstudio/TASKS.md`: a step into a `Stream`'s `ops:`, a route that writes a wire, the HuggingFace pickers and directory chooser; collapse to subgraph landed in 3b |
 | 3b menus, groups, subgraphs, landed 2026-09-29 | §6a and §6b: explicit Save and its refusals, New / Open / Save As / Revert and the file browser, copy/paste as text, templates, the subgraph node model and its four routes, the `--editor` switch; `recordstream/tests/test_subgraph.py`, `test_trace_subgraph.py`; `streamstudio/tests/test_app_save.py`, `test_app_files.py`, `test_app_clipboard.py`, `test_app_templates.py`, `test_app_subgraph.py`, `test_subgraph_model.py`, `test_subgraph_edits.py`, `test_cli_editor.py`; 24 more browser tests | `recordstream/flow/subgraph.py` and the tracer's descent; `document.py`, `app.py`, `cli.py`, `layout.py`, `_yamltext.py`; the page's menu bar, Nodes sidebar, right-click menus, groups, levels | landed; see §9 |
 | 3c round 2, landed 2026-09-29 | §6c: `tests/test_recovery.py` (40), `test_recovery_process.py` (7, real editor processes), `test_op_lists.py` (50), 21 more in `test_cli_editor.py`, 18 more browser tests, 88 more vitest | `app.py` (the recovery routes, the session guard), `cli.py` (the way out on SIGTERM, what `stop` says, `restart`'s folder), `document.py` (op-list members, the comment rule, `shifts`), `layout.py`; the page's recovery dialog, op-list targets and Shift+click | landed; see §9 |
 | 3d round 3, landed 2026-09-29 | §6c item 2: `tests/test_app_files.py::TestNew` (the file written at once, every refusal writing nothing, a file appearing between the check and the write never overwritten), `test_app_save.py::TestRevert` (back to the starter), `test_recovery.py` (an untouched New graph is not kept), `tests/test_canvas.py::TestNewAndOpen` (3 more browser tests), `frontend/src/__tests__/newgraph.test.ts` (9) | `document.py` (`Document.create`), `app.py` (`Studio.new_graph` writes; the recovery rows are changed files only); the page's New dialog (Name, Folder, Browse…, the path line, the refusal in place) | landed; see §9 |
-| 4 annotaide | its existing suite, with the converter and seeding pins deleted and the mount pinned | the mount, the deletions |
+| 4a — phase 4 step 1: the editor gains what a host needs (§6d), landed 2026-10-01 | `tests/test_host.py` (27: a host app mounting both blueprints under `/studio`; the folder followed across a move and a copy; a host's record through a flow, a sourceless Stream and the shipped PSD slice pane; `saved`; the stop's stash), `test_app_form.py` (12), `test_app_slot.py` (13), `test_pickers.py` (13), `test_lazy_package.py` (3); the page: `tests/test_canvas.py` `TestMountedInAHost` / `TestSetSourceInAHost` / `TestTheHostHearsAndFollows` (14, a host app serving both blueprints under `/studio` in headless chromium), vitest `host`, `link`, `settings`, `pickers`, `slots` | `app.py` (`EditorHost`, `HostRecord`, `studio_of`, the `app` / `slot` / `hf` routes, `files?show=all`), `document.py` (`set_slot`, `moved`, `save` answers what it wrote), `_yamltext.py` (`set_marker`), `palette.py` (`picker_of`), the lazy `__init__.py`; the page's `?tab=` / `?embed=1`, the missing-graph panel, the host run, the `app:` settings, Set source…, the pickers, the host panel's messages | landed 2026-10-01 |
+| 4b — phase 4 step 2: the annotation workspace runs the YAML and mounts the editor (§6d), landed 2026-10-01 | its existing suite, with the converter and seeding pins deleted and the mount pinned; the one-time JSON → YAML conversion of a workspace folder; the cell pane's step order as it runs today | the host object, the mount at `/studio/` and the panel, the conversion, the deletions in the workspace; the signal domain's templates as YAML | landed 2026-10-01; its review fixes 2026-10-02 (see §9) |
+| 4c — phase 4 step 3: the ComfyUI editor is deleted (§6d) | the suites without the ComfyUI pins | `bridge.py`, `graphio.py`, `export.py`, `nodes.py`, `web/`, `--editor comfy`, the converter | after 4b has been used for a while (decision 2) |
 | 5 agent tools | the transcript of §2.4 as a test against the generated tools | navigaitor registration |
 
 Estimate: four to six weeks, by the comparables of annotaide's own web app (four weeks for
@@ -470,8 +539,10 @@ tools for Algorithms without a run; any change to confluid's grammar.
 
 Landed on 2026-09-28 and 2026-09-29, nothing committed. Phase 0, phase 1, phase 2 and phase 3 are complete, and so
 are 3b — the menu scope (§6a) and subgraphs (§6b) — 3c, round 2 (§6c items 1, 3 and 4), and 3d, round 3 (§6c item
-2: New… writes the file at once). Phase 4 (the consuming workspace mounts the editor) and phase 5
-(agent tools) are next; the root `TASKS.md` holds both.
+2: New… writes the file at once). Phase 4 (the consuming workspace mounts the editor, §6d) began on 2026-10-01: its
+step 1 — the editor gains what a host needs (4a) — and step 2 — the workspace runs the YAML and mounts the editor
+(4b) — landed that day; next are step 3 — the ComfyUI editor deleted (4c), once the workspace has run on the canvas
+editor for a while — and phase 5 (agent tools); the root `TASKS.md` holds them.
 
 | project | what landed | gate |
 | --- | --- | --- |
@@ -487,6 +558,10 @@ are 3b — the menu scope (§6a) and subgraphs (§6b) — 3c, round 2 (§6c item
 | recordstream, 3b (2026-09-29) | `flow/subgraph.py` — `Subgraph(steps, result)`, an op in the compose group, running its inside on the flow kernel; `consumes` / `produces` / `flags` derived (`produces` and `flags` from the lineage of `result`); every structural mistake refused before the first record, naming the outer step and the line; `check_chain(raised=…)`; the tracer descends with a child tracer per subgraph step (`prep/grey`, pause inside, step, resume, rerun); the public `StepReferenceError`; README, `docs/graph.md`, `docs/trace.md`, an architecture record | `pytest -q`: `1426 passed`; isort/black/flake8 clean; `mypy recordstream`: `Success: no issues found in 132 source files` |
 | streamstudio, 3b backend (2026-09-29) | explicit Save (`save`, `save-as`, `revert`, `check`, the changed-on-disk refusals, `_DISK_LOCK`, merged positions), New / Open / the file browser, copy/paste as text, `POST …/steps/remove`, templates (`--templates-dir`), the subgraph node model (`model.inside`, qualified names, boundary nodes) and its routes (`subgraph`, `extract`, `include`, template insert), the `--editor canvas\|comfy` switch | `pytest -q` without the browser tests: `1076 passed, 1 skipped`; isort/black/flake8 clean; `mypy streamstudio`: `Success: no issues found in 59 source files` |
 | streamstudio, 3b page (2026-09-29) | the menu bar and keyboard map (`commands.ts`), the right-click menus, the file / new / check dialogs, ● and `beforeunload`, the Nodes sidebar (Subgraph left out, docstring markup as inline code), groups (Add group, resize, drag in and out), subgraph levels (breadcrumb, Escape, `?level=`, a readable fit on entering, a fit after Arrange), one-request Cut / Delete, paste waiting for its copy | `tests/test_canvas.py`: `83 passed` (58 before the fixes; 20 of the new tests failed on the old build); `npm test`: `Tests  203 passed (203)`; `npm run typecheck` and `npm run build` clean |
+| streamstudio, 4a backend (2026-10-01) | the HOST (`editor_blueprint(host=…)`: `folder()` asked at each request and followed across a move or a copy with the held documents' history; `record()` run on the tracer for a graph with no source, its fills set on the top-level ops; `saved(paths)` after every Save; `studio_of(app).stash()`), `GET …/app` (a graph's `app:` fields; `requires` never a field), `POST …/slot` (*set source…*), the pickers (`picker` in the form schema, `GET /api/files?show=all`, `GET /api/hf/*`), `page_blueprint()` serving the build, and the lazy package root (`import streamstudio.app` 6.2–8.0 s → 0.2 s) | the streamstudio suite without the browser tests `1359 passed, 1 skipped`; mypy clean (67 files) |
+| streamstudio, 4a page and integration (2026-10-01) | the page's half of the host: `?tab=` and `?embed=1` (no logo, no minimap until asked, every menu kept), an unknown `?graph=` named with the graphs there are, Run on a graph without its own source sending `{}` and naming the host's record and fills, the settings tab narrowed to the `app:` fields with *all parameters*, a `(min, max)` pair as one field, Set source… (card, node menu, a wire dragged out of the slot), the `…` file browser and the HuggingFace lists (asked on reach, the server's reason shown when empty), the panel's `state` / `saved` / `open` messages; 14 browser tests mounting both blueprints under `/studio` in a host app | `pytest -q` (page built): `1479 passed, 1 skipped in 138.31s`; `tests/test_canvas.py` alone: `120 passed`; `npm test`: `Tests  372 passed (372)`, 24 files; `npm run build`: `507.64 kB │ gzip: 165.99 kB`; `mypy streamstudio`: `Success: no issues found in 67 source files`; `import streamstudio.app` from a scratch folder: 0.210–0.225 s, no torch (6.2–8.0 s before) |
+| streamstudio, 4a review fixes and docs (2026-10-01) | the review of the mount (a host's `open` keeps each edit in its own graph and closes Set source…; every path handed to the host spelled under `folder()`; New… tells the host; a clean graph the host rewrote is read again; includes out of a moved folder rewritten; every host failure a 400 in words; the panel opens fitted; dialogs take and return the keyboard), then the documentation: README (the smallest host, runnable; Set source…; what is not there yet), AGENTS, the architecture record's two rejected alternatives (a second editor, an iframe-only bridge), §6d | `pytest -q` (page built): `1512 passed, 1 skipped in 156.53s`; `tests/test_canvas.py`: 133 tests; `npm test`: `Tests  379 passed (379)`, 24 files; `npm run build`: `510.28 kB │ gzip: 166.94 kB`; `mypy streamstudio`: `Success: no issues found in 67 source files` |
+| the consuming annotation workspace and the signal domain, 4b (2026-10-01) | the workspace HOSTS the editor (both blueprints under `/studio/`; `folder()` its state folder, `record()` the record and window its page shows with `{start_s, stop_s}` / `{f0_hz, f1_hz}` as fills, `saved()` dropping the chains built from the saved files and applying a saved source graph at once) and shows it in a panel of its own page (one editor, re-targeted with `open`); every graph it runs is the YAML the editor writes — `flow:` and `stream:` documents alike, cached by the file's time — and a folder saved with the ComfyUI editor is converted once when opened; the signal domain's `templates()` hands out the YAML documents, the cell pane listing its energy search after the two decoders as its canvas ran it. Proven end to end on a real server over SigMF captures: a pane setting saved in the panel (`fft_size` 1024 → 2048) is what the pane draws next, without a reload, and still runs after a restart; *settings* opens on the `app:` fields only (30 of the Bluetooth pane's 237); Run runs on the page's record and window; *Set source…* with the folder chooser lists the captures; a canvas-only folder was converted once (37 files, 8 s) and its 15 panes answered exactly as a folder made that day over two windows; no editor process and no converter child. Two ComfyUI-converter pins here now read the canvas beside each template (`test_missing_node_refusal.py`, `test_chain_op_list_export.py`) | the workspace's `pytest`: `2380 passed`; the signal domain's: `2807 passed, 15 skipped` (`test_shipped_configs.py` `54 passed, 7 skipped`); this project's: `1512 passed, 1 skipped`; recordstream `1426 passed`; mypy clean on all three |
 | the consuming annotation workspace, 3b (2026-09-29) | its ComfyUI launch names the editor (`python -m streamstudio.cli run --editor comfy`), pinned in two halves (the command and its neutral working directory run without streamstudio installed) | `pytest -q`: `2059 passed`; `mypy`: `Success: no issues found in 99 source files` |
 | streamstudio, 3c round 2 (2026-09-29) | §6c items 1, 3 and 4: the recovery file (`Studio.stash` on the way out of SIGTERM and Ctrl+C, `GET /api/workspace`, restore, discard, the session guard, what `stop` says, `restart`'s folder), op-list members added and removed (`OP_LISTS`, `{list}` on `POST …/steps`, `added`, the member comment rule, `shifts`), Shift+click; the page's recovery dialog, op-list targets and selection; `.streamstudio-workspace*.json` ignored in every project whose folders hold editor graphs | `pytest -q` (page built): `1296 passed, 1 skipped in 195.54s`; `tests/test_canvas.py` alone: `101 passed`; `npm test`: `Tests  291 passed (291)`, 18 files; `mypy streamstudio`: `Success: no issues found in 62 source files`; live on port 8196: `stop` printed the kept-work line and the next start the restore line |
 | streamstudio, 3d round 3 (2026-09-29) | §6c item 2: File ▸ New… writes the file at once — `Studio.new_graph` through `Document.create` (the file is created or the write fails, never opened over one that is there), `dirty: false`, a file in another folder joins like File ▸ Open (`clip~2`); every refusal before anything is written; the recovery rows are changed files only; the page's New dialog (Name, Folder, Browse…, the path line, the server's refusal shown in place) | `pytest -q` (page built): `1306 passed, 1 skipped`; `tests/test_canvas.py` alone: `104 passed`; `npm test`: `Tests  301 passed (301)`, 19 files; `mypy streamstudio`: `Success: no issues found in 62 source files` |

@@ -85,6 +85,40 @@ export function changedParams(wanted: Record<string, Json>, current: Record<stri
   );
 }
 
+/** What a rerun form reads a parameter's starting value from. */
+export interface RerunValues {
+  /** Typed into the form: a trial, never written. */
+  touched: Record<string, Json>;
+  /** What the host filled into this node before the run (`run.host.filled[node]`) — the window, the band. */
+  filled: Record<string, Json>;
+  /** What the document spells (`plainParams`). */
+  spelled: Record<string, Json>;
+  /** What the run's node holds now (the trace row's `params`). */
+  recorded: Record<string, Json>;
+}
+
+/**
+ * The value a rerun form starts a parameter at: typed, else the HOST's when it filled it (a window, a band), else the
+ * document's, else what the run used. Measured before: the shipped panes spell `start_s: 0` / `stop_s: 0` and the form
+ * started there, although the host had filled 0.001 / 0.003 and that window is what ran.
+ */
+export function rerunStart(name: string, values: RerunValues): Json | undefined {
+  if (name in values.touched) return values.touched[name];
+  if (name in values.filled) return values.filled[name];
+  if (name in values.spelled) return values.spelled[name];
+  return values.recorded[name];
+}
+
+/**
+ * What "rerun this node" sends: the document's values and the trials that differ from what the run's node holds — a
+ * value the host filled is sent only when typed (measured before: the spelled 0 / 0 went out over the host's window,
+ * the window became the whole capture, and the panel still said the host's window ran).
+ */
+export function rerunSends(values: RerunValues): Record<string, Json> {
+  const spelled = Object.fromEntries(Object.entries(values.spelled).filter(([name]) => !(name in values.filled)));
+  return changedParams({ ...spelled, ...values.touched }, values.recorded);
+}
+
 export interface SummaryCells {
   type: string;
   shape: string;

@@ -4,7 +4,8 @@
  *
  *     empty canvas   Add Node ▸ (by kind, with search) · Add Group · Paste · Insert template ▸ · Insert steps file… · Arrange
  *     a node         Rename… · Delete · Copy · Group · Convert to subgraph · Save as template… · Run to here
- *                    (a subgraph node also: Open · Move to its own file…; a subgraph's <in>/<out>: nothing)
+ *                    (a node with a source slot — a Stream — also: Set source…, `slots.ts`;
+ *                     a subgraph node also: Open · Move to its own file…; a subgraph's <in>/<out>: nothing)
  *     a group        Rename… · Colour ▸ · Ungroup · Convert group to subgraph
  *
  * A right-click on a node first makes it the selection (unless it already is part of it), so the node menu's items
@@ -143,6 +144,8 @@ export interface NodeMenuContext extends MenuContext {
   extract: () => void;
   /** Show a subgraph's inside; absent when the server sent none for it (`model.inside`) — the item is then greyed. */
   openSubgraph?: () => void;
+  /** The node's source slots (`slots.sourceSlots`): one Set <slot>… item each, opening the class picker and form. */
+  slots?: { slot: string; filled: string | undefined; choose: () => void }[];
 }
 
 /** Right-click on a node. A subgraph's `<in>` / `<out>` is where the record enters or leaves it: nothing to run. */
@@ -171,6 +174,18 @@ export function nodeMenu(context: NodeMenuContext): Entry[] {
       onSelect: context.runTo,
     },
   ];
+  if (context.slots !== undefined && context.slots.length > 0) {
+    entries.push(separator());
+    for (const slot of context.slots)
+      entries.push({
+        type: "item",
+        key: `set-slot:${slot.slot}`,
+        label: `Set ${slot.slot}…`,
+        hint: slot.filled === undefined ? `choose a class for the empty ${slot.slot} slot, and its values` : `replace ${slot.filled}: a class and its values`,
+        attrs: { "data-command": "set-slot", "data-slot": slot.slot },
+        onSelect: slot.choose,
+      });
+  }
   if (context.node.kind === "subgraph") {
     entries.push(
       separator(),

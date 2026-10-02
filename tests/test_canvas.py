@@ -25,27 +25,47 @@ bar, ``data-toast`` on a toast, ``data-saves`` (accepted writes so far) and ``da
 root. Only an EDGE has no attribute of its own (React Flow renders it), so edges are counted by the
 ``react-flow__edge`` element and a proposal by the ``wire-proposal`` class the page puts on it.
 
+The host classes at the end (``TestMountedInAHost``, ``TestSetSourceInAHost``, ``TestTheHostHearsAndFollows``,
+``TestTheHostsOpenKeepsEachEditInItsGraph``, ``TestTheEmbeddedPanelsFields``, ``TestTheEmbeddedPanelOpensFitted``) serve
+the page the way a consuming workspace does: a host Flask app of its own with both blueprints under ``/studio`` and a
+HOST object (``streamstudio.app.EditorHost``) that names the folder, supplies the record a pane graph runs on and hears
+of every Save; its own page holds the editor in an iframe and keeps the messages the page posts. The HuggingFace
+lookups are replaced on the package there — no test touches the network.
+
 Skipped, with the reason, when the page is not built (no ``frontend/dist/index.html``) or headless
 chromium is not installed — the build is ``cd streamstudio/frontend && npm install && npm run build``.
 """
 
 import json
 import re
+import shutil
 import threading
 import time
 import urllib.request
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, NamedTuple, Tuple
+from typing import Any, Callable, Dict, Iterator, List, NamedTuple, Sequence, Tuple
 
 import numpy as np
 import pytest
 from confluid import configurable
+from flask import Flask
 from PIL import Image as PILImage
 from recordstream import Algorithm, Image, Input, Label, Output, Record
 from werkzeug.serving import make_server
 
+import streamstudio
 from streamstudio import layout
-from streamstudio.app import EXTENSION, RECOVERY_FILE, Studio, create_app, starter_text
+from streamstudio.app import (
+    EXTENSION,
+    RECOVERY_FILE,
+    HostRecord,
+    Studio,
+    create_app,
+    editor_blueprint,
+    page_blueprint,
+    starter_text,
+    studio_of,
+)
 from streamstudio.document import ALREADY_EXISTS, Document
 
 playwright_api = pytest.importorskip(
@@ -1221,6 +1241,25 @@ class TestFirstLayout:
         assert contract == (40.0, 430.0)
         assert opened.errors == []
 
+    def test_the_detection_model_opened_fresh_draws_no_card_over_another(
+        self, open_graph: Callable[[str], Opened], graph_dir: Path
+    ) -> None:
+        """Measured 2026-10-01 on the shipped ``threshold_detector_model.yaml``, rooted that day: 11 cards —
+        the seven steps, the ``threshold`` step's three ``ConfigureOp`` members and the ``contract`` root,
+        which wires to nothing — none drawn over another."""
+        waivefront = pytest.importorskip("waivefront")
+        shipped = Path(waivefront.__file__).parent / "annotation" / "threshold_detector_model.yaml"
+        (graph_dir / "threshold_detector_model.yaml").write_text(shipped.read_text())
+        assert not layout.sidecar_path(graph_dir / "threshold_detector_model.yaml").exists()
+        opened = open_graph("threshold_detector_model")
+        page = opened.page
+        names = page.locator(NODE).evaluate_all("ns => ns.map(n => n.dataset.node)")
+        assert len(names) == 11 and "contract" in names
+        boxes = node_boxes(page, *names)
+        overlapping = [(a, b) for i, a in enumerate(names) for b in names[i + 1 :] if overlap(boxes[a], boxes[b])]
+        assert overlapping == []
+        assert opened.errors == []
+
 
 # ------------------------------------------------------------------------------------------------
 # rename: double-click a title, Enter is POST .../rename
@@ -1454,7 +1493,8 @@ class TestSettingsForm:
         opened = open_graph("pets")
         page = opened.page
         page.locator('[data-tab="settings"]').click()
-        page.wait_for_selector("[data-settings]")
+        page.locator("[data-settings-all]").check()  # pets has no app: block — it names no settings of its own
+        page.wait_for_selector('[data-settings][data-settings-mode="all"]')
         form = api_get(server, "api/graphs/pets/form")
         names = [node["name"] for node in api_get(server, "api/graphs/pets")["model"]["nodes"]]
         sections = page.locator("[data-form-node]").evaluate_all("ss => ss.map(s => s.dataset.formNode)")
@@ -1474,6 +1514,7 @@ class TestSettingsForm:
         opened = open_graph("pets")
         page = opened.page
         page.locator('[data-tab="settings"]').click()
+        page.locator("[data-settings-all]").check()
         in_form = page.locator('[data-form-node="stream.ops[1]"] input[data-param="low_level"]')
         on_canvas = page.locator(f'{node_root("stream.ops[1]")} input[data-param="low_level"]')
         in_form.fill("0.8")
@@ -2271,6 +2312,7 @@ class TestSettingsFollowTheLevel:
         opened = open_graph("sub")
         page = opened.page
         page.locator('[data-tab="settings"]').click()
+        page.locator("[data-settings-all]").check()
         sections = "ss => ss.map(s => s.dataset.formNode)"
         page.wait_for_selector('[data-form-node="mask"]')
         assert page.locator("[data-form-node]").evaluate_all(sections) == ["prep", "mask"]
@@ -3501,3 +3543,1109 @@ class TestAnUndoDrawsTheMembersWhereTheEditorHoldsThem:
             arg={name: answered[name] for name in members},
         )
         assert opened.errors == []
+
+
+# ------------------------------------------------------------------------------------------------
+# the editor MOUNTED in a host app (DESIGN5 step 1): both blueprints under /studio, a host that names the folder,
+# supplies the record a pane graph runs on and hears of every Save — what a consuming workspace builds
+# ------------------------------------------------------------------------------------------------
+
+#: Where the host mounts the editor — the API and the page side by side.
+STUDIO = "/studio"
+
+
+@configurable(category="op", group="canvas-test")
+class PaneWindow:
+    """Keep the record and write the window the host filled in — a stand-in for a signal window.
+
+    Args:
+        start_s: Where the window starts.
+        stop_s: Where it stops.
+    """
+
+    consumes = {"image": "Image"}
+    produces = {"span": "*"}
+
+    def __init__(self, start_s: float = 0.0, stop_s: float = 0.0) -> None:
+        self.start_s = float(start_s)
+        self.stop_s = float(stop_s)
+
+    def __call__(self, record: Record) -> Record:
+        return {**record, "span": [self.start_s, self.stop_s]}
+
+
+@configurable(category="op", group="canvas-test")
+class PaneBand:
+    """Keep the record and write the band the host filled in — a stand-in for a tuner with a ``(min, max)`` gate.
+
+    Args:
+        f0_hz: The band's lower edge.
+        f1_hz: The band's upper edge.
+        deviation_hz: The ``(min, max)`` deviation a burst may have.
+    """
+
+    consumes = {"image": "Image"}
+    produces = {"band": "*"}
+
+    def __init__(
+        self, f0_hz: float = 0.0, f1_hz: float = 0.0, deviation_hz: Tuple[float, float] = (1.0e5, 7.5e5)
+    ) -> None:
+        self.f0_hz = float(f0_hz)
+        self.f1_hz = float(f1_hz)
+        self.deviation_hz = (float(deviation_hz[0]), float(deviation_hz[1]))
+
+    def __call__(self, record: Record) -> Record:
+        return {**record, "band": [self.f0_hz, self.f1_hz]}
+
+
+@configurable(category="op", group="canvas-test")
+class TinyFileName:
+    """Name the file a record carries — what a files source's record holds (``{"file": "<path>"}``).
+
+    Args:
+        suffix: Appended to the name.
+        names_file: A file of names — a ``…file`` string, so its field gets the file chooser.
+    """
+
+    def __init__(self, suffix: str = "", names_file: str = "") -> None:
+        self.suffix = suffix
+        self.names_file = names_file
+
+    def __call__(self, record: Record) -> Record:
+        return {**record, "name": Path(str(record["file"])).name + self.suffix}
+
+
+#: A pane graph as a host serves it: a flow with no source — the host supplies the record, the window and the band —
+#: and an ``app:`` block naming the three settings a person tunes from the host (a ``__lo``/``__hi`` pair is ONE
+#: field; ``TinyGain`` is the class of two steps, so its entry is a field on each).
+HOST_PANE_TEXT = f"""\
+# a pane: the host supplies the record, the window and the band
+flow:
+  window:
+    op: !class:{MOD}.PaneWindow {{}}
+  band:
+    op: !class:{MOD}.PaneBand {{}}
+    from: window
+  gain:
+    op: !class:{MOD}.TinyGain {{gain: 2.0}}   # the knob
+    from: band
+  boost:
+    op: !class:{MOD}.TinyGain {{gain: 3.0}}
+    from: gain
+outputs: boost
+
+app:
+  inputs:
+    - [PaneBand, deviation_hz__lo]
+    - [PaneBand, deviation_hz__hi]
+    - [TinyGain, gain]
+"""
+
+HOST_PANE_STEPS = ["window", "band", "gain", "boost"]
+
+#: A chain whose records come from a source still to be chosen (Set source…).
+HOST_SOURCE_TEXT = f"""\
+# the files chain: its source is chosen in the editor
+stream: !class:recordstream.core.stream.Stream
+  ops:
+    - !class:{MOD}.TinyFileName {{}}
+"""
+
+HOST_WINDOW = {"start_s": 0.25, "stop_s": 0.75}
+HOST_BAND = {"f0_hz": 1.0e6, "f1_hz": 2.0e6}
+HOST_LABEL = "rec_7 · 0.25–0.75 s · 1–2 MHz"
+
+#: The host's own page: the editor in a PANEL (an iframe), and every message the editor posts kept in order.
+HOST_PAGE = f"""<!doctype html>
+<title>the host</title>
+<h1>the host's own page</h1>
+<script>
+  window.received = [];
+  window.addEventListener("message", (event) => {{
+    const said = event.data;
+    if (event.origin === location.origin && said && said.source === "streamstudio") window.received.push(said);
+  }});
+</script>
+<iframe id="studio" src="{STUDIO}/?graph=pane&embed=1" style="width: 1300px; height: 800px"></iframe>
+"""
+
+
+class BrowserHost:
+    """The smallest host: a name, a folder it may move, one selected record, and what the editor told it."""
+
+    name = "the test host"
+
+    def __init__(self, folder: Path) -> None:
+        self.where = folder
+        self.asked: List[Tuple[str, Path]] = []
+        self.saves: List[List[Path]] = []
+
+    def folder(self) -> Path:
+        return self.where
+
+    def record(self, graph: str, path: Path) -> HostRecord:
+        self.asked.append((graph, path))
+        image = Image(np.full((2, 2), 0.5, dtype=np.float32))
+        return HostRecord(record={"image": image}, fills=(HOST_WINDOW, HOST_BAND), label=HOST_LABEL)
+
+    def saved(self, paths: Sequence[Path]) -> None:
+        self.saves.append([Path(path) for path in paths])
+
+
+class Hosted(NamedTuple):
+    """A host app serving the editor under :data:`STUDIO`, on a free port in a thread."""
+
+    url: str
+    host: BrowserHost
+    app: Any  # flask.Flask
+    folder: Path
+
+
+def host_app(host: BrowserHost, templates_dir: Path) -> Any:  # flask.Flask
+    """A host app as a consuming workspace builds it: its own page and its OWN ``/api/workspace``, and the editor's API
+    and page (the checkout's build: ``page_blueprint()``) side by side under ``/studio``."""
+    app = Flask("host")
+
+    @app.get("/")
+    def home() -> str:
+        return HOST_PAGE
+
+    @app.get("/api/workspace")
+    def workspace() -> Dict[str, str]:
+        return {"owner": "the host"}
+
+    app.register_blueprint(editor_blueprint(host=host, templates_dir=templates_dir), url_prefix=STUDIO)
+    app.register_blueprint(page_blueprint(), url_prefix=STUDIO)
+    return app
+
+
+@pytest.fixture
+def hosted(tmp_path: Path, templates_dir: Path) -> Iterator[Hosted]:
+    folder = tmp_path / "state"
+    folder.mkdir()
+    (folder / "pane.yaml").write_text(HOST_PANE_TEXT)
+    (folder / "source.yaml").write_text(HOST_SOURCE_TEXT)
+    captures = folder / "captures"
+    captures.mkdir()
+    for name in ("a.txt", "b.txt"):
+        (captures / name).write_text(name)
+    host = BrowserHost(folder)
+    app = host_app(host, templates_dir)
+    httpd = make_server("127.0.0.1", 0, app, threaded=True)
+    thread = threading.Thread(target=httpd.serve_forever, name="streamstudio-canvas-host", daemon=True)
+    thread.start()
+    yield Hosted(f"http://127.0.0.1:{httpd.server_port}", host, app, folder)
+    httpd.shutdown()
+    thread.join(timeout=10)
+
+
+def open_hosted(browser: Any, hosted: Hosted, query: str) -> Opened:
+    """Open ``/studio/?<query>`` in the host app — the page under the host's prefix."""
+    page = browser.new_page(viewport={"width": 1400, "height": 900})
+    errors: List[str] = []
+    page.on("pageerror", lambda exc: errors.append(f"pageerror: {exc}"))
+    page.on("console", lambda msg: errors.append(f"console.error: {msg.text}") if msg.type == "error" else None)
+    page.goto(f"{hosted.url}{STUDIO}/?{query}")
+    return Opened(page, errors)
+
+
+def hosted_api(hosted: Hosted, path: str) -> Any:  # the route's JSON under the host's prefix
+    return api_get(f"{hosted.url}{STUDIO}", path)
+
+
+def set_widget(page: Any, scope: str, param: str, value: str) -> None:
+    """Type a value into the text/number widget ``param`` inside ``scope`` and commit it (Enter blurs)."""
+    widget = page.locator(f'{scope} input[data-param="{param}"]')
+    widget.fill(value)
+    widget.press("Enter")
+
+
+class TestMountedInAHost:
+    """The page under a host's prefix (``/studio/``), the host's record, the settings a link opens, an unknown graph."""
+
+    def test_the_page_under_the_prefix_asks_the_editor_there_and_fits_a_panel(
+        self, browser: Any, hosted: Hosted
+    ) -> None:
+        opened = open_hosted(browser, hosted, "graph=pane&embed=1")
+        page = opened.page
+        requests: List[str] = []
+        page.on("request", lambda request: requests.append(request.url))
+        wait_ready(page, "pane")
+        root = page.locator(".app")
+        assert (root.get_attribute("data-embed"), root.get_attribute("data-host")) == ("true", "the test host")
+        assert page.locator(".bar .brand").count() == 0  # the host's page says what app this is
+        assert page.locator(".react-flow__minimap").count() == 0  # a panel's small canvas: off until asked
+        assert page.locator('[data-menu="file"]').count() == 1  # the menus and every function stay
+        drawn = page.locator(NODE).evaluate_all("ns => ns.map(n => n.dataset.node)")
+        assert sorted(drawn) == sorted(node["name"] for node in hosted_api(hosted, "api/graphs/pane")["model"]["nodes"])
+        assert set(HOST_PANE_STEPS) < set(drawn)  # the four steps, and the record entering the flow
+        page.locator('[data-tab="text"]').click()
+        assert "# a pane: the host supplies the record" in page.locator("[data-yaml]").inner_text()
+        page.reload()
+        wait_ready(page, "pane")
+        asked = [url for url in requests if "/api/" in url]
+        assert asked and all(url.startswith(f"{hosted.url}{STUDIO}/api/") for url in asked), asked
+        assert opened.errors == []
+
+    def test_run_on_a_pane_runs_the_hosts_record_with_its_window_and_band_and_names_it(
+        self, browser: Any, hosted: Hosted
+    ) -> None:
+        opened = open_hosted(browser, hosted, "graph=pane&embed=1")
+        page = opened.page
+        wait_ready(page, "pane")
+        set_widget(page, node_root("gain"), "gain", "5")  # held, NOT saved: the value a Run uses
+        wait_saves(page, 1)
+        open_run_tab(page)
+        assert page.locator(".run-controls").get_attribute("data-run-from") == "host"
+        assert page.locator("input[data-run-record]").count() == 0
+        assert page.locator(".run-from-host").inner_text() == "record: the test host's selection"
+        page.locator('[data-action="run"]').click()
+        wait_answers(page, 1)
+        assert page.locator("[data-run-error]").count() == 0
+        assert run_statuses(page, *HOST_PANE_STEPS) == {name: "ok" for name in HOST_PANE_STEPS}
+        rows = page.locator("[data-run-row]").evaluate_all("rs => rs.map(r => r.dataset.runRow)")
+        assert rows == HOST_PANE_STEPS
+        assert page.locator("[data-run-ran-on]").inner_text() == HOST_LABEL
+        filled = page.locator("[data-run-filled] li").evaluate_all("ls => ls.map(l => l.innerText)")
+        assert sorted(filled) == ["band: f0_hz = 1000000, f1_hz = 2000000", "window: start_s = 0.25, stop_s = 0.75"]
+        run = hosted_api(hosted, f"api/runs/{page.locator('[data-run-panel]').get_attribute('data-run')}")
+        assert run["record"] is None and run["host"]["label"] == HOST_LABEL
+        gains = {node["node"]: node["params"].get("gain") for node in run["trace"]["nodes"]}
+        assert (gains["gain"], gains["boost"]) == (5.0, 3.0)  # the unsaved value ran
+        assert hosted.host.asked == [("pane", hosted.folder / "pane.yaml")]
+        assert (hosted.folder / "pane.yaml").read_text() == HOST_PANE_TEXT
+        assert opened.errors == []
+
+    def test_a_link_to_the_settings_tab_lists_only_the_app_fields_and_the_tick_box_lists_all(
+        self, browser: Any, hosted: Hosted
+    ) -> None:
+        opened = open_hosted(browser, hosted, "graph=pane&tab=settings&embed=1")
+        page = opened.page
+        wait_ready(page, "pane")
+        settings = page.wait_for_selector('[data-settings][data-settings-mode="app"]')
+        assert page.locator(".app").get_attribute("data-side-tab") == "settings"
+        app = hosted_api(hosted, "api/graphs/pane/app")
+        assert [(field["node"], field["param"]) for field in app["fields"]] == [
+            ("band", "deviation_hz"),
+            ("gain", "gain"),
+            ("boost", "gain"),
+        ]
+        assert settings.get_attribute("data-settings-fields") == "3"
+        shown = page.locator("[data-form-node]").evaluate_all(
+            "ss => ss.map(s => [s.dataset.formNode, [...s.querySelectorAll('[data-param]')].map(p => p.dataset.param)])"
+        )
+        assert shown == [["band", ["deviation_hz"]], ["gain", ["gain"]], ["boost", ["gain"]]]
+        # the (min, max) pair is ONE field of two numbers — what the ComfyUI editor drew as __lo / __hi
+        pair = page.locator('[data-form-node="band"] [data-param="deviation_hz"]')
+        assert [pair.locator(f'[data-pair-end="{end}"]').input_value() for end in ("min", "max")] == [
+            "100000",
+            "750000",
+        ]
+        pair.locator('[data-pair-end="max"]').fill("800000")
+        pair.locator('[data-pair-end="max"]').press("Enter")
+        wait_saves(page, 1)
+        assert (
+            f"op: !class:{MOD}.PaneBand {{deviation_hz: [100000, 800000]}}"
+            in hosted_api(hosted, "api/graphs/pane")["text"]
+        )
+
+        page.locator("[data-settings-all]").check()
+        page.wait_for_selector('[data-settings][data-settings-mode="all"]')
+        form = hosted_api(hosted, "api/graphs/pane/form")
+        every = sum(len(params) for params in form.values())
+        assert every == 7  # window: start_s, stop_s · band: f0_hz, f1_hz, deviation_hz · gain · boost
+        assert page.locator("[data-settings]").get_attribute("data-settings-fields") == str(every)
+        page.locator("[data-settings-all]").uncheck()
+        page.wait_for_selector('[data-settings][data-settings-mode="app"][data-settings-fields="3"]')
+        assert opened.errors == []
+
+    def test_a_graph_without_an_app_block_says_it_names_no_settings_until_all_parameters_is_ticked(
+        self, browser: Any, hosted: Hosted
+    ) -> None:
+        """Review 2026-10-02: ``settings`` on a pane whose graph has no ``app:`` block listed every parameter — its
+        Stream's plumbing, the window the host fills at run time, the root contract — with no word why."""
+        opened = open_hosted(browser, hosted, "graph=source&tab=settings&embed=1")
+        page = opened.page
+        wait_ready(page, "source")
+        settings = page.wait_for_selector('[data-settings][data-settings-mode="app"]')
+        assert settings.get_attribute("data-settings-fields") == "0"
+        assert page.locator("[data-form-node]").count() == 0
+        assert page.locator("[data-settings-none]").inner_text() == (
+            "This graph names no settings — it has no app: block. "
+            "Its parameters are on the canvas; tick all parameters to list every one here."
+        )
+        assert not page.locator("[data-settings-all]").is_checked()
+
+        page.locator("[data-settings-all]").check()
+
+        page.wait_for_selector('[data-settings][data-settings-mode="all"]')
+        every = sum(len(params) for params in hosted_api(hosted, "api/graphs/source/form").values())
+        assert every > 0 and page.locator("[data-settings]").get_attribute("data-settings-fields") == str(every)
+        assert page.locator("[data-settings-none]").count() == 0
+        assert opened.errors == []
+
+    def test_the_shipped_bluetooth_pane_shows_its_app_fields_and_never_a_gate(
+        self, browser: Any, hosted: Hosted
+    ) -> None:
+        """The real pane: its ``app:`` block's 32 entries are 30 fields (two ``__lo``/``__hi`` pairs), where the whole
+        graph has every parameter of 30 nodes; a step's ``requires`` gate is a field in neither list."""
+        annotation = pytest.importorskip("waivefront.annotation")
+        shipped = Path(annotation.__file__).parent / "bte_view.yaml"
+        (hosted.folder / "bte_view.yaml").write_text(shipped.read_text())
+        opened = open_hosted(browser, hosted, "graph=bte_view&tab=settings&embed=1")
+        page = opened.page
+        wait_ready(page, "bte_view")
+        settings = page.wait_for_selector('[data-settings][data-settings-mode="app"]')
+        app = hosted_api(hosted, "api/graphs/bte_view/app")
+        assert (len(app["fields"]), app["problems"]) == (30, [])
+        assert settings.get_attribute("data-settings-fields") == "30"
+        page.locator("[data-settings-all]").check()
+        page.wait_for_selector('[data-settings][data-settings-mode="all"]')
+        form = hosted_api(hosted, "api/graphs/bte_view/form")
+        every = sum(len(params) for params in form.values())
+        assert every > 200
+        assert page.locator("[data-settings]").get_attribute("data-settings-fields") == str(every)
+        assert page.locator('[data-settings] [data-param="requires"]').count() == 0
+        assert opened.errors == []
+
+    def test_a_link_to_a_graph_that_is_not_there_says_so_and_offers_the_graphs_there(
+        self, browser: Any, hosted: Hosted
+    ) -> None:
+        opened = open_hosted(browser, hosted, "graph=nosuch&embed=1")
+        page = opened.page
+        missing = page.wait_for_selector('[data-graph-missing="nosuch"]')
+        assert missing.query_selector("[data-graph-missing-message]").inner_text() == (
+            f"There is no graph 'nosuch' in {hosted.folder} — the graphs there are: pane and source."
+        )
+        assert page.locator(".app").get_attribute("data-graph") == ""  # nothing else was opened in its place
+        assert page.locator(NODE).count() == 0
+        choices = page.locator("[data-graph-choice]").evaluate_all("bs => bs.map(b => b.dataset.graphChoice)")
+        assert choices == ["pane", "source"]
+        page.locator('[data-graph-choice="pane"]').click()
+        wait_ready(page, "pane")
+        assert "graph=pane" in page.url and "embed=1" in page.url
+        assert opened.errors == []
+
+
+def choose_slot_class(page: Any, class_path: str, search: str) -> None:
+    """Set source…'s first step: search the classes the slot takes and pick ``class_path``; its form comes up."""
+    page.locator("[data-slot-search]").fill(search)
+    page.locator(f'[data-slot-class="{class_path}"]').click()
+    page.wait_for_selector(f'[data-slot-chosen="{class_path}"]')
+
+
+FILES_SOURCE = "recordstream.sources.files.FilesSource"
+HF_SOURCE = "recordstream.sources.huggingface.HuggingFaceSource"
+
+
+class TestSetSourceInAHost:
+    """Set source…: a class and its values into a Stream's empty ``source`` slot — with the folder chooser for a path
+    field and the HuggingFace lists — after which the chain runs its OWN records, not the host's."""
+
+    def test_a_files_source_with_a_folder_chosen_in_the_browser_goes_into_the_slot_and_the_chain_runs_it(
+        self, browser: Any, hosted: Hosted
+    ) -> None:
+        opened = open_hosted(browser, hosted, "graph=source&embed=1")
+        page = opened.page
+        wait_ready(page, "source")
+        open_run_tab(page)
+        assert page.locator(".run-controls").get_attribute("data-run-from") == "host"  # no source of its own yet
+        wait_palette_loaded(page)
+        page.locator(f'{node_root("stream")} button[data-set-slot="source"]').click()
+        dialog = page.wait_for_selector('[data-dialog="set-slot"] [data-slot-step="pick"]')
+        assert dialog.get_attribute("data-slot-node") == "stream" and dialog.get_attribute("data-slot-name") == "source"
+        offered = page.locator("[data-slot-class]").evaluate_all("ls => ls.map(l => l.dataset.slotClass)")
+        assert FILES_SOURCE in offered and HF_SOURCE in offered
+        assert not any(path.startswith("recordstream.ops.") for path in offered)  # an op never fills a source slot
+        choose_slot_class(page, FILES_SOURCE, "FilesSource")
+        assert page.locator("[data-slot-effect]").inner_text() == "FilesSource goes into the empty source slot."
+
+        # the folder chooser: root is a folder field — the editor's file browser, folder mode, on the editor's machine
+        page.locator('[data-dialog="set-slot"] button[data-browse="root"]').click()
+        browser_dialog = page.wait_for_selector(
+            f'[data-dialog="file"] [data-file-mode="folder"][data-file-dir="{hosted.folder}"]'
+        )
+        assert browser_dialog is not None
+        page.locator('[data-dialog="file"] [data-file-entry="captures"]').click()
+        page.wait_for_selector(f'[data-dialog="file"] [data-file-dir="{hosted.folder / "captures"}"]')
+        page.locator('[data-dialog="file"] [data-file-confirm]').click()
+        page.wait_for_selector('[data-dialog="file"]', state="detached")
+        root = page.locator('[data-dialog="set-slot"] input[data-param="root"]')
+        assert root.input_value() == str(hosted.folder / "captures")
+
+        page.locator("[data-slot-confirm]").click()
+        page.wait_for_selector('[data-dialog="set-slot"]', state="detached")
+        wait_saves(page, 1)
+        text = hosted_api(hosted, "api/graphs/source")["text"]
+        assert f"  source: !class:{FILES_SOURCE} {{root: {hosted.folder / 'captures'}}}" in text
+        assert (hosted.folder / "source.yaml").read_text() == HOST_SOURCE_TEXT  # held until Save
+        page.wait_for_selector(node_root("stream.source"))
+        assert page.locator(".app").get_attribute("data-dirty") == "true"
+
+        # the chain now draws its own records: Run asks for record #N of the files source, never the host
+        assert page.locator(".run-controls").get_attribute("data-run-from") == "source"
+        page.locator("input[data-run-record]").fill("1")
+        page.locator('[data-action="run"]').click()
+        wait_answers(page, 1)
+        assert page.locator("[data-run-error]").count() == 0
+        assert run_statuses(page, "stream.ops[0]") == {"stream.ops[0]": "ok"}
+        run = hosted_api(hosted, f"api/runs/{page.locator('[data-run-panel]').get_attribute('data-run')}")
+        assert run["record"] == 1 and run["host"] is None
+        assert page.locator("[data-run-ran-on]").inner_text() == "record #1"
+        traced = run["trace"]["nodes"][0]
+        assert "b.txt" in json.dumps(traced["output"]["name"])  # record #1 of the folder is b.txt
+        assert hosted.host.asked == []
+
+        # one undo takes the source out again
+        page.mouse.click(*EMPTY)
+        page.keyboard.press("Control+z")
+        wait_saves(page, 2)
+        assert hosted_api(hosted, "api/graphs/source")["text"] == HOST_SOURCE_TEXT
+        assert opened.errors == []
+
+    def test_the_node_menu_and_a_wire_dragged_out_of_the_slot_open_the_same_dialog(
+        self, browser: Any, hosted: Hosted
+    ) -> None:
+        opened = open_hosted(browser, hosted, "graph=source&embed=1")
+        page = opened.page
+        wait_ready(page, "source")
+        wait_palette_loaded(page)
+        page.locator(f'{node_root("stream")} .title .cls').click(button="right")
+        item = page.locator('[data-context-menu="node"] [data-command="set-slot"][data-slot="source"]')
+        assert item.inner_text().startswith("Set source…")
+        item.click()
+        page.wait_for_selector('[data-dialog="set-slot"][aria-label="Set the source of stream"]')
+        page.locator("[data-slot-cancel]").click()
+        page.wait_for_selector('[data-dialog="set-slot"]', state="detached")
+
+        start = handle(page, "stream", "source", "in").bounding_box()
+        drag(page, centre(start), EMPTY)  # a wire out of the slot onto nothing: the slot's dialog, never the palette
+        dialog = page.wait_for_selector('[data-dialog="set-slot"] [data-slot-step="pick"]')
+        assert dialog.get_attribute("data-slot-name") == "source"
+        assert page.locator("[data-palette]").count() == 0
+        page.keyboard.press("Escape")
+        page.wait_for_selector('[data-dialog="set-slot"]', state="detached")
+        assert page.locator(".app").get_attribute("data-saves") == "0"
+        assert opened.errors == []
+
+    def test_a_file_field_on_a_card_takes_a_file_chosen_in_the_editors_file_browser(
+        self, browser: Any, hosted: Hosted
+    ) -> None:
+        opened = open_hosted(browser, hosted, "graph=source&embed=1")
+        page = opened.page
+        wait_ready(page, "source")
+        card = node_root("stream.ops[0]")
+        assert page.locator(f'{card} [data-picked="file"] input[data-param="names_file"]').count() == 1
+        page.locator(f'{card} button[data-browse="names_file"]').click()
+        page.wait_for_selector(f'[data-dialog="file"] [data-file-mode="file"][data-file-dir="{hosted.folder}"]')
+        page.locator('[data-dialog="file"] [data-file-entry="captures"]').click()
+        page.wait_for_selector(f'[data-dialog="file"] [data-file-dir="{hosted.folder / "captures"}"]')
+        kinds = page.locator("[data-dialog=file] [data-file-entry]").evaluate_all(
+            "es => es.map(e => [e.dataset.fileEntry, e.dataset.fileKind])"
+        )
+        assert kinds == [["a.txt", "file"], ["b.txt", "file"]]  # every file, not only graphs
+        page.locator('[data-dialog="file"] [data-file-entry="a.txt"]').click()
+        page.locator('[data-dialog="file"] [data-file-confirm]').click()
+        wait_saves(page, 1)
+        chosen = hosted.folder / "captures" / "a.txt"
+        assert page.locator(f'{card} input[data-param="names_file"]').input_value() == str(chosen)
+        assert (
+            f"    - !class:{MOD}.TinyFileName {{names_file: {chosen}}}"
+            in hosted_api(hosted, "api/graphs/source")["text"]
+        )
+        assert opened.errors == []
+
+    def test_the_huggingface_lists_offer_what_the_editors_machine_knows(
+        self, browser: Any, hosted: Hosted, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The lookups are the editor's (its machine's cache), replaced here — no test touches the network. A list is
+        asked only when the person reaches for it, and the dataset picked is what the splits and columns are asked of.
+        """
+        asked: List[Tuple[str, Any]] = []
+
+        def datasets() -> Tuple[List[str], str]:
+            asked.append(("datasets", None))
+            return ["uoft-cs/cifar10", "ylecun/mnist"], ""
+
+        def splits(path: str, name: Any = None) -> List[str]:
+            asked.append(("splits", path))
+            return {"ylecun/mnist": ["train", "test"]}.get(path, [])
+
+        def features(path: str, name: Any = None, split: Any = None) -> List[str]:
+            asked.append(("features", (path, split)))
+            return {"ylecun/mnist": ["image", "label", "digit_name"]}.get(path, [])
+
+        monkeypatch.setattr(streamstudio, "cached_hf_datasets", datasets)
+        monkeypatch.setattr(streamstudio, "list_hf_dataset_splits", splits)
+        monkeypatch.setattr(streamstudio, "list_hf_dataset_features", features)
+        opened = open_hosted(browser, hosted, "graph=source&embed=1")
+        page = opened.page
+        wait_ready(page, "source")
+        wait_palette_loaded(page)
+        page.locator(f'{node_root("stream")} button[data-set-slot="source"]').click()
+        choose_slot_class(page, HF_SOURCE, "HuggingFaceSource")
+        form = '[data-dialog="set-slot"]'
+        assert asked == []  # nothing is asked as the form draws
+
+        dataset = page.locator(f'{form} select[data-picker="hf_dataset"][data-picker-for="path"]')
+        dataset.hover()
+        page.wait_for_selector(f'{form} select[data-picker="hf_dataset"][data-picker-state="ready"]')
+        assert dataset.locator("option").evaluate_all("os => os.map(o => o.value)") == [
+            "",
+            "uoft-cs/cifar10",
+            "ylecun/mnist",
+        ]
+        dataset.select_option("ylecun/mnist")
+        assert page.locator(f'{form} input[data-param="path"]').input_value() == "ylecun/mnist"
+
+        split = page.locator(f'{form} select[data-picker="hf_split"][data-picker-for="split"]')
+        split.hover()
+        page.wait_for_selector(f'{form} select[data-picker="hf_split"][data-picker-state="ready"]')
+        assert split.locator("option").evaluate_all("os => os.map(o => o.value)") == ["", "train", "test"]
+        split.select_option("test")
+        assert page.locator(f'{form} input[data-param="split"]').input_value() == "test"
+
+        target = page.locator(f'{form} select[data-picker="hf_feature"][data-picker-for="target_feature"]')
+        target.hover()
+        page.wait_for_selector(f'{form} select[data-picker-for="target_feature"][data-picker-state="ready"]')
+        assert target.locator("option").evaluate_all("os => os.map(o => o.value)") == [
+            "",
+            "image",
+            "label",
+            "digit_name",
+        ]
+        target.select_option("digit_name")
+        assert asked == [("datasets", None), ("splits", "ylecun/mnist"), ("features", ("ylecun/mnist", "test"))]
+
+        page.locator("[data-slot-confirm]").click()
+        page.wait_for_selector('[data-dialog="set-slot"]', state="detached")
+        wait_saves(page, 1)
+        text = hosted_api(hosted, "api/graphs/source")["text"]
+        assert f"source: !class:{HF_SOURCE} {{path: ylecun/mnist, split: test, target_feature: digit_name}}" in text
+        assert opened.errors == []
+
+    def test_an_empty_dataset_list_says_why_in_the_servers_words(
+        self, browser: Any, hosted: Hosted, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(streamstudio, "cached_hf_datasets", lambda: ([], "no datasets cached at /nowhere/hub"))
+        opened = open_hosted(browser, hosted, "graph=source&embed=1")
+        page = opened.page
+        wait_ready(page, "source")
+        wait_palette_loaded(page)
+        page.locator(f'{node_root("stream")} button[data-set-slot="source"]').click()
+        choose_slot_class(page, HF_SOURCE, "HuggingFaceSource")
+        dataset = page.locator('[data-dialog="set-slot"] select[data-picker="hf_dataset"]')
+        dataset.hover()
+        page.wait_for_selector('[data-dialog="set-slot"] select[data-picker="hf_dataset"][data-picker-state="ready"]')
+        assert dataset.get_attribute("data-picker-count") == "0"
+        assert dataset.get_attribute("title") == "no datasets cached at /nowhere/hub"
+        assert opened.errors == []
+
+
+class TestTheHostHearsAndFollows:
+    """Save tells the host which files it wrote; the host's folder is followed when it moves; the host's panel hears
+    the page's messages and opens a graph by command; unsaved work survives the host's stop."""
+
+    def test_save_tells_the_host_which_files_it_wrote(self, browser: Any, hosted: Hosted) -> None:
+        opened = open_hosted(browser, hosted, "graph=pane&embed=1")
+        page = opened.page
+        wait_ready(page, "pane")
+        set_widget(page, node_root("gain"), "gain", "4")
+        wait_saves(page, 1)
+        assert hosted.host.saves == []  # an edit is held: nothing is written, nothing told
+        save_file(page, 2)
+        assert hosted.host.saves == [[hosted.folder / "pane.yaml"]]
+        assert f"op: !class:{MOD}.TinyGain {{gain: 4}}   # the knob" in (hosted.folder / "pane.yaml").read_text()
+        assert opened.errors == []
+
+    def test_a_folder_the_host_moves_is_followed_at_the_next_request(self, browser: Any, hosted: Hosted) -> None:
+        opened = open_hosted(browser, hosted, "graph=pane&embed=1")
+        page = opened.page
+        wait_ready(page, "pane")
+        set_widget(page, node_root("gain"), "gain", "6")  # held in the editor, unsaved, when the folder moves
+        wait_saves(page, 1)
+        moved = hosted.folder.parent / "saved.d"
+        shutil.move(str(hosted.folder), str(moved))  # what a host does on a workspace's first save
+        hosted.host.where = moved
+        save_file(page, 2)
+        assert not hosted.folder.exists()
+        assert hosted.host.saves == [[moved / "pane.yaml"]]
+        assert f"op: !class:{MOD}.TinyGain {{gain: 6}}   # the knob" in (moved / "pane.yaml").read_text()
+        workspace = hosted_api(hosted, "api/workspace")
+        assert workspace["folder"] == str(moved) and workspace["host"] == {"name": "the test host"}
+        assert [entry["path"] for entry in hosted_api(hosted, "api/graphs")] == [
+            str(moved / "pane.yaml"),
+            str(moved / "source.yaml"),
+        ]
+        open_run_tab(page)
+        page.locator('[data-action="run"]').click()  # the run, too, is the moved file's
+        wait_answers(page, 1)
+        assert hosted.host.asked == [("pane", moved / "pane.yaml")]
+        assert opened.errors == []
+
+    def test_the_hosts_panel_hears_state_and_saved_and_opens_a_graph_by_command(
+        self, browser: Any, hosted: Hosted
+    ) -> None:
+        page = browser.new_page(viewport={"width": 1400, "height": 900})
+        errors: List[str] = []
+        page.on("pageerror", lambda exc: errors.append(f"pageerror: {exc}"))
+        page.on("console", lambda msg: errors.append(f"console.error: {msg.text}") if msg.type == "error" else None)
+        page.goto(hosted.url)
+        page.wait_for_function("() => window.received.some(m => m.type === 'state' && m.graph === 'pane')")
+        frame = page.frame_locator("#studio")
+        frame.locator('.app[data-graph="pane"][data-ready="true"]').wait_for()
+        frame.locator('.canvas[data-graph="pane"][data-initialized="true"]').wait_for()
+        received = page.evaluate("window.received")
+        assert received[-1] == {
+            "source": "streamstudio",
+            "type": "state",
+            "graph": "pane",
+            "dirty": False,
+            "unsaved": [],
+            "tab": "text",
+        }
+
+        widget = frame.locator(f'{node_root("gain")} input[data-param="gain"]')
+        widget.fill("7")
+        widget.press("Enter")
+        page.wait_for_function("() => window.received.some(m => m.type === 'state' && m.dirty)")
+        assert page.evaluate("window.received.filter(m => m.dirty).pop()")["unsaved"] == ["pane"]
+        frame.locator('[data-menu="file"] > .menubar-title').click()
+        frame.locator('[data-menu="file"] [data-command="save"]').click()
+        page.wait_for_function("() => window.received.some(m => m.type === 'saved')")
+        saved = page.evaluate("window.received.find(m => m.type === 'saved')")
+        assert saved == {
+            "source": "streamstudio",
+            "type": "saved",
+            "graph": "pane",
+            "path": str(hosted.folder / "pane.yaml"),
+        }
+        assert hosted.host.saves == [[hosted.folder / "pane.yaml"]]
+
+        # the host's own button: open another graph on its settings tab, without reloading the panel
+        page.evaluate(
+            "document.querySelector('#studio').contentWindow.postMessage("
+            "{target: 'streamstudio', type: 'open', graph: 'source', tab: 'run'}, location.origin)"
+        )
+        frame.locator('.app[data-graph="source"][data-ready="true"][data-side-tab="run"]').wait_for()
+        page.wait_for_function(
+            "() => window.received.some(m => m.type === 'state' && m.graph === 'source' && m.tab === 'run')"
+        )
+        page.evaluate(
+            "document.querySelector('#studio').contentWindow.postMessage("
+            "{target: 'streamstudio', type: 'open', graph: 'nosuch'}, location.origin)"
+        )
+        frame.locator('[data-graph-missing="nosuch"]').wait_for()
+        page.close()
+        assert errors == []
+
+    def test_unsaved_work_kept_on_the_hosts_stop_is_offered_back_by_the_mounted_page(
+        self, browser: Any, hosted: Hosted, templates_dir: Path
+    ) -> None:
+        opened = open_hosted(browser, hosted, "graph=pane&embed=1")
+        page = opened.page
+        wait_ready(page, "pane")
+        set_widget(page, node_root("gain"), "gain", "8")
+        wait_saves(page, 1)
+        page.close()
+        kept = studio_of(hosted.app).stash()  # the host's stop
+        assert kept == [str(hosted.folder / "pane.yaml")] and (hosted.folder / RECOVERY_FILE).is_file()
+        hosted.app.extensions[EXTENSION] = Studio(host=hosted.host, templates_dir=templates_dir)  # the next start
+
+        again = open_hosted(browser, hosted, "graph=pane&embed=1")
+        again.page.wait_for_selector('.app[data-recovery="asking"] [data-dialog="recovery"]')
+        again.page.locator('[data-recovery-action="restore"]').click()
+        again.page.wait_for_selector('.app[data-recovery="restored"]')
+        wait_ready(again.page, "pane")
+        assert again.page.locator(f'{node_root("gain")} input[data-param="gain"]').input_value() == "8"
+        assert again.page.locator(".app").get_attribute("data-dirty") == "true"
+        assert (hosted.folder / "pane.yaml").read_text() == HOST_PANE_TEXT
+        assert again.errors == []
+
+
+# ------------------------------------------------------------------------------------------------
+# the host's panel keeps each edit in its own graph, follows the host, and opens fitted (review 5 of DESIGN5 step 1)
+# ------------------------------------------------------------------------------------------------
+
+#: Two graphs that share a step name — a value typed into one must never land in the other.
+VIEW_TEXT = f"""\
+# a view: one gain step
+flow:
+  gain:
+    op: !class:{MOD}.TinyGain {{gain: 2.0}}
+outputs: gain
+"""
+
+#: A pane chain as a host serves it: a Stream with no source of its own — its slot ``stream.source`` exists exactly as
+#: in ``source.yaml``, so a source meant for one would fit the other.
+PANE_STREAM_TEXT = f"""\
+# a pane chain (no source: the host supplies the record)
+stream: !class:recordstream.core.stream.Stream
+  ops:
+    - !class:{MOD}.TinyFileName {{suffix: pane}}
+"""
+
+#: A pane that SPELLS its window as 0 and 0, as the shipped panes do — the host fills the real window before a run.
+SPELLED_WINDOW_TEXT = f"""\
+# a pane spelling its window: the host fills it
+flow:
+  window:
+    op: !class:{MOD}.PaneWindow {{start_s: 0, stop_s: 0}}
+  gain:
+    op: !class:{MOD}.TinyGain {{gain: 2.0}}
+    from: window
+outputs: gain
+"""
+
+
+class HostPage(NamedTuple):
+    """The host's own page with the editor in its panel (an iframe), the panel's frame, and every error of both."""
+
+    page: Any  # playwright.sync_api.Page
+    frame: Any  # playwright.sync_api.Frame — the panel's document
+    errors: List[str]
+
+
+def open_host_page(browser: Any, hosted: Hosted, graph: str) -> HostPage:
+    """The host's page; its panel opens ``pane`` and is then told to open ``graph`` (the host's own ``open``)."""
+    page = browser.new_page(viewport={"width": 1400, "height": 900})
+    errors: List[str] = []
+    page.on("pageerror", lambda exc: errors.append(f"pageerror: {exc}"))
+    page.on("console", lambda msg: errors.append(f"console.error: {msg.text}") if msg.type == "error" else None)
+    page.goto(hosted.url)
+    frame = page.wait_for_selector("#studio").content_frame()
+    wait_ready(frame, "pane")
+    if graph != "pane":
+        host_opens(page, graph)
+        wait_ready(frame, graph)
+    return HostPage(page, frame, errors)
+
+
+def host_opens(page: Any, graph: str) -> None:
+    """The host posts ``open`` to its panel — what a pane's ``graph`` button does — with no click inside the panel."""
+    page.evaluate(
+        "graph => document.querySelector('#studio').contentWindow.postMessage("
+        "{target: 'streamstudio', type: 'open', graph}, location.origin)",
+        graph,
+    )
+
+
+def held_text(hosted: Hosted, graph: str) -> str:
+    return str(hosted_api(hosted, f"api/graphs/{graph}")["text"])
+
+
+class TestTheHostsOpenKeepsEachEditInItsGraph:
+    """The host switches the panel's graph by itself (``open``) — after its own save, a selection change, a pane's
+    ``graph`` button. Whatever the person was doing in the graph shown stays with THAT graph."""
+
+    def test_set_source_is_closed_when_the_host_opens_another_graph(self, browser: Any, hosted: Hosted) -> None:
+        """Measured before: the dialog stayed up over the new graph, and Set wrote the source into it — a pane that then
+        draws its own records instead of the host's."""
+        (hosted.folder / "view_psd.yaml").write_text(PANE_STREAM_TEXT)
+        shown = open_host_page(browser, hosted, "source")
+        frame = shown.frame
+        wait_palette_loaded(frame)
+        frame.locator(f'{node_root("stream")} button[data-set-slot="source"]').click()
+        choose_slot_class(frame, FILES_SOURCE, "FilesSource")
+        frame.locator('[data-dialog="set-slot"] input[data-param="pattern"]').fill("*.iq")
+        host_opens(shown.page, "view_psd")
+        wait_ready(frame, "view_psd")
+        frame.wait_for_selector('[data-dialog="set-slot"]', state="detached")
+        assert held_text(hosted, "source") == HOST_SOURCE_TEXT
+        assert held_text(hosted, "view_psd") == PANE_STREAM_TEXT
+        assert frame.locator(".app").get_attribute("data-saves") == "0"
+        assert shown.errors == []
+
+    def test_a_value_typed_but_not_left_goes_into_the_graph_it_was_typed_in(self, browser: Any, hosted: Hosted) -> None:
+        """Measured before: the card of ``gain`` stayed the same component across the switch, kept the typed draft, and
+        committed it into the NEW graph's ``gain`` when the field was left."""
+        (hosted.folder / "view_a.yaml").write_text(VIEW_TEXT)
+        (hosted.folder / "view_b.yaml").write_text(VIEW_TEXT)
+        shown = open_host_page(browser, hosted, "view_a")
+        frame = shown.frame
+        frame.locator(f'{node_root("gain")} input[data-param="gain"]').fill("7")  # typed, still in the field
+        host_opens(shown.page, "view_b")
+        wait_ready(frame, "view_b")
+        frame.wait_for_selector('.app[data-saves="1"]')  # the value typed in view_a was written there
+        assert frame.locator(f'{node_root("gain")} input[data-param="gain"]').input_value() == "2"
+        frame.locator("[data-status]").click()  # leaving whatever has the focus commits nothing more
+        assert f"op: !class:{MOD}.TinyGain {{gain: 7}}" in held_text(hosted, "view_a")
+        assert held_text(hosted, "view_b") == VIEW_TEXT
+        assert frame.locator(".app").get_attribute("data-dirty") == "false"
+        dirty = {entry["name"]: entry["dirty"] for entry in hosted_api(hosted, "api/graphs")}
+        assert (dirty["view_a"], dirty["view_b"]) == (True, False)
+        assert shown.errors == []
+
+    def test_a_file_the_host_rewrote_is_shown_as_the_file_says_when_the_host_opens_it(
+        self, browser: Any, hosted: Hosted
+    ) -> None:
+        """Measured before: the panel, a reload and Run kept the first text read, ``data-dirty`` false."""
+        shown = open_host_page(browser, hosted, "pane")
+        frame = shown.frame
+        (hosted.folder / "pane.yaml").write_text(
+            HOST_PANE_TEXT.replace("gain: 2.0}   # the knob", "gain: 9.0}   # the knob")
+        )
+        host_opens(shown.page, "pane")
+        frame.wait_for_function(
+            "() => document.querySelector("
+            "'[data-node=\"gain\"]:not([data-socket]) input[data-param=\"gain\"]')?.value === '9'"
+        )
+        assert frame.locator(".app").get_attribute("data-dirty") == "false"
+        assert shown.errors == []
+
+    def test_new_tells_the_host_which_file_it_wrote(self, browser: Any, hosted: Hosted) -> None:
+        """New… writes a graph file in the host's folder: the host hears it, as it hears a Save. Measured before: no
+        ``saved`` message and nothing on ``saved()``, so a host finding its panes through them never saw a new one."""
+        shown = open_host_page(browser, hosted, "pane")
+        frame = shown.frame
+        open_new(frame, "flow")
+        frame.locator("[data-new-name]").fill("view_new")
+        frame.locator("[data-new-confirm]").click()
+        wait_ready(frame, "view_new")
+        shown.page.wait_for_function("() => window.received.some(m => m.type === 'saved' && m.graph === 'view_new')")
+        said = shown.page.evaluate("window.received.find(m => m.type === 'saved')")
+        assert said == {
+            "source": "streamstudio",
+            "type": "saved",
+            "graph": "view_new",
+            "path": str(hosted.folder / "view_new.yaml"),
+        }
+        assert hosted.host.saves == [[hosted.folder / "view_new.yaml"]]
+        assert shown.errors == []
+
+    def test_after_the_host_moves_its_folder_new_and_a_missing_graph_name_the_new_folder(
+        self, browser: Any, hosted: Hosted
+    ) -> None:
+        """Measured before: the page read the folder once, so New… said it writes ``state/fresh.yaml`` and wrote
+        ``saved.d/fresh.yaml``, and a missing graph was looked for "in" the folder the host had left."""
+        shown = open_host_page(browser, hosted, "pane")
+        frame = shown.frame
+        moved = hosted.folder.parent / "saved.d"
+        shutil.move(str(hosted.folder), str(moved))
+        hosted.host.where = moved
+        open_new(frame, "flow")
+        assert frame.locator("[data-new-folder]").input_value() == str(moved)
+        frame.locator("[data-new-name]").fill("fresh")
+        assert new_path_shown(frame).endswith(str(moved / "fresh.yaml"))
+        frame.locator("[data-new-confirm]").click()
+        wait_ready(frame, "fresh")
+        assert (moved / "fresh.yaml").is_file()
+        host_opens(shown.page, "nosuch")
+        frame.wait_for_selector('[data-graph-missing="nosuch"]')
+        assert frame.locator("[data-graph-missing-message]").inner_text() == (
+            f"There is no graph 'nosuch' in {moved} — the graphs there are: fresh, pane and source."
+        )
+        assert shown.errors == []
+
+
+class TestTheEmbeddedPanelsFields:
+    """The fields of the panel: a ``(min, max)`` pair typed end to end, a rerun of a step the host filled, the
+    settings tab's tick, the folder browser over Set source…, the keyboard in Set source…, a HuggingFace list that
+    failed once."""
+
+    def test_a_pair_typed_min_tab_max_keeps_what_was_typed_while_the_min_answer_arrives(
+        self, browser: Any, hosted: Hosted
+    ) -> None:
+        """Leaving the min box writes ``[min, old max]``; its answer arrives while the max box is being typed into. The
+        server is held until the first key is in the max box — that ordering, not a typing speed. Measured before: the
+        answer reset BOTH boxes, so the max box went back to 750000 and the next keys were appended to it
+        (``75000061000``, refused, or written)."""
+        gate, arrived = threading.Event(), threading.Event()
+        inner = hosted.app.wsgi_app
+
+        def held(environ: Dict[str, Any], start_response: Any) -> Any:  # a WSGI app: the environ and its callback
+            if environ["PATH_INFO"].endswith("/api/graphs/pane/param") and not gate.is_set():
+                arrived.set()
+                gate.wait(timeout=30)
+            return inner(environ, start_response)
+
+        hosted.app.wsgi_app = held
+        opened = open_hosted(browser, hosted, "graph=pane&tab=settings&embed=1")
+        page = opened.page
+        wait_ready(page, "pane")
+        page.wait_for_selector('[data-settings][data-settings-mode="app"]')
+        pair = page.locator('[data-form-node="band"] [data-param="deviation_hz"]')
+        low, high = pair.locator('[data-pair-end="min"]'), pair.locator('[data-pair-end="max"]')
+        low.fill("111000")
+        low.press("Tab")  # into the max box, its text selected
+        assert arrived.wait(timeout=30), "leaving the min box wrote nothing"
+        page.keyboard.type("76")
+        gate.set()  # the min box's answer arrives now, with "76" typed into the max box
+        wait_saves(page, 1)
+        assert high.input_value() == "76"
+        page.keyboard.type("1000")
+        page.keyboard.press("Enter")
+        wait_saves(page, 2)
+        assert f"op: !class:{MOD}.PaneBand {{deviation_hz: [111000, 761000]}}" in held_text(hosted, "pane")
+        assert [low.input_value(), high.input_value()] == ["111000", "761000"]
+        assert opened.errors == []
+
+    def test_rerun_of_a_step_the_host_filled_keeps_the_hosts_window(self, browser: Any, hosted: Hosted) -> None:
+        """Measured before (``power_time_view``): the rerun form showed the document's ``0`` / ``0``, "rerun this node"
+        sent them, and the window became the whole capture while the panel still said the host's window ran."""
+        (hosted.folder / "spelled.yaml").write_text(SPELLED_WINDOW_TEXT)
+        opened = open_hosted(browser, hosted, "graph=spelled&embed=1")
+        page = opened.page
+        wait_ready(page, "spelled")
+        open_run_tab(page)
+        page.locator('[data-action="run"]').click()
+        wait_answers(page, 1)
+        page.locator(f'{node_root("window")} .title').click()
+        form = page.locator('[data-inspect="window"] [data-rerun-form]')
+        assert [form.locator(f'[data-param="{name}"]').input_value() for name in ("start_s", "stop_s")] == [
+            "0.25",
+            "0.75",
+        ]
+        with page.expect_request("**/api/runs/*/rerun") as asked:
+            page.locator('[data-action="rerun"]').click()
+        assert json.loads(asked.value.post_data or "{}") == {"node": "window", "params": {}}
+        wait_answers(page, 2)
+        run = hosted_api(hosted, f"api/runs/{page.locator('[data-run-panel]').get_attribute('data-run')}")
+        window = next(node for node in run["trace"]["nodes"] if node["node"] == "window")
+        assert window["params"] == HOST_WINDOW
+        assert opened.errors == []
+
+    def test_the_all_parameters_tick_stays_when_the_person_leaves_the_tab(self, browser: Any, hosted: Hosted) -> None:
+        opened = open_hosted(browser, hosted, "graph=pane&tab=settings&embed=1")
+        page = opened.page
+        wait_ready(page, "pane")
+        page.wait_for_selector('[data-settings][data-settings-mode="app"]')
+        page.locator("[data-settings-all]").check()
+        page.wait_for_selector('[data-settings][data-settings-mode="all"]')
+        open_run_tab(page)
+        page.locator('[data-tab="settings"]').click()
+        page.wait_for_selector('[data-settings][data-settings-mode="all"]')
+        assert page.locator("[data-settings-all]").is_checked()
+        assert opened.errors == []
+
+    def test_escape_in_the_folder_browser_over_set_source_closes_the_browser_alone(
+        self, browser: Any, hosted: Hosted
+    ) -> None:
+        """Measured before: the browser did not take the focus, so Escape closed Set source… under it (and what was
+        typed there), and the folder then chosen went nowhere; on a card, Escape did nothing."""
+        opened = open_hosted(browser, hosted, "graph=source&embed=1")
+        page = opened.page
+        wait_ready(page, "source")
+        wait_palette_loaded(page)
+        page.locator(f'{node_root("stream")} button[data-set-slot="source"]').click()
+        choose_slot_class(page, FILES_SOURCE, "FilesSource")
+        page.locator('[data-dialog="set-slot"] input[data-param="pattern"]').fill("*.txt")
+        page.locator('[data-dialog="set-slot"] input[data-param="pattern"]').press("Enter")
+        page.locator('[data-dialog="set-slot"] button[data-browse="root"]').click()
+        page.wait_for_selector(f'[data-dialog="file"] [data-file-dir="{hosted.folder}"]')
+        page.keyboard.press("Escape")
+        page.wait_for_selector('[data-dialog="file"]', state="detached")
+        assert page.locator('[data-dialog="set-slot"]').count() == 1
+        assert page.locator('[data-dialog="set-slot"] input[data-param="pattern"]').input_value() == "*.txt"
+        page.locator('[data-dialog="set-slot"] button[data-browse="root"]').click()
+        page.locator('[data-dialog="file"] [data-file-entry="captures"]').click()
+        page.wait_for_selector(f'[data-dialog="file"] [data-file-dir="{hosted.folder / "captures"}"]')
+        page.locator('[data-dialog="file"] [data-file-confirm]').click()
+        page.wait_for_selector('[data-dialog="file"]', state="detached")
+        assert page.locator('[data-dialog="set-slot"] input[data-param="root"]').input_value() == str(
+            hosted.folder / "captures"
+        )
+        page.locator("[data-slot-cancel]").click()
+        page.wait_for_selector('[data-dialog="set-slot"]', state="detached")
+
+        page.locator(f'{node_root("stream.ops[0]")} button[data-browse="names_file"]').click()  # on a card
+        page.wait_for_selector('[data-dialog="file"] [data-file-mode="file"]')
+        page.keyboard.press("Escape")
+        page.wait_for_selector('[data-dialog="file"]', state="detached")
+        assert opened.errors == []
+
+    def test_set_source_keeps_the_keyboard_after_a_pick_and_scrolls_to_the_highlighted_class(
+        self, browser: Any, hosted: Hosted
+    ) -> None:
+        """Measured before: after Enter picked a class the focus fell to the page (Escape did nothing), and ArrowDown
+        moved the highlight below the list's bottom edge."""
+        opened = open_hosted(browser, hosted, "graph=source&embed=1")
+        page = opened.page
+        wait_ready(page, "source")
+        wait_palette_loaded(page)
+        page.locator(f'{node_root("stream")} button[data-set-slot="source"]').click()
+        page.locator("[data-slot-search]").fill("FilesSource")
+        page.locator("[data-slot-search]").press("Enter")
+        page.wait_for_selector(f'[data-slot-chosen="{FILES_SOURCE}"]')
+        focused = page.evaluate(
+            "() => [document.activeElement?.closest('[data-dialog]')?.dataset.dialog,"
+            " document.activeElement?.dataset.param]"
+        )
+        assert focused[0] == "set-slot" and focused[1] is not None
+        page.keyboard.press("Escape")
+        page.wait_for_selector('[data-dialog="set-slot"]', state="detached")
+
+        page.locator(f'{node_root("stream")} button[data-set-slot="source"]').click()
+        page.wait_for_selector('[data-dialog="set-slot"] [data-slot-step="pick"]')
+        rows = page.locator("[data-slot-class]").count()
+        assert rows > 14, "too few classes to scroll — the check would prove nothing"
+        for _ in range(14):
+            page.keyboard.press("ArrowDown")
+        inside = page.evaluate(
+            """() => { const list = document.querySelector('[data-slot-list]').getBoundingClientRect();
+                       const row = document.querySelector('[data-slot-class][aria-selected="true"]')
+                         .getBoundingClientRect();
+                       return row.top >= list.top - 1 && row.bottom <= list.bottom + 1; }"""
+        )
+        assert inside
+        assert opened.errors == []
+
+    def test_a_huggingface_list_that_failed_asks_again_when_reached_for_again(
+        self, browser: Any, hosted: Hosted, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Measured before: once failed, hovering and focusing the list again asked nothing — only reopening the dialog
+        (or reloading the page) did."""
+        answers: List[str] = []
+
+        def datasets() -> Tuple[List[str], str]:
+            answers.append("asked")
+            if len(answers) == 1:
+                raise RuntimeError("the HuggingFace cache could not be read: permission denied")
+            return ["ylecun/mnist"], ""
+
+        monkeypatch.setattr(streamstudio, "cached_hf_datasets", datasets)
+        opened = open_hosted(browser, hosted, "graph=source&embed=1")
+        page = opened.page
+        wait_ready(page, "source")
+        wait_palette_loaded(page)
+        page.locator(f'{node_root("stream")} button[data-set-slot="source"]').click()
+        choose_slot_class(page, HF_SOURCE, "HuggingFaceSource")
+        dataset = page.locator('[data-dialog="set-slot"] select[data-picker="hf_dataset"]')
+        dataset.hover()
+        page.wait_for_selector('[data-dialog="set-slot"] select[data-picker="hf_dataset"][data-picker-state="failed"]')
+        page.locator("[data-slot-effect]").hover()
+        dataset.hover()
+        page.wait_for_selector('[data-dialog="set-slot"] select[data-picker="hf_dataset"][data-picker-state="ready"]')
+        assert dataset.locator("option").evaluate_all("os => os.map(o => o.value)") == ["", "ylecun/mnist"]
+        assert answers == ["asked", "asked"]
+        assert opened.errors == [REFUSED_400]
+
+
+class TestTheEmbeddedPanelOpensFitted:
+    @pytest.mark.parametrize("graph", ["pane", "bte_view"])
+    def test_a_graph_opened_in_a_small_panel_shows_every_card(self, browser: Any, hosted: Hosted, graph: str) -> None:
+        """Measured before: zoom 1 from the top-left — at 900x700, 1 of the shipped Bluetooth pane's 30 cards and 1 of
+        this pane's 5 (and, with the fit clamped at zoom 0.1, 17 of the 30). The standalone page keeps its zoom-1 first
+        view (``TestEnteringASubgraphIsReadable`` and the drag tests measure at zoom 1)."""
+        if graph == "bte_view":
+            annotation = pytest.importorskip("waivefront.annotation")
+            (hosted.folder / "bte_view.yaml").write_text(
+                (Path(annotation.__file__).parent / "bte_view.yaml").read_text()
+            )
+        page = browser.new_page(viewport={"width": 900, "height": 700})
+        errors: List[str] = []
+        page.on("pageerror", lambda exc: errors.append(f"pageerror: {exc}"))
+        page.goto(f"{hosted.url}{STUDIO}/?graph={graph}&embed=1")
+        wait_ready(page, graph)
+        page.wait_for_selector('.canvas[data-view-level=""]')
+        outside = page.evaluate(
+            """() => { const pane = document.querySelector('.react-flow').getBoundingClientRect();
+                       return [...document.querySelectorAll('.react-flow__node')]
+                         .map(n => [n.dataset.id, n.getBoundingClientRect()])
+                         .filter(([, r]) => r.left < pane.left - 1 || r.right > pane.right + 1
+                                            || r.top < pane.top - 1 || r.bottom > pane.bottom + 1)
+                         .map(([id]) => id); }"""
+        )
+        assert outside == []
+        assert viewport_zoom(page) <= 1
+        assert errors == []
