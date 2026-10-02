@@ -305,6 +305,13 @@ is refused — and the footer says how one is made instead:
 `A subgraph is made from steps: Graph ▸ Convert selection to subgraph, Insert template ▸ or Insert steps file…`.
 Double-clicking empty canvas opens the same catalogue as a search palette.
 
+**When the catalogue is read.** The editor builds it by importing every installed package that declares classes —
+6.5–8.4 s on a fresh editor with the training and detection backends installed. The page asks for it the first time
+you open something that lists it — the Nodes sidebar, Add Node ▸, the palette or Set source… — and never as it
+opens, so opening a graph or changing a value does not wait for it. Until it arrives those four show
+`loading the catalogue…`; after that it is kept for as long as the page is open. A page that starts with the
+sidebar open (it remembers) asks at once.
+
 ### Pipelines — adding to and removing from an `ops:` list
 
 On a Pipeline the ops are a list, not named steps, so the canvas names each one by its place: `stream.ops[0]`,
@@ -654,6 +661,18 @@ A refused edit changes nothing. The message is the server's, verbatim (paths sho
   (`maybe.op`), but the run tab shows no rows for its inside.
 - **The page inside the package.** An install from GitHub serves a placeholder until a release builds the page
   in ([Building the canvas page](#building-the-canvas-page)).
+- **A quick first open for an editor started on its own over graphs naming a class nothing has imported yet.** Over
+  graphs spelling `_target_: WindowSignal`, `streamstudio <folder>`'s first graph list still takes about 6 s: nothing
+  has imported that class's package, so the walk above goes through every backend listed before it (85 entry
+  points). An editor mounted in a host app that has already imported the package is not affected.
+- **One short class name for two installed classes, before the catalogue is opened.** `FourierOp` is the name of a
+  NumPy op (`waivefront.fourier`) and of a torch op (`waivefront.fourier_torch`); with every package installed, 18
+  short names are shared like this (`WindowOp`, `MeanSquaredError`, …). Until the catalogue has been opened (the
+  Nodes sidebar, Add Node ▸, the palette or Set source…), a graph spelling `_target_: FourierOp` is drawn with the
+  first of the two the lookup imports, the NumPy one; a run refuses the name (`AmbiguousClassError 'FourierOp' is
+  registered by 2 classes, so a bare lookup cannot choose between them`), and a graph opened after the catalogue says
+  `cannot resolve the class 'FourierOp'`. Spell such a class by its dotted path: `_target_:
+  waivefront.fourier.FourierOp`.
 
 ### The document model and node names
 
@@ -686,6 +705,21 @@ The same holds for `include: ~/nope.steps.yaml` (the message names it with your 
 include that names a folder (`… is a directory, not a config file`). A graph file that is a symbolic link
 (`served/demo.yaml` → `shared/demo.yaml`) reads its steps files beside the file it points to, in `shared/` — the
 canvas, Check graph, a run, Copy and Save as template alike; a `prep.steps.yaml` beside the link is not read.
+
+**A class spelled by its registry key** (`!class:AnnotationUpdateSink`, not the dotted path) is found once the
+package defining it is imported. On the first document naming such a class, the editor imports the installed
+packages' `confluid.configurables` entry points one at a time — those of packages already loaded first, then the
+rest in their listed order — and stops at the first that registers it; the rest are left for a later miss, and none
+is imported twice. A package another request is still importing (the catalogue imports every package in its own
+request) is waited for, so a class half a second from being registered is never reported as missing.
+Measured 2026-10-02, the editor mounted in a host app over a sink graph naming one class:
+
+```
+before:  first graph list  6.0 s   every entry point imported (127)
+after:   first graph list  1.1 s   15 imported, the walk stopping at the one that registers AnnotationUpdateSink
+```
+
+A name nothing defines imports them all, once; a later miss then costs nothing.
 
 **Node names** are one scheme shared by the model, the engine, the sidecar and
 the routes: a `flow:` step by its key (`floor`), a list member by `path[i]` (`stream.ops[1]`), a nested marker by
@@ -920,6 +954,7 @@ listens to its own parent window only:
     if (event.origin !== location.origin || event.data?.source !== "streamstudio") return;
     // {source: "streamstudio", type: "state", graph: "view_bte", dirty: true, unsaved: ["view_bte"], tab: "settings"}
     // {source: "streamstudio", type: "saved", graph: "view_bte", path: "/w/state/view_bte.yaml"}
+    // {source: "streamstudio", type: "unavailable"}   — from the page served INSTEAD of the editor
   });
   // what the host asks: show another graph (and tab) WITHOUT reloading — a reload asks "Leave site?" when unsaved
   studio.contentWindow.postMessage({target: "streamstudio", type: "open", graph: "view_fft", tab: "run"}, location.origin);
@@ -927,7 +962,11 @@ listens to its own parent window only:
 ```
 
 `unsaved` lists every graph holding unsaved edits — what closing the panel would leave unsaved (the edits stay in the
-editor; `studio_of(app).stash()` keeps them over the host's stop). `saved` is posted after Save, Save As and New….
+editor; `studio_of(app).stash()` keeps them over the host's stop). `unavailable` is posted by the page `/` answers
+when there is no editor to show — the page is not built, Node was missing at the server's start, or the start's build
+failed — and that page says which and what to do. No editor answers in that frame: a host that covers its panel
+until the first `state` uncovers it on `unavailable`, and loads the frame again (rather than posting `open`) to show
+another graph. `saved` is posted after Save, Save As and New….
 An `open` naming a graph the editor does not list shows the missing-graph message, as a link does, naming the folder
 the editor serves NOW (the page asks again at every `open` and before New…, so a folder the host moved is the one
 shown and written to).
@@ -1017,8 +1056,60 @@ page's life; an empty list says why in its tooltip, in the server's words (`no d
 
 ### Building the canvas page
 
-The page's source is `frontend/` (vite + React Flow + TypeScript, committed). Building it needs node and npm, which
-`pyproject.toml` declares as a system dependency. Build it once:
+The page's source is `frontend/` (vite + React Flow + TypeScript, committed); `npm run build` turns it into
+`frontend/dist`, which the editor serves at `/`. Building needs Node and npm, which `pyproject.toml` declares as a
+system dependency, so `aisland setup` installs them.
+
+**A server builds the page as it STARTS, when the page's source changed since its last build.** `streamstudio
+<folder>` does it, and so does an app that mounts the editor when it starts (it calls
+`streamstudio.app.ensure_page_built()` before it serves). After a `git pull` that changed the page, the next start
+prints:
+
+```
+streamstudio: the editor's page changed since its last build — building it
+streamstudio: built the editor's page in 2.0 s
+```
+
+and serves the new page. What each line a start can print means (each begins `streamstudio: `):
+
+| line | what happened |
+| --- | --- |
+| *(nothing)* | the page is current — the check took about 2 ms |
+| `the editor's page is not built yet — building it` | `frontend/dist` holds no page (a fresh checkout) |
+| `the editor's page changed since its last build — building it` | a file the build reads changed |
+| `the editor's page has no record of the source it was built from — building it` | the page was built by hand (or before this check existed); it is built once more to record its source |
+| `installing the page's libraries first (npm ci) — the first time takes about a minute` | `frontend/node_modules` is missing, or `package-lock.json` is newer than npm's own record of its last install |
+| `another start is building the editor's page — waiting for it` | a second server started from the same checkout while the first builds; it waits, then finds the page current |
+| `built the editor's page in 2.0 s` | done; the time covers the install too |
+| `the editor's page is out of date and Node is not installed — run aisland setup` | the server starts anyway, and `/` says the same instead of serving the old page (`… is not built and Node is not installed …` when there was no page yet) |
+| `the editor's page has no record of the source it was built from and Node is not installed — the page built earlier is served` | a page built by hand may well be current: without Node it is served as it is |
+| `building the editor's page failed — npm run build exited with code 2; its last lines:` and npm's last 20 lines | the server starts anyway, and `/` says it failed and names the command that shows why |
+| `building the editor's page failed — npm ci did not finish in 300 s` | npm was stopped, with everything it started (`npm ci` may take 300 s, `npm run build` 120 s — an unreachable registry otherwise kept a start waiting for good) |
+| `interrupted before the editor's page was built — the next start builds it` | Ctrl+C during the check: npm is stopped and the start ends (exit code 130) |
+
+"Node is not installed" means `node` and `npm` are not on the server's `PATH`. On Linux `aisland setup` puts them in
+`aisland/bin`, which `source project.bashrc` adds to `PATH`.
+
+What counts as the page's source: everything under `frontend/src/` and `frontend/public/` except the page's tests
+(`__tests__/`, `*.test.*`, `*.spec.*`) and hidden files, plus `index.html`, `package.json`, `package-lock.json`,
+`vite.config.*`, `tsconfig*.json` and the `.env` files `vite build` reads (`.env`, `.env.local`, `.env.production`,
+`.env.production.local` — not `.env.test` or `.env.development*`). A change to a test file builds nothing. The record
+of what the page was built from is the file `frontend/dist/.built-from`, written after a successful build.
+
+Whether `npm ci` runs first is decided by file TIMES, because npm keeps no record of the lock it installed from: a
+`package-lock.json` rewritten with the same bytes (a branch switched away and back) installs once more at the next
+start that builds — about a minute the first time, seconds from npm's cache. A start whose page source did not change
+installs nothing.
+
+Two servers started at once from the same checkout never build together on macOS and Linux (there is no lock on
+Windows): the second says it waits, waits, then finds the page current. Only a START checks — making an app
+(`create_app`, `page_blueprint`) never builds anything, and an install from a wheel, which has no `frontend/` source,
+is never checked. A start that could not build the page (no Node, a failed build) does not try again in the same
+process: an app that checks before it announces its server and again as it serves prints its lines once, and a
+server process it starts in the background takes its answer over through `page_check_environment()` — passed in the
+child's environment — instead of running npm again where its output is discarded.
+
+Building by hand still works, and is what the page's own tools need:
 
 ```bash
 cd frontend
@@ -1028,9 +1119,10 @@ npm test         # the page's unit tests (vitest)
 npm run dev      # optional: a hot-reloading copy on vite's own port, proxying api/ to an editor on port 8190
 ```
 
-`frontend/dist` is a build product: gitignored, not inside the wheel, not built by CI. `streamstudio` serves it at
-`/` when it is there. Until then — and after a `pip install` from GitHub, which carries no page — `/` answers
-a placeholder that says what to do:
+A page built by hand leaves no record of its source, so the next start builds it once more (about 2 s).
+
+`frontend/dist` is a build product: gitignored, not inside the wheel, not built by CI. Without it — after a
+`pip install` from GitHub, which carries no page — `/` answers a placeholder that says what to do:
 
 ```
 streamstudio editor
@@ -1040,6 +1132,10 @@ reload; the page lands in frontend/dist beside the package. The API is up:
   GET /api/graphs/<name>
   …
 ```
+
+The page served at `/` is looked up at every request, so a page built after the server's app was made is served
+without a restart — unless this server's start could not build it: then `/` keeps saying why (no Node, or the
+build failed) until the next start, which checks again.
 
 The browser tests of the page (`tests/test_canvas.py`, headless chromium) skip when `frontend/dist/index.html` is
 absent, and the skip reason is that same build command.
@@ -1052,7 +1148,8 @@ StreamStudio is not on PyPI yet; install it from GitHub:
 pip install git+https://github.com/Gearlux/streamstudio.git@main
 ```
 
-The canvas editor needs nothing more (plus a built page — [Building the canvas page](#building-the-canvas-page)),
+The canvas editor needs nothing more (plus its page, which a checkout builds as the editor starts —
+[Building the canvas page](#building-the-canvas-page)),
 except confluid 0.4.0, the release whose `load` takes `texts=`. The editor keeps every file you edit — the graph, a
 steps file it includes, each one Move to its own file… makes — in memory, and hands them to confluid as text with the
 graph's own path, instead of writing them to disk; confluid then looks for every included file beside the file that

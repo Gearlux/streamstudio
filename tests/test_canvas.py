@@ -400,8 +400,9 @@ def wait_ready(page: Any, name: str) -> None:
 
 
 def wait_palette_loaded(page: Any) -> None:
-    """The page fetches ``GET api/palette`` once in the background; ``data-palette-ready`` says it has arrived, so
-    a measured open time is the palette's own and never the fetch's."""
+    """The page asks ``GET api/palette`` on FIRST NEED — when the Nodes sidebar, Add Node ▸, the palette or Set source…
+    is first shown, never as it opens; ``data-palette-ready`` says the catalogue has arrived. Call it right after the
+    gesture that shows one of them, so what the test reads next is the whole catalogue."""
     page.wait_for_selector('.app[data-palette-ready="true"]')
 
 
@@ -699,7 +700,12 @@ class TestPalette:
         self, open_graph: Callable[[str], Opened], server: str
     ) -> None:
         opened = open_graph("wires")
+        # the first palette asks for the catalogue; it is closed again, so the open measured below is the palette's
+        # own and never the fetch's
+        opened.page.mouse.dblclick(*EMPTY)
         wait_palette_loaded(opened.page)
+        opened.page.keyboard.press("Escape")
+        opened.page.locator("[data-palette]").wait_for(state="detached")
         # every class the route lists but the one no list offers (an empty subgraph is refused; SUBGRAPH below)
         specs = [spec for spec in api_get(server, "api/palette") if spec["class_path"] != SUBGRAPH]
         assert len(specs) > PALETTE_ROWS  # the real catalogue: hundreds of classes, so the cap is exercised
@@ -739,11 +745,11 @@ class TestPalette:
         self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path
     ) -> None:
         opened = open_graph("wires")
-        wait_palette_loaded(opened.page)
         opened.page.locator(f'{node_root("gain")} .title').click()
         assert selected_nodes(opened.page) == ["gain"]
         edges_before = edge_count(opened.page)
         opened.page.mouse.dblclick(*EMPTY)
+        wait_palette_loaded(opened.page)
         opened.page.locator("[data-palette-search]").fill("recordstream.ops.numpy.Threshold")
         rows = opened.page.locator("[data-palette-list] li")
         assert rows.count() == 1
@@ -765,8 +771,8 @@ class TestPalette:
         self, open_graph: Callable[[str], Opened], server: str
     ) -> None:
         opened = open_graph("wires")
-        wait_palette_loaded(opened.page)
         opened.page.mouse.dblclick(*EMPTY)
+        wait_palette_loaded(opened.page)
         opened.page.locator("[data-palette-search]").fill("recordstream.ops.numpy.Threshold")
         assert "after count" in opened.page.locator("[data-palette-meta]").inner_text()
         opened.page.locator("[data-palette-list] li").first.click()
@@ -782,8 +788,8 @@ class TestPalette:
         """DESIGN2 §3. Before: the palette said ``added after stream.ops[2]`` and the pick was refused with
         ``'stream.ops[2]' is not a flow step (the steps are: [])``. Now the pick is the list's last member."""
         opened = open_graph("pets")
-        wait_palette_loaded(opened.page)
         opened.page.mouse.dblclick(*EMPTY)
+        wait_palette_loaded(opened.page)
         opened.page.locator("[data-palette-search]").fill("recordstream.ops.numpy.Threshold")
         assert "added at the end of stream.ops" in opened.page.locator("[data-palette-meta]").inner_text()
         opened.page.locator("[data-palette-list] li").first.click()
@@ -798,12 +804,12 @@ class TestPalette:
         self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path
     ) -> None:
         opened = open_graph("wires")
-        wait_palette_loaded(opened.page)
         specs = api_get(server, "api/palette")
         types = api_get(server, "api/types")
         edges_before = edge_count(opened.page)
         source = centre(handle(opened.page, "decode", "image", "out").bounding_box())
         drag(opened.page, source, EMPTY)
+        wait_palette_loaded(opened.page)
         rows = opened.page.locator("[data-palette-list] li")
         rows.first.wait_for()
         expected = [spec for spec in specs if any(meets("Image", socket["type"], types) for socket in spec["inputs"])]
@@ -831,11 +837,11 @@ class TestPalette:
         self, open_graph: Callable[[str], Opened], server: str
     ) -> None:
         opened = open_graph("wires")
-        wait_palette_loaded(opened.page)
         specs = api_get(server, "api/palette")
         types = api_get(server, "api/types")
         target = centre(handle(opened.page, "boost", "image", "in").bounding_box())
         drag(opened.page, target, EMPTY)
+        wait_palette_loaded(opened.page)
         rows = opened.page.locator("[data-palette-list] li")
         rows.first.wait_for()
         expected = [spec for spec in specs if any(meets(socket["type"], "Image", types) for socket in spec["outputs"])]
@@ -854,11 +860,11 @@ class TestPalette:
         """DESIGN2 §3. Before: the pick after ``stream.ops[2]`` was refused (``is not a flow step``). Now it is the
         member after it — here the list's last."""
         opened = open_graph("pets")
-        wait_palette_loaded(opened.page)
         specs = api_get(server, "api/palette")
         types = api_get(server, "api/types")
         source = centre(handle(opened.page, "stream.ops[2]", "record", "out").bounding_box())
         drag(opened.page, source, EMPTY)
+        wait_palette_loaded(opened.page)
         rows = opened.page.locator("[data-palette-list] li")
         rows.first.wait_for()
         expected = [spec for spec in specs if any(meets("Record", socket["type"], types) for socket in spec["inputs"])]
@@ -872,6 +878,71 @@ class TestPalette:
         opened.page.wait_for_selector(f'{node_root("stream.ops[3]")}[data-class="recordstream.ops.numpy.Threshold"]')
         assert (graph_dir / "pets.yaml").read_text() == PETS_TEXT
         assert opened.errors == []
+
+
+class TestTheCatalogueIsAskedForOnFirstNeed:
+    """The page asks ``GET api/palette`` when something that lists the catalogue is first shown — the Nodes sidebar,
+    Add Node ▸, the palette, Set source… — and never as it opens (2026-10-02). Measured before: the page asked as it
+    opened, beside its first ``GET api/graphs``; on a fresh server, building the catalogue imports every installed
+    package that declares classes, and the graph list waited on those imports."""
+
+    @staticmethod
+    def show(page: Any, surface: str) -> None:
+        """Show ``surface`` the way a person does, and wait until it is drawn."""
+        if surface == "sidebar":
+            page.locator('button[data-command="toggle-nodes"]').click()
+            page.locator("[data-nodes-sidebar]").wait_for()
+        elif surface == "add-node":
+            page.mouse.click(*EMPTY, button="right")
+            page.locator('[data-context-menu="pane"] [data-submenu="add-node"]').click()
+            page.locator("[data-add-node-search]").wait_for()
+        elif surface == "palette":
+            page.mouse.dblclick(*EMPTY)
+            page.locator("[data-palette]").wait_for()
+        else:
+            page.locator(f'{node_root("stream")} button[data-set-slot="source"]').click()
+            page.locator('[data-dialog="set-slot"]').wait_for()
+
+    @staticmethod
+    def hide(page: Any, surface: str) -> None:
+        if surface == "sidebar":
+            page.locator('button[data-command="toggle-nodes"]').click()
+            page.locator("[data-nodes-sidebar]").wait_for(state="detached")
+        else:
+            page.keyboard.press("Escape")
+            gone = {
+                "add-node": "[data-add-node]",
+                "palette": "[data-palette]",
+                "set-source": '[data-dialog="set-slot"]',
+            }
+            page.locator(gone[surface]).wait_for(state="detached")
+
+    @pytest.mark.parametrize("surface", ["sidebar", "add-node", "palette", "set-source"])
+    def test_nothing_asks_while_the_page_opens_and_the_first_surface_asks_once(
+        self, browser: Any, server: str, surface: str
+    ) -> None:
+        page = browser.new_page(viewport={"width": 1400, "height": 900})
+        errors: List[str] = []
+        asked: List[str] = []
+        page.on("pageerror", lambda exc: errors.append(f"pageerror: {exc}"))
+        page.on("console", lambda msg: errors.append(f"console.error: {msg.text}") if msg.type == "error" else None)
+        page.on("request", lambda request: asked.append(request.url) if "/api/palette" in request.url else None)
+        try:
+            page.goto(f"{server}/?graph=pets")
+            wait_ready(page, "pets")  # everything the page asks as it opens was asked before it drew the graph
+            assert asked == []
+            assert page.locator(".app").get_attribute("data-palette-ready") == "false"
+
+            self.show(page, surface)
+            wait_palette_loaded(page)
+            assert len(asked) == 1
+
+            self.hide(page, surface)  # shown again: the page keeps what arrived
+            self.show(page, surface)
+            assert len(asked) == 1
+            assert errors == []
+        finally:
+            page.close()
 
 
 # ------------------------------------------------------------------------------------------------
@@ -1802,10 +1873,10 @@ class TestNodesSidebar:
     ) -> None:
         opened = open_graph("wires")
         page = opened.page
-        wait_palette_loaded(page)
         specs = api_get(server, "api/palette")
         page.locator('button[data-command="toggle-nodes"]').click()
         page.locator("[data-nodes-sidebar]").wait_for()
+        wait_palette_loaded(page)
         packages = page.locator("[data-nodes-package]").evaluate_all("ps => ps.map(p => p.dataset.nodesPackage)")
         assert sorted(packages) == sorted({spec["class_path"].split(".")[0] for spec in specs})
         page.locator('[data-nodes-package="recordstream"] .nodes-package-head').click()
@@ -1841,7 +1912,6 @@ class TestRightClick:
     ) -> None:
         opened = open_graph("wires")
         page = opened.page
-        wait_palette_loaded(page)
         page.mouse.click(*EMPTY, button="right")
         menu = page.locator('[data-context-menu="pane"]')
         menu.wait_for()
@@ -1849,6 +1919,7 @@ class TestRightClick:
         assert labels[:3] == ["Add Node", "Add Group", "Paste"]
         menu.locator('[data-submenu="add-node"]').click()
         page.locator("[data-add-node] [data-add-node-search]").wait_for()
+        wait_palette_loaded(page)  # Add Node ▸ asked for the catalogue
         menu.locator('[data-command="add-group"]').click()
         wait_saves(page, 1)
         box = page.locator("[data-group]")
@@ -2284,9 +2355,9 @@ class TestSubgraphIsMadeNotAdded:
     ) -> None:
         opened = open_graph("wires")
         page = opened.page
-        wait_palette_loaded(page)
         assert SUBGRAPH in [spec["class_path"] for spec in api_get(server, "api/palette")]  # the catalogue holds it
         page.locator('button[data-command="toggle-nodes"]').click()
+        wait_palette_loaded(page)
         page.locator("[data-nodes-search]").fill("recordstream.flow.subgraph")
         assert page.locator(f'[data-nodes-entry][data-class="{SUBGRAPH}"]').count() == 0
         hint = page.locator("[data-nodes-subgraph-hint]").inner_text()
@@ -2511,8 +2582,8 @@ class TestHoverCard:
     ) -> None:
         opened = open_graph("wires")
         page = opened.page
-        wait_palette_loaded(page)
         page.locator('button[data-command="toggle-nodes"]').click()
+        wait_palette_loaded(page)
         page.locator("[data-nodes-search]").fill(f"{MOD}.TinyWide")
         page.locator(f'[data-nodes-entry][data-class="{MOD}.TinyWide"]').hover()
         card = page.locator(f'[data-nodes-card="{MOD}.TinyWide"]')
@@ -2544,7 +2615,6 @@ class TestDocsMarkup:
     ) -> None:
         opened = open_graph("wires")
         page = opened.page
-        wait_palette_loaded(page)
         specs = api_get(server, "api/palette")
         marked = next(
             spec
@@ -2552,6 +2622,7 @@ class TestDocsMarkup:
             if re.search(r":[a-z]+:`[^`]+`", spec["doc"]) and "``" in spec["doc"] and "~" not in spec["doc"]
         )
         page.locator('button[data-command="toggle-nodes"]').click()
+        wait_palette_loaded(page)
         page.locator("[data-nodes-search]").fill(marked["class_path"])
         entry = page.locator(f'[data-nodes-entry][data-class="{marked["class_path"]}"]')
         doc = entry.locator(".nodes-entry-doc")
@@ -2838,9 +2909,9 @@ class TestAddingFromMenusAndTheSidebar:
     ) -> None:
         opened = open_graph("wires")
         page = opened.page
-        wait_palette_loaded(page)
         page.mouse.click(500, 500, button="right")
         page.locator('[data-context-menu="pane"] [data-submenu="add-node"]').click()
+        wait_palette_loaded(page)
         page.locator("[data-add-node-search]").fill("recordstream.ops.numpy.Threshold")
         page.locator('[data-add-node] [data-class="recordstream.ops.numpy.Threshold"]').click()
         wait_saves(page, 1)
@@ -2856,8 +2927,8 @@ class TestAddingFromMenusAndTheSidebar:
     ) -> None:
         opened = open_graph("wires")
         page = opened.page
-        wait_palette_loaded(page)
         page.locator('button[data-command="toggle-nodes"]').click()
+        wait_palette_loaded(page)
         page.locator("[data-nodes-search]").fill("recordstream.ops.numpy.Threshold")
         entry = page.locator('[data-nodes-entry][data-class="recordstream.ops.numpy.Threshold"]')
         pane = page.locator(".canvas .react-flow__pane")
@@ -3027,7 +3098,6 @@ class TestOpListsAreEditable:
         api_put(server, "api/graphs/demo/positions", {"positions": before})
         opened = open_graph("demo")
         page = opened.page
-        wait_palette_loaded(page)
         sent: List[str] = []
         page.on(
             "request",
@@ -3036,6 +3106,7 @@ class TestOpListsAreEditable:
             ),
         )
         page.locator('button[data-command="toggle-nodes"]').click()
+        wait_palette_loaded(page)
         page.locator("[data-nodes-search]").fill(PROBE)
         entry = page.locator(f'[data-nodes-entry][data-class="{PROBE}"]')
 
@@ -3371,8 +3442,8 @@ class TestAddingIntoAPipelinesTransforms:
         (graph_dir / "piped.yaml").write_text(PIPED_TEXT.format(png=graph_dir / "demo.png"))
         opened = open_graph("piped")
         page = opened.page
-        wait_palette_loaded(page)
         page.locator('button[data-command="toggle-nodes"]').click()
+        wait_palette_loaded(page)
         page.locator("[data-nodes-search]").fill(PROBE)
         page.locator(f'{node_root("stream.ops[1]")} .title .cls').click()
         page.wait_for_selector('.app[data-selection="stream.ops[1]"]')
@@ -3395,8 +3466,8 @@ class TestAddingIntoAPipelinesTransforms:
         (graph_dir / "piped.yaml").write_text(PIPED_TEXT.format(png=graph_dir / "demo.png"))
         opened = open_graph("piped")
         page = opened.page
-        wait_palette_loaded(page)
         page.locator('button[data-command="toggle-nodes"]').click()
+        wait_palette_loaded(page)
         page.locator("[data-nodes-search]").fill(PROBE)
         page.locator(f'{node_root("stream.ops[1].transforms[0]")} .title .cls').click()
         page.wait_for_selector('.app[data-selection="stream.ops[1].transforms[0]"]')
@@ -3427,10 +3498,10 @@ class TestAddingIntoAPipelinesTransforms:
         (graph_dir / "piped.yaml").write_text(empty)
         opened = open_graph("piped")
         page = opened.page
-        wait_palette_loaded(page)
         start = handle(page, "stream.ops[1]", "transforms[0]", "in").bounding_box()
         drag(page, centre(start), EMPTY)
         page.wait_for_selector("[data-palette]")
+        wait_palette_loaded(page)
         assert "added at the end of stream.ops[1].transforms" in page.locator("[data-palette-meta]").inner_text()
         page.locator("[data-palette-search]").fill(PROBE)
         page.locator(f'[data-palette-list] [data-class="{PROBE}"]').first.click()
@@ -3523,8 +3594,8 @@ class TestAnUndoDrawsTheMembersWhereTheEditorHoldsThem:
         (graph_dir / "demo.yaml").write_text(DEMO_TEXT.format(png=graph_dir / "demo.png"))
         opened = open_graph("demo")
         page = opened.page
-        wait_palette_loaded(page)
         page.locator('button[data-command="toggle-nodes"]').click()
+        wait_palette_loaded(page)
         page.locator("[data-nodes-search]").fill(PROBE)
         page.locator(f'{node_root("stream.ops[1]")} .title .cls').click()
         page.wait_for_selector('.app[data-selection="stream.ops[1]"]')
@@ -3950,8 +4021,8 @@ class TestSetSourceInAHost:
         wait_ready(page, "source")
         open_run_tab(page)
         assert page.locator(".run-controls").get_attribute("data-run-from") == "host"  # no source of its own yet
-        wait_palette_loaded(page)
         page.locator(f'{node_root("stream")} button[data-set-slot="source"]').click()
+        wait_palette_loaded(page)
         dialog = page.wait_for_selector('[data-dialog="set-slot"] [data-slot-step="pick"]')
         assert dialog.get_attribute("data-slot-node") == "stream" and dialog.get_attribute("data-slot-name") == "source"
         offered = page.locator("[data-slot-class]").evaluate_all("ls => ls.map(l => l.dataset.slotClass)")
@@ -4009,12 +4080,12 @@ class TestSetSourceInAHost:
         opened = open_hosted(browser, hosted, "graph=source&embed=1")
         page = opened.page
         wait_ready(page, "source")
-        wait_palette_loaded(page)
         page.locator(f'{node_root("stream")} .title .cls').click(button="right")
         item = page.locator('[data-context-menu="node"] [data-command="set-slot"][data-slot="source"]')
         assert item.inner_text().startswith("Set source…")
         item.click()
         page.wait_for_selector('[data-dialog="set-slot"][aria-label="Set the source of stream"]')
+        wait_palette_loaded(page)
         page.locator("[data-slot-cancel]").click()
         page.wait_for_selector('[data-dialog="set-slot"]', state="detached")
 
@@ -4081,8 +4152,8 @@ class TestSetSourceInAHost:
         opened = open_hosted(browser, hosted, "graph=source&embed=1")
         page = opened.page
         wait_ready(page, "source")
-        wait_palette_loaded(page)
         page.locator(f'{node_root("stream")} button[data-set-slot="source"]').click()
+        wait_palette_loaded(page)
         choose_slot_class(page, HF_SOURCE, "HuggingFaceSource")
         form = '[data-dialog="set-slot"]'
         assert asked == []  # nothing is asked as the form draws
@@ -4131,8 +4202,8 @@ class TestSetSourceInAHost:
         opened = open_hosted(browser, hosted, "graph=source&embed=1")
         page = opened.page
         wait_ready(page, "source")
-        wait_palette_loaded(page)
         page.locator(f'{node_root("stream")} button[data-set-slot="source"]').click()
+        wait_palette_loaded(page)
         choose_slot_class(page, HF_SOURCE, "HuggingFaceSource")
         dataset = page.locator('[data-dialog="set-slot"] select[data-picker="hf_dataset"]')
         dataset.hover()
@@ -4344,8 +4415,8 @@ class TestTheHostsOpenKeepsEachEditInItsGraph:
         (hosted.folder / "view_psd.yaml").write_text(PANE_STREAM_TEXT)
         shown = open_host_page(browser, hosted, "source")
         frame = shown.frame
-        wait_palette_loaded(frame)
         frame.locator(f'{node_root("stream")} button[data-set-slot="source"]').click()
+        wait_palette_loaded(frame)
         choose_slot_class(frame, FILES_SOURCE, "FilesSource")
         frame.locator('[data-dialog="set-slot"] input[data-param="pattern"]').fill("*.iq")
         host_opens(shown.page, "view_psd")
@@ -4526,8 +4597,8 @@ class TestTheEmbeddedPanelsFields:
         opened = open_hosted(browser, hosted, "graph=source&embed=1")
         page = opened.page
         wait_ready(page, "source")
-        wait_palette_loaded(page)
         page.locator(f'{node_root("stream")} button[data-set-slot="source"]').click()
+        wait_palette_loaded(page)
         choose_slot_class(page, FILES_SOURCE, "FilesSource")
         page.locator('[data-dialog="set-slot"] input[data-param="pattern"]').fill("*.txt")
         page.locator('[data-dialog="set-slot"] input[data-param="pattern"]').press("Enter")
@@ -4562,8 +4633,8 @@ class TestTheEmbeddedPanelsFields:
         opened = open_hosted(browser, hosted, "graph=source&embed=1")
         page = opened.page
         wait_ready(page, "source")
-        wait_palette_loaded(page)
         page.locator(f'{node_root("stream")} button[data-set-slot="source"]').click()
+        wait_palette_loaded(page)
         page.locator("[data-slot-search]").fill("FilesSource")
         page.locator("[data-slot-search]").press("Enter")
         page.wait_for_selector(f'[data-slot-chosen="{FILES_SOURCE}"]')
@@ -4607,8 +4678,8 @@ class TestTheEmbeddedPanelsFields:
         opened = open_hosted(browser, hosted, "graph=source&embed=1")
         page = opened.page
         wait_ready(page, "source")
-        wait_palette_loaded(page)
         page.locator(f'{node_root("stream")} button[data-set-slot="source"]').click()
+        wait_palette_loaded(page)
         choose_slot_class(page, HF_SOURCE, "HuggingFaceSource")
         dataset = page.locator('[data-dialog="set-slot"] select[data-picker="hf_dataset"]')
         dataset.hover()

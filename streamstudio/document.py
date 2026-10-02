@@ -53,9 +53,11 @@ mapping, so renaming an outer ``grey`` never touches an inner ``from: grey``.
 import copy
 import errno
 import importlib
+import importlib.metadata
 import inspect
 import os
 import re
+import sys
 import threading
 from collections import Counter
 from contextlib import contextmanager
@@ -98,6 +100,7 @@ from confluid import (
 )
 from confluid.fluid import Fluid, Reference, Target
 from confluid.registry import resolve_class
+from loggair import get_logger
 from recordstream.algorithm import Algorithm, algorithm_spec
 from recordstream.flow.graph import FlowGraph
 from recordstream.flow.steps import RESERVED_STEP_KEYS, SUBGRAPH_SEPARATOR
@@ -111,6 +114,8 @@ if TYPE_CHECKING:  # the annotation only: layout is imported on first use (`_lay
     from recordstream.flow.subgraph import Steps, Subgraph
 
     from streamstudio.layout import Group
+
+logger = get_logger(__name__)
 
 # ================================================================================================
 # the vocabulary
@@ -586,33 +591,99 @@ class _Declaration(NamedTuple):
 
 _NO_DECLARATION = _Declaration({}, {}, "", (), "", "")
 
-_loaded_entry_points = False
+#: The entry-point group ``confluid.load_configurables`` reads (its default): every package's
+#: ``@configurable``-bearing modules.
+_CONFIGURABLES = "confluid.configurables"
+
+#: The ``_CONFIGURABLES`` entry points no short-name lookup has imported yet, in their listed order;
+#: ``None`` until the first miss reads the list (once per process). A lookup takes each one off the
+#: list as it imports it, so no entry point is imported twice and a later miss starts where the
+#: last one stopped.
+_pending_entry_points: Optional[List[importlib.metadata.EntryPoint]] = None
+_entry_points_lock = threading.Lock()
 
 
 def _resolve(target: Any) -> Optional[type]:  # a class object, a registry key or a dotted path
     """The class a marker's target names, or ``None``.
 
     A registry key (``Stream``) resolves only once the module defining it has been imported; on a
-    miss the entry points are loaded once per process (``confluid.load_configurables``), which is
-    what a running app does at start.
+    miss :func:`_import_until` imports the installed entry points one at a time until it does. A
+    dotted path is imported by ``resolve_class`` itself and walks no entry point.
     """
-    global _loaded_entry_points
     if isinstance(target, type):
         return target
     if not isinstance(target, str):
         return None
-    try:
-        found = resolve_class(target)
-    except Exception:
-        found = None
-    if found is None and "." not in target and not _loaded_entry_points:
-        _loaded_entry_points = True
-        try:
-            confluid.load_configurables()
-            found = resolve_class(target)
-        except Exception:
-            found = None
+    found = _registered(target)
+    if found is None and "." not in target:
+        found = _import_until(target)
     return found if isinstance(found, type) else None
+
+
+def _import_until(name: str) -> Any:
+    """Import the ``confluid.configurables`` entry points ONE AT A TIME until ``name`` resolves.
+
+    Measured 2026-10-02: importing all of them on the first miss (``confluid.load_configurables``)
+    made the first graph list of an editor mounted in a fresh host app take 13.9 s (6.0 s on a warm
+    disk cache) — for one key, ``AnnotationUpdateSink``, whose module (``waivefront.sinks``) was not
+    imported yet; the other entry points brought torch, transformers and the detection backends with
+    them. This walk finds it after 15 of the 127 and the list takes 1.1 s. So:
+
+    * the entry points of a package that is imported already go first (its dependencies are loaded,
+      so they are cheap — and the key usually lives there), then the rest in their listed order;
+    * each is loaded with ``EntryPoint.load()``, also when its module is in ``sys.modules`` already:
+      that costs nothing for a module that is imported, and it WAITS for one another thread is still
+      importing — Python lists a module in ``sys.modules`` before its body runs, and the catalogue
+      (``palette``) imports every entry point in its own request thread. Skipping such a module
+      answered "cannot resolve" for a class half a second from being registered;
+    * the walk stops at the first entry point after which ``name`` resolves;
+    * a failing entry point is skipped with the warning line ``confluid.load_configurables`` writes
+      for it, and is not tried again.
+
+    A name no entry point defines ends with every entry point imported, once per process; a later
+    miss then costs nothing. The walk holds a lock, and a request that waited for it looks the name
+    up again before walking on: the walk it waited for may have registered it (and taken the defining
+    entry point off the list), so walking on would answer "cannot resolve", or import an entry point
+    nobody needs.
+
+    Known limit: a name two entry points define (``FourierOp``: ``waivefront.fourier`` and
+    ``waivefront.fourier_torch``) resolves to the first one the walk imports, because the second is
+    not imported yet; once the catalogue has imported everything the name is ambiguous and resolves
+    to nothing, which is what a run (``strict``) refuses.
+
+    Returns:
+        Whatever ``resolve_class`` answers for ``name`` once found (a class, or a function a key
+        names), else ``None``.
+    """
+    global _pending_entry_points
+    with _entry_points_lock:
+        found = _registered(name)
+        if found is not None:
+            return found
+        if _pending_entry_points is None:
+            _pending_entry_points = list(importlib.metadata.entry_points(group=_CONFIGURABLES))
+        pending = _pending_entry_points
+        imported = [ep for ep in pending if ep.module.split(".")[0] in sys.modules]
+        order = imported + [ep for ep in pending if ep.module.split(".")[0] not in sys.modules]
+        for ep in order:
+            pending.remove(ep)
+            try:
+                ep.load()
+            except Exception as exc:  # broad on purpose, as confluid.load_configurables: one broken package
+                logger.warning(f"load_configurables: entry point '{ep.name}' ({ep.value}) failed to import: {exc}")
+                continue
+            found = _registered(name)
+            if found is not None:
+                return found
+    return None
+
+
+def _registered(name: str) -> Any:
+    """``resolve_class(name)``, with a lookup that raises (a malformed selector, an ambiguous name) as ``None``."""
+    try:
+        return resolve_class(name)
+    except Exception:
+        return None
 
 
 def _dotted(cls: type) -> str:

@@ -779,8 +779,11 @@ class TestMounting:
         assert response.status_code == 200
         page = response.get_data(as_text=True)
         assert "npm run build" in page and "frontend" in page
-        for route in ("/api/graphs", "/api/palette", "/api/runs/<run>/rerun", "/api/graphs/<name>/trace"):
+        # escaped, so a browser shows `<run>` as text — written raw, `…/templates/<template>` opened an HTML element
+        # that swallowed the rest of the page
+        for route in ("/api/graphs", "/api/palette", "/api/runs/&lt;run&gt;/rerun", "/api/graphs/&lt;name&gt;/trace"):
             assert route in page
+        assert "<template>" not in page
         assert client.get("/assets/app.js").status_code == 404
 
     def test_a_built_page_is_served_at_the_root_with_its_assets(self, graph_dir: Path, tmp_path: Path) -> None:

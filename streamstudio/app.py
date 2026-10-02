@@ -61,6 +61,7 @@ them. A standalone editor has no host, and such a graph's run is refused in word
 :func:`studio_of`), so a mounted editor keeps unsaved work across it as the standalone one does.
 """
 
+import html
 import itertools
 import json
 import os
@@ -98,7 +99,9 @@ from recordstream.ops.contract import ChainContractError
 
 import streamstudio
 from streamstudio import document as document_module
-from streamstudio import layout, palette
+from streamstudio import layout
+from streamstudio import page as page_module
+from streamstudio import palette
 from streamstudio._yamltext import YamlText
 from streamstudio.document import (
     ALREADY_EXISTS,
@@ -110,15 +113,13 @@ from streamstudio.document import (
     Node,
     rebase_path,
 )
+from streamstudio.page import BUILD_COMMAND, PageCheck, ensure_page_built, page_check_environment
 
 if sys.platform != "win32":  # the folder lock between editors (:func:`_folder_lock`) is POSIX's flock
     import fcntl
 
 #: The key under ``app.extensions`` where the :class:`Studio` of an app lives.
 EXTENSION = "streamstudio"
-
-#: The command that builds the canvas page — printed by the placeholder, so the fix is on the page that needs it.
-BUILD_COMMAND = "cd streamstudio/frontend && npm install && npm run build"
 
 #: What a document's root says it is: a ``flow:`` graph, a contract-rooted graph (a template twin),
 #: or any other configuration (a ``Stream``, a processor …).
@@ -2028,11 +2029,12 @@ def web_dist() -> Optional[Path]:
     """``<repo>/frontend/dist`` when the canvas page is built there, else ``None``.
 
     The page is a build artifact beside the package, never in it (navigaitor's shape): ``frontend/`` is
-    the committed source, ``frontend/dist`` is gitignored and produced by :data:`BUILD_COMMAND`, and an
-    install without it still serves the API and a placeholder that says how to build. ``index.html`` is
-    the test — a ``dist/`` left over from an interrupted build must not be mistaken for a page.
+    the committed source, ``frontend/dist`` is gitignored and produced by a server's start
+    (:func:`streamstudio.page.ensure_page_built`) or by :data:`BUILD_COMMAND`, and an install without it still
+    serves the API and a placeholder that says how to build. ``index.html`` is the test — a ``dist/`` left over
+    from an interrupted build must not be mistaken for a page.
     """
-    dist = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+    dist = page_module.FRONTEND / "dist"
     return dist if (dist / "index.html").is_file() else None
 
 
@@ -2044,40 +2046,91 @@ def page_blueprint(dist: Optional[Path] = None) -> Blueprint:
     prefix (``url_prefix="/studio"``): the page is built with ``base: './'``, so its asset URLs resolve
     against whatever path serves it.
 
+    Decided at EVERY request (a stat or two), never once when the blueprint is made: a server's start builds the
+    page AFTER its app was made (:func:`streamstudio.page.ensure_page_built`), and that page is served. When that
+    start could not make the page current — no Node, or the build failed (:func:`streamstudio.page.unbuildable`) —
+    ``/`` says so instead of serving the old page. Without a start check (an app made in a test) ``/`` serves what
+    ``dist`` holds.
+
     Args:
         dist: The built page; ``None`` = the checkout's build, :func:`web_dist` (measured before 2026-10-01:
             ``page_blueprint()`` served the placeholder even with the page built, so a host had to know to pass
             ``web_dist()``). A directory without ``index.html`` serves the placeholder — how a test asks for it.
     """
     blueprint = Blueprint(f"{EXTENSION}_page", __name__)
-    given = web_dist() if dist is None else Path(dist)
-    built = given if given is not None and (given / "index.html").is_file() else None
+    given = None if dist is None else Path(dist)
+
+    def built() -> Optional[Path]:  # the folder holding the page now, or None
+        if given is None:
+            return web_dist()
+        return given if (given / "index.html").is_file() else None
 
     @blueprint.get("/")
     def index() -> Any:  # flask.Response from send_from_directory, or the placeholder str
-        if built is not None:
-            return send_from_directory(built, "index.html")
+        problem = page_module.unbuildable(given if given is not None else page_module.FRONTEND / "dist")
+        if problem is not None:
+            return _unbuildable_page(problem)
+        served = built()
+        if served is not None:
+            return send_from_directory(served, "index.html")
         rules = sorted(
             (rule.rule, ", ".join(sorted((rule.methods or set()) - {"HEAD", "OPTIONS"})))
             for rule in current_app.url_map.iter_rules()
             if "/api/" in rule.rule
         )
-        items = "".join(f"<li><code>{methods} {path}</code></li>" for path, methods in rules)
+        # Escaped: a route reads `…/templates/<template>`, and written raw that opened an HTML <template> element
+        # that swallowed the rest of the page — the message to a host's panel included.
+        items = "".join(f"<li><code>{html.escape(f'{methods} {path}')}</code></li>" for path, methods in rules)
         return (
             "<!doctype html><title>streamstudio editor</title>"
             "<h1>streamstudio editor</h1>"
-            f"<p>The canvas page is not built. Build it once — <code>{BUILD_COMMAND}</code> — and reload; "
+            f"<p>The canvas page is not built. Build it once — <code>{html.escape(BUILD_COMMAND)}</code> — and reload; "
             f"the page lands in <code>frontend/dist</code> beside the package. The API is up:</p>"
-            f"<ul>{items}</ul>"
+            f"<ul>{items}</ul>{_TELL_THE_HOST}"
         )
 
     @blueprint.get("/<path:filename>")
     def asset(filename: str) -> Response:
-        if built is None:
+        served = built()
+        if served is None:
             abort(404)
-        return send_from_directory(built, filename)
+        return send_from_directory(served, filename)
 
     return blueprint
+
+
+#: What a page served INSTEAD of the editor (the placeholder, no Node, a failed build) tells a host's panel — its
+#: parent window, same origin only, and only with ``?embed`` (the editor's own rule, ``link.ts::embedFromSearch``):
+#: ``{source: "streamstudio", type: "unavailable"}``, no editor will answer here. Measured before: a host covering its
+#: panel until the editor's first ``state`` message covered these pages for good, its veil reading ``loading sink…``
+#: over ``…Node is not installed — run aisland setup…``. A host that waits for no message ignores it.
+_TELL_THE_HOST = (
+    "<script>(() => {"
+    " const asked = new URLSearchParams(location.search).get('embed');"
+    " if (window.parent === window || asked === null"
+    " || ['0', 'false', 'no'].includes(asked.trim().toLowerCase())) return;"
+    " window.parent.postMessage({source: 'streamstudio', type: 'unavailable'}, location.origin);"
+    " })();</script>"
+)
+
+
+def _unbuildable_page(problem: PageCheck) -> str:
+    """What ``/`` says when this server's start could not make the page current — the start's own words."""
+    if problem.state == "no-node":
+        said = html.escape(
+            f"The editor's page {problem.why} and Node is not installed — run aisland setup, "
+            "then start this server again."
+        )
+    else:
+        said = (
+            html.escape(f"Building the editor's page failed when this server started — {problem.why}. To see why, run ")
+            + f"<code>{html.escape(BUILD_COMMAND)}</code>, then start this server again."
+        )
+    tail = f"<pre>{html.escape(problem.output)}</pre>" if problem.output else ""
+    return (
+        f"<!doctype html><title>streamstudio editor</title><h1>streamstudio editor</h1><p>{said}</p>{tail}"
+        f"{_TELL_THE_HOST}"
+    )
 
 
 def create_app(
@@ -2137,7 +2190,9 @@ __all__ = [
     "create_app",
     "default_templates_dir",
     "editor_blueprint",
+    "ensure_page_built",
     "page_blueprint",
+    "page_check_environment",
     "starter_text",
     "studio_of",
     "web_dist",

@@ -4,7 +4,7 @@
  * classes (the Nodes sidebar's search: every word, in the name, the class path or the description). A pick adds the
  * class as a step after the selected node and places it where the canvas was right-clicked.
  */
-import { useMemo, useState, type KeyboardEvent } from "react";
+import { useEffect, useMemo, useState, type KeyboardEvent } from "react";
 import type { NodeSpec } from "../api";
 import { plainDoc } from "../rst";
 import { KIND_ORDER, kindLabel, packageOf, sidebarMatches } from "../sidebar";
@@ -16,6 +16,8 @@ const MATCH_ROWS = 60;
 
 export interface AddNodeMenuProps {
   specs: NodeSpec[] | null;
+  /** Called once as the menu is drawn: the App asks for the catalogue then, on first need (`catalogue.ts`). */
+  onShown?: () => void;
   onPick: (spec: NodeSpec) => void;
   close: () => void;
 }
@@ -29,8 +31,12 @@ const classEntry = (spec: NodeSpec, onPick: (spec: NodeSpec) => void, withPackag
   onSelect: () => onPick(spec),
 });
 
-export function AddNodeMenu({ specs, onPick, close }: AddNodeMenuProps) {
+export function AddNodeMenu({ specs, onShown, onPick, close }: AddNodeMenuProps) {
   const [query, setQuery] = useState("");
+
+  useEffect(() => {
+    onShown?.();
+  }, [onShown]);
 
   const kinds = useMemo((): Entry[] => {
     if (specs === null) return [{ type: "header", key: "loading", label: "loading the catalogue…" }];

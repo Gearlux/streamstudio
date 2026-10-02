@@ -45,7 +45,8 @@
  * values into a Stream's source slot (`slots.ts`, `dialogs/SetSlotDialog.tsx`).
  *
  * The root carries `data-graph`, `data-ready`, `data-saves` (accepted writes so far), `data-dirty`, `data-level` (the
- * level drawn, `""` at the top), `data-palette-ready`, `data-selection` (the document nodes a gesture acts on),
+ * level drawn, `""` at the top), `data-palette-ready` (the catalogue has arrived — it is asked for on first need, never
+ * at open: `catalogue.ts`), `data-selection` (the document nodes a gesture acts on),
  * `data-recovery` (`pending` | `asking` | `confirming` | `restored` | `discarded` | `none`), `data-side-tab` (the side panel's
  * tab), `data-embed` (`true` in a host's panel) and `data-host` (the host's name, `""` standalone) — what a test waits
  * on instead of timing.
@@ -99,6 +100,7 @@ import {
 } from "./api";
 import { Canvas, type CanvasMenuRequest, type LayoutChange, type PaletteGesture } from "./canvas/Canvas";
 import { Palette, type PaletteRequest } from "./canvas/Palette";
+import { needsCatalogue, onFirstNeed } from "./catalogue";
 import { enabled, isMac, matchShortcut, type CommandId, type CommandState, type MenuId } from "./commands";
 import { EditorContext, type Editing, type EditorApi } from "./context";
 import { AskDialog, type AskAnswer, type AskRequest } from "./dialogs/AskDialog";
@@ -297,6 +299,11 @@ function Editor() {
   /** A Restore or a discard answered the graph list — the first `GET api/graphs`, if later, must not replace it. */
   const answeredList = useRef(false);
   const { toasts, push, dismiss } = useToasts();
+  /**
+   * Ask for the catalogue (`GET api/palette`) — the first call asks, later ones do nothing until an answer failed
+   * (`catalogue.ts`). Called when something that lists it is shown, never as the page opens.
+   */
+  const [needCatalogue] = useState(() => onFirstNeed(getPalette, setSpecs, (exc) => push("error", errorMessage(exc))));
   const timeline = useRef(new Timeline());
   /** The page's clipboard: the TEXT `POST …/copy` answered — a subgraph's whole block, pastable into any graph. */
   const clipboard = useRef<Copied | null>(null);
@@ -334,8 +341,6 @@ function Editor() {
       (exc) => push("error", errorMessage(exc)),
     );
     getTypes().then(setTypes, (exc) => push("error", errorMessage(exc)));
-    // the catalogue is scanned once per server (seconds on a cold one): fetched in the background, never awaited
-    getPalette().then(setSpecs, (exc) => push("error", errorMessage(exc)));
     // unsaved work the last session kept when it stopped: asked about before any graph is loaded
     getWorkspace().then(
       (workspace) => {
@@ -351,6 +356,13 @@ function Editor() {
       },
     );
   }, [push]);
+
+  // The catalogue on first need (`catalogue.ts`): the Nodes sidebar — open at start when the person left it open —,
+  // the palette and Set source… ask here; Add Node ▸ asks when its menu is drawn. Never at open: building it imports
+  // every installed package that declares classes, and the first graph list waited on those imports.
+  useEffect(() => {
+    if (needsCatalogue({ sidebar, palette: palette !== null, setSource: slotAsked !== null })) needCatalogue();
+  }, [sidebar, palette, slotAsked, needCatalogue]);
 
   /** Show a graph the server answered, with its form: a fresh timeline, no run, nothing selected. */
   const present = useCallback((loaded: Graph, schema: Form) => {
@@ -1954,6 +1966,7 @@ function Editor() {
         addNode: (close) => (
           <AddNodeMenu
             specs={addable}
+            onShown={needCatalogue}
             close={close}
             onPick={(spec) => {
               close();

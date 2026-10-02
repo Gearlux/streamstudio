@@ -8,12 +8,49 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **The canvas page builds itself when a server starts and its source changed since its last build.**
+  `streamstudio <folder>` — and an app that mounts the editor, through `streamstudio.app.ensure_page_built()` called
+  at its start, before it announces its server — prints `streamstudio: the editor's page changed since its last build
+  — building it` (or `… is not built yet …`), runs `npm ci` first when `frontend/node_modules` is missing or
+  `package-lock.json` is newer than npm's last install, runs `npm run build`, and prints `streamstudio: built the
+  editor's page in 2.0 s`. A page that is current costs a 2 ms check and prints nothing. Without Node, or when the
+  build fails, the server still starts: the start prints `… is out of date and Node is not installed — run aisland
+  setup` or `building the editor's page failed — npm run build exited with code 2; its last lines:` with npm's last 20
+  lines, and the page at `/` says the same instead of serving the old page. A page built by hand (no record of its
+  source) is served as it is when there is no Node to rebuild it. npm may take 300 s for `npm ci` and 120 s for the
+  build; past that it is stopped with everything it started (`… npm ci did not finish in 300 s`). Ctrl+C during the
+  build stops npm and ends the start with `streamstudio: interrupted before the editor's page was built — the next
+  start builds it` (exit code 130). What the page was built from is recorded in `frontend/dist/.built-from`; two starts
+  from one checkout never build at once on macOS and Linux — the second prints `another start is building the editor's
+  page — waiting for it`. A start that could not build the page does not try again in the same process, and
+  `streamstudio.app.page_check_environment()` hands its answer to a server process it starts. The editor's own start
+  asks for its port again after the check. Making an app never builds anything, and an install from a wheel is never
+  checked.
+- **The page served instead of the editor tells a host's panel.** The placeholder, the no-Node page and the
+  failed-build page post `{source: "streamstudio", type: "unavailable"}` to their parent when opened with `?embed`, so a
+  host that covers its panel until the editor answers can show them. The placeholder's list of routes is escaped (a
+  route ending `<template>` hid the rest of the page).
+- **`page_blueprint` looks for the built page at every request**, not once when it is made: a page built after the app
+  was made is served without a restart — unless this server's start could not build it, in which case `/` keeps
+  saying why until the next start.
 - **`import streamstudio.app` no longer runs the ComfyUI node discovery**: 0.2 s instead of 6.2–8.0 s, and no
   torch. The ComfyUI mappings are made when ComfyUI reads them (and at import inside ComfyUI); `streamstudio`
   commands start in 0.1 s. It also leaves the importing app's environment and logging alone: `NO_COLOR=1` (and
   loggair's colourless reconfiguration) is set only inside ComfyUI and when the ComfyUI half is made — a host that
   mounts the canvas editor, and every process it starts, keeps its console colours.
 - **`page_blueprint()` without an argument serves the built page** (`web_dist()`), not the placeholder.
+- **The first graph list no longer imports every installed package for one class name.** A document naming a
+  class by its registry key (`!class:AnnotationUpdateSink`) now imports the installed entry points one at a time —
+  those of packages already loaded first — and stops at the one that registers it. Measured in a host app over a
+  sink graph: the first `GET /studio/api/graphs` 6.0 s → 1.1 s (15 of 127 entry points imported; 13.9 s on a cold
+  disk before). A failing entry point is skipped with the warning line it always had, and none is imported twice. A
+  package another request is still importing (the catalogue imports every package in its own request) is waited
+  for, never reported as missing. A short name two installed classes share (`FourierOp`) is drawn with the first one
+  the lookup imports until the catalogue is opened; its dotted path (`waivefront.fourier.FourierOp`) works everywhere.
+- **The page asks for the catalogue (`GET api/palette`) the first time something lists it** — the Nodes sidebar,
+  Add Node ▸, the palette, Set source… — not as it opens. Building it imports every installed package (6.5–8.4 s),
+  and asked beside the first graph list it made that list wait too (7.2 s instead of 1.2 s). Until it arrives the
+  four show `loading the catalogue…`; `data-palette-ready` still says when it has.
 - **Bare `streamstudio` starts the canvas editor**, on port 8190, over the folder it is given (default: the
   current directory): `streamstudio path/to/graphs`. **`streamstudio --editor comfy`** starts the ComfyUI editor on
   port 8188, with every ComfyUI option (`--comfy-dir`, `-b`, `--default-nodes-`, `--only-taidal-nodes`,

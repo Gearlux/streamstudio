@@ -1,8 +1,8 @@
 """The signal path, against a REAL editor process: a stop keeps the unsaved work, the next start offers it.
 
-Each test starts ``python -m streamstudio.cli run <folder> --port <free port>`` as a child process over a temporary
-folder, waits until it LISTENS (werkzeug's own ``Running on http://…`` line — read from the pipe, never a sleep),
-makes an edit through the API, and stops it the way a person does:
+Each test starts ``python -m streamstudio.cli run <folder> --port <free port>`` (:data:`EDITOR_CLI`) as a child process
+over a temporary folder, waits until it LISTENS (werkzeug's own ``Running on http://…`` line — read from the pipe,
+never a sleep), makes an edit through the API, and stops it the way a person does:
 
 * ``SIGTERM`` — what ``streamstudio stop`` and ``streamstudio restart`` send (``cli._stop_studio``);
 * ``SIGINT`` — Ctrl+C in the terminal the editor runs in;
@@ -47,6 +47,15 @@ flow:
 outputs: mask
 """
 EDIT = {"node": "mask", "param": "low_level", "value": 0.9}
+#: ``python -m streamstudio.cli`` — with the start's check of the editor's page replaced first: a start checks
+#: whether the checkout's ``frontend/`` changed since its last build and runs npm when it did, and no test builds the
+#: checkout's own page (``tests/conftest.py::page_checks`` does the same for the tests that start in-process).
+EDITOR_CLI = [
+    sys.executable,
+    "-c",
+    "import runpy, streamstudio.app as app; app.ensure_page_built = lambda frontend=None: None; "
+    "runpy.run_module('streamstudio.cli', run_name='__main__', alter_sys=True)",
+]
 #: How long a start (imports, ~6 s measured) and a stop may take before the test fails instead of hanging.
 START_TIMEOUT = 180.0
 STOP_TIMEOUT = 60.0
@@ -66,9 +75,7 @@ class _Editor:
         self.port = _free_port()
         self.proc = subprocess.Popen(
             [
-                sys.executable,
-                "-m",
-                "streamstudio.cli",
+                *EDITOR_CLI,
                 "run",
                 str(folder),
                 "--port",
@@ -284,9 +291,7 @@ def test_a_restart_with_no_folder_serves_the_folder_the_running_editor_served(
     elsewhere.mkdir()
     restarted = subprocess.Popen(
         [
-            sys.executable,
-            "-m",
-            "streamstudio.cli",
+            *EDITOR_CLI,
             "restart",
             "--port",
             str(first.port),
@@ -325,8 +330,7 @@ def test_a_closed_terminal_window_keeps_the_work_although_nothing_can_be_printed
     port = _free_port()
     terminal, editor_side = pty.openpty()
     proc = subprocess.Popen(
-        [sys.executable, "-m", "streamstudio.cli", "run", str(folder), "--port", str(port)]
-        + ["--templates-dir", str(tmp_path / "templates")],
+        [*EDITOR_CLI, "run", str(folder), "--port", str(port)] + ["--templates-dir", str(tmp_path / "templates")],
         cwd=tmp_path,  # never the workspace root: its liquifai/ folder shadows the installed package
         stdin=editor_side,
         stdout=editor_side,
