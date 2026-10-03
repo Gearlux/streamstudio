@@ -58,6 +58,9 @@ def _skipped(exported: str) -> List[str]:
 
 class TestAnUnregisteredTaidalNodeRefuses:
     def test_it_raises_instead_of_shortening_the_chain(self) -> None:
+        # waivefront is an optional plugin (not on PyPI, so CI does not install it): the assertion below, that the
+        # op is REALLY registered, holds only where its package is installed
+        pytest.importorskip("waivefront")
         node = NEWER_THAN_THE_SERVER[0]
         assert node in NODE_CLASS_MAPPINGS, "the op is real; only the stale server lacks it"
         with pytest.raises(UnsupportedTopologyError):
