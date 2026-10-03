@@ -80,6 +80,12 @@ dev = [
     "isort>=5.13.0,<6.0.0",
     "flake8>=6.0.0,<8.0.0",
     "mypy>=1.0.0,<2.0.0",
+    # Type stubs for two DECLARED dependencies that ship none (pyyaml, psutil). This project's own CI
+    # runs `mypy .` from the project directory with the default error codes, so without them every
+    # `import yaml` / `import psutil` is an `import-untyped` error there (the workspace-root run hides
+    # it by disabling that code).
+    "types-PyYAML>=6.0.0",
+    "types-psutil",
     "pytest>=7.0.0,<9.0.0",
     "pytest-cov>=4.0.0,<7.0.0",
 ]
@@ -151,3 +157,30 @@ line_length = 120
 
 [tool.black]
 line-length = 120
+
+# This project is type-checked TWICE with different configs. From the workspace root the shared
+# `mypy.ini` supplies these ignores, so a gap here is invisible there; this project's OWN CI runs
+# `mypy .` from the project directory, reads only the tables below, and is what a published package
+# must satisfy. Every third party that CI cannot resolve therefore needs an entry HERE, each one for
+# a stated reason — never a global `ignore_missing_imports`, never a disabled error code.
+
+# Declared dependency that ships neither a `py.typed` marker nor a stub package.
+[[tool.mypy.overrides]]
+module = ["datasets.*"]
+ignore_missing_imports = true
+
+# ComfyUI itself: importable only inside a running ComfyUI install (`~/.streamstudio/ComfyUI`), so not
+# installable for CI. `streamstudio.nodes` imports `comfy.model_management` lazily for interrupt
+# handling and `streamstudio.bridge` imports `comfy_execution.validation` lazily inside a generated
+# node's `VALIDATE_INPUTS`, each behind a try/except with a fallback.
+[[tool.mypy.overrides]]
+module = ["comfy.*", "comfy_execution.*"]
+ignore_missing_imports = true
+
+# The optional `[waivefront]` extra and the sonair package: PLUGINS this package works without (every
+# use is a guarded import, a TYPE_CHECKING import, or a test that `pytest.importorskip`s it). waivefront
+# is not on PyPI, so CI cannot install it; sonair is, but the one test that imports its engine modules
+# also needs the heavy keras / torch engine extras, which CI does not install.
+[[tool.mypy.overrides]]
+module = ["waivefront.*", "sonair.*"]
+ignore_missing_imports = true
