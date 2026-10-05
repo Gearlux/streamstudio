@@ -34,9 +34,11 @@ A class whose introspection fails is still listed: kind ``op``, no sockets, and 
 ``problem``. The registry today holds one such class (a ``DataLoader`` whose constructor names an
 ``Iterable`` it never imported); dropping it would hide a real defect, and raising would empty the
 palette for everyone else.
-The full entry-point scan is the expensive part — measured 6.6 s for the imports of 124 entry points
-plus 0.7 s to describe every discovered class (a few hundred in this workspace) — so the palette is
-built once per process and ``palette(refresh=True)`` is the only thing that rebuilds it.
+The full entry-point scan is the expensive part — measured 2026-10-05 at load 23: 12 s for the imports of 134 entry
+points, 6 s to build the settings of 825 classes — so the palette is built once per process and
+``palette(refresh=True)`` is the only thing that rebuilds it. The editor's server never runs the scan itself: its
+catalogue is built by a helper process (:mod:`streamstudio.catalogue`), from :func:`registered` and :func:`describe`
+— the list without settings (:func:`listed`), then every class with them.
 
 This module reads recordstream and confluid only; the document, the app and the canvas build on it.
 """
@@ -46,7 +48,7 @@ import difflib
 import inspect
 import types
 import warnings
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import PurePath
 from typing import (
     Any,
@@ -457,7 +459,8 @@ def kind_of(target: Callable[..., Any]) -> NodeKind:
 # ----------------------------------------------------------------------------------------------
 # describing one class
 # ----------------------------------------------------------------------------------------------
-def _class_path(target: Any) -> str:
+def class_path_of(target: Any) -> str:
+    """How a document spells ``target``: ``module.QualName`` (``!class:<path>``), or its repr when it has neither."""
     module = getattr(target, "__module__", None)
     qualname = getattr(target, "__qualname__", None) or getattr(target, "__name__", None)
     return f"{module}.{qualname}" if module and qualname else repr(target)
@@ -569,9 +572,40 @@ def _op_out() -> SocketDict:
     return _socket("op", OP, False, "this node as an op — what a Stream's ops list holds")
 
 
-def describe(target: Callable[..., Any]) -> NodeSpec:
-    """The :class:`NodeSpec` of one class or builder function. Never raises: a failure is the spec's ``problem``."""
-    class_path = _class_path(target)
+def _check_settings(target: Callable[..., Any]) -> None:
+    """Raise what building the settings would raise, without building them — for the list, which leaves them out.
+
+    Building them (``confluid.to_pydantic``) refuses a constructor whose signature or annotations cannot be read —
+    torch's ``DataLoader`` names an ``Iterable`` it never imported — and that refusal is the class's ``problem``.
+    confluid makes that check first, cheaply (``inspect.signature`` and ``get_type_hints`` of the constructor); it is
+    repeated here, and only when it fails is ``to_pydantic`` called, so the problem is in confluid's own words.
+    Measured 2026-10-05 over 825 classes: 1.8 s with this check, 6.5 s with ``to_pydantic`` for every class (both at
+    load ~70). That the list and the full description agree is pinned over every installed class
+    (``tests/test_catalogue.py``).
+    """
+    if inspect.isclass(target):
+        function = target.__dict__.get("__init__") or target.__init__  # type: ignore[misc]  # mypy: no __init__ on type
+    else:
+        function = target
+    if function is object.__init__:
+        return
+    try:
+        inspect.signature(function)
+        get_type_hints(function, include_extras=True)
+    except (TypeError, ValueError, NameError):
+        to_pydantic(target)
+
+
+def describe(target: Callable[..., Any], *, settings: bool = True) -> NodeSpec:
+    """The :class:`NodeSpec` of one class or builder function. Never raises: a failure is the spec's ``problem``.
+
+    Args:
+        target: The class or builder function.
+        settings: Build the constructor's settings (``params_schema``, ``params_defs``). ``False`` leaves them empty —
+            what the catalogue's list carries (:func:`listed`): building them is most of a description's cost (6 s of
+            6.5 s for 825 classes, measured 2026-10-05), and a class's settings are asked for one class at a time.
+    """
+    class_path = class_path_of(target)
     tags = marks(target)
     common = dict(
         class_path=class_path,
@@ -582,8 +616,13 @@ def describe(target: Callable[..., Any]) -> NodeSpec:
     )
     try:
         kind = kind_of(target)
-        properties, defs = _schema(target)
-        properties = _mark_pickers(target, properties)
+        properties: Dict[str, Any] = {}
+        defs: Dict[str, Any] = {}
+        if settings:
+            properties, defs = _schema(target)
+            properties = _mark_pickers(target, properties)
+        else:
+            _check_settings(target)
         wired = _wired_inputs(target)
         inputs: List[SocketDict] = []
         outputs: List[SocketDict] = []
@@ -661,6 +700,30 @@ def _remember(spec: NodeSpec) -> None:
     _index.setdefault(spec.name, spec)
 
 
+#: The fields a catalogue LIST leaves out — a class's settings, asked for one class at a time (:func:`listed`).
+SETTINGS_FIELDS: Tuple[str, ...] = ("params_schema", "params_defs")
+
+
+def listed(spec: NodeSpec) -> Dict[str, Any]:
+    """``spec`` as the catalogue's list carries it: every field but the settings (:data:`SETTINGS_FIELDS`).
+
+    The list is what the page searches and draws entries from — names, kinds, sockets, descriptions; the settings are
+    94 % of the full catalogue's 11.6 MB (measured 2026-10-05) and are needed for the one class someone selects.
+    """
+    return {key: value for key, value in asdict(spec).items() if key not in SETTINGS_FIELDS}
+
+
+def registered(scan: bool = True) -> List[Callable[..., Any]]:
+    """Every class and builder function the registry holds, in registry-key order — after importing every
+    ``confluid.configurables`` entry point when ``scan`` (the expensive part of a catalogue: 12 s of 21 s measured
+    2026-10-05 at load 23)."""
+    if scan:
+        load_configurables()
+    registry = get_registry()
+    targets = (registry.get_class(key) for key in sorted(registry.list_classes()))
+    return [target for target in targets if target is not None]
+
+
 def palette(refresh: bool = False, *, scan: bool = True) -> List[NodeSpec]:
     """Every registered class as a :class:`NodeSpec`, sorted by class path; built once, cached per process.
 
@@ -674,14 +737,7 @@ def palette(refresh: bool = False, *, scan: bool = True) -> List[NodeSpec]:
     global _cache, _cache_scanned
     if _cache is not None and not refresh and (_cache_scanned or not scan):
         return _cache
-    if scan:
-        load_configurables()
-    registry = get_registry()
-    specs: List[NodeSpec] = []
-    for key in sorted(registry.list_classes()):
-        target = registry.get_class(key)
-        if target is not None:
-            specs.append(describe(target))
+    specs = [describe(target) for target in registered(scan=scan)]
     specs.sort(key=lambda spec: spec.class_path)
     _index.clear()
     for spec in specs:

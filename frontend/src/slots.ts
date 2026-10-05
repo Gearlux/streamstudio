@@ -15,10 +15,11 @@
  *
  * The classes offered are the ones the model's meet rule lets into the slot — every class with an output whose type
  * meets the slot's (`Source`: the sources, and the engines, since a `Stream` IS a source) — the palette's own filter
- * (`steps.paletteMatches`), less the Subgraph class. The form is the class's constructor schema from `GET api/palette`;
+ * (`steps.paletteMatches`), less the Subgraph class. The form is the class's constructor schema, asked when it is picked
+ * (`GET api/palette/<class>`, `api.settingsOf`);
  * only the values the person changed are sent, so every other parameter stays the constructor's default, unspelled.
  */
-import type { NodeSpec } from "./api";
+import type { NodeSpec, NodeSpecWithSettings } from "./api";
 import { SUBGRAPH_CLASS } from "./sidebar";
 import { paletteMatches, searchMatches } from "./steps";
 import type { Json, Model, ModelNode, Param, Socket, SocketType, Supertypes } from "./model";
@@ -93,7 +94,7 @@ export function schemaWord(schema: Record<string, Json>): SocketType {
  * The class's constructor parameters as the form's fields, before anything is set: each at its default (`null` when the
  * constructor requires it), its schema the class's, nothing spelled.
  */
-export function draftParams(spec: Pick<NodeSpec, "params_schema">): Param[] {
+export function draftParams(spec: Pick<NodeSpecWithSettings, "params_schema">): Param[] {
   return Object.entries(spec.params_schema).map(([name, value]) => {
     const schema = asSchema(value) ?? {};
     const has = "default" in schema;

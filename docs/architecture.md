@@ -1516,7 +1516,8 @@ it (1.2 s alone). A page opened to look at a graph or change a value paid for bo
    means "the catalogue has arrived".
 
 Rejected: a background thread that warms the catalogue at server start (the same import-lock contention, moved to
-the first seconds of every session, and paid by a host that never opens the editor); a persisted name → module index
+the first seconds of every session, and paid by a host that never opens the editor — a helper PROCESS started when the
+page opens has neither cost: "The catalogue is built by a helper process", 2026-10-05); a persisted name → module index
 (a second source of truth that goes stale when a package is installed — not decided, see below); keeping the page's
 fetch at open and only narrowing the server's lookup (measured: 7.2 s for the graph list while the catalogue builds
 beside it).
@@ -1785,3 +1786,92 @@ its page source changed. Pins:
 `tests/test_committed_page.py`, `tests/test_page_build.py::TestAnInstallWithoutPageSource`, `::TestABuildByHand`,
 `::TestWhatTheBuildReads`, `tests/test_packaging.py::test_the_wheel_built_from_a_checkout_serves_the_page`,
 `::test_every_file_of_the_built_page_is_shipped_and_no_source_map`.
+
+## The catalogue is built by a helper process, and a class's settings are asked when it is selected (`streamstudio.catalogue`, `GET api/palette/<class>`, 2026-10-05)
+
+**Context.** The catalogue — every class the page can list — was built inside the editor's process on the first
+`GET api/palette`: import every `confluid.configurables` entry point, then describe every class with its settings.
+Measured 2026-10-05 with every backend installed: 21 s at load 23 — 12 s of imports (`raidar.ultralytics` 5.7 s, which
+is torch and torchmetrics, the latter importing `transformers` on its own; `deltaid.tensorflow_segmenter` 2.2 s;
+`deltaid.unet.flax_unet` 1.1 s), 6 s building each class's settings (`to_pydantic` and pydantic's JSON schema), the
+rest describing kinds and sockets — and an 11.6 MB answer, 94 % of it settings. After it the editor held 1.17 GB.
+Importing those backends lazily was measured and rejected: ultralytics itself imports in 0.07 s — the cost is torch
+and torchmetrics, which every torch package pays — and the TensorFlow and Flax classes inherit from their framework's
+own base classes, so they cannot be declared without it; at most 3 s for a refactor across two projects. Building the
+catalogue earlier, in a thread of the editor, was rejected on 2026-10-02 (the record above): it contends with the
+page's own requests for the import locks.
+
+**Decision.** Two halves.
+
+1. **A helper process builds it** (`python -P -m streamstudio.catalogue`). It imports every entry point and answers
+   twice on its stdout, one JSON line each: first the LIST — every class without its settings (`palette.listed`,
+   `describe(settings=False)`) — then every class's full spec. It points its file descriptor 1 at stderr before
+   importing anything, so what an imported package prints reaches the editor's log, never an answer; `-P` keeps the
+   working directory from shadowing an installed package. Serving the editor's page (`page_blueprint`'s `/`) starts
+   it; a catalogue request starts it if nothing has. ONE helper per process (`catalogue.CATALOGUE`), the one piece of
+   module-level state the editor keeps: the catalogue describes the installed packages, the same for every app the
+   process mounts (the palette's own cache was always per process). `?refresh=1` runs a new helper, which — a fresh
+   interpreter — also sees packages edited since. A helper that stops before answering is a `503` naming its exit
+   code, and the next request runs a new one. The editor adds the classes only ITS registry holds (a host's or a
+   test's, no entry point naming them), described in its process.
+2. **A class's settings are asked when it is selected** — picked in Set source…, its card shown in the Nodes sidebar
+   (`GET api/palette/<class>`, the page's `api.settingsOf`, once per class for the page's life). The answer comes from
+   the helper's second line, or at once from the editor's own process when the class's module is already imported
+   there (no import, no wait). The list and the full spec must agree on a class's kind, sockets and problem, but the
+   list does not build settings — and building them is where a class whose constructor annotations do not resolve
+   fails (torch's `DataLoader`). So the list makes confluid's own cheap check (`inspect.signature`,
+   `get_type_hints`) and, only when it fails, calls `to_pydantic` for confluid's own words (`palette._check_settings`):
+   1.8 s for 825 classes against 6.5 s for building every model (load ~70).
+
+Rejected: settings described in the editor on selection, whatever is imported (measured on a first pick in a fresh
+editor: `YOLO26Model` 10.8 s, `TensorFlowSegmenter` 9.3 s at load 112 — each first pick of a torch or TensorFlow
+class would load that framework into the editor); the full catalogue persisted on disk between runs (instant when
+nothing changed, 21 s again after any edit to a package that declares classes, and a second copy to keep true); one
+helper per editor app (a test session making many apps would run one each).
+
+**Consequences.** Measured 2026-10-05, one fresh editor process per line, over the six shipped pane graphs:
+
+```
+                                               before (in the editor)     after (helper process)
+editor opened, Set source… at once — the list  55.1 s, 11.7 MB  (load 128)  31.0 s, 0.60 MB  (load 120)
+a picked class's settings                      in the list                FilesSource 31.0 s (with the list),
+                                                                          YOLO26Model 44.2 s (the second answer)
+the list asked once the helper answered        —                          3 ms
+the editor's memory afterwards                 1.17 GB                    0.13 GB
+the first graph list (load ~104, two runs)     4.3 s, 4.4 s               4.1 s, 4.1 s with the helper running
+```
+
+Every editor that serves its page runs the helper once — about 20 s of one core at load 23 — even when nobody opens
+the catalogue. A short class name two packages share (`FourierOp`, the record above) is no longer refused by name once
+the catalogue has been opened: the editor never imports every package now, so a card draws the first the lookup
+imports, as before the catalogue, while a run still refuses the name.
+
+**Example.**
+
+```
+GET /studio/                                   -> the page; the helper starts
+GET /studio/api/palette                        -> [{"class_path": "recordstream.sources.files.FilesSource",
+                                                    "kind": "source", "inputs": [...], "outputs": [...], ...}, ...]
+                                                  (no "params_schema", no "params_defs")
+GET /studio/api/palette/recordstream.sources.files.FilesSource
+                                               -> {"class_path": ..., "params_schema": {"files": {...}, "root": {...},
+                                                    "pattern": {...}, ...}, "params_defs": {}, ...}
+```
+
+```python
+from streamstudio.catalogue import Catalogue
+
+catalogue = Catalogue()          # stores only; the helper runs on the first start() or entries()
+catalogue.start()                # what serving the page does
+entries = catalogue.entries()    # waits for the helper's first answer
+spec = catalogue.spec("recordstream.ops.numpy.Threshold")   # at once: recordstream is imported here
+catalogue.stop()
+```
+
+**What you may change.** When the helper starts (another trigger than the page — a host that opens the editor with
+the catalogue in view, say), how the answers travel (two lines on stdout today), and which surfaces count as
+selecting a class. What must hold: the editor's process never imports every entry point for the catalogue; the list
+carries no settings; a list entry and its full spec agree on kind, sockets and problem; a helper never outlives its
+editor; one helper at a time per process. Pins: `tests/test_catalogue.py`,
+`tests/test_app.py::TestPaletteAndForm::test_the_palette_lists_at_least_recordstreams_own_classes`,
+`frontend/src/__tests__/catalogue.test.ts`.

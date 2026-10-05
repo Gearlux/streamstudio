@@ -49,10 +49,11 @@ Invariants:
 - Parameter help comes from the class's docstring `Args:`, choices from a `Literal`, bounds from an `Interval` mark —
   never restated in the editor. (`tests/test_palette.py::TestAlgorithm::test_interval_and_literal_marks_reach_the_schema`)
 - **A short class name resolves one entry point at a time** (`document._import_until`). Never call
-  `load_configurables()` from a document path — the catalogue (`palette(scan=True)`) is the one place that imports
-  everything. Never skip an entry point because its module is in `sys.modules` (it may be half-imported by another
-  thread). A test that counts imports resets `_pending_entry_points`. (`tests/test_short_name_lookup.py`) arch: "A
-  short class name is looked up one entry point at a time".
+  `load_configurables()` from a document path, and never `palette(scan=True)` in the server — only the catalogue's
+  helper process (`python -P -m streamstudio.catalogue`) imports everything. Never skip an entry point because its
+  module is in `sys.modules` (it may be half-imported by another thread). A test that counts imports resets
+  `_pending_entry_points`. (`tests/test_short_name_lookup.py`) arch: "A short class name is looked up one entry point
+  at a time".
 
 ## Save, New, recovery
 
@@ -122,7 +123,7 @@ Invariants:
 
 - **No logic in the routes:** each `/api` route parses its request and calls ONE `Studio` method, so phase 5's tools
   cannot drift from the page. All state lives on `app.extensions["streamstudio"]` (`studio_of(app)`), never at module
-  level.
+  level — the catalogue (`catalogue.CATALOGUE`, see "The canvas page") is the one exception.
 - The graph list leaves out hidden files, `*.layout.yaml` and `*.steps.yaml`; a file is read before it enters the
   registry. (`tests/test_app_files.py`)
 - **The settings form:** `requires` (`document.GATE_PARAM`) is never a field, but stays in the MODEL (the gate wire
@@ -202,6 +203,14 @@ arch: "A host mounts the editor through three methods"; pins `tests/test_host.py
   `page_blueprint` decides per request. (`tests/test_page_build.py`) arch: "The canvas page builds itself".
 - **The catalogue is asked for on first need** (`frontend/src/catalogue.ts`); the page's mount effect must not call
   `getPalette`. (`tests/test_canvas.py::TestTheCatalogueIsAskedForOnFirstNeed`)
+- **The catalogue is built by a helper process, never in the server** (`streamstudio/catalogue.py`): serving the page
+  (`page_blueprint`'s `/`) starts it, and nothing else does but a catalogue request. Its list carries no settings
+  (`palette.listed`); a class's settings are asked when it is SELECTED (`GET api/palette/<class>`, the page's
+  `api.settingsOf`, once per class) — never put them back into the list. A list entry and the full spec agree on kind,
+  sockets and problem (`palette._check_settings`). `catalogue.CATALOGUE` is the one piece of module-level state: it
+  describes the installed packages, the same for every app a process mounts — one helper per process, stopped at exit.
+  A test runs its own helper script (`tests/test_catalogue.py::Helper`) and stops every catalogue it makes.
+  (`tests/test_catalogue.py`) arch: "The catalogue is built by a helper process".
 - **In a host's panel the page decides nothing the server decides.** Run with no source of its own asks the server,
   which asks the host; pickers come from `schema.picker`; HuggingFace lists are asked only when the person reaches
   for one. `?embed=1` removes chrome, never a function. The `state`/`saved`/`open`/`unavailable` messages are a

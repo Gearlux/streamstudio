@@ -50,3 +50,21 @@ export function onFirstNeed<T>(fetch: () => Promise<T>, arrived: (value: T) => v
     return true;
   };
 }
+
+/**
+ * A class's settings (`GET api/palette/<class>`) are not in the catalogue's list — they were 94 % of its 11.6 MB, and a
+ * person needs them for the one class they SELECT: the class picked in Set source…, the class whose card the Nodes
+ * sidebar shows. `oncePerClass(fetch)` asks `fetch` the first time a class is selected and hands every later selection
+ * of it the same answer; a refused answer is forgotten, so the next selection asks again.
+ */
+export function oncePerClass<T>(fetch: (classPath: string) => Promise<T>): (classPath: string) => Promise<T> {
+  const asked = new Map<string, Promise<T>>();
+  return (classPath) => {
+    const known = asked.get(classPath);
+    if (known !== undefined) return known;
+    const answer = fetch(classPath);
+    asked.set(classPath, answer);
+    answer.catch(() => asked.delete(classPath));
+    return answer;
+  };
+}

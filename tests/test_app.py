@@ -630,8 +630,10 @@ class TestPaletteAndForm:
         assert len(specs) >= len(core) > 0
         by_path = {spec["class_path"]: spec for spec in specs}
         assert by_path["recordstream.ops.numpy.Threshold"]["kind"] == "op"
-        assert "low_level" in by_path["recordstream.ops.numpy.Threshold"]["params_schema"]
-        assert client.get("/api/palette?refresh=1").status_code == 200
+        assert "params_schema" not in by_path["recordstream.ops.numpy.Threshold"]  # a class's settings: its own route
+        assert f"{MOD}.TinyGain" in by_path  # a class only this process registered is listed too
+        settings = client.get("/api/palette/recordstream.ops.numpy.Threshold").get_json()["params_schema"]
+        assert "low_level" in settings
 
     def test_the_form_gives_every_node_its_parameter_schema(self, client: Any) -> None:
         response = client.get("/api/graphs/pets/form")

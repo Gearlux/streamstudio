@@ -3,7 +3,8 @@
  * (`GET api/palette`), grouped by PACKAGE and, inside one, by KIND — sources, ops, algorithms, … — each section only
  * when it holds something. An entry shows the class name, its one-line description and coloured chips for what it
  * reads and what it writes (the socket colours the canvas uses); resting the pointer on it shows a card with the whole
- * description and the constructor's parameters.
+ * description and the constructor's parameters — asked when the card opens (`api.settingsOf`, once per class), the card
+ * saying "loading the settings…" until they arrive.
  *
  * Drag an entry onto the canvas to add it where it is dropped (the canvas turns the drop point into flow coordinates),
  * or click it to add it after the selected node. Either way it is `POST …/steps` where the footer says
@@ -23,7 +24,7 @@
  * `data-nodes-subgraph-hint`.
  */
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent } from "react";
-import type { NodeSpec } from "../api";
+import { errorMessage, settingsOf, type NodeSpec, type NodeSpecWithSettings } from "../api";
 import { socketColor } from "../model";
 import type { InsertTarget } from "../oplists";
 import { docSpans } from "../rst";
@@ -274,16 +275,49 @@ function DocText({ text }: { text: string }) {
   );
 }
 
-/**
- * The hover card: the whole description, what it reads and writes with the types, the parameters. It never leaves
- * the window (its height is capped, its top clamped), and a parameter list longer than the room left is cut at the
- * last row that fits WHOLE, followed by how many were left out — measured before: a 48-parameter card ran 18 px past a
- * 900-px window and cut its 13th row mid-sentence, with nothing saying 36 more existed.
- */
+type CardSettings = NodeSpecWithSettings | "loading" | { refused: string };
+
+/** The hover card of one class: asks for its settings as it opens and draws the card again once they are in. */
 function Card({ spec, top, left }: { spec: NodeSpec; top: number; left: number }) {
+  const [settings, setSettings] = useState<CardSettings>("loading");
+  useEffect(() => {
+    let current = true;
+    setSettings("loading");
+    settingsOf(spec.class_path).then(
+      (full) => current && setSettings(full),
+      (exc: unknown) => current && setSettings({ refused: errorMessage(exc) }),
+    );
+    return () => {
+      current = false;
+    };
+  }, [spec.class_path]);
+  // keyed by the state, so the body measures its rows afresh when the parameters arrive
+  const state = settings === "loading" ? "loading" : "refused" in settings ? "refused" : "ready";
+  return <CardBody key={state} spec={spec} settings={settings} state={state} top={top} left={left} />;
+}
+
+/**
+ * The hover card's body: the whole description, what it reads and writes with the types, the parameters. It never
+ * leaves the window (its height is capped, its top clamped), and a parameter list longer than the room left is cut at
+ * the last row that fits WHOLE, followed by how many were left out — measured before: a 48-parameter card ran 18 px
+ * past a 900-px window and cut its 13th row mid-sentence, with nothing saying 36 more existed.
+ */
+function CardBody({
+  spec,
+  settings,
+  state,
+  top,
+  left,
+}: {
+  spec: NodeSpec;
+  settings: CardSettings;
+  state: "loading" | "refused" | "ready";
+  top: number;
+  left: number;
+}) {
   const box = useRef<HTMLDivElement>(null);
   const list = useRef<HTMLDivElement>(null);
-  const params = paramRows(spec);
+  const params = settings === "loading" || "refused" in settings ? [] : paramRows(settings);
   const [shown, setShown] = useState(params.length);
   const [y, setY] = useState(top);
   useLayoutEffect(() => {
@@ -305,7 +339,7 @@ function Card({ spec, top, left }: { spec: NodeSpec; top: number; left: number }
   const { reads, writes } = chips(spec);
   const hidden = params.length - shown;
   return (
-    <div ref={box} className="node-card" data-nodes-card={spec.class_path} style={{ top: y, left }}>
+    <div ref={box} className="node-card" data-nodes-card={spec.class_path} data-card-settings={state} style={{ top: y, left }}>
       <div className="node-card-head">
         <span className="node-card-name">{spec.name}</span>
         <span className={`badge kind-${spec.kind}`}>{spec.kind}</span>
@@ -370,7 +404,9 @@ function Card({ spec, top, left }: { spec: NodeSpec; top: number; left: number }
           )}
         </div>
       )}
-      {params.length === 0 && <div className="dim small">no parameters</div>}
+      {state === "loading" && <div className="dim small">loading the settings…</div>}
+      {settings !== "loading" && "refused" in settings && <div className="node-card-problem">{settings.refused}</div>}
+      {state === "ready" && params.length === 0 && <div className="dim small">no parameters</div>}
     </div>
   );
 }

@@ -13,8 +13,6 @@ const spec = (classPath: string, inputs: [string, string][] = [], outputs: [stri
   category: "op",
   group: "",
   kind: "op",
-  params_schema: {},
-  params_defs: {},
   inputs: inputs.map(([name, type]) => ({ name, type, required: false, doc: "" })),
   outputs: outputs.map(([name, type]) => ({ name, type, required: false, doc: "" })),
   consumes: {},

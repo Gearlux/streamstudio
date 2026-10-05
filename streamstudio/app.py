@@ -98,11 +98,13 @@ from recordstream.items import Record
 from recordstream.ops.contract import ChainContractError
 
 import streamstudio
+from streamstudio import catalogue as catalogue_module
 from streamstudio import document as document_module
 from streamstudio import layout
 from streamstudio import page as page_module
 from streamstudio import palette
 from streamstudio._yamltext import YamlText
+from streamstudio.catalogue import CatalogueUnavailable
 from streamstudio.document import (
     ALREADY_EXISTS,
     GATE_PARAM,
@@ -1340,6 +1342,18 @@ class Studio:
         path.unlink()
         return self.templates()
 
+    # -- the catalogue -----------------------------------------------------------------------
+
+    def catalogue(self, refresh: bool = False) -> List[Dict[str, Any]]:
+        """Every class the editor can describe, without its settings — built by a helper process and waited for here
+        (:meth:`streamstudio.catalogue.Catalogue.entries`); ``refresh`` runs a new helper."""
+        return catalogue_module.CATALOGUE.entries(refresh)
+
+    def class_spec(self, class_path: str) -> Dict[str, Any]:
+        """One class with its settings, asked when someone selects it
+        (:meth:`streamstudio.catalogue.Catalogue.spec`)."""
+        return catalogue_module.CATALOGUE.spec(class_path)
+
     # -- the settings form -------------------------------------------------------------------
 
     def form(self, name: str) -> Dict[str, Dict[str, Any]]:
@@ -1767,6 +1781,10 @@ def editor_blueprint(
     def _wrong_state(exc: RuntimeError) -> Tuple[Response, int]:
         return _error(str(exc), 400)
 
+    @blueprint.errorhandler(CatalogueUnavailable)
+    def _no_catalogue(exc: CatalogueUnavailable) -> Tuple[Response, int]:
+        return _error(str(exc), 503)  # the server's own helper failed — nothing the request did
+
     @blueprint.errorhandler(OSError)
     def _disk(exc: OSError) -> Tuple[Response, int]:
         """A file the editor could not read or write, answered in the route's JSON shape and naming the file — never
@@ -1994,7 +2012,11 @@ def editor_blueprint(
     @blueprint.get("/api/palette")
     def palette_route() -> Response:
         refresh = request.args.get("refresh", "") not in ("", "0", "false")
-        return jsonify([asdict(spec) for spec in palette.palette(refresh=refresh)])
+        return jsonify(_studio().catalogue(refresh))
+
+    @blueprint.get("/api/palette/<class_path>")
+    def class_route(class_path: str) -> Response:
+        return jsonify(_studio().class_spec(class_path))
 
     @blueprint.get("/api/graphs/<name>/form")
     def form(name: str) -> Response:
@@ -2072,6 +2094,9 @@ def page_blueprint(dist: Optional[Path] = None) -> Blueprint:
             return _unbuildable_page(problem)
         served = built()
         if served is not None:
+            # The editor is opening: its catalogue starts building now, in a helper process, so a list opened later is
+            # there or nearly (a page that only looks at a graph never waits for it — it asks on first need).
+            catalogue_module.CATALOGUE.start()
             return send_from_directory(served, "index.html")
         rules = sorted(
             (rule.rule, ", ".join(sorted((rule.methods or set()) - {"HEAD", "OPTIONS"})))

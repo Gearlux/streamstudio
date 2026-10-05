@@ -3,7 +3,7 @@
  * and the values it sends — the PRO and the CON case of each.
  */
 import { describe, expect, it } from "vitest";
-import type { NodeSpec } from "../api";
+import type { NodeSpecWithSettings } from "../api";
 import type { Model, ModelNode, Supertypes } from "../model";
 import {
   draftParams,
@@ -18,7 +18,13 @@ import {
   sourceSlots,
 } from "../slots";
 
-const spec = (name: string, kind: string, outputs: { name: string; type: string }[], params: NodeSpec["params_schema"] = {}): NodeSpec => ({
+// with its settings — what a picked class answers (`GET api/palette/<class>`); a list entry is the same less those
+const spec = (
+  name: string,
+  kind: string,
+  outputs: { name: string; type: string }[],
+  params: NodeSpecWithSettings["params_schema"] = {},
+): NodeSpecWithSettings => ({
   class_path: `pkg.${name}`,
   name,
   category: kind,

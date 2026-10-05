@@ -13,7 +13,7 @@
  *   are never shown                                                 waiting for data-palette-ready="true"
  */
 import { describe, expect, it } from "vitest";
-import { NOTHING_SHOWN, needsCatalogue, onFirstNeed, type CatalogueShown } from "../catalogue";
+import { NOTHING_SHOWN, needsCatalogue, onFirstNeed, oncePerClass, type CatalogueShown } from "../catalogue";
 
 interface Server {
   asked: number;
@@ -122,5 +122,61 @@ describe("the rule, through the stand-in page: the first need asks, once", () =>
     const need = onFirstNeed(fake.fetch, () => undefined, () => undefined);
     expect(need()).toBe(true);
     expect(need()).toBe(false);
+  });
+});
+
+/**
+ * A class's settings (`GET api/palette/<class>`) are asked when the class is SELECTED — Set source…'s pick, the Nodes
+ * sidebar's card — once per class for the page's life; a refused answer is forgotten, so the next selection asks again.
+ */
+describe("oncePerClass — a class's settings, asked on selection", () => {
+  function settings() {
+    const waiting = new Map<string, { resolve: (value: string) => void; reject: (exc: Error) => void }[]>();
+    const asked: string[] = [];
+    return {
+      asked,
+      fetch: (classPath: string) => {
+        asked.push(classPath);
+        return new Promise<string>((resolve, reject) =>
+          waiting.set(classPath, [...(waiting.get(classPath) ?? []), { resolve, reject }]),
+        );
+      },
+      answer: (classPath: string) => waiting.get(classPath)?.shift()?.resolve(`settings of ${classPath}`),
+      refuse: (classPath: string) => waiting.get(classPath)?.shift()?.reject(new Error(`no class ${classPath}`)),
+    };
+  }
+
+  it("selecting a class twice asks once, and both selections get the answer", async () => {
+    const fake = settings();
+    const settingsOf = oncePerClass(fake.fetch);
+    const first = settingsOf("recordstream.sources.files.FilesSource");
+    const again = settingsOf("recordstream.sources.files.FilesSource");
+    fake.answer("recordstream.sources.files.FilesSource");
+    expect(await first).toBe("settings of recordstream.sources.files.FilesSource");
+    expect(await again).toBe("settings of recordstream.sources.files.FilesSource");
+    expect(await settingsOf("recordstream.sources.files.FilesSource")).toBe(
+      "settings of recordstream.sources.files.FilesSource",
+    );
+    expect(fake.asked).toEqual(["recordstream.sources.files.FilesSource"]);
+  });
+
+  it("each class is asked for its own settings", () => {
+    const fake = settings();
+    const settingsOf = oncePerClass(fake.fetch);
+    void settingsOf("recordstream.ops.numpy.Threshold");
+    void settingsOf("recordstream.ops.numpy.Scale");
+    expect(fake.asked).toEqual(["recordstream.ops.numpy.Threshold", "recordstream.ops.numpy.Scale"]);
+  });
+
+  it("a refused answer is forgotten: the next selection asks again", async () => {
+    const fake = settings();
+    const settingsOf = oncePerClass(fake.fetch);
+    const refused = settingsOf("recordstream.ops.numpy.Threshold");
+    fake.refuse("recordstream.ops.numpy.Threshold");
+    await expect(refused).rejects.toThrow("no class recordstream.ops.numpy.Threshold");
+    const asked = settingsOf("recordstream.ops.numpy.Threshold");
+    fake.answer("recordstream.ops.numpy.Threshold");
+    expect(await asked).toBe("settings of recordstream.ops.numpy.Threshold");
+    expect(fake.asked).toEqual(["recordstream.ops.numpy.Threshold", "recordstream.ops.numpy.Threshold"]);
   });
 });
