@@ -117,6 +117,18 @@ class TestWhatMustStillConvert:
         assert not exported.startswith("#"), "nothing skipped, so no comment block at all"
 
 
+def _signal_canvas(slot: str) -> Path:
+    """The ComfyUI CANVAS the domain ships beside one signal pane's document (its templates are YAML since 2026-10-01;
+    the canvas stays for the ComfyUI editor, which is what this converter serves) — from whichever package ships that
+    pane: the plotting panes in ``waivefront.annotation``, the panes that name a standard in
+    ``waivefront.analysis.annotation`` (moved there 2026-10-04). Skips when the package holding the pane is not
+    installed; a pane neither package ships is a ``KeyError``, never a skip."""
+    slots = dict(pytest.importorskip("waivefront.annotation").templates()["signal"])
+    if slot not in slots:
+        slots.update(pytest.importorskip("waivefront.analysis.annotation").templates()["signal"])
+    return Path(slots[slot]).with_suffix(".json")
+
+
 class TestTheShippedCanvasesConvertWhole:
     """The two canvases the failure was seen on. Gated on the domain package being
     installed; the artifacts ship there."""
@@ -127,11 +139,7 @@ class TestTheShippedCanvasesConvertWhole:
     def test_the_signal_domain_view_graphs_drop_nothing(self, slot: str, ops: int) -> None:
         import json
 
-        annotation = pytest.importorskip("waivefront.annotation")
-        # the CANVAS beside the document the domain hands out (its templates are YAML since
-        # 2026-10-01; the canvas stays for the ComfyUI editor, which is what this converter serves)
-        path = Path(annotation.templates()["signal"][slot]).with_suffix(".json")
-        exported = workflow_to_yaml(json.loads(path.read_text()), NODE_CLASS_MAPPINGS)
+        exported = workflow_to_yaml(json.loads(_signal_canvas(slot).read_text()), NODE_CLASS_MAPPINGS)
         assert [c for c in _skipped(exported) if c not in NODE_CLASS_MAPPINGS] == []
         assert exported.count("_target_:") == ops + 1, "every op plus the Stream"
 
@@ -141,8 +149,7 @@ class TestTheShippedCanvasesConvertWhole:
         now refuses, naming them."""
         import json
 
-        annotation = pytest.importorskip("waivefront.annotation")
-        canvas = json.loads(Path(annotation.templates()["signal"]["view_bte"]).with_suffix(".json").read_text())
+        canvas = json.loads(_signal_canvas("view_bte").read_text())
         # The CANVAS's own measure/bluetooth ops — not every such node the registry happens to
         # carry today, which grows as the domain adds nodes and has nothing to do with this canvas.
         newer = sorted(
