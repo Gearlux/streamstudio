@@ -6,7 +6,8 @@
   "description": "The streamstudio canvas — a React Flow drawing of a confluid graph document, talking to the editor's Flask routes under api/.",
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && vite build",
+    "build:page": "tsc --noEmit && vite build",
+    "build": "python3 ../streamstudio/page.py begin && npm run build:page && python3 ../streamstudio/page.py",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"

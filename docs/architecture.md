@@ -636,9 +636,9 @@ written and the next model refresh drops it.
 
 **Consequences.** `pip install streamstudio` gives the API and the placeholder, never a page that is out
 of step with its routes; a developer builds once and the checkout serves it (since 2026-10-02 a server's start
-builds it whenever its source changed — "The canvas page builds itself at a server's start" below). The wheel does not carry
-the page — the deferred item in `TASKS.md` is to build it in the release workflow, which needs node on
-the runner. Every element the page renders is addressable by `data-*` (`data-node`, `data-socket`,
+builds it whenever its source changed — "The canvas page builds itself at a server's start" below).
+*Update 2026-10-04:* where the build lives was reversed — it is committed inside the package, `streamstudio/canvas`,
+and every install serves it ("The built page is committed inside the package" below); the rest of this record holds. Every element the page renders is addressable by `data-*` (`data-node`, `data-socket`,
 `data-type`, `data-kind`, `data-param`, `data-problem`, `data-toast`, `data-saves`), so the playwright
 suite reads the SPEC and never a class name. The proposal rule means the canvas can show one thing the
 document does not have — visibly dashed, and only until the next edit; the alternative (adding the wire
@@ -662,7 +662,7 @@ drag decode.image -> boost.image  : one dashed edge; toast "wires.yaml: the wire
 the toolchain versions, the widget mapping, the toast wording. What must hold: the page is derived from
 the model the routes serve and writes only through them; the type test is `document.supertypes()`, never
 a table typed into the page; a wire the document cannot spell is never written; the source is committed
-and the build is not. Pins: `tests/test_canvas.py`, `tests/test_app.py::TestTypes`,
+(and, since 2026-10-04, the build with it). Pins: `tests/test_canvas.py`, `tests/test_app.py::TestTypes`,
 `tests/test_app.py::TestMounting`, `frontend/src/__tests__/model.test.ts`.
 
 ## Undo is two histories under one gesture: the document's text history on the server, the layout's on the page (`frontend/src/history.ts`, 2026-09-28)
@@ -1592,9 +1592,11 @@ cannot — the page in it is whatever the last build left.
    creation: tests make apps by the hundred.
 2. The source fingerprint is a SHA-256 over every input's relative path and bytes — `src/` and `public/` minus the
    page's tests and hidden files, plus `index.html`, `package.json`, `package-lock.json`, `vite.config.*`,
-   `tsconfig*.json` and the four `.env` files `vite build` loads in production mode — and the STAMP is
+   `tsconfig*.json` and the two `.env` files a clone carries that `vite build` loads in production mode (`.env`,
+   `.env.production`) — and the STAMP is
    `dist/.built-from`, written after a successful build. vite empties `dist` as a build starts, so an interrupted
-   build, or one run by hand, leaves no stamp, and the next start builds.
+   build, or one run by hand, leaves no stamp, and the next start builds. (Since 2026-10-04 the stamp is
+   `streamstudio/canvas/.built-from`, committed, and a build by hand writes it too — the record below.)
 3. `npm ci` runs first only when `node_modules/.package-lock.json` — npm's own record of its last install — is
    missing or older than `package-lock.json`. By time: npm keeps no fingerprint of the lock it installed from.
 4. Nothing about it stops a start: without Node, or when npm fails or outlives its time limit (300 s for `npm ci`,
@@ -1609,7 +1611,9 @@ cannot — the page in it is whatever the last build left.
    once; the second says it waits.
 
 Rejected: **committing `dist`** (every page change becomes a second, generated diff that merges badly, and a commit
-that forgets it ships a page out of step with its routes — the very drift this removes); **building in `aisland
+that forgets it ships a page out of step with its routes — the very drift this removes; *reversed 2026-10-04* with a
+test that catches the forgotten commit and a binary merge rule — "The built page is committed inside the package"
+below); **building in `aisland
 setup`** (setup runs once per machine, not after each pull, so the stale page after a pull stays); **building by hand**
 (what existed — the measured stale page and placeholder); **building at app creation** (a test suite makes hundreds of
 apps and must never run npm); **deciding whether the PAGE is current by modification times instead of contents** (a
@@ -1622,7 +1626,7 @@ two lines and serves 2.0 s later; an unchanged start prints nothing and the chec
 start without Node prints one line and starts at once; two starts at once from the same folder build once — the
 second printed `another start is building the editor's page — waiting for it` and served at the same moment as the
 first. The first install of the page's libraries takes about a minute and is said before it starts. A page built by
-hand has no stamp, so the next start builds it once more (2 s). Each start that FAILED to build tries again; the
+hand had no stamp, so the next start built it once more (2 s) — since 2026-10-04 `npm run build` writes it. Each start that FAILED to build tries again; the
 failure's last 20 lines are printed and shown, and `/` keeps saying so until the next start (a page built by hand
 meanwhile is not served — the page tells the person to start the server again). A host that registers its server
 before checking would make a server still building look gone to anything that prunes unanswered servers — so the
@@ -1663,3 +1667,121 @@ process, no lock and prints nothing; a start never fails because of the page (Ct
 page at `/` never shows a page the start knows is out of date; two starts never build in one folder at once; a folder
 without page source is never checked; an answer is never repeated in the process that gave it. Pins:
 `tests/test_page_build.py`.
+
+## The built page is committed inside the package (`streamstudio/canvas`, user decision B, 2026-10-04)
+
+**Context.** The page built into `frontend/dist`, gitignored and outside `package-data` (the two records above). So
+the page existed only where someone had built it: an install from GitHub — `uv pip install --no-deps
+git+https://github.com/Gearlux/streamstudio.git@main`, which is how a consuming app's CI installs the editor — carries
+no `frontend/` and no build, `ensure_page_built()` answered `no-source`, and `GET /` served the placeholder `The canvas
+page is not built. Build it once — cd streamstudio/frontend && npm install && npm run build …`. Measured 2026-10-04 in
+a consuming app's CI mirror (streamstudio installed non-editable from today's `main`): `web_dist()` → `None`, and the
+app's ten tests that drive the real editor in its panel SKIPPED (`30 passed, 10 skipped`). A checkout without Node
+served the "not built and Node is not installed" page. The build is small — `index.html` (0.4 KB), one js bundle
+(511 KB), one css (45 KB); the 1.95 MB source map was the bulk.
+
+**Decision.** B — commit the built page, inside the package.
+
+1. vite writes to `streamstudio/canvas` (`outDir: "../streamstudio/canvas"`, `emptyOutDir: true`; `page.OUT_DIR` says
+   the same, `page.built_folder()` derives the folder from the page's source folder). The name collides with
+   nothing: not `page` (the module `streamstudio/page.py`), not `web` (the ComfyUI editor's JavaScript, which the
+   release smoke test asserts), not `static` (Flask serves a `static` folder beside `app.py` at `/static/`), not
+   `dist`/`build` (the repository's `.gitignore` drops every folder of those names — they are Python's build output).
+2. The build record `.built-from` — the fingerprint of the source, `page.fingerprint` — is committed with the build.
+   A checkout whose committed page matches its source is `current`: it starts silently and needs no Node. A checkout
+   whose page source changed rebuilds at its start as before (Node needed — that is the person editing the page). An
+   install with no page source serves the page its package carries; the placeholder is left only for a package with
+   no build at all.
+3. `package-data` carries `canvas/index.html`, `canvas/.built-from`, `canvas/assets/*.js`, `canvas/assets/*.css`.
+   No source map is built (`sourcemap: false`): a committed `.js` would end in `//# sourceMappingURL=…map` for a map
+   no install carries, and every page change would add ~2 MB to the history. `npm run dev` still serves the sources
+   with maps. A map made by hand is gitignored (`/streamstudio/canvas/**/*.map`) and matches no package-data pattern.
+4. THE GUARD, `tests/test_committed_page.py::test_the_committed_editor_page_was_built_from_its_current_source`,
+   compares the committed record with `page.fingerprint(page.FRONTEND)` and fails, naming the one build command and
+   the folder to commit. It needs no Node, so it runs in CI. It calls the ONE fingerprint; so does the hand build,
+   whose `npm run build` is `python3 ../streamstudio/page.py begin && npm run build:page && python3
+   ../streamstudio/page.py` (`begin_build()` and `record_build()` — `page.py` imports the standard library only, so a
+   `python3` (3.8 or later) command runs it; measured under macOS's `/usr/bin/python3` 3.9.6). A second
+   implementation (a vite plugin hashing in JavaScript) was rejected: two hashes drift, and the guard would compare
+   one with the other.
+   - **`begin` takes the fingerprint BEFORE vite reads a file** (into `node_modules/.cache/streamstudio-page-source`,
+     which git ignores and vite's emptying of the built folder does not reach); the last step writes THAT value as the
+     record and refuses (`SourceChanged`, exit 1, no record) when the source no longer has it. A record taken after
+     the build vouched for a line saved during its ~3 s: measured, a line appended at `rendering chunks` was in the
+     source and in the record, not in the bundle (`grep` 1 / 0), the guard passed and every start answered `current`.
+     A start already fingerprints before it builds (`_build`), so only the hand build needed the note. Run alone
+     (without `begin`) the last step records the source as it is now.
+   - **A start runs `npm run build:page`, never `build`** (`page._STEPS`): `build:page` is `tsc --noEmit && vite
+     build`, with no `python3` in it, and the start writes its own record. Measured: with `build` ending in
+     `python3 …`, a machine with Node on `PATH` and no `python3` command built the page and was told `npm run build
+     exited with code 127` (`sh: python3: command not found`), and `/` served the failure page. python.org's Windows
+     installer provides `python` and `py` only, and `page.py` supports Windows. The hand build is the developer's, and
+     it needs a `python3`.
+5. The fingerprint is the same on every machine for the same source: relative POSIX paths and bytes, never mtimes or
+   absolute paths — and EVERY input is a file a clone carries: `.env.local`, `.env.production.local` and any `*.local`
+   under `src/` or `public/` are `frontend/.gitignore`'s own pattern and are never inputs (`page._read_by_the_build`;
+   `tests/test_committed_page.py` fails when one input is git-ignored or when a skipped name is not). Measured with
+   a `VITE_DEBUG_PANEL=1` `.env.local` on the developer's machine: the record moved, the guard passed there, a fresh
+   clone (without the file) FAILED the guard, and the same clone with no Node was refused the page (`no-node`) though
+   nothing of it had changed. The page reads no `import.meta.env` (`grep` finds none), so such a file changes nothing
+   the browser runs; if the page ever reads one, the value must come from the committed `.env` / `.env.production`. Bytes means line endings count, so `frontend/.gitattributes` (`* text=auto eol=lf`) checks the
+   source out with LF everywhere — a Windows checkout with `core.autocrlf` would otherwise find the page out of date.
+6. `.gitattributes` marks `streamstudio/canvas/**` `binary linguist-generated=true`: no diff of minified bundles, no
+   line-ending conversion, and a merge of two page changes is a conflict, resolved by building again.
+
+Rejected, each measured or counted against the same consuming CI:
+- **A — build only in the release workflow** (Node on the release runner, the page in the wheel): helps nobody until
+  a release, and a consuming app's CI installs from GitHub `main`, so its ten editor tests keep skipping.
+- **C — build at install** (a setuptools build step running npm): every install, a consumer's CI included, needs
+  Node and the npm registry, and is about a minute slower (`npm ci`'s first install takes about a minute).
+- **D — keep the honest placeholder**: every install from GitHub stays without an editor.
+
+**Consequences.** Measured 2026-10-04:
+- in a copy of the tree (`git ls-files -co`) with no Node on `PATH`, `streamstudio <graphs> --port 8194` printed
+  nothing about the page and `GET /` served the committed `index.html` byte for byte — before, the same start printed
+  `streamstudio: the editor's page is not built and Node is not installed — run aisland setup` and served that line;
+- in the consuming app's CI mirror (streamstudio installed non-editable, `--no-deps`, from a copy), `web_dist()` named
+  `…/site-packages/streamstudio/canvas`, `page.FRONTEND` did not exist, and the editor tests went from `30 passed, 10
+  skipped` to `40 passed`;
+- in a scratch copy, one changed line in `frontend/src/canvas/Palette.tsx` failed the guard with its message; a start
+  with Node printed `the editor's page changed since its last build — building it` / `built the editor's page in
+  5.5 s`, the guard passed, and `git status` listed `.built-from`, `index.html` and the two bundle names — what a page
+  change commits;
+- review round, same day, real npm in a scratch copy: with only node, npm and `/bin` on `PATH` a start's rebuild
+  printed `the editor's page changed since its last build — building it` / `built the editor's page in 10.0 s` (before:
+  `npm run build exited with code 127`); a line saved during `npm run build` ended it with `streamstudio: the editor's
+  page's source changed since its build began — build again (npm run build)`, left no record, the guard failed, and the
+  next start printed `the editor's page has no record of the source it was built from — building it` and the bundle
+  held the line; with an ignored `.env.local` the guard passed on the developer's machine AND in a fresh clone, and the
+  clone without Node answered `current`.
+Every page change now carries a second, generated change (the bundles, ~0.5 MB), which is the price; the guard turns
+the forgotten one into a red CI run instead of a page out of step with its routes.
+
+**Example.**
+
+```python
+from streamstudio import page
+from streamstudio.app import web_dist
+
+page.built_folder()                     # <repo>/streamstudio/canvas — in an install: <site-packages>/streamstudio/canvas
+web_dist()                              # the same folder: every install serves the page
+page.ensure_page_built().state          # "current" in a checkout whose committed page matches its source; no Node needed
+assert page._built_from(page.built_folder()) == page.fingerprint(page.FRONTEND)   # the guard
+```
+
+```
+$ cd frontend && npm run build          # by hand: note the source, vite into streamstudio/canvas, then the record
+…
+✓ built in 3.9s
+streamstudio: recorded the source of the editor's page in …/streamstudio/canvas/.built-from
+```
+
+**What you may change.** The folder's name (with `OUT_DIR`, vite's `outDir`, `package-data`, `.gitignore`,
+`.gitattributes` and the release smoke test together), the guard's wording, the attributes. What must hold: the
+committed build matches its committed source (the guard, in CI); ONE fingerprint, in `page.py`, over files a clone
+carries; the hand build notes it before vite and records it after; a start rebuilds with `build:page` and so needs no
+`python3`; no source map in git or a wheel; every install serves the page without Node; a checkout rebuilds only when
+its page source changed. Pins:
+`tests/test_committed_page.py`, `tests/test_page_build.py::TestAnInstallWithoutPageSource`, `::TestABuildByHand`,
+`::TestWhatTheBuildReads`, `tests/test_packaging.py::test_the_wheel_built_from_a_checkout_serves_the_page`,
+`::test_every_file_of_the_built_page_is_shipped_and_no_source_map`.

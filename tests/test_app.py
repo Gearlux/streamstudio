@@ -798,12 +798,11 @@ class TestMounting:
         assert client.get("/assets/missing.js").status_code == 404
         assert client.get("/api/graphs").status_code == 200  # the API is not shadowed by the page
 
-    def test_the_default_page_is_the_checkouts_frontend_dist_when_built(self) -> None:
-        """``web_dist()`` resolves ``<repo>/frontend/dist`` beside the package (navigaitor's shape) — the
-        directory itself when its ``index.html`` exists, ``None`` when the page is not built."""
-        expected = Path(app_module.__file__).resolve().parent.parent / "frontend" / "dist"
-        found = web_dist()
-        assert found == (expected if (expected / "index.html").is_file() else None)
+    def test_the_default_page_is_the_one_the_package_carries(self) -> None:
+        """``web_dist()`` is ``streamstudio/canvas`` inside the package — committed, so every checkout and every install
+        has it (``tests/test_committed_page.py``). Measured before: ``<repo>/frontend/dist``, gitignored, ``None`` in
+        an install from GitHub."""
+        assert web_dist() == Path(app_module.__file__).resolve().parent / "canvas"
 
 
 # ------------------------------------------------------------------------------------------------

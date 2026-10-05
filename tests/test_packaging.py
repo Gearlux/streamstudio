@@ -19,12 +19,17 @@ build; none is a checklist item:
 
 import ast
 import re
+import shutil
 import subprocess
+import sys
 import tomllib
+import zipfile
 from fnmatch import fnmatch
 from importlib.metadata import packages_distributions
 from pathlib import Path
 from typing import Any, Dict, List, Set, cast
+
+import pytest
 
 _REPO = Path(__file__).resolve().parent.parent
 _PYPROJECT = _REPO / "pyproject.toml"
@@ -126,6 +131,68 @@ def test_every_web_asset_is_shipped() -> None:
     ]
 
     assert not unshipped, f"web assets missing from package-data {patterns}: {unshipped}"
+
+
+def test_every_file_of_the_built_page_is_shipped_and_no_source_map() -> None:
+    """Every file of the committed editor page (``streamstudio/canvas``) matches a ``package-data`` pattern, and no
+    pattern takes a source map.
+
+    The folder has no ``__init__.py`` either, so ``package-data`` is the only way into the wheel. Stated as "every file
+    is covered" so a build that starts writing a new kind of asset (a font, an image) fails here instead of shipping a
+    page whose ``index.html`` names a file the install does not have.
+    """
+    patterns = _package_data_patterns()
+    files = [
+        path.relative_to(_PACKAGE).as_posix() for path in sorted((_PACKAGE / "canvas").rglob("*")) if path.is_file()
+    ]
+    assert "canvas/index.html" in files and "canvas/.built-from" in files, files
+    unshipped = [name for name in files if not name.endswith(".map") and not any(fnmatch(name, p) for p in patterns)]
+    assert not unshipped, f"built page files missing from package-data {patterns}: {unshipped}"
+    mapped = [p for p in patterns if fnmatch("canvas/assets/index-AbCd1234.js.map", p) or fnmatch("canvas/x.map", p)]
+    assert not mapped, f"package-data patterns that would ship a source map: {mapped}"
+
+
+def test_the_wheel_built_from_a_checkout_serves_the_page(tmp_path: Path) -> None:
+    """Built from what a checkout CARRIES (the tracked files, plus new ones not ignored — ``git ls-files -co``), the
+    wheel holds the editor page — ``index.html``, its assets, the build record — and no source map, even when one lies
+    in the folder (a developer's ``vite build --sourcemap``). Measured before: the wheel held no page at all, and an
+    install answered ``/`` with ``The canvas page is not built``."""
+    inside = (
+        shutil.which("git")
+        and subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"], cwd=_REPO, capture_output=True, text=True
+        ).stdout.strip()
+    )
+    if inside != "true":
+        pytest.skip("not a git checkout: what a checkout carries is what git lists")
+    listed = (
+        subprocess.run(
+            ["git", "ls-files", "-co", "--exclude-standard", "-z"], cwd=_REPO, capture_output=True, check=True
+        )
+        .stdout.decode()
+        .split("\0")
+    )
+    checkout = tmp_path / "checkout"
+    for name in filter(None, listed):
+        if (_REPO / name).is_file():
+            (checkout / name).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(_REPO / name, checkout / name)
+    page = checkout / "streamstudio" / "canvas"
+    (page / "assets" / "index-AbCd1234.js.map").write_text("{}")  # what a build with source maps would leave
+    # No isolation: an isolated build would fetch the backend from the network (the [dev] extra declares it).
+    command = [sys.executable, "-m", "build", "--wheel", "--no-isolation", "--outdir", str(tmp_path / "wheel")]
+    built = subprocess.run([*command, str(checkout)], capture_output=True, text=True)
+    assert built.returncode == 0, built.stdout[-2000:] + built.stderr[-2000:]
+    names = zipfile.ZipFile(next((tmp_path / "wheel").glob("*.whl"))).namelist()
+    carried = sorted(
+        f"streamstudio/{path.relative_to(page.parent).as_posix()}"
+        for path in page.rglob("*")
+        if path.is_file() and path.suffix != ".map"
+    )
+    assert {"streamstudio/canvas/index.html", "streamstudio/canvas/.built-from"} <= set(carried), carried
+    assert [name for name in carried if name not in names] == []
+    assert [name for name in names if name.endswith(".map")] == []
+    assert [name for name in names if name.startswith("streamstudio/web/")], "the ComfyUI editor's JavaScript too"
 
 
 def test_the_declared_package_data_files_exist() -> None:

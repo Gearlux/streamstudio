@@ -329,8 +329,9 @@ class TestTheMount:
         assert _ok(create_app(folder).test_client().get("/api/workspace"))["host"] is None
 
     def test_the_checkouts_built_page_and_every_asset_it_names_answer_under_the_prefix(self, host: FakeHost) -> None:
-        """The REAL build (``frontend/dist``), mounted under ``/studio``: the page names its assets relative to itself
-        (``./assets/…``, vite's ``base: './'``), and each answers under the prefix — what a browser fetches next."""
+        """The REAL build (``streamstudio/canvas``), mounted under ``/studio``: the page names its assets relative to
+        itself (``./assets/…``, vite's ``base: './'``), and each answers under the prefix — what a browser fetches
+        next."""
         built = web_dist()
         if built is None:
             pytest.skip(f"the canvas page is not built — {BUILD_COMMAND}")

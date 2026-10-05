@@ -74,6 +74,18 @@ jobs:
 
         installed = Path(streamstudio.__file__).parent
         assert list((installed / "web").glob("*.js")), f"no frontend extensions in {installed}"
+
+        # The canvas editor's page is committed BUILT inside the package (streamstudio/canvas) and must
+        # ship: without it `/` answers "The canvas page is not built" on every install. Its record of the
+        # source it was built from ships with it; a source map never does.
+        import streamstudio.app
+
+        canvas = installed.resolve() / "canvas"
+        assert streamstudio.app.web_dist() == canvas, (streamstudio.app.web_dist(), canvas)
+        assert (canvas / "index.html").exists(), f"no editor page in {canvas}"
+        assert list((canvas / "assets").glob("*.js")) and list((canvas / "assets").glob("*.css")), f"no page assets in {canvas}"
+        assert (canvas / ".built-from").exists(), "the editor page's build record is missing from the wheel"
+        assert not list(canvas.rglob("*.map")), "a source map shipped in the wheel"
         assert (installed / "config.default.yaml").exists(), "palette config missing from the wheel"
         assert (installed / "py.typed").exists(), "py.typed missing from the wheel"
 

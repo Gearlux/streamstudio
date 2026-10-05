@@ -8,19 +8,37 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **The canvas editor's page ships built, inside the package** — `streamstudio/canvas` (`index.html`, its js and css,
+  and `.built-from`, the record of the source it was built from), committed and in the wheel. Every install serves the
+  page: an install from GitHub, which carries no `frontend/`, answered `/` with `The canvas page is not built. Build it
+  once — …`, and now serves the editor; a checkout without Node printed `streamstudio: the editor's page is not built
+  and Node is not installed — run aisland setup`, and now starts silently. Node is needed only to edit the page: a
+  checkout whose page source changed rebuilds it at its start, as before, into `streamstudio/canvas` — commit that
+  folder with the source change. `tests/test_committed_page.py` fails when the committed page was not built from its
+  source: ``the committed editor page is older than its source — start streamstudio once, or run `cd
+  streamstudio/frontend && npm install && npm run build`, and commit streamstudio/streamstudio/canvas``. `npm run
+  build` now writes that record too, so a page built by hand is current: it is `python3 ../streamstudio/page.py begin
+  && npm run build:page && python3 ../streamstudio/page.py` — the source is noted before vite reads a file and the
+  record is that note, refused (`the editor's page's source changed since its build began — build again`) when a file
+  changed meanwhile. A server's start runs `npm run build:page` alone, so it needs Node and nothing else; the hand
+  build also needs a `python3` command. The record covers only files a clone carries: `.env.local`,
+  `.env.production.local` and every `*.local` are never inputs. No source map is built. `streamstudio.page` adds
+  `OUT_DIR`, `built_folder()`, `begin_build()`, `record_build()` and `SourceChanged`; `web_dist()` answers
+  `streamstudio/canvas`. The page's source is checked out with LF line endings everywhere (`frontend/.gitattributes`):
+  the record is a fingerprint of its bytes.
 - **The canvas page builds itself when a server starts and its source changed since its last build.**
   `streamstudio <folder>` — and an app that mounts the editor, through `streamstudio.app.ensure_page_built()` called
   at its start, before it announces its server — prints `streamstudio: the editor's page changed since its last build
   — building it` (or `… is not built yet …`), runs `npm ci` first when `frontend/node_modules` is missing or
-  `package-lock.json` is newer than npm's last install, runs `npm run build`, and prints `streamstudio: built the
+  `package-lock.json` is newer than npm's last install, runs `npm run build:page`, and prints `streamstudio: built the
   editor's page in 2.0 s`. A page that is current costs a 2 ms check and prints nothing. Without Node, or when the
   build fails, the server still starts: the start prints `… is out of date and Node is not installed — run aisland
-  setup` or `building the editor's page failed — npm run build exited with code 2; its last lines:` with npm's last 20
-  lines, and the page at `/` says the same instead of serving the old page. A page built by hand (no record of its
+  setup` or `building the editor's page failed — npm run build:page exited with code 2; its last lines:` with npm's
+  last 20 lines, and the page at `/` says the same instead of serving the old page. A page built by hand (no record of its
   source) is served as it is when there is no Node to rebuild it. npm may take 300 s for `npm ci` and 120 s for the
   build; past that it is stopped with everything it started (`… npm ci did not finish in 300 s`). Ctrl+C during the
   build stops npm and ends the start with `streamstudio: interrupted before the editor's page was built — the next
-  start builds it` (exit code 130). What the page was built from is recorded in `frontend/dist/.built-from`; two starts
+  start builds it` (exit code 130). What the page was built from is recorded in `streamstudio/canvas/.built-from`; two starts
   from one checkout never build at once on macOS and Linux — the second prints `another start is building the editor's
   page — waiting for it`. A start that could not build the page does not try again in the same process, and
   `streamstudio.app.page_check_environment()` hands its answer to a server process it starts. The editor's own start

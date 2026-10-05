@@ -32,8 +32,9 @@ HOST object (``streamstudio.app.EditorHost``) that names the folder, supplies th
 of every Save; its own page holds the editor in an iframe and keeps the messages the page posts. The HuggingFace
 lookups are replaced on the package there — no test touches the network.
 
-Skipped, with the reason, when the page is not built (no ``frontend/dist/index.html``) or headless
-chromium is not installed — the build is ``cd streamstudio/frontend && npm install && npm run build``.
+Skipped, with the reason, when the package carries no built page (no ``streamstudio/canvas/index.html`` — it is
+committed, so only a deleted build skips) or headless chromium is not installed — the build is ``cd
+streamstudio/frontend && npm install && npm run build``.
 """
 
 import json
@@ -72,8 +73,7 @@ playwright_api = pytest.importorskip(
     "playwright.sync_api", reason="playwright is not installed (pip install playwright)"
 )
 
-FRONTEND = Path(__file__).resolve().parents[1] / "frontend"
-DIST = FRONTEND / "dist"
+DIST = Path(__file__).resolve().parents[1] / "streamstudio" / "canvas"
 BUILD = "cd streamstudio/frontend && npm install && npm run build"
 if not (DIST / "index.html").is_file():
     pytest.skip(f"the canvas page is not built ({DIST / 'index.html'} is absent): {BUILD}", allow_module_level=True)

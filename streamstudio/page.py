@@ -1,18 +1,23 @@
 """The editor's page is built at a server's START when its source changed since its last build.
 
-The canvas page is TypeScript/React in ``frontend/`` beside the package (committed source); ``npm run build``
-(``tsc --noEmit && vite build``) writes it to ``frontend/dist`` (gitignored, never in the wheel). Measured before
-2026-10-02: after a ``git pull`` that changed the page, every start served the page built BEFORE the pull — or, on a
-machine that had never built it, a placeholder naming :data:`BUILD_COMMAND` — until someone ran that command by hand.
+The canvas page is TypeScript/React in ``frontend/`` beside the package (committed source); ``npm run build:page``
+(``tsc --noEmit && vite build``) writes it INTO the package, ``streamstudio/canvas`` (:func:`built_folder`), where it
+is COMMITTED with the record of the source it was built from (:data:`STAMP`) — so every install
+serves it, a checkout without Node and an install with no ``frontend/`` at all included, and Node is needed only by
+whoever edits the page's source (user decision B, 2026-10-04). Measured before 2026-10-02: after a ``git pull`` that
+changed the page, every start served the page built BEFORE the pull — or, on a machine that had never built it, a
+placeholder naming :data:`BUILD_COMMAND` — until someone ran that command by hand.
 
 :func:`ensure_page_built` is what a start calls — the editor's own CLI and a host app that mounts the editor, each
 before it serves (and before it announces the server anywhere), never when an app is MADE (tests make apps by the
 hundred and must never run npm):
 
 * it hashes what the build reads (:func:`page_inputs`) and compares it with the record a successful build left inside
-  ``dist`` (:data:`STAMP`) — equal: nothing is printed and nothing runs (2.1 ms measured over the 56 inputs);
+  the built page (:data:`STAMP`) — equal: nothing is printed and nothing runs (2.1 ms measured over the 56 inputs).
+  A checkout whose committed page matches its source is current, without Node;
 * otherwise it says so, runs ``npm ci`` first when the page's libraries are missing or ``package-lock.json`` is newer
-  than npm's own record of its last install, then ``npm run build``, and writes the record. Each npm step has a time
+  than npm's own record of its last install, then ``npm run build:page`` — the build alone, with no ``python3`` in it:
+  a start needs Node and nothing else — and writes the record itself. Each npm step has a time
   limit (:data:`TIMEOUTS`): npm runs in a session of its own, and a step that outlives its limit is stopped with
   everything it started;
 * without Node, or when npm fails, the server still starts: the start prints what is wrong, and the page served at
@@ -26,8 +31,15 @@ hundred and must never run npm):
   page folder (macOS and Linux; where ``fcntl`` does not exist — Windows — there is no lock), so the second says it
   waits, waits, and then finds the page current. A page that is current takes no lock.
 
-A folder without page source — an install from a wheel — is never checked. Ctrl+C while npm runs stops npm and ends
-the start with one line (exit code 130), never a traceback.
+A folder without page source — an install — is never checked: it serves the page its package carries. Ctrl+C while
+npm runs stops npm and ends the start with one line (exit code 130), never a traceback.
+
+Run as a script it is the two steps a build BY HAND puts around vite — ``npm run build`` is ``python3
+../streamstudio/page.py begin && npm run build:page && python3 ../streamstudio/page.py``: ``begin`` takes the
+:func:`fingerprint` of the source before vite reads a file (:func:`begin_build`), and the last step writes the record
+(:func:`record_build`) — with that same fingerprint, refusing when a file changed meanwhile, so a hand build is current
+too and never vouches for a line that is in the record and not in the bundle. It runs under whatever ``python3`` is on
+``PATH`` (3.8 or later): this module imports the standard library only.
 """
 
 import hashlib
@@ -50,14 +62,27 @@ if sys.platform != "win32":  # the lock between two starts (:func:`_held`) is PO
 #: The page's source folder beside the package. Read at every call, so a test points a check at a folder of its own.
 FRONTEND = Path(__file__).resolve().parent.parent / "frontend"
 
+#: Where a build of the page lands, relative to the page's source folder — ``build.outDir`` in
+#: ``frontend/vite.config.ts`` says the same (``tests/test_committed_page.py`` holds the two together). It is a folder
+#: INSIDE the package, so the built page is committed with it and ``package-data`` carries it into every install. Named
+#: ``canvas``: not ``page`` (this module), not ``web`` (the ComfyUI editor's JavaScript), not ``static`` (Flask serves
+#: a ``static`` folder beside ``app.py`` at ``/static/``), not ``dist``/``build`` (the repository ignores those).
+OUT_DIR = "../streamstudio/canvas"
+
 #: The command that builds the page by hand: the placeholder names it, and a failed start names it as the way to see
-#: npm's whole output.
+#: npm's whole output. ``npm run build`` brackets ``npm run build:page`` (what a start runs) with this module's two
+#: steps, so its page is current.
 BUILD_COMMAND = "cd streamstudio/frontend && npm install && npm run build"
 
-#: The record of what a build was made from — the hex fingerprint of :func:`page_inputs`, in a file inside ``dist``
-#: written AFTER a successful build. vite empties ``dist`` as a build starts, so a build cut short leaves no record,
-#: and so does a build by hand (the next start then builds once more and writes it).
+#: The record of what a build was made from — the hex fingerprint of :func:`page_inputs`, in a file inside the built
+#: page, written AFTER a successful build and committed with it. vite empties the folder as a build starts, so a build
+#: cut short leaves no record (the next start then builds once more and writes it).
 STAMP = ".built-from"
+
+#: The note a hand build leaves BEFORE vite reads a file — the fingerprint of the source at that moment — relative to
+#: the page's source folder: under ``node_modules/.cache``, which git ignores and vite's own emptying of the built
+#: folder does not reach. The record step writes the record from it and removes it (:func:`record_build`).
+BEGUN = "node_modules/.cache/streamstudio-page-source"
 
 #: The environment variable through which a start hands its check's answer to a process it launches to serve (a host's
 #: ``--background`` child): that process takes the answer over instead of running npm again where its output is
@@ -67,8 +92,10 @@ HANDED_DOWN = "STREAMSTUDIO_PAGE_CHECK"
 
 #: The files at the top of the page folder that the build reads: the page shell, the libraries it pins, the build's
 #: own configuration (vite loads the first of its six config names it finds; ``tsc`` reads ``tsconfig*.json``) and
-#: the ``.env`` files ``vite build`` loads — it runs in production mode, so ``.env.test`` and ``.env.development*``
-#: (read by vitest and the dev server) are not inputs.
+#: the ``.env`` files ``vite build`` loads that every clone has — it runs in production mode, so ``.env.test`` and
+#: ``.env.development*`` (read by vitest and the dev server) are not inputs, and neither are ``.env.local`` and
+#: ``.env.production.local``: ``frontend/.gitignore`` ignores ``*.local``, so no clone has one
+#: (:func:`_read_by_the_build`).
 _TOP_INPUTS = (
     "index.html",
     "package.json",
@@ -80,15 +107,13 @@ _TOP_INPUTS = (
     "vite.config.mts",
     "vite.config.cts",
     ".env",
-    ".env.local",
     ".env.production",
-    ".env.production.local",
 )
 _TOP_GLOBS = ("tsconfig*.json",)
 
 #: The folders whose every file the build reads — the page's source and vite's ``public/`` — minus the page's tests
-#: (vitest's ``__tests__/``, ``*.test.*``, ``*.spec.*``) and hidden files (a Finder ``.DS_Store``): neither changes
-#: the page.
+#: (vitest's ``__tests__/``, ``*.test.*``, ``*.spec.*``), hidden files (a Finder ``.DS_Store``) and ``*.local`` files
+#: (git-ignored, so in no clone): none of them changes the page.
 _TREES = ("src", "public")
 
 #: How many of npm's last lines a failed build prints, and the page shows.
@@ -98,14 +123,14 @@ TAIL_LINES = 20
 NpmStep = Literal["ci", "build"]
 
 #: How long each npm step may run, in seconds, before the start stops it and reports the build as failed — measured:
-#: the first ``npm ci`` takes about a minute, ``npm run build`` 2.1 s; with a registry that refuses connections ``npm
-#: ci`` gave up after 70 s, with one that drops the traffic it was still waiting after 10 minutes.
+#: the first ``npm ci`` takes about a minute, ``npm run build:page`` 2.1 s; with a registry that refuses connections
+#: ``npm ci`` gave up after 70 s, with one that drops the traffic it was still waiting after 10 minutes.
 TIMEOUTS: Dict[NpmStep, float] = {"ci": 300.0, "build": 120.0}
 
 #: How each step is said, and what npm is asked.
 _STEPS: Dict[NpmStep, Tuple[str, Tuple[str, ...]]] = {
     "ci": ("npm ci", ("ci",)),
-    "build": ("npm run build", ("run", "build")),
+    "build": ("npm run build:page", ("run", "build:page")),
 }
 
 #: How long npm's last output is read after it was stopped (its own children are stopped with it, so the pipe closes
@@ -116,8 +141,9 @@ _AFTER_STOP_S = 10.0
 _INTERRUPTED = "streamstudio: interrupted before the editor's page was built — the next start builds it"
 
 #: What a start's check found: the page was ``current``; it was ``built`` now; the folder holds ``no-source`` (an
-#: install from a wheel); it needed a build and there was ``no-node``; the build ``failed``; or the page has no record
-#: of its source and there is no Node to rebuild it, so it is served ``unverified``.
+#: install, which serves the page its package carries); it needed a build and there was ``no-node``; the build
+#: ``failed``; or the page has no record of its source and there is no Node to rebuild it, so it is served
+#: ``unverified``.
 PageState = Literal["current", "built", "no-source", "no-node", "failed", "unverified"]
 PAGE_STATES: Tuple[str, ...] = get_args(PageState)
 
@@ -138,8 +164,8 @@ class PageCheck:
         said: The lines the check printed, in order (empty when there was nothing to say — and for an answer this
             process gave before, which is not said twice).
         why: For ``no-node``: how the page stands — ``is not built`` / ``is out of date``; for ``unverified``: ``has no
-            record of the source it was built from``; for ``failed``: what went wrong — ``npm run build exited with code
-            2``, ``npm ci did not finish in 300 s``. Empty otherwise.
+            record of the source it was built from``; for ``failed``: what went wrong — ``npm run build:page exited with
+            code 2``, ``npm ci did not finish in 300 s``. Empty otherwise.
         output: For ``failed``: npm's last lines (:data:`TAIL_LINES`), joined by newlines.
         seconds: For ``built``: how long the install and the build took.
     """
@@ -151,7 +177,7 @@ class PageCheck:
     seconds: float = 0.0
 
 
-#: The answers that did not make the page current, by the page folder's resolved ``dist``: the fingerprint the check
+#: The answers that did not make the page current, by the resolved built page folder: the fingerprint the check
 #: found and its answer. ``page_blueprint`` serves the message of a ``no-node`` or ``failed`` one at ``/`` instead of
 #: an out-of-date page; a later check that builds (or finds the page current) forgets it. Per process: the next start
 #: is a new process and tries again.
@@ -171,7 +197,11 @@ def page_inputs(frontend: Path) -> List[Path]:
 
 
 def _read_by_the_build(relative: Path) -> bool:
-    """A test or a hidden file under ``src/`` or ``public/`` is not an input; a top-level ``.env`` file is."""
+    """A test, a hidden file or a ``*.local`` file under ``src/`` or ``public/`` is not an input; a top-level ``.env``
+    file is. ``*.local`` is ``frontend/.gitignore``'s own pattern: a file it ignores is in no clone, and the record is
+    compared with the source of every clone (``tests/test_committed_page.py`` holds the two together)."""
+    if relative.name.endswith(".local"):
+        return False
     inner = relative.parts[1:] if relative.parts[0] in _TREES else ()
     if any(part.startswith(".") or part == "__tests__" for part in inner):
         return False
@@ -179,13 +209,71 @@ def _read_by_the_build(relative: Path) -> bool:
 
 
 def fingerprint(frontend: Path) -> str:
-    """The SHA-256 of every input's relative path and bytes — what the build would read now."""
+    """The SHA-256 of every input's relative path and bytes — what the build would read now.
+
+    The same on every machine for the same source: relative POSIX paths and contents only, never where the folder is
+    or when its files were written. Bytes, so a line ending counts — ``frontend/.gitattributes`` checks the source out
+    with LF everywhere."""
     digest = hashlib.sha256()
     for relative in page_inputs(frontend):
         data = (frontend / relative).read_bytes()
         digest.update(f"{relative.as_posix()}\0{len(data)}\0".encode())
         digest.update(data)
     return digest.hexdigest()
+
+
+def built_folder(frontend: Optional[Path] = None) -> Path:
+    """Where a build of the page in ``frontend`` lands — :data:`OUT_DIR` from it.
+
+    Args:
+        frontend: The page folder; ``None`` = the checkout's, :data:`FRONTEND` — its build is ``streamstudio/canvas``
+            inside the package, which is where an install, with no ``frontend/`` at all, finds the page too.
+    """
+    folder = FRONTEND if frontend is None else Path(frontend)
+    return Path(os.path.normpath(folder / OUT_DIR))
+
+
+class SourceChanged(RuntimeError):
+    """A file the build reads changed between :func:`begin_build` and :func:`record_build`: the page built in between
+    may not hold it, so no record vouches for it."""
+
+
+def begin_build(frontend: Optional[Path] = None) -> Path:
+    """Note the fingerprint of the source BEFORE a build by hand reads a file (:data:`BEGUN`) — the first step of
+    ``npm run build``. A record made after vite finished would vouch for a file saved while it ran (measured: ~3 s of
+    window, a line saved at ``rendering chunks`` was in the record and not in the bundle). Answers the note's path."""
+    folder = FRONTEND if frontend is None else Path(frontend)
+    note = folder / BEGUN
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text(fingerprint(folder) + "\n", encoding="utf-8")
+    return note
+
+
+def record_build(frontend: Optional[Path] = None) -> Path:
+    """Write the record of the page just built from ``frontend`` (:data:`STAMP`, :func:`fingerprint`) — what a build by
+    hand ends with (``npm run build``). Answers the record's path.
+
+    The record is the fingerprint :func:`begin_build` noted before the build, when there is a note — and only if the
+    source still has it; without a note (this step run alone) it is the fingerprint of the source now. The note is
+    removed either way: it belongs to one build.
+
+    Raises:
+        FileNotFoundError: The built page folder holds no ``index.html``: a record never vouches for a missing page.
+        SourceChanged: A file the build reads changed since :func:`begin_build`: build again.
+    """
+    folder = FRONTEND if frontend is None else Path(frontend)
+    built = built_folder(folder)
+    if not (built / "index.html").is_file():
+        raise FileNotFoundError(f"no built page in {built} (no index.html) — nothing to record")
+    now = fingerprint(folder)
+    note = folder / BEGUN
+    begun: Optional[str] = None
+    if note.is_file():
+        begun = note.read_bytes().decode("ascii", errors="replace").strip()
+        note.unlink()
+    if begun is not None and begun != now:
+        raise SourceChanged("the editor's page's source changed since its build began — build again (npm run build)")
+    return _write_record(built, now)
 
 
 def ensure_page_built(frontend: Optional[Path] = None) -> PageCheck:
@@ -197,12 +285,12 @@ def ensure_page_built(frontend: Optional[Path] = None) -> PageCheck:
 
     Args:
         frontend: The page folder; ``None`` = the checkout's, :data:`FRONTEND`. A folder without ``package.json``
-            and ``src/`` (an install from a wheel) is not checked: ``no-source``.
+            and ``src/`` (an install) is not checked: ``no-source`` — it serves the page its package carries.
     """
     folder = FRONTEND if frontend is None else Path(frontend)
     if not ((folder / "package.json").is_file() and (folder / "src").is_dir()):
         return PageCheck("no-source")
-    dist = folder / "dist"
+    dist = built_folder(folder)
     key = dist.resolve()
     said: List[str] = []
 
@@ -251,8 +339,7 @@ def page_check_environment(frontend: Optional[Path] = None) -> Dict[str, str]:
     Args:
         frontend: The page folder; ``None`` = the checkout's, :data:`FRONTEND`.
     """
-    folder = FRONTEND if frontend is None else Path(frontend)
-    key = (folder / "dist").resolve()
+    key = built_folder(frontend).resolve()
     entry = _UNSETTLED.get(key)
     if entry is None:
         return {}
@@ -306,7 +393,7 @@ def _check(folder: Path, dist: Path, source: str, say: Callable[[str], None]) ->
 def _build(
     folder: Path, dist: Path, source: str, npm: str, built_from: Optional[str], say: Callable[[str], None]
 ) -> PageCheck:
-    """``npm ci`` when needed, then ``npm run build``, and the record — npm's output shown only when a step fails."""
+    """``npm ci`` when needed, then ``npm run build:page``, and the record — npm's output shown on a failed step."""
     say(f"streamstudio: the editor's page {_what_changed(built_from)} — building it")
     started = time.perf_counter()
     steps: List[NpmStep] = ["build"]
@@ -327,7 +414,7 @@ def _build(
         for line in tail:
             say(f"  {line}")
         return PageCheck("failed", why=why, output="\n".join(tail))
-    (dist / STAMP).write_text(source + "\n", encoding="utf-8")
+    _write_record(dist, source)
     seconds = time.perf_counter() - started
     say(f"streamstudio: built the editor's page in {seconds:.1f} s")
     return PageCheck("built", seconds=seconds)
@@ -405,6 +492,13 @@ def _lock(handle: int, say: Callable[[str], None]) -> None:
         pass
 
 
+def _write_record(dist: Path, source: str) -> Path:
+    """Write the record that the page in ``dist`` was built from ``source`` (a fingerprint); answer its path."""
+    stamp = dist / STAMP
+    stamp.write_text(source + "\n", encoding="utf-8")
+    return stamp
+
+
 def _built_from(dist: Path) -> Optional[str]:
     """The fingerprint the page in ``dist`` was built from; ``""`` for a page built without a usable record (by hand,
     before the record existed, or a record that is not a fingerprint); ``None`` when ``dist`` holds no page."""
@@ -444,9 +538,11 @@ def _needs_install(folder: Path) -> bool:
 
 
 __all__ = [
+    "BEGUN",
     "BUILD_COMMAND",
     "FRONTEND",
     "HANDED_DOWN",
+    "OUT_DIR",
     "PAGE_STATES",
     "STAMP",
     "TAIL_LINES",
@@ -454,9 +550,27 @@ __all__ = [
     "NpmStep",
     "PageCheck",
     "PageState",
+    "SourceChanged",
+    "begin_build",
+    "built_folder",
     "ensure_page_built",
     "fingerprint",
     "page_check_environment",
     "page_inputs",
+    "record_build",
     "unbuildable",
 ]
+
+
+if __name__ == "__main__":  # the two steps around vite in `npm run build` (the module docstring)
+    _arguments = sys.argv[1:]
+    if _arguments not in ([], ["begin"]):
+        print("usage: page.py [begin]   (no argument: record the page just built)", file=sys.stderr)
+        sys.exit(2)
+    try:
+        if _arguments:
+            begin_build()
+        else:
+            print(f"streamstudio: recorded the source of the editor's page in {record_build()}")
+    except (OSError, SourceChanged) as exc:  # no built page, an unwritable folder, or a source edited during the build
+        sys.exit(f"streamstudio: {exc}")

@@ -158,8 +158,20 @@ arch: "A host mounts the editor through three methods"; pins `tests/test_host.py
 
 ## The canvas page (`frontend/`)
 
-- `frontend/` is committed source; `frontend/dist` is gitignored, not in `package-data`, not built by CI. Shipping
-  the page in the wheel is the release item in `TASKS.md`. arch: "The canvas page is a build artifact".
+- `frontend/` is the page's source; its BUILD is committed inside the package, `streamstudio/canvas`
+  (`page.OUT_DIR` = vite's `outDir`), with its record `.built-from`, and `package-data` ships it — every install
+  serves the page, Node is for editing it. **A change to the page's source commits its rebuilt `streamstudio/canvas`
+  in the same commit** (a start rebuilds it, or `cd frontend && npm run build`). The guard fails otherwise — never
+  loosen it, never edit the record or the bundles by hand; a merge conflict in the folder is resolved by building
+  again. ONE fingerprint (`page.fingerprint`): `npm run build` is `python3 ../streamstudio/page.py begin && npm run
+  build:page && python3 ../streamstudio/page.py` — `begin` notes the fingerprint BEFORE vite reads a file, the last step
+  records it and REFUSES when a file changed meanwhile (`SourceChanged`; stdlib only — it needs a `python3` command on
+  PATH, 3.8+), never a second implementation in the page's tooling. **A server's start runs `npm run build:page`, never
+  `build`: a start needs Node and nothing else** (a machine with Node and no `python3` command must still rebuild).
+  **Every fingerprint input is a file a clone carries:** `*.local` (`.env.local`, `.env.production.local`) is
+  git-ignored and never an input — add an input a clone would not have and CI fails the guard where the developer's
+  machine passes it. No source map is built, committed or shipped. (`tests/test_committed_page.py`) arch: "The built
+  page is committed inside the package".
 - **The page keeps no document of its own.** ONE node component (`src/canvas/GenericNode.tsx`) renders every class
   from the model and `GET …/form`; never a per-class component or a widget table in the page. arch: "The canvas is a
   React Flow page over the document routes".
@@ -201,9 +213,9 @@ arch: "A host mounts the editor through three methods"; pins `tests/test_host.py
 
 ### Testing the page
 
-- `tests/test_canvas.py` SKIPS without `frontend/dist/index.html` or headless chromium. A green suite on an unbuilt
-  checkout proves nothing: build (`cd frontend && npm run build`) before claiming a canvas change works, and report
-  the passed line, not the skip.
+- `tests/test_canvas.py` drives the BUILT page (`streamstudio/canvas`) and SKIPS only without it or headless
+  chromium. After a page-source change, rebuild (`cd frontend && npm run build`) before claiming the change works, and
+  report the passed line, not the skip.
 - **Zero console errors is a gate.** The one allowed line is Chrome's `400` in a test that provokes a refusal
   (`REFUSED_400`); a new console error is a failing test, never a new allowed line.
 - Tests wait on state, never on time (`data-saves`, `data-answers`, `wait_for_function`). A test that reads the
@@ -242,9 +254,12 @@ arch: "A host mounts the editor through three methods"; pins `tests/test_host.py
   (`tests/test_packaging.py::test_no_requirement_is_a_direct_url`)
 - The `[waivefront]` extra stays declared, but the README never prints an install command for it (it resolves
   nowhere). (`tests/test_packaging.py::test_the_readme_does_not_advertise_an_unresolvable_extra`)
-- Every file under `web/`, `config.default.yaml` and `py.typed` are in `package-data`; `MANIFEST.in` ships the
-  CHANGELOG. (`tests/test_packaging.py::test_every_web_asset_is_shipped`,
-  `::test_the_declared_package_data_files_exist`, `::test_the_changelog_is_shipped_in_the_sdist`)
+- Every file under `web/`, every file of the built page `canvas/` (never a `.map`), `config.default.yaml` and
+  `py.typed` are in `package-data`; `MANIFEST.in` ships the CHANGELOG.
+  (`tests/test_packaging.py::test_every_web_asset_is_shipped`,
+  `::test_every_file_of_the_built_page_is_shipped_and_no_source_map`,
+  `::test_the_wheel_built_from_a_checkout_serves_the_page`, `::test_the_declared_package_data_files_exist`,
+  `::test_the_changelog_is_shipped_in_the_sdist`)
 - The package speaks its own name only. (`tests/test_packaging.py::test_no_superseded_project_name_in_shipped_code`)
 
 ## ComfyUI editor (removed in phase 4 step 3)
