@@ -4821,6 +4821,31 @@ class TestTheEmbeddedPanelsFields:
         page.wait_for_selector('[data-dialog="file"]', state="detached")
         assert opened.errors == []
 
+    def test_while_a_picked_classs_settings_load_the_dialog_keeps_the_keyboard(
+        self, browser: Any, hosted: Hosted
+    ) -> None:
+        """The search box goes with the list when a class is picked, and the first field takes the keyboard only once
+        the class's settings arrive. Measured 2026-10-05: in between, the focus was on the page, where Escape did
+        nothing. The settings are held back here, so that moment lasts as long as the test needs it."""
+        opened = open_hosted(browser, hosted, "graph=source&embed=1")
+        page = opened.page
+        held: List[Any] = []
+        page.route(f"**/api/palette/{FILES_SOURCE}", lambda route: held.append(route))
+        try:
+            wait_ready(page, "source")
+            page.locator(f'{node_root("stream")} button[data-set-slot="source"]').click()
+            wait_palette_loaded(page)
+            page.locator("[data-slot-search]").fill("FilesSource")
+            page.locator("[data-slot-search]").press("Enter")
+            page.wait_for_selector(f'[data-slot-chosen="{FILES_SOURCE}"][data-slot-settings="loading"]')
+            assert held, "the settings were never asked — the hold proves nothing"
+            assert page.evaluate("() => document.activeElement?.closest('[data-dialog]')?.dataset.dialog") == "set-slot"
+            page.keyboard.press("Escape")
+            page.wait_for_selector('[data-dialog="set-slot"]', state="detached")
+        finally:
+            for route in held:
+                route.abort()
+
     def test_set_source_keeps_the_keyboard_after_a_pick_and_scrolls_to_the_highlighted_class(
         self, browser: Any, hosted: Hosted
     ) -> None:
@@ -4834,6 +4859,9 @@ class TestTheEmbeddedPanelsFields:
         page.locator("[data-slot-search]").fill("FilesSource")
         page.locator("[data-slot-search]").press("Enter")
         page.wait_for_selector(f'[data-slot-chosen="{FILES_SOURCE}"]')
+        # the first field takes the keyboard once the class's settings have ARRIVED — they are asked when it is
+        # picked; read before that, the check raced them (measured 2026-10-05: about half the runs on a busy machine)
+        page.wait_for_selector('[data-slot-settings="ready"]')
         focused = page.evaluate(
             "() => [document.activeElement?.closest('[data-dialog]')?.dataset.dialog,"
             " document.activeElement?.dataset.param]"

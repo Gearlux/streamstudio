@@ -8,6 +8,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **Set source… keeps the keyboard while a picked class's settings load.** The dialog's box holds the focus from the
+  pick until the first field can take it, so Escape cancels in between (before, the focus was on the page there).
 - **A class that is not an op is a card of its own.** Add Node ▸, the double-click palette, a Nodes-sidebar entry and
   the palette of a wire dropped on empty canvas write a value, a source, an engine or a sink as a NEW top-level key
   named after its class (`class_names_scan: !class:recordstream.ops.contract.ClassNamesScan {}`, `_2` … when taken),

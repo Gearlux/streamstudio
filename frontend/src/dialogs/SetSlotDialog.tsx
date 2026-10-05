@@ -69,6 +69,9 @@ export function SetSlotDialog({ slot, specs, types, model, onSet, onCancel }: Se
   useEffect(() => {
     setSettings(null);
     if (chosen === null) return;
+    // the search box went with the list: until the settings arrive the dialog's own box keeps the keyboard, so
+    // Escape still cancels (measured 2026-10-05: the focus was on the page meanwhile, where Escape did nothing)
+    form.current?.closest<HTMLElement>("[data-dialog]")?.focus();
     let current = true;
     settingsOf(chosen.class_path).then(
       (spec) => current && setSettings(spec),
