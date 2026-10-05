@@ -1296,8 +1296,8 @@ class TestFirstLayout:
     ) -> None:
         """Measured 2026-10-01 before the rule: ``contract`` at (40, 240) under ``known`` (373 px tall, 40..413) —
         the one overlapping pair; after: ``contract`` at (40, 430), 17 px below ``known``'s bottom."""
-        waivefront = pytest.importorskip("waivefront")
-        shipped = Path(waivefront.__file__).parent / "annotation" / "bte_view.yaml"
+        annotation = pytest.importorskip("waivefront.analysis.annotation")
+        shipped = Path(annotation.__file__).parent / "bte_view.yaml"
         (graph_dir / "bte_view.yaml").write_text(shipped.read_text())
         assert not layout.sidecar_path(graph_dir / "bte_view.yaml").exists()
         opened = open_graph("bte_view")
@@ -3960,7 +3960,7 @@ class TestMountedInAHost:
     ) -> None:
         """The real pane: its ``app:`` block's 32 entries are 30 fields (two ``__lo``/``__hi`` pairs), where the whole
         graph has every parameter of 30 nodes; a step's ``requires`` gate is a field in neither list."""
-        annotation = pytest.importorskip("waivefront.annotation")
+        annotation = pytest.importorskip("waivefront.analysis.annotation")
         shipped = Path(annotation.__file__).parent / "bte_view.yaml"
         (hosted.folder / "bte_view.yaml").write_text(shipped.read_text())
         opened = open_hosted(browser, hosted, "graph=bte_view&tab=settings&embed=1")
@@ -4699,7 +4699,7 @@ class TestTheEmbeddedPanelOpensFitted:
         this pane's 5 (and, with the fit clamped at zoom 0.1, 17 of the 30). The standalone page keeps its zoom-1 first
         view (``TestEnteringASubgraphIsReadable`` and the drag tests measure at zoom 1)."""
         if graph == "bte_view":
-            annotation = pytest.importorskip("waivefront.annotation")
+            annotation = pytest.importorskip("waivefront.analysis.annotation")
             (hosted.folder / "bte_view.yaml").write_text(
                 (Path(annotation.__file__).parent / "bte_view.yaml").read_text()
             )

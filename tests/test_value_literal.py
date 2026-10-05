@@ -18,7 +18,7 @@ from streamstudio import NODE_CLASS_MAPPINGS
 from streamstudio.export import compile_flow_documents
 from streamstudio.graphio import flow_yaml_to_workflow, ui_workflow_to_prompt, workflow_to_yaml, yaml_to_workflow
 
-waivefront = pytest.importorskip("waivefront")
+waivefront = pytest.importorskip("waivefront.analysis")
 confluid = pytest.importorskip("confluid")
 
 VALUE_NODE = "Taidal_Value"
@@ -26,7 +26,7 @@ WINDOWS = [[900000.0, 1100000.0], [1800000.0, 2200000.0]]
 
 
 def _bte_yaml() -> str:
-    from waivefront.annotation import templates
+    from waivefront.analysis.annotation import templates
 
     return Path(templates()["signal"]["view_bte"]).with_suffix(".yaml").read_text()
 

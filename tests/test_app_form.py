@@ -203,19 +203,18 @@ class TestTheShippedPanes:
     """The ``app:`` blocks shipped with the signal domain's panes, opened as they are."""
 
     @pytest.mark.parametrize(
-        "pane, entries, fields, all_fields",
+        "package, pane, entries, fields, all_fields",
         [
-            ("bte_view.yaml", 32, 30, 247),
-            ("clock_view.yaml", 12, 9, 49),
-            ("cell_view.yaml", 6, 6, 66),
-            ("write_annotations.yaml", 1, 1, 14),
+            ("waivefront.analysis.annotation", "bte_view.yaml", 32, 30, 247),
+            ("waivefront.analysis.annotation", "clock_view.yaml", 12, 9, 49),
+            ("waivefront.analysis.annotation", "cell_view.yaml", 6, 6, 66),
+            ("waivefront.annotation", "write_annotations.yaml", 1, 1, 14),
         ],
     )
     def test_each_pane_narrows_to_its_app_inputs_with_no_problem(
-        self, tmp_path: Path, pane: str, entries: int, fields: int, all_fields: int
+        self, tmp_path: Path, package: str, pane: str, entries: int, fields: int, all_fields: int
     ) -> None:
-        pytest.importorskip("waivefront")
-        import waivefront.annotation as annotation
+        annotation = pytest.importorskip(package)
 
         source = Path(annotation.__file__).with_name(pane)
         (tmp_path / pane).write_text(source.read_text())

@@ -408,8 +408,14 @@ def _line_of(text: str, needle: str) -> int:
 
 
 def _bte_path() -> Path:
-    waivefront = pytest.importorskip("waivefront")
-    return Path(waivefront.__file__).parent / "annotation" / "bte_view.yaml"
+    annotation = pytest.importorskip("waivefront.analysis.annotation")
+    return Path(annotation.__file__).parent / "bte_view.yaml"
+
+
+def _shipped(name: str) -> Path:
+    """One of the signal domain's own shipped graphs (the selection, detection and plotting-pane documents)."""
+    annotation = pytest.importorskip("waivefront.annotation")
+    return Path(annotation.__file__).parent / name
 
 
 @pytest.fixture
@@ -655,7 +661,7 @@ class TestDerive:
 
         This pins the waivefront file's declarations from here; a change there shows up here first.
         """
-        doc = Document.open(_bte_path().with_name("selection_stats.yaml"))
+        doc = Document.open(_shipped("selection_stats.yaml"))
         model = doc.model
         assert doc.check() == []
         assert [node.name for node in model.nodes] == [
@@ -688,7 +694,7 @@ class TestDerive:
 
         This pins the waivefront file's declarations from here; a change there shows up here first.
         """
-        doc = Document.open(_bte_path().with_name("threshold_detector_model.yaml"))
+        doc = Document.open(_shipped("threshold_detector_model.yaml"))
         model = doc.model
         assert doc.check() == []
         assert [node.name for node in model.nodes] == [
@@ -730,7 +736,7 @@ class TestDerive:
         ``<host>`` that supplies anything, so the same step is accepted and the host grows a
         ``spectrogram`` output.
         """
-        source = _bte_path().with_name("threshold_detector_model.yaml").read_text()
+        source = _shipped("threshold_detector_model.yaml").read_text()
         start, stop = source.index("  threshold:\n"), source.index("  components:\n")
         plain = (
             source[:start]
@@ -807,7 +813,7 @@ class TestDerive:
 
     def test_the_psd_twin_derives_a_stream_and_two_ops(self) -> None:
         pytest.importorskip("waivefront.processing")  # registers the twin's registry-key classes
-        path = _bte_path().with_name("psd_slice_view.yaml")
+        path = _shipped("psd_slice_view.yaml")
         model = Document.open(path).model
         # The twin's `contract:` root (2026-09-28) is its last entry, so it derives as the last node.
         assert [node.name for node in model.nodes] == ["stream", "stream.ops[0]", "stream.ops[1]", "contract"]
@@ -822,7 +828,7 @@ class TestDerive:
         of record wires, and yesterday's prototype did not draw that one — the count here includes it.
         """
         pytest.importorskip("waivefront.sinks")
-        path = _bte_path().with_name("save_boxes_to_store.yaml")
+        path = _shipped("save_boxes_to_store.yaml")
         model = Document.open(path).model
         assert [node.name for node in model.nodes] == [
             "processor",

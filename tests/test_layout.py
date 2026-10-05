@@ -574,11 +574,11 @@ def test_a_column_of_only_unwired_nodes_keeps_the_models_order() -> None:
 
 
 def _bte_view_model() -> "Model":
-    """The shipped Bluetooth pane's model — skipped where waivefront is not installed."""
-    waivefront = pytest.importorskip("waivefront")
+    """The shipped Bluetooth pane's model — skipped where its package is not installed."""
+    annotation = pytest.importorskip("waivefront.analysis.annotation")
     from streamstudio.document import Document
 
-    return Document.open(Path(waivefront.__file__).parent / "annotation" / "bte_view.yaml").model
+    return Document.open(Path(annotation.__file__).parent / "bte_view.yaml").model
 
 
 def test_bte_view_derives_into_twenty_nine_layers_one_column_apart() -> None:
