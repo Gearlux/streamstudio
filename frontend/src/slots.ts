@@ -8,9 +8,9 @@
  *                                                     [Set source]  → POST …/slot {node: "stream", slot: "source",
  *                                                                                  class_path, params}
  *
- * A wire drawn into the slot cannot say WHICH object to build (`docs/rewrite.md` §5 — it stays a dashed proposal), so the
- * gesture is a class and its values, written by the server as ONE marker (`source: !class:… {…}`) on the slot's own line;
- * the answer is the graph, with the new node drawn and wired. Three ways in: the slot's `set…` button on the card, the
+ * A wire drawn into the slot can only bring a card that is already there (it is saved as `source: !ref:<card>`), so
+ * putting a NEW object into it is a class and its values, written by the server as ONE marker (`source: !class:… {…}`)
+ * on the slot's own line; the answer is the graph, with the new node drawn and wired. Three ways in: the slot's `set…` button on the card, the
  * node's right-click menu (Set source…), and a wire dragged out of the slot's handle and dropped on empty canvas.
  *
  * The classes offered are the ones the model's meet rule lets into the slot — every class with an output whose type

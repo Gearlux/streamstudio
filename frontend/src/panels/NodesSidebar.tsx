@@ -1,7 +1,9 @@
 /**
  * The Nodes sidebar (View ▸ Nodes sidebar, the bar's Nodes button, key N): every class the catalogue describes
- * (`GET api/palette`), grouped by PACKAGE and, inside one, by KIND — sources, ops, algorithms, … — each section only
- * when it holds something. An entry shows the class name, its one-line description and coloured chips for what it
+ * (`GET api/palette`) as a tree of folders that each fold — by PACKAGE, inside one by KIND (sources, ops, algorithms,
+ * …), inside a kind by the class's `@configurable` group path (`group="fourier/numpy"`: ▸ waivefront ▸ Ops ▸ fourier
+ * ▸ numpy) — each folder only when it holds something, its sub-folders before the classes that sit in it directly
+ * (`sidebar.groupSpecs`). A package that declares no group shows its classes straight under the kind. An entry shows the class name, its one-line description and coloured chips for what it
  * reads and what it writes (the socket colours the canvas uses); resting the pointer on it shows a card with the whole
  * description and the constructor's parameters — asked when the card opens (`api.settingsOf`, once per class), the card
  * saying "loading the settings…" until they arrive.
@@ -18,17 +20,20 @@
  * the name (`rst.docSpans`), never as the markup. The hover card stays inside the window: when the parameters do not
  * all fit, it draws the ones that fit WHOLE and says how many it left out (`+36 more parameters`).
  *
- * Which packages are unfolded is remembered in this browser (`localStorage`, best effort); a search unfolds every
- * package with a match. Hooks: `data-nodes-sidebar`, `data-nodes-search`, `data-nodes-package` (+ `aria-expanded`
- * on its head), `data-nodes-kind`, `data-nodes-entry` (+ `data-class`), `data-nodes-card`, `data-card-more`,
+ * Every folder starts folded; which ones are unfolded is remembered in this browser (`localStorage`, best effort), by
+ * the folder's key — a package by its name, a deeper folder by its path (`waivefront/op/fourier`). A search unfolds
+ * every folder on the way to a match, and clearing it puts them back as they were. Hooks: `data-nodes-sidebar`,
+ * `data-nodes-search`, `data-nodes-package` (+ `aria-expanded` on its head), `data-nodes-kind` and
+ * `data-nodes-folder` (the key; + `aria-expanded` on its `.nodes-folder-head`), `data-nodes-entry` (+ `data-class`),
+ * `data-nodes-card` (+ `data-card-settings`: `loading` | `ready` | `refused`), `data-card-more`,
  * `data-nodes-subgraph-hint`.
  */
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from "react";
 import { errorMessage, settingsOf, type NodeSpec, type NodeSpecWithSettings } from "../api";
 import { socketColor } from "../model";
 import type { InsertTarget } from "../oplists";
 import { docSpans } from "../rst";
-import { chips, groupSpecs, paramRows, sidebarMatches, type Chip } from "../sidebar";
+import { chips, groupSpecs, paramRows, sidebarMatches, type Chip, type Folder, type KindSection } from "../sidebar";
 
 /** The drag payload a canvas drop reads: the class path. */
 export const CLASS_MIME = "application/x-streamstudio-class";
@@ -78,11 +83,12 @@ export function NodesSidebar({ specs, target, onAdd, onClose }: NodesSidebarProp
   const sections = useMemo(() => groupSpecs(matching), [matching]);
   const searching = query.trim() !== "";
 
-  const toggle = (name: string) => {
-    const next = expanded.includes(name) ? expanded.filter((n) => n !== name) : [...expanded, name];
+  const toggle = (key: string) => {
+    const next = expanded.includes(key) ? expanded.filter((k) => k !== key) : [...expanded, key];
     setExpanded(next);
     writeExpanded(next);
   };
+  const isOpen = (key: string): boolean => searching || expanded.includes(key);
 
   const hover = (spec: NodeSpec, element: HTMLElement) => {
     window.clearTimeout(hoverTimer.current);
@@ -133,7 +139,7 @@ export function NodesSidebar({ specs, target, onAdd, onClose }: NodesSidebarProp
         {specs === null && <p className="nodes-empty">Reading every class the server can describe…</p>}
         {specs !== null && sections.length === 0 && <p className="nodes-empty">No class matches “{query}”.</p>}
         {sections.map((section) => {
-          const open = searching || expanded.includes(section.name);
+          const open = isOpen(section.name);
           return (
             <section key={section.name} className="nodes-package" data-nodes-package={section.name}>
               <button type="button" className="nodes-package-head" aria-expanded={open} onClick={() => toggle(section.name)}>
@@ -148,13 +154,12 @@ export function NodesSidebar({ specs, target, onAdd, onClose }: NodesSidebarProp
               </button>
               {open &&
                 section.kinds.map((kind) => (
-                  <div key={kind.kind} className="nodes-kind" data-nodes-kind={kind.kind}>
-                    <div className="nodes-kind-head">
-                      <span className={`kind-pip kind-${kind.kind}`} />
-                      {kind.label}
-                      <span className="nodes-count">{kind.specs.length}</span>
-                    </div>
-                    {kind.specs.map((spec) => (
+                  <FolderView
+                    key={kind.key}
+                    folder={kind}
+                    isOpen={isOpen}
+                    onToggle={toggle}
+                    entry={(spec) => (
                       <Entry
                         key={spec.class_path}
                         spec={spec}
@@ -163,8 +168,8 @@ export function NodesSidebar({ specs, target, onAdd, onClose }: NodesSidebarProp
                         onLeave={leave}
                         onDragStart={onDragStart}
                       />
-                    ))}
-                  </div>
+                    )}
+                  />
                 ))}
             </section>
           );
@@ -197,6 +202,41 @@ export function NodesSidebar({ specs, target, onAdd, onClose }: NodesSidebarProp
         />
       )}
     </aside>
+  );
+}
+
+interface FolderViewProps {
+  folder: Folder | KindSection;
+  isOpen: (key: string) => boolean;
+  onToggle: (key: string) => void;
+  entry: (spec: NodeSpec) => ReactNode;
+}
+
+/** A folder that folds: a kind (its pip and label on the head) or a group segment; its sub-folders, then its classes. */
+function FolderView({ folder, isOpen, onToggle, entry }: FolderViewProps) {
+  const open = isOpen(folder.key);
+  const kind = "kind" in folder ? folder : undefined;
+  return (
+    <div
+      className={kind ? "nodes-folder nodes-kind" : "nodes-folder"}
+      data-nodes-kind={kind?.kind}
+      data-nodes-folder={kind ? undefined : folder.key}
+    >
+      <button type="button" className="nodes-folder-head" aria-expanded={open} onClick={() => onToggle(folder.key)}>
+        <span className={`caret${open ? " open" : ""}`}>▸</span>
+        {kind && <span className={`kind-pip kind-${kind.kind}`} />}
+        <span className="nodes-folder-name">{kind ? kind.label : folder.name}</span>
+        <span className="nodes-count">{folder.count}</span>
+      </button>
+      {open && (
+        <>
+          {folder.folders.map((child) => (
+            <FolderView key={child.key} folder={child} isOpen={isOpen} onToggle={onToggle} entry={entry} />
+          ))}
+          {folder.specs.map(entry)}
+        </>
+      )}
+    </div>
   );
 }
 

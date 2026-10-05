@@ -124,8 +124,11 @@ button { font: inherit; }
 .kind-contract { --kind: #bcaaa4; }
 .kind-subgraph { --kind: #4fc3f7; }
 .kind-pip { background: var(--kind, #666); }
-.nodes-kind { margin: 2px 0 6px 14px; }
-.nodes-kind-head { display: flex; align-items: center; gap: 6px; padding: 4px 6px 3px; font-size: 11px; font-weight: 600; color: var(--dim); text-transform: uppercase; letter-spacing: .06em; }
+.nodes-folder { margin: 1px 0 1px 12px; }
+.nodes-folder-head { display: flex; align-items: center; gap: 6px; width: 100%; padding: 4px 6px; background: transparent; border: 0; border-radius: 6px; color: var(--dim); font-size: 12px; font-weight: 600; cursor: pointer; text-align: left; }
+.nodes-folder-head:hover { background: #20202c; color: var(--text); }
+.nodes-folder-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nodes-kind > .nodes-folder-head { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
 .nodes-entry { padding: 6px 8px 7px; border-radius: 7px; border: 1px solid transparent; cursor: grab; outline: none; }
 .nodes-entry:hover, .nodes-entry:focus-visible { background: #20202e; border-color: var(--line-2); }
 .nodes-entry:active { cursor: grabbing; }
@@ -203,6 +206,7 @@ button { font: inherit; }
 .gnode .row.out { justify-content: flex-end; }
 .gnode .row .label i { opacity: .55; font-style: normal; margin: 0 4px; }
 .gnode .row .label b { color: #ffb74d; margin-left: 2px; }
+.gnode .row .label .filled { color: var(--dim); margin-left: 2px; }
 .gnode .row.param label { min-width: 90px; opacity: .85; }
 .gnode .row input[type=number], .gnode .row input[type=text], .gnode .row select { width: 96px; background: #111; color: #eee; border: 1px solid #444; font-size: 11px; padding: 1px 4px; }
 .gnode .row input[type=checkbox] { margin: 0; }
@@ -211,12 +215,14 @@ button { font: inherit; }
 .gnode .react-flow__handle.socket { width: 10px; height: 10px; border: 1px solid #111; }
 .gnode .react-flow__handle.socket-param { width: 7px; height: 7px; opacity: .55; }
 
-/* wires: solid for the document's, dashed for a proposal that is not written */
+/* wires: every edge is a wire of the document, coloured by its kind; a selected one (Delete takes it out) is bright */
 .react-flow__edge.wire .react-flow__edge-path { stroke: #9aa0b4; stroke-width: 1.6; }
 .react-flow__edge.wire-record .react-flow__edge-path { stroke: #ffd54f; stroke-width: 2; }
 .react-flow__edge.wire-gate .react-flow__edge-path { stroke: #ff8a65; }
 .react-flow__edge.wire-bind .react-flow__edge-path { stroke: #80cbc4; }
-.react-flow__edge.wire-proposal .react-flow__edge-path { stroke: #ff5252; stroke-dasharray: 6 4; }
+/* where the host puts what it hands the graph: derived, never written — dashed (`document.host_wires`) */
+.react-flow__edge.wire-host .react-flow__edge-path { stroke: #b39ddb; stroke-dasharray: 6 4; }
+.react-flow__edge.wire.selected .react-flow__edge-path { stroke: #ffffff; stroke-width: 2.6; }
 
 /* toasts */
 /* over the canvas's top-right corner, clear of the bar and of the side panel's tabs (a toast used to sit on them and
@@ -226,6 +232,13 @@ button { font: inherit; }
 .toast-error { border-left-color: #ff5252; }
 .toast-warning { border-left-color: #ffb74d; }
 .toast-info { border-left-color: #4fc3f7; }
+/* a refusal's or a warning's copy button: on the box's corner, outside the [data-toast] box so its text stays the message */
+.toast-row { position: relative; display: flex; pointer-events: none; }
+.toast-row.copyable .toast { padding-right: 76px; }
+.toast-copy { pointer-events: auto; position: absolute; top: 6px; right: 6px; padding: 1px 7px; border-radius: 4px; border: 1px solid #555; background: #262626; color: #ddd; font-size: 11px; line-height: 1.5; cursor: pointer; }
+.toast-copy:hover { background: #3a3a3a; }
+.toast-copy[data-toast-copy="copied"] { color: #81c784; border-color: #81c784; }
+.toast-copy[data-toast-copy="copy failed"] { color: #ff8a80; border-color: #ff8a80; }
 
 /* run status on a node: the border says what the trace says */
 .gnode.run-ok { border-color: #66bb6a; }
@@ -446,3 +459,9 @@ button { font: inherit; }
 .modal:focus {
   outline: none;
 }
+
+/* ---------------------------------------------------------------- ?only=settings — a host's settings sheet */
+/* the settings form and nothing else: no bar row, no canvas column — the side panel is the page (App.tsx) */
+.app.settings-only { grid-template-rows: 1fr; }
+.app.settings-only .body { grid-template-columns: 1fr; }
+.app.settings-only .side { border-left: 0; }

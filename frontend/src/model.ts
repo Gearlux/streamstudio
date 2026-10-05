@@ -20,7 +20,11 @@ export const NODE_KINDS = [
 ] as const;
 export type NodeKind = (typeof NODE_KINDS)[number];
 
-export const WIRE_KINDS = ["record", "entry", "gate", "bind", "ref", "delivered", "list"] as const;
+/**
+ * `host` is the one wire no text spells: where the host puts what it hands a rooted graph (the host card's `files` into a
+ * `FilesSource`'s `files`) — drawn dashed, never saved, and its removal is the server's refusal (`document.host_wires`).
+ */
+export const WIRE_KINDS = ["record", "entry", "gate", "bind", "ref", "delivered", "list", "host"] as const;
 export type WireKind = (typeof WIRE_KINDS)[number];
 
 export const GRAPH_KINDS = ["flow", "graph", "contract"] as const;
@@ -43,6 +47,12 @@ export interface Socket {
   doc: string;
   entry: string;
 }
+
+/**
+ * The mark a card draws after an input's name: `*` for an input nothing may leave unwired, nothing for any other — a
+ * root's `optional` slot (the host has its own answer when it is left unwired) comes with `required: false`.
+ */
+export const requiredMark = (socket: Socket): string => (socket.required ? "*" : "");
 
 export interface Param {
   name: string;
@@ -172,12 +182,26 @@ export type GroupNode = Node<{ group: Group; members: string[] }, "group">;
 
 export type CanvasNode = GenericNode | GroupNode;
 
-/** What an edge carries: a document wire's kind and type, or `proposal` for a wire drawn but not written. */
+/** What an edge carries: the document wire's kind and type — every edge IS a wire of the document. */
 export interface EdgeData extends Record<string, unknown> {
-  kind: WireKind | "proposal";
+  kind: WireKind;
   type: SocketType;
 }
 export type CanvasEdge = Edge<EdgeData>;
+
+/**
+ * An edge's id: the wire's two ends, `wire:source.class_names->contract.classes` — what a test finds it by (`data-id`),
+ * the same across redraws while the wire is there; `#2`, `#3` … when the model lists one wire more than once.
+ */
+function edgeIds(wires: Wire[]): string[] {
+  const seen = new Map<string, number>();
+  return wires.map((wire) => {
+    const id = `wire:${wire.source}.${wire.source_socket}->${wire.target}.${wire.target_socket}`;
+    const count = (seen.get(id) ?? 0) + 1;
+    seen.set(id, count);
+    return count === 1 ? id : `${id}#${count}`;
+  });
+}
 
 /** The document's nodes and wires as React Flow's arrays; the node id IS the document's node name. */
 export function modelToFlow(model: Model, positions: Positions): { nodes: GenericNode[]; edges: CanvasEdge[] } {
@@ -185,8 +209,9 @@ export function modelToFlow(model: Model, positions: Positions): { nodes: Generi
     const [x, y] = positions[node.name] ?? [0, 0];
     return { id: node.name, type: "generic", position: { x, y }, data: { node } };
   });
+  const ids = edgeIds(model.wires);
   const edges: CanvasEdge[] = model.wires.map((wire, index) => ({
-    id: `w${index}`,
+    id: ids[index],
     source: wire.source,
     sourceHandle: handleId("out", wire.source_socket),
     target: wire.target,

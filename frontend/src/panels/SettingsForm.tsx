@@ -18,6 +18,9 @@
  * `data-settings-all` (the tick box, present once the `app:` answer is in), `data-settings-none` (the sentence of a
  * graph without an `app:` block), `data-form-node` per section, `data-param` per field (`ParamWidget`),
  * `data-settings-problem` per `app:` entry that names nothing.
+ *
+ * `fixed` (the page opened with `?only=settings`, a host's settings sheet): the `app:` fields and nothing else — no
+ * "all parameters" box, so the sheet never offers a value that would change the graph itself.
  */
 import { useEffect, useState } from "react";
 import { errorMessage, getApp, type AppForm } from "../api";
@@ -33,9 +36,11 @@ export interface SettingsFormProps {
   /** "all parameters" is ticked — the page's, per graph, so it stays when another tab is looked at. */
   all: boolean;
   onAll: (all: boolean) => void;
+  /** The settings and nothing else: no "all parameters" box (`?only=settings`). */
+  fixed?: boolean;
 }
 
-export function SettingsForm({ graph, level = "", all: allTicked, onAll }: SettingsFormProps) {
+export function SettingsForm({ graph, level = "", all: allTicked, onAll, fixed = false }: SettingsFormProps) {
   const { form, setParam } = useEditor();
   /** The graph's `app:` answer (or why there is none); `undefined` until the first one arrives. */
   const [app, setApp] = useState<{ app: AppForm | null; error: string | null } | undefined>(undefined);
@@ -58,14 +63,14 @@ export function SettingsForm({ graph, level = "", all: allTicked, onAll }: Setti
       </div>
     );
   const declared = app.app;
-  const mode = settingsMode(declared, allTicked);
+  const mode = settingsMode(declared, allTicked && !fixed);
   const sections = settingsSections(graph.model, form, declared, mode, level);
   const where = level === "" ? "of this graph" : `inside ${level}`;
-  const empty = settingsEmpty(declared, mode, fieldCount(sections), where);
+  const empty = settingsEmpty(declared, mode, fieldCount(sections), where, fixed);
   const named = declared?.declared ? `${fieldCount(sections)} fields the graph's app: block names` : "the graph has no app: block";
   return (
     <div className="settings" data-settings data-settings-mode={mode} data-settings-fields={fieldCount(sections)}>
-      {declared !== null && (
+      {declared !== null && !fixed && (
         <label className="settings-mode" title="the graph's app: block names the fields shown; tick to list every parameter">
           <input type="checkbox" data-settings-all checked={allTicked} onChange={(event) => onAll(event.target.checked)} />
           all parameters

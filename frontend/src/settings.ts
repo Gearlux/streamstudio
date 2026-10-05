@@ -51,9 +51,10 @@ export const settingsMode = (app: AppForm | null, allTicked: boolean): SettingsM
  * What the tab says when it lists no field — `""` when it lists some. `where` names the level (`of this graph`,
  * `inside prep`).
  */
-export function settingsEmpty(app: AppForm | null, mode: SettingsMode, count: number, where: string): string {
+export function settingsEmpty(app: AppForm | null, mode: SettingsMode, count: number, where: string, fixed = false): string {
   if (count > 0) return "";
   if (mode === "all") return `No node ${where} has a parameter to set.`;
+  if (app !== null && !app.declared && fixed) return "This graph names no settings — it has no app: block.";
   if (app !== null && !app.declared)
     return "This graph names no settings — it has no app: block. Its parameters are on the canvas; tick all parameters to list every one here.";
   return "No field the app: block names is a parameter of this graph.";

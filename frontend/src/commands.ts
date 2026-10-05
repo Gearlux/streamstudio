@@ -109,7 +109,7 @@ export const COMMANDS: Record<CommandId, Command> = {
   delete: command("delete", "Delete", [{ key: "Delete" }, { key: "Backspace" }]),
   "select-all": command("select-all", "Select all", [{ key: "a", mod: true }]),
   rename: command("rename", "Rename…", [{ key: "F2" }]),
-  "toggle-nodes": command("toggle-nodes", "Nodes sidebar", [{ key: "n" }], { hint: "every class, by package and kind" }),
+  "toggle-nodes": command("toggle-nodes", "Nodes sidebar", [{ key: "n" }], { hint: "every class, by package, kind and group" }),
   fit: command("fit", "Fit to view"),
   arrange: command("arrange", "Arrange", [], { action: "arrange", hint: "left to right by the cards' sizes" }),
   "arrange-server": command("arrange-server", "Arrange in columns", [], {
@@ -228,8 +228,15 @@ export interface CommandState {
   dirty: boolean;
   /** How many document nodes are selected. */
   selected: number;
+  /**
+   * The HOST card is among them (`<host>`, what a host hands the graph — drawn, never written): Rename… and Delete never
+   * act on it, so they are greyed while it is all that is selected. Absent: it is not.
+   */
+  hostSelected?: boolean;
   /** A group box is selected. */
   groupSelected: boolean;
+  /** A wire is selected (Delete takes it out). */
+  wireSelected: boolean;
   /** Something was copied. */
   clipboard: boolean;
   /** A run of this graph exists. */
@@ -262,9 +269,9 @@ export function enabled(id: CommandId, state: CommandState): boolean {
     case "save-template":
       return state.selected > 0;
     case "delete":
-      return state.selected > 0 || state.groupSelected;
+      return state.selected > (state.hostSelected ? 1 : 0) || state.groupSelected || state.wireSelected;
     case "rename":
-      return state.selected === 1 || (state.selected === 0 && state.groupSelected);
+      return (state.selected === 1 && !state.hostSelected) || (state.selected === 0 && state.groupSelected);
     case "paste":
       return state.clipboard;
     case "run":

@@ -4,6 +4,8 @@
  *     /studio/?graph=view_bte                    the graph view_bte, its text tab
  *     /studio/?graph=view_bte&tab=settings       the same graph, the settings tab open (a host's "settings" button)
  *     /studio/?graph=view_bte&embed=1            in a host's panel: the menus and every function, no app chrome
+ *     /studio/?graph=view_bte&only=settings      the graph's settings and nothing else (a host's settings sheet):
+ *                                                no menus, canvas or tabs, and each change is saved at once
  *     /studio/?graph=demo&level=prep             the inside of the subgraph prep (`levels.ts`)
  *
  * The page is served at `/` by the editor itself or under a mount prefix (`/studio/`) by a host app; every request it
@@ -28,6 +30,10 @@ export const DEFAULT_TAB: SideTab = "text";
 export const GRAPH_PARAM = "graph";
 export const TAB_PARAM = "tab";
 export const EMBED_PARAM = "embed";
+export const ONLY_PARAM = "only";
+
+/** What a link may ask the page to show and nothing else: the graph's settings. */
+export type OnlyView = "settings";
 
 /** `?tab=settings` → `settings`; a tab the panel does not have (or none) is the default. */
 export function tabFromSearch(search: string): SideTab {
@@ -39,6 +45,15 @@ export function tabFromSearch(search: string): SideTab {
 export function embedFromSearch(search: string): boolean {
   const asked = new URLSearchParams(search).get(EMBED_PARAM);
   return asked !== null && !["0", "false", "no"].includes(asked.trim().toLowerCase());
+}
+
+/**
+ * `?only=settings` → `settings`: the page shows the graph's settings form and nothing else — what a host's settings
+ * sheet holds, each change saved at once so the host hears it. None, or any other word, is the whole page. Like
+ * `?embed=`, the host's: `pageHref` keeps it as it was given.
+ */
+export function onlyFromSearch(search: string): OnlyView | null {
+  return new URLSearchParams(search).get(ONLY_PARAM) === "settings" ? "settings" : null;
 }
 
 /** The graph a link names (`?graph=`), or `null`. */

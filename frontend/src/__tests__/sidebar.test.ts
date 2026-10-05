@@ -82,6 +82,80 @@ describe("groupSpecs", () => {
   });
 });
 
+describe("groupSpecs — folders from the class's @configurable group", () => {
+  const specs = [
+    spec("waivefront.fourier.window.WindowOp", "op", { group: "fourier/numpy" }),
+    spec("waivefront.fourier.fourier.FourierOp", "op", { group: "fourier/numpy" }),
+    spec("waivefront.fourier_torch.fourier.TorchFourierOp", "op", { group: "fourier/torch" }),
+    spec("waivefront.processing.measure.MeasureOp", "op", { group: "measure" }),
+    spec("waivefront.detection.LocateOp", "op"),
+    spec("waivefront.zigbee.zcl.OnOff", "value", { group: "zigbee/zcl" }),
+    spec("keras.losses.Huber", "value"),
+    spec("keras.losses.Dice", "value"),
+  ];
+  const waivefront = () => groupSpecs(specs).find((section) => section.name === "waivefront")!;
+
+  it("nests a class under its kind, then one folder per segment of its group", () => {
+    const ops = waivefront().kinds.find((kind) => kind.kind === "op")!;
+    const fourier = ops.folders.find((folder) => folder.name === "fourier")!;
+    const numpy = fourier.folders.find((folder) => folder.name === "numpy")!;
+    expect(numpy.specs.map((entry) => entry.name)).toEqual(["FourierOp", "WindowOp"]);
+    expect(fourier.folders.map((folder) => folder.name)).toEqual(["numpy", "torch"]);
+    expect(fourier.specs).toEqual([]);
+  });
+
+  it("keys every folder by its path from the package — the name the sidebar remembers it under", () => {
+    const ops = waivefront().kinds.find((kind) => kind.kind === "op")!;
+    expect(ops.key).toBe("waivefront/op");
+    const fourier = ops.folders.find((folder) => folder.name === "fourier")!;
+    expect(fourier.key).toBe("waivefront/op/fourier");
+    expect(fourier.folders.map((folder) => folder.key)).toEqual(["waivefront/op/fourier/numpy", "waivefront/op/fourier/torch"]);
+  });
+
+  it("lists the folders alphabetically, then the classes with no group of their own", () => {
+    const ops = waivefront().kinds.find((kind) => kind.kind === "op")!;
+    expect(ops.folders.map((folder) => folder.name)).toEqual(["fourier", "measure"]);
+    expect(ops.specs.map((entry) => entry.name)).toEqual(["LocateOp"]);
+  });
+
+  it("counts every class beneath a folder, at every level", () => {
+    const section = waivefront();
+    expect(section.count).toBe(6);
+    const ops = section.kinds.find((kind) => kind.kind === "op")!;
+    expect(ops.count).toBe(5);
+    expect(ops.folders.map((folder) => [folder.name, folder.count])).toEqual([
+      ["fourier", 3],
+      ["measure", 1],
+    ]);
+    const values = section.kinds.find((kind) => kind.kind === "value")!;
+    expect(values.folders[0].folders[0]).toMatchObject({ name: "zcl", count: 1, key: "waivefront/value/zigbee/zcl" });
+  });
+
+  it("leaves a package that declares no group exactly as flat as before: its classes straight under the kind", () => {
+    const keras = groupSpecs(specs).find((section) => section.name === "keras")!;
+    expect(keras.kinds).toHaveLength(1);
+    expect(keras.kinds[0].folders).toEqual([]);
+    expect(keras.kinds[0].specs.map((entry) => entry.name)).toEqual(["Dice", "Huber"]);
+    expect(keras.kinds[0].count).toBe(2);
+  });
+
+  it("ignores empty segments of a group path", () => {
+    const grouped = groupSpecs([spec("p.A", "op", { group: "/fourier//numpy/" })]);
+    const fourier = grouped[0].kinds[0].folders[0];
+    expect(fourier.name).toBe("fourier");
+    expect(fourier.folders.map((folder) => folder.key)).toEqual(["p/op/fourier/numpy"]);
+  });
+
+  it("built from a search's matches, holds only the folders on the way to a match, counted by matches", () => {
+    const matching = specs.filter((entry) => sidebarMatches(entry, "window"));
+    const ops = groupSpecs(matching)[0].kinds[0];
+    expect(ops.count).toBe(1);
+    expect(ops.folders.map((folder) => [folder.name, folder.count])).toEqual([["fourier", 1]]);
+    expect(ops.folders[0].folders.map((folder) => [folder.name, folder.count])).toEqual([["numpy", 1]]);
+    expect(ops.specs).toEqual([]);
+  });
+});
+
 describe("sidebarMatches", () => {
   const threshold = spec("recordstream.ops.numpy.Threshold", "op", { doc: "Binarize an array against a level." });
 

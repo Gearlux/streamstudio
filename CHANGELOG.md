@@ -8,6 +8,35 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **A class that is not an op is a card of its own.** Add Node ▸, the double-click palette, a Nodes-sidebar entry and
+  the palette of a wire dropped on empty canvas write a value, a source, an engine or a sink as a NEW top-level key
+  named after its class (`class_names_scan: !class:recordstream.ops.contract.ClassNamesScan {}`, `_2` … when taken),
+  directly above the graph's root and its comment lines (at the end of a graph without a root), as ONE edit, and draw
+  the card where the menu, the drop or the wire's release was. A wire dropped on empty canvas is saved to the card in
+  the same edit — from the root's `classes`, `classes: !ref:class_names_output` — or nothing is added. A flow graph
+  refuses a card in one line (`The editor can't add a value card to a flow graph yet — pick an op.`). New route
+  `POST /api/graphs/<name>/nodes {class_path, params, wire?}`; `POST …/steps` takes `wire` and hands a class that is
+  not an op to the same edit. The host card and the root are never what an added class goes after.
+- **The host card's Rename… and Delete are greyed**, and Delete of a selection holding it removes the other cards.
+- **A refusal's or a warning's toast has a copy button** that copies the whole message.
+- **A graph's settings live in a file of their own, `<graph>.settings.yaml`.** A value set in a field the graph's
+  `app:` block names — on the canvas or in the settings tab — is written there, one line per setting
+  (`flow.second.op.level: 0.9`), and never into the graph; every other edit goes to the graph as before. The editor
+  shows each setting on its node; Save writes only what changed; Save As takes the settings along. A setting names
+  its node: a flow step by its name, a top-level object by its key, a node with no name by its class while the class
+  is that node's alone. A line that is none of the graph's settings is refused where it is written
+  (`…/view_pane.settings.yaml:2:1: flow.second.op.levle is not a setting of view_pane — its settings are: …`), in the
+  editor's Check and in `streamstudio.settings.load_graph`, which loads a graph with its settings over it.
+  `GET …/app` answers `graph` (`editable` or `settings-only`), and an `app:` entry naming a class two nodes with no name
+  share is a located problem with no field.
+- **A host may ship graphs from outside its folder** — `EditorHost.shipped()` (a host now has four methods): such a
+  graph is listed (`shipped: true`) and opened while the folder holds no file of its name; a settings change writes
+  only its settings file into the folder, and the first Save of a change to the graph itself writes the folder's copy.
+- **A graph may offer its settings only** — `app: {graph: settings-only}`: the editor refuses every other change
+  (`locked offers its settings only — its graph is fixed where it is shipped`).
+- **`?only=settings`** opens the page on the graph's settings and nothing else — no menus, canvas or tabs — and saves
+  each change at once, the settings file alone (`POST …/save {only: "settings"}`): the form a host's settings sheet
+  holds. A change of the graph itself held unsaved elsewhere stays unsaved.
 - **The catalogue is built by a helper process, and a class's settings arrive when you select it.** Serving the
   editor's page starts `python -P -m streamstudio.catalogue`, which imports every installed package that declares
   classes and describes them; the editor itself no longer imports them (its memory after the catalogue: 0.13 GB,
@@ -16,6 +45,35 @@ All notable changes to this project are documented here. The format follows
   and the Nodes sidebar's card ask for a class's settings when it is selected and say `loading the settings…` until
   they arrive. Measured on a busy machine: the list 31 s after the editor opened (before: 55 s), at once when asked
   after the helper has answered.
+- **A wire drawn on the canvas is saved** — in the document's own spelling, as ONE edit held until Save, one undo:
+  `delivered: {classes: !ref:hugging_face_source}` into an output slot of the graph's root, `thing:
+  !ref:hugging_face_source` into any other card's slot or setting, `delivered: {input: image}` from a source's record
+  entry into a record entry of the root. A card written inside another card's slot (`stream.source`) moves out to a
+  top-level key named after its class first (`hugging_face_source` for a `HuggingFaceSource`, or
+  `hugging_face_source_2` when a top-level key, a card or a setting of any card — the slot's own card included — has
+  the name), keeping its place and its groups. Click a wire
+  and press Delete to take it out (several at once are one edit). A wire the editor cannot save yet is refused with one
+  line and is not drawn: `This wire would change the order of the steps — the editor can't save that yet.` (a
+  Pipeline's record wires, a wire into an `ops` member), `The editor can't save wires in this kind of graph yet.` (a
+  flow). Routes `POST /api/graphs/<name>/wires` (answers `wired`, the card the wire comes from now) and
+  `POST /api/graphs/<name>/wires/remove`; `Document.add_wire`, `Document.remove_wires`.
+- **The graph's root card shows only what you connect** — one input per output slot, one per record entry
+  (`input · Image`, `target · Label`) and one per optional slot (`optional: {classes: "List[str]"}`, without the `*`:
+  never a problem while unwired), no rows for its declaration, no outputs, and the contract's name on its second line.
+  A source card has one output per record entry it declares (`produces`: `image · Image`, `class · Label`), which
+  follow its settings, and so does a step (`ReadImage`: `image · Image`).
+- **What a host hands a rooted graph is one host card** — `from <host>` in a host's panel, `from the host`
+  standalone — with an output per input the root declares (`files · List[str]`; a pane's `input · Signal` is an entry
+  its steps' reads are wired from); it was drawn as outputs of the root. Where the host puts an input is a DASHED wire
+  into the one card of the delivered stream's source chain that takes a setting of that name (the files graph:
+  `files` → `file_source.files`); it is never saved, and deleting it is refused: `The host fills this when it runs the
+  graph — it isn't a wire you can remove.` Rename and Delete of the host card are refused (`<host> is the host's side
+  of the graph, not a node of the document`). Every rooted pane graph gains the card (the Bluetooth pane: 31 nodes).
+- **The Nodes sidebar is a tree that folds at every level** — package ▸ kind ▸ the class's `@configurable` group, one
+  folder per part of the group path (`group="fourier/numpy"`: `▸ Ops ▸ fourier ▸ numpy`). Every folder shows its
+  count and starts folded; sub-folders come before the classes that sit in a folder directly, and a class without a
+  group sits straight under its kind. The folders opened are remembered in the browser; a search opens every folder
+  on the way to a match.
 - **The canvas editor's page ships built, inside the package** — `streamstudio/canvas` (`index.html`, its js and css,
   and `.built-from`, the record of the source it was built from), committed and in the wheel. Every install serves the
   page: an install from GitHub, which carries no `frontend/`, answered `/` with `The canvas page is not built. Build it

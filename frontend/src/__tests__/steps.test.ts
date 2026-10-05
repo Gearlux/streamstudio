@@ -5,7 +5,18 @@
 import { describe, expect, it } from "vitest";
 import type { NodeSpec } from "../api";
 import type { Graph, ModelNode } from "../model";
-import { PALETTE_ROWS, freeSpot, paletteMatches, recordPredecessor, spotBeside, stepAnchor, stepName, uniqueName } from "../steps";
+import {
+  PALETTE_ROWS,
+  freeSpot,
+  isAnchor,
+  paletteMatches,
+  recordPredecessor,
+  selectedAnchor,
+  spotBeside,
+  stepAnchor,
+  stepName,
+  uniqueName,
+} from "../steps";
 
 const spec = (classPath: string, inputs: [string, string][] = [], outputs: [string, string][] = []): NodeSpec => ({
   class_path: classPath,
@@ -153,5 +164,42 @@ describe("spotBeside — a node added by a click lands below the one it follows,
   it("with room below the anchor, right there", () => {
     const anchor = { x: 40, y: 40, ...size };
     expect(spotBeside(anchor, [anchor], size)).toEqual({ x: 100, y: 280 });
+  });
+});
+
+describe("the host card and the root are never an anchor (the user's rule, 2026-10-05)", () => {
+  // the files graph a host workspace seeds: a source, a Stream reading each file, the root, the host card
+  const files = graph([
+    node("file_source", "source"),
+    node("stream", "engine"),
+    node("stream.ops[0]"),
+    node("contract", "contract"),
+    node("<host>", "host"),
+  ]);
+
+  it("isAnchor: neither the host card nor the root; any other card", () => {
+    expect(isAnchor(node("<host>", "host"))).toBe(false);
+    expect(isAnchor(node("contract", "contract"))).toBe(false);
+    expect(isAnchor(node("stream.ops[0]"))).toBe(true);
+    expect(isAnchor(node("file_source", "source"))).toBe(true);
+  });
+
+  it("stepAnchor: the host card or the root selected counts as nothing selected", () => {
+    // measured before: Add Node with the host card selected sent {after: "<host>"} — `a new flow step needs a name`
+    expect(stepAnchor(files, "<host>")).toBe("stream.ops[0]");
+    expect(stepAnchor(files, "contract")).toBe("stream.ops[0]");
+    expect(stepAnchor(files, undefined)).toBe("stream.ops[0]");
+  });
+
+  it("selectedAnchor: the LAST selected node that can be one — a mixed selection acts on the document card", () => {
+    expect(selectedAnchor(files.model, ["stream.ops[0]", "<host>"])).toBe("stream.ops[0]");
+    expect(selectedAnchor(files.model, ["<host>", "file_source"])).toBe("file_source");
+  });
+
+  it("selectedAnchor: a selection holding only them, or nothing the level draws, is none", () => {
+    expect(selectedAnchor(files.model, ["<host>"])).toBeUndefined();
+    expect(selectedAnchor(files.model, ["contract", "<host>"])).toBeUndefined();
+    expect(selectedAnchor(files.model, ["gone"])).toBeUndefined();
+    expect(selectedAnchor(files.model, [])).toBeUndefined();
   });
 });

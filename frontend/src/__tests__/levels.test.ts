@@ -38,11 +38,13 @@ import {
   qualify,
   rekeyName,
   followShifts,
+  isHostCard,
   renamedTo,
   shiftKeys,
   shiftName,
   shortName,
   stepNames,
+  withoutHost,
 } from "../levels";
 import type { Model, ModelNode, Wire } from "../model";
 
@@ -355,5 +357,26 @@ describe("shiftName / followShifts — an op list member is named by its POSITIO
       "stream.ops[2]": 2,
       stream: 3,
     });
+  });
+});
+
+describe("the host card — drawn, never written: Delete leaves it (the user's rule, 2026-10-05)", () => {
+  const files: Model = {
+    nodes: [node("file_source", "source"), node("stream", "engine"), node("contract", "contract"), node("<host>", "host")],
+    wires: [],
+    problems: [],
+    outputs: [],
+  };
+
+  it("isHostCard: the host card only", () => {
+    expect(isHostCard(node("<host>", "host"))).toBe(true);
+    expect(isHostCard(node("contract", "contract"))).toBe(false);
+    expect(isHostCard(node("prep/<in>", "boundary"))).toBe(false);
+  });
+
+  it("withoutHost: a selection less the host card, in its own order — the document cards Delete removes", () => {
+    expect(withoutHost(files, ["stream", "<host>", "file_source"])).toEqual(["stream", "file_source"]);
+    expect(withoutHost(files, ["<host>"])).toEqual([]);
+    expect(withoutHost(files, ["contract"])).toEqual(["contract"]); // the root is a node of the document
   });
 });

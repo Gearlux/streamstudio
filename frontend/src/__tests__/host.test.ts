@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import {
   MESSAGE_SOURCE,
   hasOwnSource,
+  hostCardTitle,
   hostOf,
   parseHostCommand,
   filledLines,
@@ -72,6 +73,17 @@ describe("hostOf — the host GET api/workspace names", () => {
     expect(hostOf({ host: false })).toBeNull();
     expect(hostOf(null)).toBeNull();
     expect(hostOf("annotaide")).toBeNull(); // the workspace answer itself must be an object
+  });
+});
+
+describe("hostCardTitle — the title of the host card (what the host hands a rooted graph)", () => {
+  it("mounted, the card names the host", () => {
+    expect(hostCardTitle({ name: "annotaide" })).toBe("from annotaide");
+  });
+
+  it("standalone — or a host the server names without a name — it is the host", () => {
+    expect(hostCardTitle(null)).toBe("from the host");
+    expect(hostCardTitle(hostOf({ host: true }))).toBe("from the host");
   });
 });
 

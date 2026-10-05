@@ -61,6 +61,7 @@ const FORM: Form = {
 /** `GET …/app`: the block resolved, out of node order, a pair as one field. */
 const APP: AppForm = {
   declared: true,
+  graph: "editable",
   fields: [
     { node: "classify", param: "line_db", loc: "/w/bte.yaml:12:7" },
     { node: "refuse", param: "max_band_hz", loc: "/w/bte.yaml:13:7" },
@@ -75,7 +76,7 @@ const APP: AppForm = {
   problems: [],
 };
 
-const NOTHING: AppForm = { declared: false, fields: [], form: {}, problems: [] };
+const NOTHING: AppForm = { declared: false, graph: "editable", fields: [], form: {}, problems: [] };
 
 const names = (sections: ReturnType<typeof settingsSections>) =>
   sections.map((section) => [section.node.name, section.fields.map((field) => field.name)]);
@@ -97,7 +98,8 @@ describe("settingsMode — narrowed to the app: block until 'all parameters' is 
   });
 
   it("a block whose every entry names nothing is still narrowed: the tab shows its problems, and offers all", () => {
-    expect(settingsMode({ declared: true, fields: [], form: {}, problems: [{ message: "…", loc: "…" }] }, false)).toBe("app");
+    const unnamed: AppForm = { declared: true, graph: "editable", fields: [], form: {}, problems: [{ message: "…", loc: "…" }] };
+    expect(settingsMode(unnamed, false)).toBe("app");
   });
 });
 
@@ -147,6 +149,11 @@ describe("settingsEmpty — what the tab says when it lists no field", () => {
     expect(settingsEmpty(NOTHING, "app", 0, "of this graph")).toBe(
       "This graph names no settings — it has no app: block. Its parameters are on the canvas; tick all parameters to list every one here.",
     );
+  });
+
+  it("a settings-only page (a host's settings sheet, `?only=settings`) has no tick box, so it points at none", () => {
+    expect(settingsEmpty(NOTHING, "app", 0, "of this graph", true)).toBe("This graph names no settings — it has no app: block.");
+    expect(settingsEmpty(APP, "app", 0, "of this graph", true)).toBe("No field the app: block names is a parameter of this graph.");
   });
 
   it("a block naming nothing that is here; a level with no parameter; nothing to say when fields are listed", () => {

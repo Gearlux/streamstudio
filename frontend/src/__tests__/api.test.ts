@@ -4,7 +4,9 @@
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  addNode,
   addStep,
+  addWire,
   discardRecovery,
   getWorkspace,
   hfDatasets,
@@ -18,6 +20,7 @@ import {
   newGraph,
   onRestarted,
   removeSteps,
+  removeWires,
   restoreRecovery,
   setParam,
   setSlot,
@@ -72,11 +75,72 @@ describe("POST …/steps — a flow step, a list member after another, a member 
   });
 });
 
+describe("a class that is not an op — a CARD of its own (2026-10-05)", () => {
+  const SCAN = "recordstream.ops.contract.ClassNamesScan";
+
+  it("POST …/steps carries a card's dropped wire, and no place when the page has none", async () => {
+    const sent = stub({ added: "class_names_output" });
+    const wire = { target: "contract", target_socket: "classes" };
+    expect(await addStep("files", { name: "classnamesoutput", class_path: "m.ClassNamesOutput", params: {}, wire })).toEqual({
+      added: "class_names_output",
+    });
+    expect(sent).toEqual([
+      {
+        path: "api/graphs/files/steps",
+        method: "POST",
+        body: { name: "classnamesoutput", class_path: "m.ClassNamesOutput", params: {}, wire },
+      },
+    ]);
+  });
+
+  it("POST …/nodes: the class and its values, and the dropped wire only when there is one", async () => {
+    const sent = stub({ added: "class_names_scan" });
+    expect(await addNode("files", SCAN, {})).toEqual({ added: "class_names_scan" });
+    await addNode("files", SCAN, { key: "label" }, { source: "file_source", source_socket: "stream" });
+    expect(sent).toEqual([
+      { path: "api/graphs/files/nodes", method: "POST", body: { class_path: SCAN, params: {} } },
+      {
+        path: "api/graphs/files/nodes",
+        method: "POST",
+        body: { class_path: SCAN, params: { key: "label" }, wire: { source: "file_source", source_socket: "stream" } },
+      },
+    ]);
+  });
+});
+
 describe("POST …/steps/remove — members are removed like steps: ONE request for the whole selection", () => {
   it("sends every name at once", async () => {
     const sent = stub({});
     await removeSteps("demo", ["stream.ops[1]", "stream.ops[3]"]);
     expect(sent).toEqual([{ path: "api/graphs/demo/steps/remove", method: "POST", body: { nodes: ["stream.ops[1]", "stream.ops[3]"] } }]);
+  });
+});
+
+describe("POST …/wires — a drawn wire is saved; …/wires/remove — Delete on wires is ONE request", () => {
+  const ends = { source: "stream.source", source_socket: "class_names", target: "contract", target_socket: "classes" };
+
+  it("a wire: its two ends, as the canvas drew them; the answer names the card it now comes from", async () => {
+    const sent = stub({ name: "source", wired: "source" });
+    expect(await addWire("source", ends)).toEqual({ name: "source", wired: "source" });
+    expect(sent).toEqual([{ path: "api/graphs/source/wires", method: "POST", body: ends }]);
+  });
+
+  it("removing: every wire at once", async () => {
+    const sent = stub({});
+    await removeWires("source", [ends, { ...ends, source: "source", source_socket: "image", target_socket: "input" }]);
+    expect(sent).toEqual([
+      {
+        path: "api/graphs/source/wires/remove",
+        method: "POST",
+        body: { wires: [ends, { ...ends, source: "source", source_socket: "image", target_socket: "input" }] },
+      },
+    ]);
+  });
+
+  it("a refusal is the server's one line", async () => {
+    const said = "This wire would change the order of the steps — the editor can't save that yet.";
+    stub({ error: said }, 400);
+    await expect(addWire("pets", ends)).rejects.toMatchObject({ status: 400, error: said });
   });
 });
 

@@ -611,7 +611,7 @@ never below a drawn card, `ROW_DY` stays the MINIMUM pitch so short cards keep t
 `layout.py` imports no document code. Pins: `tests/test_layout.py::TestCardHeight`, `::TestTallCards`,
 `::test_bte_views_first_layout_overlaps_no_two_cards_of_a_column`, `tests/test_canvas.py::TestFirstLayout`.
 
-## The canvas page is a build artifact beside the package, and a drawn wire is a proposal until a route can spell it (`frontend/`, `streamstudio.app.page_blueprint`, 2026-09-28)
+## The canvas page is a build artifact beside the package, and a drawn wire is the server's to spell (`frontend/`, `streamstudio.app.page_blueprint`, 2026-09-28)
 
 **Context.** Phase 3 of the rewrite (`docs/rewrite.md` §2.3) puts a React Flow page over the phase-2
 routes. Two things had to be decided before the first line: where the built page LIVES — inside the
@@ -630,9 +630,11 @@ takes the directory so a test asks for either page deterministically. The page i
 `base: './'` and reaches the API through RELATIVE paths (`api/graphs`), so one bundle serves at `/` and
 under any mount prefix. The type test the page applies while dragging is the model's own: `GET /api/types`
 serves `document.supertypes()` — the `_meets` rule as a table — and the page's `compatible(a, b)` is
-identity, the wildcard, or `types[a]` containing `b`; a mismatch never becomes an edge. A drop whose types
-meet becomes a dashed PROPOSAL edge with a toast naming the spelling the document would need; nothing is
-written and the next model refresh drops it.
+identity, the wildcard, or `types[a]` containing `b`; a mismatch never becomes an edge. What a drop whose
+types meet becomes is the SERVER's to decide, never the page's: in phase 3 no route could spell a wire, so the drop
+was a dashed edge the document did not hold. *Update 2026-10-04:* a drop is sent to `POST …/wires`, and the server
+saves it in the document's own spelling or refuses it in one line — "A drawn wire is saved in the document's own
+spelling" below; the page draws no edge of its own any more.
 
 **Consequences.** `pip install streamstudio` gives the API and the placeholder, never a page that is out
 of step with its routes; a developer builds once and the checkout serves it (since 2026-10-02 a server's start
@@ -640,9 +642,9 @@ builds it whenever its source changed — "The canvas page builds itself at a se
 *Update 2026-10-04:* where the build lives was reversed — it is committed inside the package, `streamstudio/canvas`,
 and every install serves it ("The built page is committed inside the package" below); the rest of this record holds. Every element the page renders is addressable by `data-*` (`data-node`, `data-socket`,
 `data-type`, `data-kind`, `data-param`, `data-problem`, `data-toast`, `data-saves`), so the playwright
-suite reads the SPEC and never a class name. The proposal rule means the canvas can show one thing the
-document does not have — visibly dashed, and only until the next edit; the alternative (adding the wire
-to the document by guessing a spelling) would invent semantics the document never stated.
+suite reads the SPEC and never a class name. The page never guesses a spelling: adding a wire to the
+document by a rule of the page's own would invent semantics the document never stated, so the server, which reads
+the document, is the one place a wire is spelled.
 
 **Example.**
 
@@ -654,14 +656,13 @@ client.get("/api/types").get_json()["Stream"]        # ["Source"]  — the page'
 
 ```
 drag decode.image -> count.label  : isValidConnection False -> no edge, no toast, file unchanged
-drag decode.image -> boost.image  : one dashed edge; toast "wires.yaml: the wire decode.image → boost.image is drawn as a
-                                    proposal, not written — on boost it would be spelled 'from: decode' …"; file unchanged
+drag decode.image -> boost.image  : POST …/wires -> 400 "The editor can't save wires in this kind of graph yet." — no edge
 ```
 
 **What you may change.** Where the build lands (as long as `web_dist()` and the build command agree),
 the toolchain versions, the widget mapping, the toast wording. What must hold: the page is derived from
 the model the routes serve and writes only through them; the type test is `document.supertypes()`, never
-a table typed into the page; a wire the document cannot spell is never written; the source is committed
+a table typed into the page; a wire is spelled by the server or not written; the source is committed
 (and, since 2026-10-04, the build with it). Pins: `tests/test_canvas.py`, `tests/test_app.py::TestTypes`,
 `tests/test_app.py::TestMounting`, `frontend/src/__tests__/model.test.ts`.
 
@@ -1377,7 +1378,11 @@ app.register_blueprint(editor_blueprint(host=Host()), url_prefix="/studio")
   source yields NOTHING (a source the host fills when IT runs the graph — the files graph) says so instead of
   `the source yields only 0 records`: the editor runs the source as the document spells it.
 
-**What you may change.** What a host adds beyond the three methods, how a run labels the record, the fill rule's
+**Update 2026-10-05 — a fourth method, `shipped()`.** A host may ship graphs from outside its folder (a package's
+templates); the editor lists and opens them while the folder holds no file of their name, and writes the copy only on
+the first Save of a change to the graph itself. The record "A graph's settings live in a file of their own" has why.
+
+**What you may change.** What a host adds beyond the four methods, how a run labels the record, the fill rule's
 reach (into subgraphs, once the tracer exposes their ops). What must hold: the editor never caches the host's folder
 across requests; a moved folder keeps the held documents' edits and history; a host's record runs the held texts,
 never the files; `saved` hears only of document files actually written, every path spelled one way; a clean
@@ -1787,6 +1792,88 @@ its page source changed. Pins:
 `::TestWhatTheBuildReads`, `tests/test_packaging.py::test_the_wheel_built_from_a_checkout_serves_the_page`,
 `::test_every_file_of_the_built_page_is_shipped_and_no_source_map`.
 
+## A drawn wire is saved in the document's own spelling, and a nested producer moves out to a top-level key (`Document.add_wire`, `POST /api/graphs/<name>/wires`, 2026-10-04)
+
+**Context.** Until now a wire drawn on the canvas was never written (the record above): the user wiring a host
+workspace's seeded source graph — `stream.source.class_names → contract.classes` — got a dashed edge and a toast
+saying the editor "cannot write" `classes: !ref:stream.source`, and the graph stayed undeliverable. Two things stood in
+the way. A wire is not ONE spelling: into a root's output slot it is a `delivered:` entry, into a card's slot a
+`!ref:`, and into a record entry of the root (the root reads `input`, the source writes `image`) it is a plain key.
+And a `!ref:` names a TOP-LEVEL key only — confluid refuses `!ref:stream.source`, attribute references having been
+removed — while the seed writes its source INSIDE the Stream's slot.
+
+**Decision.** The server spells every wire, in the document's own words, as one text patch held until Save:
+`delivered: {<slot>: !ref:<P>}` into a root's output slot (adding `delivered:` when there is none),
+`<slot>: !ref:<P>` into any other card's single slot (`YamlText.set_marker_edit`), and `delivered: {<entry>: <key>}`
+from a record-entry output — a source's `produces`, an op's — into a root's record entry. `P` is the producer's
+top-level key; a producer written inside another card's slot is MOVED OUT first (`YamlText.hoist_edits`): its text
+whole becomes a top-level key named after the slot, inserted above the key that held it, and the slot reads `!ref:P`.
+The name must be one no card takes as a constructor parameter: confluid hands a top-level key to every same-named
+parameter, so a top-level `source` reached a second, source-less Stream and overrode the `source` a Stream ABOVE it
+spelled (measured 2026-10-04, last spec wins) — `Document._free_key` takes `source_2` then. The page sends only the two
+ends and draws the answer; it never draws an edge of its own. Every edit re-derives and must draw exactly the wire
+drawn (`_drawn`), so a spelling that would draw another wire — a bare `!ref:` is drawn from P's FIRST fitting output —
+is refused, never written. Removing is the same patch backwards; the one problem a removal may gain is the required
+input it leaves open (`_commit(allow=…)`). Everything with no spelling yet is refused in one plain line
+(`document.WIRE_*`): a Stream's record wires ARE its `ops:` order, and a flow's wires are its steps' `from:` / `bind:`
+/ gates.
+
+**Consequences.** A wire drawn on the seeded source graph is saved, reopens drawn, and the file passes the host's
+`GraphContract.check()`. A card can change its NAME when it is wired (`stream.source` → `source`): the move is a rename
+in the history — its sidecar position and groups follow, those of the cards under it too, a laid-out card keeps the
+place it was drawn at (`Document._pin`), and one undo puts it back in the slot. A root card grows one input per record
+entry and a source card one output per entry it declares, read off the BUILT source, since a source may answer
+`produces` from its settings. A `!ref:` written into a one-line card needs a space before `}` (`{thing: !ref:source }`)
+— PyYAML reads `!ref:source}` as one tag.
+
+**Example.**
+
+```yaml
+# drawn: stream.source.class_names → contract.classes, source.image → contract.input
+source: !class:recordstream.sources.huggingface.HuggingFaceSource {path: ylecun/mnist}   # moved out of the slot
+stream: !class:recordstream.core.stream.Stream
+  source: !ref:source
+  ops: []
+contract: !class:recordstream.ops.contract.GraphContract
+  outputs: {"stream": "Stream", "classes": "List[str]"}
+  records: {"input": "Image", "target": "Label"}
+  delivered:
+    stream: !ref:stream
+    classes: !ref:source
+    input: image
+```
+
+```python
+document.add_wire("stream.source", "class_names", "contract", "classes")   # → "source" (the card's name now)
+document.add_wire("stream.ops[0]", "record", "stream.ops[1]", "record")
+# ValueError: This wire would change the order of the steps — the editor can't save that yet.
+```
+
+**What you may change.** The refusal wording, where a moved-out key is inserted, the suffix rule of a taken name. What
+must hold: the server spells a wire, never the page; a patch, never a re-dump; a `!ref:` only to a top-level key; a
+moved-out name no card takes as a parameter; a wire edit draws exactly the wire asked for or writes nothing. Spelling
+the wires still refused — a Stream's `ops:` order, a flow's `from:` / `bind:` — is a new route each, decided with the
+user (`TASKS.md`). Pins: `tests/test_wires.py`, `tests/test_app.py::TestWires`, `frontend/src/__tests__/wires.test.ts`,
+`tests/test_canvas.py::TestWiringTheSourceGraph`.
+
+**Update, 2026-10-05 — the moved-out card is named after its CLASS (`Document._moved_key`).** Named after the slot,
+every source moved out of a Stream was `source`, `source_2` …: the key said where the card had sat, not what it is,
+and the user's saved graph read `source: !ref:source`. A moved-out card now takes its class name in snake case
+(`document._snake`, the rule generated step names already used): `HuggingFaceSource` → `hugging_face_source`,
+`FilesSource` → `files_source`, `HTTPSource` → `http_source`, then `_2`, `_3` … while it is taken. TAKEN now counts
+the parameters of EVERY card, the slot's owner included — it was exempt, but a key named like the owner's slot flows
+back into that slot through confluid once the person removes the wire (measured 2026-10-05: a top-level `source:`
+card was handed to a second, source-less Stream — `second (no source written) got: FilesSource ['a.png']`). The
+user's saved graph now reads `hugging_face_source: !class:…HuggingFaceSource {path: ylecun/mnist}`, `source:
+!ref:hugging_face_source`, `classes: !ref:hugging_face_source`. Pins:
+`tests/test_wires.py::TestTheMovedOutCardIsNamedAfterItsClass`, `::TestTheUsersSourceGraph`.
+
+```python
+document.add_wire("stream.source", "class_names", "contract", "classes")   # → "hugging_face_source"
+# a class named like a parameter of any card — Source, in a Stream's `source` slot — takes a suffix:
+document.add_wire("stream.source", "stream", "holder", "thing")             # → "source_2"
+```
+
 ## The catalogue is built by a helper process, and a class's settings are asked when it is selected (`streamstudio.catalogue`, `GET api/palette/<class>`, 2026-10-05)
 
 **Context.** The catalogue — every class the page can list — was built inside the editor's process on the first
@@ -1875,3 +1962,181 @@ carries no settings; a list entry and its full spec agree on kind, sockets and p
 editor; one helper at a time per process. Pins: `tests/test_catalogue.py`,
 `tests/test_app.py::TestPaletteAndForm::test_the_palette_lists_at_least_recordstreams_own_classes`,
 `frontend/src/__tests__/catalogue.test.ts`.
+
+## A graph's settings live in a file of their own, joined to the graph by confluid's `include:` rule (`streamstudio.settings`, `EditorHost.shipped`, 2026-10-05)
+
+**Context.** A host copies every graph it offers into its own folder before the editor opens it — measured on a signal
+workspace (2026-10-05): opening the type copied 19 graphs into its `templates/`, the first draw of one pane copied
+that pane's graph, and changing one threshold in a pane's settings tab saved the whole 457-line graph. From then on
+the workspace runs its frozen copy, and a fix shipped later in the package never reaches it. Most of those changes are
+VALUES the graph's `app:` block already names as its settings; very few change the graph itself. The user's design:
+a graph and its settings are two files, a graph is copied only when its structure is edited, and the settings a
+person made stay in force on the edited copy.
+
+**Decision.**
+
+- **The settings file** sits beside the graph (`view_bte.yaml` → `view_bte.settings.yaml`) and holds one line per
+  setting. The editor writes there every value of a field the `app:` block names (`Document.set_param` →
+  `settings.set_setting`), and nothing else; every other edit goes to the graph as before.
+- **One document, by the rule confluid already has.** The two are loaded as the HELD document
+  `include: [<graph>, <settings>]` (`settings.composed`, passed with `texts=`, never written): a key below an include
+  wins over it, so a setting wins over what the graph spells, and every location names the real file. Rejected: a
+  `configure()` call on the built objects (it cannot address a flow step by name), a settings block inside the
+  workspace file (it travels with no graph), and any new confluid spelling or precedence (root ruling "A configuration
+  utility, not a compiler").
+- **A setting names its node by NAME** — the user's choice — `flow.<step>.op.<param>` for a flow step,
+  `<key>.<param>` for a top-level object, so two nodes of one class are set apart; a node with no name (an `ops:` list
+  member) falls back to `<Class>.<param>` only while the class is that node's alone. Measured: a nested
+  `flow: {first: {op: …}}` block is merged by confluid by MOVING the step to the end of the flow
+  (`from: 'first' does not name an EARLIER step`), and a dotted index into a list is refused
+  (`a dotted write cannot index a list`) — so neither is a spelling.
+- **A line that is none of the graph's settings is refused where it is written.** Confluid by itself warns and ignores
+  an unknown key: measured, a misspelt `line_dbb` loaded with a warning and the pane ran the graph's own value. The
+  editor's check and `settings.load_graph` (what a host runs) refuse it at its `file:line:col`.
+- **The model applies the settings itself.** A class line reaches its node only at confluid's `settled` stage, after
+  the `document` stage the model is derived at — measured, the canvas showed `-90.0` while a run used `-60.0` — so the
+  derivation sets each resolved setting on its node (`document._apply_settings`).
+- **A host may SHIP a graph** (`EditorHost.shipped()`): listed and opened from the shipped file while the folder holds
+  none (`Document.open_shipped` holds the shipped text as unchanged), so a settings change writes only the settings
+  file and the first Save of a change to the graph writes the folder's copy.
+- **A graph may offer its settings only** (`app: {graph: settings-only}`): every other change is refused first
+  (`@_structural`), so a host can show a graph's settings without offering its canvas.
+
+**Consequences.** A host that ships its graphs keeps only what a person changed: settings files, and the graphs whose
+structure was edited; a package update reaches every graph not copied, the settings staying on top. A setting naming a
+parameter the package later renamed is a located refusal, never a silent fallback. The settings file is a second
+text of every document (undo, the recovery file, a folder move and Save As carry it). Removing or renaming a node a
+setting names is refused while the setting is there — the line would name nothing.
+
+**Example.**
+
+```python
+from streamstudio.settings import load_graph
+
+# view_pane.settings.yaml (in the host's folder):   flow.second.op.level: 0.9
+built = load_graph(package / "pane_view.yaml", folder / "view_pane.settings.yaml")
+built["flow"]["second"]["op"].level        # 0.9 — the graph spells nothing, the class default is 0.5
+```
+
+**What you may change.** How a value is spelled on its line, which edits re-key a setting instead of refusing (a
+rename could follow its node), and a gesture that drops a setting back to the graph's value. What must hold: a setting
+never goes into the graph; the composition stays confluid's `include:` rule; a key that is none of the graph's
+settings is refused, never ignored; a shipped file is never written. Pins: `tests/test_graph_settings.py`,
+`tests/test_canvas.py::TestTheSettingsOnlyPage`.
+
+## What a host hands a rooted graph is one HOST card, and where the host puts it is a derived dashed wire (`_Builder.root_host`, `_Builder.host_wires`, 2026-10-05)
+
+**Context.** A host workspace has two graphs that deliver records: a SOURCE graph and a FILES graph — the files a
+person drops. The user asked for the files graph to work like the source graph (approved from a picture, 2026-10-05):
+a `FilesSource` card the host fills, a Stream reading each file as an image, a root that delivers the stream, reads
+`input` from `image` and MAY deliver a class list (recordstream's `GraphContract.optional`). Until then the root drew
+the contract's `inputs` as its OWN outputs: the files graph's root showed a `files · List[str]` output that nothing in
+the document wires and nothing could be wired from, while the host's real rule — it fills a list-valued `files` on an
+object in the delivered stream's source chain, BY SHAPE — showed nowhere. A pane's root carried `input · Signal` the
+same way, and the wires its steps read left the root, a card that is otherwise only wired INTO.
+
+**Decision.** The host's side of a rooted graph is ONE card, the synthetic `<host>` a graph without a root already had
+(kind `host`): one output per slot the contract's `inputs` declare — an item-typed slot (`input · Signal`) is an ENTRY
+of the record the host hands in, which a step reads by name; any other (`files · List[str]`) is an object — and the root
+has no outputs. Where the host PUTS an input is drawn as a wire of its own kind, `host`, mirroring the host's rule: for
+each host output naming a constructor PARAMETER of exactly one card of the delivered stream's source chain (the stream
+the root delivers, the card in its `source` slot, that card's own `source`, …), a wire from the host card into that
+parameter; none or several such cards, no wire. The wire is DERIVED from the document's shape and spelled by no text,
+so it is never saved and its removal is refused in one line (`document.WIRE_FROM_THE_HOST`). The card is never a node
+of the document: no parameters, Rename and Delete refused (`document.HOST_NOT_A_NODE`), never written. The page titles
+it after the host it is mounted in (`from <host>`, `from the host` standalone; `host.hostCardTitle`) and draws the
+`host` wire dashed (`.wire-host`); a Delete on it is sent to the server like any wire, whose refusal is the toast — the
+page decides nothing.
+
+**Consequences.** Every rooted graph that declares `inputs` gains the card — the signal domain's panes too: the
+Bluetooth pane is 31 nodes, its 59 wires unchanged (no step reads `input` or `regions` by name). The chain check still
+starts from the declared inputs (`_Derivation.provided`), and `_contract_problems` reads the declaration from the root's
+parameters, not from the root's sockets. A root with no `inputs` draws no card, so an entry nothing produces stays the
+chain check's refusal, never a host that supplies anything. An `optional` slot is an input without the required mark
+after the record entries, wired and removed like an output, never a problem while unwired.
+
+**Example.**
+
+```yaml
+file_source: !class:recordstream.sources.files.FilesSource {}
+stream: !class:recordstream.core.stream.Stream
+  source: !ref:file_source
+  ops:
+    - !class:recordstream.ops.image.ReadImage {field: file, output: image}
+contract: !class:recordstream.ops.contract.GraphContract
+  name: classification files
+  inputs: {files: "List[str]"}
+  outputs: {stream: Stream}
+  optional: {classes: "List[str]"}
+  records: {input: Image}
+  delivered:
+    stream: !ref:stream
+    input: image
+```
+
+```python
+model = Document.open(path).model
+[(w.kind, w.source, w.source_socket, w.target, w.target_socket) for w in model.wires]
+# [('list', 'stream.ops[0]', 'op', 'stream', 'ops[0]'), ('ref', 'file_source', 'stream', 'stream', 'source'),
+#  ('delivered', 'stream', 'stream', 'contract', 'stream'), ('delivered', 'stream.ops[0]', 'image', 'contract', 'input'),
+#  ('host', '<host>', 'files', 'file_source', 'files')]
+document.remove_wires([("<host>", "files", "file_source", "files")])
+# ValueError: The host fills this when it runs the graph — it isn't a wire you can remove.
+```
+
+**What you may change.** The card's title and note, the dash, the refusal wording, and the chain the host wire follows
+— together with the host's own rule, which it mirrors. What must hold: the host card is drawn, never written; a `host`
+wire is never saved and its removal is refused; one card takes an input or none is drawn; the root has no outputs.
+Pins: `tests/test_wires.py::TestTheFilesGraph`, `::TestTheHostWire`, `::TestAnOptionalSlot`,
+`tests/test_document.py::TestDerive::test_a_rooted_flow_reads_an_item_typed_input_from_the_host_card`,
+`frontend/src/__tests__/{host,model,wires}.test.ts`, `tests/test_canvas.py::TestTheFilesGraphsHostCard`.
+
+## A class that is not an op is a card of its own, named like a card moved out of a slot (`Document.add_node`, `POST /api/graphs/<name>/nodes`, 2026-10-05)
+
+**Context.** Adding a class knew two places: a member of an op list (`Document.add_step` → `_add_member`) or a flow
+step. A class that is neither — a value like `ClassNamesScan`, a source, an engine, a sink — had no place in a Stream
+document, and the page took the host card (and the root) as the node to add after. Measured on the files graph a host
+workspace seeds, right-click ▸ Add Node ▸ ClassNamesScan: with nothing selected `add
+recordstream.ops.contract.ClassNamesScan to stream.ops at [1] refused at …/files.yaml:12:7: cannot wire
+stream.ops[1].object (object) into stream.ops[1] (Op) …`; with the host card selected `a new flow step needs a name —
+after '<host>', it has none`. The same path broke the host's own instruction: drag from the root's `classes` socket
+onto empty canvas and pick the class-names card.
+
+**Decision.** A class whose node kind is not `op`, `algorithm` or `subgraph` is a CARD of its own (the user's design,
+2026-10-05): a NEW top-level key `<key>: !class:<path> {<params>}`, ONE edit. The key follows the move-out rule — the
+class name in snake case, `_2` … when it is a top-level key, a card, or a constructor parameter of any card — because a
+card added on its own and a card moved out of a slot are the same thing in the text, and both meet confluid's broadcast:
+a top-level key is handed to every same-named parameter (`_free_key`, shared with `_moved_key`). The line goes directly
+above the root and the comment lines written over it (`YamlText.top_key_line`), so the root stays last, else at the
+end. A wire dropped on empty canvas is saved to the new card in the SAME edit (`add_wire`, inside `_one_edit`), or
+nothing is added. Which classes are ops is the DOCUMENT's word (`_kind_of`): the catalogue lists 35 classes as values
+that the document derives as ops (`recordstream.core.wrappers.FilterOp`, `WrappedOp`, Keras and fastai losses —
+measured 2026-10-05 over 829 classes), so `add_step` hands a non-op to `add_node` and the page sends every add through
+`POST …/steps`, deciding only how to PLACE the answer (`cards.addPlan`). The host card and the root are never an
+anchor. A flow graph and a subgraph's inside refuse a card in the user's line — their top level is steps, and a card
+there would be drawn on no level the person is looking at.
+
+**Consequences.** The user's gesture writes `class_names_scan: !class:…ClassNamesScan {}` above the root's comment and
+Check graph finds nothing. A rooted graph keeps its root last whatever is added. A non-op class picked with an op's
+place (`after: stream.ops[0]`) is a card, not a refusal; an op whose catalogue entry says value still goes into the
+list. One known limit, unchanged by this: confluid also hands an EXISTING top-level key to a new card's same-named
+parameter (a top-level `source:` reaches a new `ClassNamesScan`'s `source` at load, drawn as no wire — `TASKS.md`).
+
+**Example.**
+
+```python
+document = Document.open("files.yaml")                       # the files graph, its root under a comment line
+document.add_node("recordstream.ops.contract.ClassNamesScan", {})   # → "class_names_scan", above the root's comment
+document.add_step("", "<host>", "recordstream.ops.contract.ClassNamesScan", {})   # the same: no anchor, no op
+document.add_node("recordstream.ops.contract.ClassNamesOutput", {}, wire=("", "", "contract", "classes"))
+# → "class_names_output"; delivered gains `classes: !ref:class_names_output` — one undo takes both
+Document.open("flow.yaml").add_node("recordstream.ops.contract.ClassNamesScan", {})
+# ValueError: The editor can't add a value card to a flow graph yet — pick an op.
+```
+
+**What you may change.** Where the line goes when there is no root, the refusal wording (the flow line is the user's),
+which kinds count as ops — together with `_STEP_KINDS` and `cards.STEP_KINDS`. What must hold: one edit and one undo,
+card and wire together or nothing; the move-out naming rule; the root stays last; the document's kind decides, never
+the catalogue's; the host card and the root are never an anchor. Pins: `tests/test_add_node.py`,
+`tests/test_app.py::TestAddingACard`, `frontend/src/__tests__/{cards,steps}.test.ts`,
+`tests/test_canvas.py::TestACardOfItsOwn`.

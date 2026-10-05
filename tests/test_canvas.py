@@ -12,18 +12,18 @@ the module name pytest imported this file under.
 
 What the drags pin, and the rule they measure: a drag between sockets whose types do not meet (an
 ``Image`` output onto a ``Label`` input) adds no edge — React Flow's ``isValidConnection`` refuses it
-while dragging; a drag between two ``Image`` sockets adds ONE edge, and that edge is NOT written to
-the document. Phase 3 part 1 draws the wires the document has and writes PARAMETERS, POSITIONS, NAMES
-and STEPS; no route yet spells a new wire (a Stream's record wires ARE its ``ops:`` order, a flow's are
-``from:`` / ``bind:``, a contract's are ``!ref:``), so the drawn wire stays on the canvas as a dashed
-PROPOSAL, a toast names the spelling the document would need, and the file is byte-identical.
+while dragging; a drag between sockets whose types meet is sent to ``POST …/wires`` and the canvas draws
+the graph the server answers: the wire saved in the document's own spelling (``classes: !ref:hugging_face_source``,
+``input: image``), or — for a wire the editor cannot save yet (a Stream's record wires ARE its ``ops:``
+order, a flow's are ``from:`` / ``bind:``) — one plain line in a toast and NO edge: the page never draws
+an edge of its own. A selected wire and Delete is ``POST …/wires/remove``.
 
 The tests read the SPEC through ``data-*`` attributes, never DOM classes, wherever the page can carry
 it: ``data-node`` / ``data-kind`` / ``data-class`` on a node, ``data-node`` / ``data-socket`` /
 ``data-type`` / ``data-kind`` on a handle, ``data-param`` on a widget, ``data-problem`` in the status
 bar, ``data-toast`` on a toast, ``data-saves`` (accepted writes so far) and ``data-ready`` on the app
-root. Only an EDGE has no attribute of its own (React Flow renders it), so edges are counted by the
-``react-flow__edge`` element and a proposal by the ``wire-proposal`` class the page puts on it.
+root. An EDGE is React Flow's element: it is counted by ``react-flow__edge`` and found by its ``data-id``, which the
+page makes from the wire's two ends (``wire:source.class_names->contract.classes``).
 
 The host classes at the end (``TestMountedInAHost``, ``TestSetSourceInAHost``, ``TestTheHostHearsAndFollows``,
 ``TestTheHostsOpenKeepsEachEditInItsGraph``, ``TestTheEmbeddedPanelsFields``, ``TestTheEmbeddedPanelOpensFitted``) serve
@@ -44,7 +44,7 @@ import threading
 import time
 import urllib.request
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, NamedTuple, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Mapping, NamedTuple, Sequence, Tuple
 
 import numpy as np
 import pytest
@@ -504,7 +504,6 @@ class TestLoading:
         opened = open_graph("pets")
         model = api_get(server, "api/graphs/pets")["model"]
         assert edge_count(opened.page) == len(model["wires"]) == 6
-        assert opened.page.locator(".react-flow__edge.wire-proposal").count() == 0
 
     def test_a_handles_data_type_is_the_sockets_type_from_the_model(
         self, open_graph: Callable[[str], Opened], server: str
@@ -543,8 +542,44 @@ class TestLoading:
 
 
 # ------------------------------------------------------------------------------------------------
-# wires: the types are tested while dragging; a drawn wire is a proposal, never a write
+# wires: the types are tested while dragging; a drawn wire is saved by the server, or refused in one line
 # ------------------------------------------------------------------------------------------------
+
+
+def edge(page: Any, source: str, source_socket: str, target: str, target_socket: str) -> Any:  # a playwright Locator
+    """The edge the page draws for one wire — its ``data-id`` spells the two ends."""
+    return page.locator(f'.react-flow__edge[data-id="wire:{source}.{source_socket}->{target}.{target_socket}"]')
+
+
+def click_wire(page: Any, source: str, source_socket: str, target: str, target_socket: str) -> None:
+    """Click ON the wire: a point of its path that no card covers (a wire may run under a card), found in the page."""
+    wanted = f"wire:{source}.{source_socket}->{target}.{target_socket}"
+    point = page.evaluate(
+        """(id) => {
+            const g = document.querySelector(`.react-flow__edge[data-id="${id}"]`);
+            const path = g.querySelector('.react-flow__edge-interaction') || g.querySelector('path');
+            const total = path.getTotalLength();
+            const matrix = path.getScreenCTM();
+            for (let step = 1; step < 40; step++) {
+                const at = path.getPointAtLength((total * step) / 40);
+                const x = at.x * matrix.a + at.y * matrix.c + matrix.e;
+                const y = at.x * matrix.b + at.y * matrix.d + matrix.f;
+                const hit = document.elementFromPoint(x, y);
+                if (hit && hit.closest(`.react-flow__edge[data-id="${id}"]`)) return [x, y];
+            }
+            return null;
+        }""",
+        wanted,
+    )
+    assert point is not None, f"no point of {wanted} is uncovered"
+    page.mouse.click(*point)
+    page.wait_for_selector(f'.react-flow__edge.selected[data-id="{wanted}"]')
+
+
+def warning(page: Any) -> str:
+    toast = page.locator('[data-toast="warning"]')
+    toast.wait_for()
+    return str(toast.inner_text())
 
 
 class TestDrawingWires:
@@ -561,7 +596,7 @@ class TestDrawingWires:
         assert (graph_dir / "wires.yaml").read_text() == WIRES_TEXT
         assert opened.errors == []
 
-    def test_a_drag_between_images_adds_a_dashed_proposal_that_is_not_written(
+    def test_a_wire_in_a_flow_is_refused_in_one_line_and_nothing_is_drawn(
         self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path
     ) -> None:
         opened = open_graph("wires")
@@ -569,23 +604,14 @@ class TestDrawingWires:
         source = centre(handle(opened.page, "decode", "image", "out").bounding_box())
         target = centre(handle(opened.page, "boost", "image", "in").bounding_box())
         drag(opened.page, source, target)
-        assert edge_count(opened.page) == before + 1
-        assert opened.page.locator(".react-flow__edge.wire-proposal").count() == 1
-        toast = opened.page.locator("[data-toast]")
-        toast.wait_for()
-        message = toast.inner_text()
-        assert "wires.yaml" in message
-        assert "decode.image" in message and "boost.image" in message
-        assert "from: decode" in message  # the spelling a flow document would need
-        assert "not written" in message
-        # nothing reached the document: the file, the served text and the served wires are as before
-        assert (graph_dir / "wires.yaml").read_text() == WIRES_TEXT
+        assert warning(opened.page) == "The editor can't save wires in this kind of graph yet."
+        assert edge_count(opened.page) == before  # nothing drawn: the page never draws an edge of its own
         body = api_get(server, "api/graphs/wires")
-        assert body["text"] == WIRES_TEXT
-        assert len(body["model"]["wires"]) == before
-        assert opened.errors == []
+        assert body["text"] == WIRES_TEXT and body["dirty"] is False
+        assert (graph_dir / "wires.yaml").read_text() == WIRES_TEXT
+        assert opened.errors == [REFUSED_400]
 
-    def test_a_proposal_on_a_stream_names_the_ops_order_as_the_reason(
+    def test_a_record_wire_on_a_stream_would_change_the_order_of_the_steps(
         self, open_graph: Callable[[str], Opened], graph_dir: Path
     ) -> None:
         opened = open_graph("pets")
@@ -593,10 +619,128 @@ class TestDrawingWires:
         source = centre(handle(opened.page, "stream.ops[0]", "record", "out").bounding_box())
         target = centre(handle(opened.page, "stream.ops[2]", "record", "in").bounding_box())
         drag(opened.page, source, target)
-        assert edge_count(opened.page) == before + 1
-        message = opened.page.locator("[data-toast]").inner_text()
-        assert "pets.yaml" in message and "ops" in message and "order" in message
+        assert warning(opened.page) == "This wire would change the order of the steps — the editor can't save that yet."
+        assert edge_count(opened.page) == before
         assert (graph_dir / "pets.yaml").read_text() == PETS_TEXT
+        assert opened.errors == [REFUSED_400]
+
+
+#: The source graph a classification workspace seeds: a HuggingFace source in the Stream's slot, the root after it.
+SEED_TEXT = """\
+stream: !class:recordstream.core.stream.Stream
+  source: !class:recordstream.sources.huggingface.HuggingFaceSource {path: ylecun/mnist}
+  ops: []
+# The graph's ROOT — what this graph must deliver, declared by the workspace (its `graphs:`).
+# Wire what each output needs; the workspace applies the graph through this root's own check.
+contract: !class:recordstream.ops.contract.GraphContract
+  name: "classification source"
+  outputs: {"stream": "Stream", "classes": "List[str]"}
+  records: {"input": "Image", "target": "Label"}
+  delivered:
+    stream: !ref:stream
+"""
+
+#: The seed after ``stream.source.class_names → contract.classes``: the source moved out to a key named after its
+#: class, its slot a reference.
+WIRED_TEXT = """\
+hugging_face_source: !class:recordstream.sources.huggingface.HuggingFaceSource {path: ylecun/mnist}
+stream: !class:recordstream.core.stream.Stream
+  source: !ref:hugging_face_source
+  ops: []
+# The graph's ROOT — what this graph must deliver, declared by the workspace (its `graphs:`).
+# Wire what each output needs; the workspace applies the graph through this root's own check.
+contract: !class:recordstream.ops.contract.GraphContract
+  name: "classification source"
+  outputs: {"stream": "Stream", "classes": "List[str]"}
+  records: {"input": "Image", "target": "Label"}
+  delivered:
+    stream: !ref:stream
+    classes: !ref:hugging_face_source
+"""
+
+
+def drag_wire(page: Any, source: str, source_socket: str, target: str, target_socket: str) -> None:
+    start = centre(handle(page, source, source_socket, "out").bounding_box())
+    stop = centre(handle(page, target, target_socket, "in").bounding_box())
+    drag(page, start, stop)
+
+
+class TestWiringTheSourceGraph:
+    """The user's case on the built page: the seeded source graph, wired by hand, saved, opened again."""
+
+    def test_a_drawn_wire_is_saved_and_drawn_again_after_a_reload(
+        self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path
+    ) -> None:
+        (graph_dir / "source.yaml").write_text(SEED_TEXT)
+        opened = open_graph("source")
+        page = opened.page
+        place = node_translate(page, "stream.source")
+        drag_wire(page, "stream.source", "class_names", "contract", "classes")
+        wait_saves(page, 1)
+        assert page.locator(node_root("hugging_face_source")).count() == 1  # moved out, named after its class
+        assert page.locator(node_root("stream.source")).count() == 0
+        assert node_translate(page, "hugging_face_source") == place  # and kept its place
+        edge(page, "hugging_face_source", "class_names", "contract", "classes").wait_for()
+        assert page.locator("[data-yaml]").inner_text().rstrip("\n") == WIRED_TEXT.rstrip("\n")
+        assert (graph_dir / "source.yaml").read_text() == SEED_TEXT  # held until Save
+        save_file(page, 2)
+        assert (graph_dir / "source.yaml").read_text() == WIRED_TEXT
+
+        page.reload()
+        wait_ready(page, "source")
+        assert edge(page, "hugging_face_source", "class_names", "contract", "classes").count() == 1
+        drag_wire(page, "hugging_face_source", "image", "contract", "input")
+        wait_saves(page, 1)
+        edge(page, "hugging_face_source", "image", "contract", "input").wait_for()
+        assert api_get(server, "api/graphs/source")["text"] == WIRED_TEXT + "    input: image\n"
+        assert opened.errors == []
+
+    def test_a_selected_wire_and_delete_take_it_out_in_one_edit(
+        self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path
+    ) -> None:
+        (graph_dir / "source.yaml").write_text(WIRED_TEXT + "    input: image\n")
+        opened = open_graph("source")
+        page = opened.page
+        before = edge_count(page)
+        click_wire(page, "hugging_face_source", "image", "contract", "input")
+        page.keyboard.press("Delete")
+        wait_saves(page, 1)
+        wait_edges(page, before - 1)
+        assert edge(page, "hugging_face_source", "image", "contract", "input").count() == 0
+        assert api_get(server, "api/graphs/source")["text"] == WIRED_TEXT
+        page.keyboard.press("Control+z")  # one undo brings it back
+        wait_saves(page, 2)
+        wait_edges(page, before)
+        assert api_get(server, "api/graphs/source")["text"] == WIRED_TEXT + "    input: image\n"
+        assert opened.errors == []
+
+    def test_the_root_card_shows_its_sockets_and_the_contracts_name_only(
+        self, open_graph: Callable[[str], Opened], graph_dir: Path
+    ) -> None:
+        (graph_dir / "source.yaml").write_text(SEED_TEXT)
+        opened = open_graph("source")
+        root = opened.page.locator(node_root("contract"))
+        assert root.locator("[data-subtitle]").inner_text() == "classification source"
+        assert root.locator("[data-param]").count() == 0  # no rows for name, inputs, outputs, records, delivered
+        sockets = root.locator('.react-flow__handle[data-kind="in"]').evaluate_all(
+            "hs => hs.map(h => h.dataset.socket)"
+        )
+        assert sockets == ["stream", "classes", "input", "target"]
+        outputs = opened.page.locator('.react-flow__handle[data-node="stream.source"][data-kind="out"]').evaluate_all(
+            "hs => hs.map(h => [h.dataset.socket, h.dataset.type])"
+        )
+        assert outputs == [["stream", "Source"], ["image", "Image"], ["class", "Label"], ["class_names", "List[str]"]]
+        assert opened.errors == []
+
+    def test_a_record_entry_read_from_a_key_no_card_writes_shows_the_key_on_its_row(
+        self, open_graph: Callable[[str], Opened], graph_dir: Path
+    ) -> None:
+        (graph_dir / "source.yaml").write_text(SEED_TEXT + "    input: pixels\n")
+        opened = open_graph("source")
+        filled = opened.page.locator(f'{node_root("contract")} [data-filled]')
+        assert filled.evaluate_all("fs => fs.map(f => f.dataset.filled)") == ["pixels"]
+        assert edge(opened.page, "stream.source", "image", "contract", "input").count() == 0  # no card writes it
+        assert opened.errors == []
 
 
 # ------------------------------------------------------------------------------------------------
@@ -816,7 +960,7 @@ class TestPalette:
         assert rows.count() == len(expected) >= 2  # TinyGain and TinyClip declare an Image entry
         meta = opened.page.locator("[data-palette-meta]").inner_text()
         assert "Image" in meta and "after decode" in meta
-        assert edge_count(opened.page) == edges_before  # a drop on nothing is neither an edge nor a proposal
+        assert edge_count(opened.page) == edges_before  # a drop on nothing draws no edge
         assert opened.page.locator("[data-toast]").count() == 0
         opened.page.locator(f'[data-palette-list] li[data-class="{MOD}.TinyGain"]').click()
         opened.page.wait_for_selector('.app[data-saves="1"]')
@@ -1295,7 +1439,8 @@ class TestFirstLayout:
         self, open_graph: Callable[[str], Opened], graph_dir: Path
     ) -> None:
         """Measured 2026-10-01 before the rule: ``contract`` at (40, 240) under ``known`` (373 px tall, 40..413) —
-        the one overlapping pair; after: ``contract`` at (40, 430), 17 px below ``known``'s bottom."""
+        the one overlapping pair; after: ``contract`` at (40, 430), 17 px below ``known``'s bottom. Since 2026-10-05 the
+        root's two inputs are the host card's, the 31st card, under the root at (40, 630)."""
         annotation = pytest.importorskip("waivefront.analysis.annotation")
         shipped = Path(annotation.__file__).parent / "bte_view.yaml"
         (graph_dir / "bte_view.yaml").write_text(shipped.read_text())
@@ -1303,13 +1448,14 @@ class TestFirstLayout:
         opened = open_graph("bte_view")
         page = opened.page
         names = page.locator(NODE).evaluate_all("ns => ns.map(n => n.dataset.node)")
-        assert len(names) == 30
+        assert len(names) == 31 and "<host>" in names
         boxes = node_boxes(page, *names)
         overlapping = [(a, b) for i, a in enumerate(names) for b in names[i + 1 :] if overlap(boxes[a], boxes[b])]
         assert overlapping == []
         known, contract = node_translate(page, "known"), node_translate(page, "contract")
         assert known == (40.0, 40.0)
         assert contract == (40.0, 430.0)
+        assert node_translate(page, "<host>") == (40.0, 630.0)
         assert opened.errors == []
 
     def test_the_detection_model_opened_fresh_draws_no_card_over_another(
@@ -1317,7 +1463,8 @@ class TestFirstLayout:
     ) -> None:
         """Measured 2026-10-01 on the shipped ``threshold_detector_model.yaml``, rooted that day: 11 cards —
         the seven steps, the ``threshold`` step's three ``ConfigureOp`` members and the ``contract`` root,
-        which wires to nothing — none drawn over another."""
+        which wires to nothing — none drawn over another; since 2026-10-05 a 12th, the host card holding the root's
+        three inputs."""
         waivefront = pytest.importorskip("waivefront")
         shipped = Path(waivefront.__file__).parent / "annotation" / "threshold_detector_model.yaml"
         (graph_dir / "threshold_detector_model.yaml").write_text(shipped.read_text())
@@ -1325,7 +1472,7 @@ class TestFirstLayout:
         opened = open_graph("threshold_detector_model")
         page = opened.page
         names = page.locator(NODE).evaluate_all("ns => ns.map(n => n.dataset.node)")
-        assert len(names) == 11 and "contract" in names
+        assert len(names) == 12 and "contract" in names and "<host>" in names
         boxes = node_boxes(page, *names)
         overlapping = [(a, b) for i, a in enumerate(names) for b in names[i + 1 :] if overlap(boxes[a], boxes[b])]
         assert overlapping == []
@@ -1898,6 +2045,47 @@ class TestNodesSidebar:
         assert f"  boost:\n    op: !class:{MOD}.TinyGain {{gain: 3.0}}\n    from: threshold\n" in text
         page.wait_for_selector(node_root("threshold"))
         assert (graph_dir / "wires.yaml").read_text() == WIRES_TEXT
+        assert opened.errors == []
+
+    def test_every_level_folds_package_kind_group_remembered_and_a_search_opens_the_path(
+        self, open_graph: Callable[[str], Opened]
+    ) -> None:
+        # TinyGain is `@configurable(category="op", group="canvas-test")`: <package> ▸ Ops ▸ canvas-test ▸ TinyGain
+        opened = open_graph("wires")
+        page = opened.page
+        package = MOD.split(".")[0]
+        page.locator('button[data-command="toggle-nodes"]').click()
+        page.locator("[data-nodes-sidebar]").wait_for()
+        wait_palette_loaded(page)
+        entry = page.locator(f'[data-nodes-entry][data-class="{MOD}.TinyGain"]')
+        head = page.locator(f'[data-nodes-package="{package}"] > .nodes-package-head')
+        kind = page.locator(f'[data-nodes-package="{package}"] [data-nodes-kind="op"]')
+        kind_head = kind.locator(":scope > .nodes-folder-head")
+        group = kind.locator(f'[data-nodes-folder="{package}/op/canvas-test"]')
+        group_head = group.locator(":scope > .nodes-folder-head")
+
+        head.click()
+        assert kind_head.get_attribute("aria-expanded") == "false"  # the kind is a folder, folded
+        assert group.count() == 0 and entry.count() == 0
+        kind_head.click()
+        assert group_head.get_attribute("aria-expanded") == "false"  # the group is a folder, folded
+        assert entry.count() == 0
+        group_head.click()
+        entry.wait_for()
+        assert group_head.inner_text().split() == ["▸", "canvas-test", str(group.locator("[data-nodes-entry]").count())]
+
+        page.reload()  # the folders opened are remembered in this browser
+        wait_ready(page, "wires")
+        wait_palette_loaded(page)
+        entry.wait_for()
+
+        group_head.click()  # fold it again, then search: a search opens every folder on the way to a match
+        assert entry.count() == 0
+        page.locator("[data-nodes-search]").fill(f"{MOD}.TinyGain")
+        entry.wait_for()
+        assert group_head.get_attribute("aria-expanded") == "true"
+        page.locator("[data-nodes-search]").fill("")
+        assert entry.count() == 0  # clearing the search puts the folders back as they were
         assert opened.errors == []
 
 
@@ -3762,6 +3950,9 @@ class BrowserHost:
     def saved(self, paths: Sequence[Path]) -> None:
         self.saves.append([Path(path) for path in paths])
 
+    def shipped(self) -> Mapping[str, Path]:
+        return {}
+
 
 class Hosted(NamedTuple):
     """A host app serving the editor under :data:`STUDIO`, on a free port in a thread."""
@@ -3915,10 +4106,11 @@ class TestMountedInAHost:
         pair.locator('[data-pair-end="max"]').fill("800000")
         pair.locator('[data-pair-end="max"]').press("Enter")
         wait_saves(page, 1)
-        assert (
-            f"op: !class:{MOD}.PaneBand {{deviation_hz: [100000, 800000]}}"
-            in hosted_api(hosted, "api/graphs/pane")["text"]
-        )
+        # a SETTING (the app: block names it): held for the graph's settings file, the graph's own text untouched
+        held = hosted_api(hosted, "api/graphs/pane")
+        band = next(node for node in held["model"]["nodes"] if node["name"] == "band")
+        assert band["params"]["deviation_hz"]["value"] == [100000, 800000]
+        assert held["text"] == HOST_PANE_TEXT and held["dirty"] is True
 
         page.locator("[data-settings-all]").check()
         page.wait_for_selector('[data-settings][data-settings-mode="all"]')
@@ -4225,8 +4417,10 @@ class TestTheHostHearsAndFollows:
         wait_saves(page, 1)
         assert hosted.host.saves == []  # an edit is held: nothing is written, nothing told
         save_file(page, 2)
-        assert hosted.host.saves == [[hosted.folder / "pane.yaml"]]
-        assert f"op: !class:{MOD}.TinyGain {{gain: 4}}   # the knob" in (hosted.folder / "pane.yaml").read_text()
+        # `gain` is one of the pane's SETTINGS (its app: block names it): the Save writes the settings file only
+        assert hosted.host.saves == [[hosted.folder / "pane.settings.yaml"]]
+        assert (hosted.folder / "pane.settings.yaml").read_text() == "flow.gain.op.gain: 4\n"
+        assert (hosted.folder / "pane.yaml").read_text() == HOST_PANE_TEXT
         assert opened.errors == []
 
     def test_a_folder_the_host_moves_is_followed_at_the_next_request(self, browser: Any, hosted: Hosted) -> None:
@@ -4240,8 +4434,8 @@ class TestTheHostHearsAndFollows:
         hosted.host.where = moved
         save_file(page, 2)
         assert not hosted.folder.exists()
-        assert hosted.host.saves == [[moved / "pane.yaml"]]
-        assert f"op: !class:{MOD}.TinyGain {{gain: 6}}   # the knob" in (moved / "pane.yaml").read_text()
+        assert hosted.host.saves == [[moved / "pane.settings.yaml"]]  # `gain` is a setting: its file, moved too
+        assert (moved / "pane.settings.yaml").read_text() == "flow.gain.op.gain: 6\n"
         workspace = hosted_api(hosted, "api/workspace")
         assert workspace["folder"] == str(moved) and workspace["host"] == {"name": "the test host"}
         assert [entry["path"] for entry in hosted_api(hosted, "api/graphs")] == [
@@ -4291,7 +4485,7 @@ class TestTheHostHearsAndFollows:
             "graph": "pane",
             "path": str(hosted.folder / "pane.yaml"),
         }
-        assert hosted.host.saves == [[hosted.folder / "pane.yaml"]]
+        assert hosted.host.saves == [[hosted.folder / "pane.settings.yaml"]]  # `gain` is a setting
 
         # the host's own button: open another graph on its settings tab, without reloading the panel
         page.evaluate(
@@ -4547,7 +4741,9 @@ class TestTheEmbeddedPanelsFields:
         page.keyboard.type("1000")
         page.keyboard.press("Enter")
         wait_saves(page, 2)
-        assert f"op: !class:{MOD}.PaneBand {{deviation_hz: [111000, 761000]}}" in held_text(hosted, "pane")
+        band = next(node for node in hosted_api(hosted, "api/graphs/pane")["model"]["nodes"] if node["name"] == "band")
+        assert band["params"]["deviation_hz"]["value"] == [111000, 761000]  # a setting: held for the settings file
+        assert held_text(hosted, "pane") == HOST_PANE_TEXT
         assert [low.input_value(), high.input_value()] == ["111000", "761000"]
         assert opened.errors == []
 
@@ -4720,3 +4916,259 @@ class TestTheEmbeddedPanelOpensFitted:
         assert outside == []
         assert viewport_zoom(page) <= 1
         assert errors == []
+
+
+class TestTheSettingsOnlyPage:
+    """``?only=settings`` — a host's settings SHEET: the graph's ``app:`` fields and nothing else, each change SAVED at
+    once (the user's pick 2026-10-05), and saved where every setting goes — the graph's settings file, never the graph.
+    """
+
+    def test_it_shows_the_settings_and_nothing_else_and_saves_each_change_at_once(
+        self, browser: Any, hosted: Hosted
+    ) -> None:
+        opened = open_hosted(browser, hosted, "graph=pane&embed=1&only=settings")
+        page = opened.page
+        page.wait_for_selector('.app[data-graph="pane"][data-ready="true"] [data-settings]')
+        root = page.locator(".app")
+        assert root.get_attribute("data-only") == "settings"
+        assert page.locator(".bar").count() == 0  # no menus, no graph picker, no Run
+        assert page.locator(".canvas").count() == 0 and page.locator(".react-flow").count() == 0
+        assert page.locator(".side .tabs").count() == 0
+        assert page.locator("[data-settings-all]").count() == 0  # nothing that would change the graph itself
+        sections = page.locator("[data-form-node]").evaluate_all("ss => ss.map(s => s.dataset.formNode)")
+        assert sections == ["band", "gain", "boost"]  # TinyGain's two nodes, each by its name
+        set_widget(page, '[data-form-node="gain"]', "gain", "5.5")
+        wait_saves(page, 2)  # the setting, then the Save the page sends right after it
+        assert root.get_attribute("data-dirty") == "false"
+        assert (hosted.folder / "pane.settings.yaml").read_text() == "flow.gain.op.gain: 5.5\n"
+        assert (hosted.folder / "pane.yaml").read_text() == HOST_PANE_TEXT
+        assert hosted.host.saves == [[(hosted.folder / "pane.settings.yaml").resolve()]]
+        shown = page.locator('[data-form-node="gain"] input[data-param="gain"]').input_value()
+        assert float(shown) == 5.5
+        assert opened.errors == []
+
+    def test_a_graph_with_no_settings_says_so_and_offers_no_tick_box(self, browser: Any, hosted: Hosted) -> None:
+        opened = open_hosted(browser, hosted, "graph=source&embed=1&only=settings")
+        page = opened.page
+        page.wait_for_selector('.app[data-graph="source"][data-ready="true"] [data-settings-none]')
+        assert (
+            page.locator("[data-settings-none]").inner_text() == "This graph names no settings — it has no app: block."
+        )
+        assert page.locator("[data-settings-all]").count() == 0
+        assert opened.errors == []
+
+
+#: The files graph a host workspace seeds (2026-10-05): the host's ``files`` go into ``file_source``; the Stream reads
+#: each file as an image; the root delivers the stream, reads ``input`` from ``image`` and MAY deliver a class list.
+FILES_GRAPH_TEXT = """\
+file_source: !class:recordstream.sources.files.FilesSource {}
+stream: !class:recordstream.core.stream.Stream
+  source: !ref:file_source
+  ops:
+    - !class:recordstream.ops.image.ReadImage {field: file, output: image}
+contract: !class:recordstream.ops.contract.GraphContract
+  name: classification files
+  inputs: {files: "List[str]"}
+  outputs: {stream: Stream}
+  optional: {classes: "List[str]"}
+  records: {input: Image}
+  delivered:
+    stream: !ref:stream
+    input: image
+"""
+
+#: The host wire of the files graph: the host card's ``files`` into the FilesSource's ``files``.
+FILES_HOST_WIRE = ("<host>", "files", "file_source", "files")
+
+
+class TestTheFilesGraphsHostCard:
+    """The files graph on the built page: the host card titled after the host, its dashed wire to where the host puts
+    the files, the delivered wires, the optional slot without a ``*`` — and a Delete on the dashed wire refused in the
+    server's one line, nothing changed."""
+
+    def test_it_draws_the_host_card_its_dashed_wire_and_the_delivered_wires(
+        self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path
+    ) -> None:
+        (graph_dir / "files.yaml").write_text(FILES_GRAPH_TEXT)
+        opened = open_graph("files")
+        page = opened.page
+        wait_edges(page, 5)
+        assert sorted(page.locator(".react-flow__edge").evaluate_all("es => es.map(e => e.dataset.id)")) == sorted(
+            [
+                "wire:<host>.files->file_source.files",
+                "wire:file_source.stream->stream.source",
+                "wire:stream.ops[0].op->stream.ops[0]",
+                "wire:stream.stream->contract.stream",
+                "wire:stream.ops[0].image->contract.input",
+            ]
+        )
+        host = page.locator(node_root("<host>"))
+        assert host.get_attribute("data-kind") == "host"
+        assert host.locator("[data-host-title]").inner_text() == "from the host"  # standalone
+        assert host.locator("[data-rename]").count() == 0
+        dashed = page.evaluate(
+            """(id) => getComputedStyle(
+                document.querySelector(`.react-flow__edge[data-id="${id}"] .react-flow__edge-path`)).strokeDasharray""",
+            "wire:<host>.files->file_source.files",
+        )
+        assert dashed not in ("", "none")
+        assert "wire-host" in (edge(page, *FILES_HOST_WIRE).get_attribute("class") or "")
+        rows = page.locator(f'{node_root("contract")} .row.in .label').evaluate_all(
+            "ls => ls.map(l => [l.firstChild.textContent, l.querySelector('b')?.textContent ?? ''])"
+        )
+        assert rows == [["stream", "*"], ["input", ""], ["classes", ""]]  # the optional slot has no required mark
+        assert page.locator("[data-problem]").count() == 0
+        assert opened.errors == []
+
+    def test_deleting_the_dashed_wire_is_refused_in_one_line_and_nothing_changes(
+        self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path
+    ) -> None:
+        (graph_dir / "files.yaml").write_text(FILES_GRAPH_TEXT)
+        opened = open_graph("files")
+        page = opened.page
+        wait_edges(page, 5)
+        click_wire(page, *FILES_HOST_WIRE)
+        page.keyboard.press("Delete")
+        assert warning(page) == "The host fills this when it runs the graph — it isn't a wire you can remove."
+        assert edge(page, *FILES_HOST_WIRE).count() == 1
+        assert edge_count(page) == 5
+        body = api_get(server, "api/graphs/files")
+        assert body["text"] == FILES_GRAPH_TEXT and body["dirty"] is False
+        assert page.locator(".app").get_attribute("data-dirty") == "false"
+        assert opened.errors == [REFUSED_400]
+
+    def test_in_a_hosts_panel_the_card_is_titled_after_the_host(self, browser: Any, hosted: Hosted) -> None:
+        (hosted.folder / "files.yaml").write_text(FILES_GRAPH_TEXT)
+        opened = open_hosted(browser, hosted, "graph=files&embed=1")
+        page = opened.page
+        wait_ready(page, "files")
+        title = page.locator(f'{node_root("<host>")} [data-host-title]')
+        assert title.inner_text() == f"from {BrowserHost.name}"
+        assert opened.errors == []
+
+
+# ------------------------------------------------------------------------------------------------
+# a class that is not an op is a card of its own (the user's case, 2026-10-05)
+# ------------------------------------------------------------------------------------------------
+
+#: The files graph as a host workspace's template spells it — a header, then the root's own comment line.
+FILES_TEMPLATE_TEXT = "# a template: the files graph a host workspace seeds\n" + FILES_GRAPH_TEXT.replace(
+    "contract: ", "# The graph's ROOT — what this graph must deliver.\ncontract: ", 1
+)
+
+#: The class the person picked, and the one a wire out of the root's ``classes`` takes.
+SCAN_CLASS = "recordstream.ops.contract.ClassNamesScan"
+NAMES_CLASS = "recordstream.ops.contract.ClassNamesOutput"
+
+#: Where the files graph's cards stand: every one in view, left of the side panel and clear of the minimap.
+FILES_PLACES = {
+    "<host>": (40.0, 40.0),
+    "file_source": (40.0, 200.0),
+    "stream": (380.0, 40.0),
+    "stream.ops[0]": (380.0, 300.0),
+    "contract": (720.0, 40.0),
+}
+
+
+def with_card_above_the_root(text: str, line: str) -> str:
+    """``text`` with ``line`` written directly above the root's own comment line."""
+    return text.replace("# The graph's ROOT", f"{line}\n# The graph's ROOT", 1)
+
+
+def empty_point(page: Any) -> Tuple[float, float]:
+    """A screen point on EMPTY canvas, below every card of the files graph — where a right-click opens the pane's menu
+    and a wire's release opens the palette."""
+    boxes = [page.locator(node_root(name)).bounding_box() for name in FILES_PLACES]
+    point = (boxes[-1]["x"] + 40, max(box["y"] + box["height"] for box in boxes) + 60)
+    hit = page.evaluate(
+        "([x, y]) => document.elementFromPoint(x, y)?.classList.contains('react-flow__pane')", list(point)
+    )
+    assert hit is True, point
+    return point
+
+
+class TestACardOfItsOwn:
+    """The user's case on the built page: right-click empty canvas ▸ Add Node ▸ ClassNamesScan on the files graph.
+    Measured before: a toast ``add recordstream.ops.contract.ClassNamesScan to stream.ops at [1] refused at …:12:7:
+    cannot wire stream.ops[1].object (object) into stream.ops[1] (Op) …`` with nothing selected, ``a new flow step needs
+    a name — after '<host>', it has none`` with the host card selected. Now a ``class_names_scan`` card where the
+    canvas was clicked, its line above the root's comment, no toast, nothing for Check graph. And a wire dragged out of
+    the root's ``classes`` and dropped on empty canvas, ClassNamesOutput picked: the card and its wire, ONE edit, one
+    undo."""
+
+    def _open(self, open_graph: Callable[[str], Opened], graph_dir: Path) -> Opened:
+        (graph_dir / "files.yaml").write_text(FILES_TEMPLATE_TEXT)
+        layout.write_sidecar(graph_dir / "files.layout.yaml", FILES_PLACES)
+        opened = open_graph("files")
+        wait_edges(opened.page, 5)
+        return opened
+
+    def _add_node(self, page: Any, point: Tuple[float, float], class_path: str, search: str) -> None:
+        page.mouse.click(*point, button="right")
+        page.locator('[data-context-menu="pane"] [data-submenu="add-node"]').click()
+        wait_palette_loaded(page)
+        page.locator("[data-add-node-search]").fill(search)
+        page.locator(f'[data-add-node] [data-class="{class_path}"]').click()
+
+    def test_add_node_writes_the_card_above_the_roots_comment_and_draws_it_where_the_canvas_was_clicked(
+        self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path
+    ) -> None:
+        opened = self._open(open_graph, graph_dir)
+        page = opened.page
+        point = empty_point(page)
+        self._add_node(page, point, SCAN_CLASS, "ClassNamesScan")
+        wait_saves(page, 1)
+        page.wait_for_selector(node_root("class_names_scan"))
+        body = api_get(server, "api/graphs/files")
+        assert body["text"] == with_card_above_the_root(
+            FILES_TEMPLATE_TEXT, f"class_names_scan: !class:{SCAN_CLASS} {{}}"
+        )
+        at = flow_point(page, point)
+        assert body["positions"]["class_names_scan"] == [pytest.approx(at[0], abs=1), pytest.approx(at[1], abs=1)]
+        assert page.locator(node_root("class_names_scan")).get_attribute("data-kind") == "value"
+        assert page.locator("[data-toast]").count() == 0
+        assert api_get(server, "api/graphs/files/check") == {"problems": []}
+        assert opened.errors == []
+
+    def test_with_the_host_card_selected_the_same_card(
+        self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path
+    ) -> None:
+        opened = self._open(open_graph, graph_dir)
+        page = opened.page
+        point = empty_point(page)
+        page.locator(f'{node_root("<host>")} [data-host-title]').click()
+        page.wait_for_selector('.app[data-selection="<host>"]')
+        self._add_node(page, point, SCAN_CLASS, "ClassNamesScan")
+        wait_saves(page, 1)
+        page.wait_for_selector(node_root("class_names_scan"))
+        assert api_get(server, "api/graphs/files")["text"] == with_card_above_the_root(
+            FILES_TEMPLATE_TEXT, f"class_names_scan: !class:{SCAN_CLASS} {{}}"
+        )
+        assert page.locator("[data-toast]").count() == 0
+        assert opened.errors == []
+
+    def test_a_wire_from_the_roots_classes_dropped_on_empty_canvas_picks_a_wired_card_in_one_edit(
+        self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path
+    ) -> None:
+        opened = self._open(open_graph, graph_dir)
+        page = opened.page
+        point = empty_point(page)
+        drag(page, centre(handle(page, "contract", "classes", "in").bounding_box()), point)
+        page.locator("[data-palette]").wait_for()
+        wait_palette_loaded(page)
+        page.locator("[data-palette-search]").fill("ClassNamesOutput")
+        page.locator(f'[data-palette-list] [data-class="{NAMES_CLASS}"]').click()
+        wait_saves(page, 1)
+        wait_edges(page, 6)
+        assert edge(page, "class_names_output", "class_names", "contract", "classes").count() == 1
+        body = api_get(server, "api/graphs/files")
+        wired = with_card_above_the_root(FILES_TEMPLATE_TEXT, f"class_names_output: !class:{NAMES_CLASS} {{}}")
+        assert body["text"] == wired + "    classes: !ref:class_names_output\n"
+        at = flow_point(page, point)
+        assert body["positions"]["class_names_output"] == [pytest.approx(at[0], abs=1), pytest.approx(at[1], abs=1)]
+        assert page.locator("[data-toast]").count() == 0
+        page.keyboard.press("Control+z")  # ONE undo takes the card and its wire
+        wait_saves(page, 2)
+        wait_edges(page, 5)
+        assert api_get(server, "api/graphs/files")["text"] == FILES_TEMPLATE_TEXT
+        assert opened.errors == []
