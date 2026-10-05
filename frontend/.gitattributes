@@ -1,0 +1,4 @@
+# The page's source is checked out with LF on every machine. The build record (streamstudio/canvas/.built-from) is a
+# fingerprint of these files' BYTES (streamstudio.page.fingerprint): a checkout that turned LF into CRLF (git on
+# Windows, core.autocrlf) would find the committed page out of date. Binary files are left as they are.
+* text=auto eol=lf

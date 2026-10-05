@@ -76,6 +76,11 @@ dev = [
     # validates the metadata PyPI will re-validate on upload.
     "build>=1.0.0",
     "twine>=5.0.0",
+    # The build backend itself (= [build-system] requires): tests/test_packaging.py builds the wheel
+    # with `python -m build --wheel --no-isolation` to prove the committed editor page ships in it —
+    # no isolation, because an isolated build fetches these from the network, which tests never touch.
+    "setuptools>=77",
+    "wheel",
     "black>=24.0.0,<25.0.0",
     "isort>=5.13.0,<6.0.0",
     "flake8>=6.0.0,<8.0.0",
@@ -122,16 +127,16 @@ streamstudio = "streamstudio.cli:app"
 [project.entry-points."streamstudio.custom_nodes"]
 streamstudio = "streamstudio.custom_nodes:CUSTOM_NODE_URLS"
 
-# `npm` builds the canvas page (`npm ci` when its libraries are missing, then `npm run build` ->
-# `frontend/dist`). A server's START does it when the page's source changed since its last build
-# (`streamstudio.page.ensure_page_built`); without Node the server still starts, and its start and the
-# page at `/` say "the editor's page is out of date and Node is not installed — run aisland setup".
-# macOS: brew's `node` formula bundles npm; Linux: aisland fetches the official Node LTS tarball into
-# aisland/tools/ (its USERSPACE_TOOLS registry) and symlinks node/npm/npx into aisland/bin/ — no sudo;
-# `source project.bashrc` puts aisland/bin on PATH, which is where a start looks for them.
-# The page is a build artifact beside the package, gitignored (frontend/.gitignore) and NOT in
-# package-data: an install from a wheel has no page source, is never built, and serves the API and a
-# placeholder naming the build command.
+# `node`/`npm` are for EDITING the canvas page: the built page is committed inside the package
+# (`streamstudio/canvas`, carried by package-data below), so a checkout and every install serve it without
+# Node. When the page's source (`frontend/`) changed since its committed build, a server's START rebuilds it
+# (`streamstudio.page.ensure_page_built`: `npm ci` when its libraries are missing, then `npm run build:page`
+# -> `streamstudio/canvas`) — and that rebuilt folder is committed with the source change. Without Node such a
+# start still starts, and it and the page at `/` say "the editor's page is out of date and Node is not
+# installed — run aisland setup". macOS: brew's `node` formula bundles npm; Linux: aisland fetches the
+# official Node LTS tarball into aisland/tools/ (its USERSPACE_TOOLS registry) and symlinks node/npm/npx
+# into aisland/bin/ — no sudo; `source project.bashrc` puts aisland/bin on PATH, which is where a start
+# looks for them.
 [tool.aisland.sys-dependencies]
 brew      = ["node"]
 userspace = ["node"]
@@ -146,7 +151,19 @@ include = ["streamstudio*"]
 # packages.find skips it and this is the ONLY thing that puts it in the wheel — omitted, the
 # package installs, registers every node, and has no UI. `config.default.yaml` is the palette
 # fallback read at runtime by streamstudio.bridge; `py.typed` marks the package as typed.
-streamstudio = ["py.typed", "config.default.yaml", "web/*.js"]
+# `canvas/` is the canvas editor's BUILT page (vite's output, committed; no __init__.py either), served at `/`
+# by streamstudio.app.web_dist(): its index.html, the js/css bundles, and `.built-from`, the record of the
+# source it was built from (streamstudio.page.STAMP). Source maps are never built or shipped (`*.map` matches
+# none of these patterns; tests/test_packaging.py).
+streamstudio = [
+    "py.typed",
+    "config.default.yaml",
+    "web/*.js",
+    "canvas/index.html",
+    "canvas/.built-from",
+    "canvas/assets/*.js",
+    "canvas/assets/*.css",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

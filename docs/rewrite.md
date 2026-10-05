@@ -308,9 +308,10 @@ runs `check()` on every one, and keeps JSON and YAML side by side until the flip
   - **Positions and the layout history are the page's.** The server stores what the page sends (`PUT …/positions`,
     `…/groups`); the before/after of a move, an arrange or a group lives in the page's timeline for as long as the
     page is open, and never enters the document's text history.
-  - **The built page is not in the wheel.** `frontend/dist` is gitignored, outside `package-data`, not built by CI
-    (navigaitor's precedent); an install without it serves the API and a placeholder naming the build command.
-    Shipping it is a release item for the flip (`streamstudio/TASKS.md`).
+  - **The built page is committed inside the package** (`streamstudio/canvas`, user decision B, 2026-10-04 — it was
+    gitignored in `frontend/dist` until then): `package-data` ships it, so every install serves the page and Node is
+    needed only to edit it; a test fails when the committed build does not match its source (`docs/architecture.md`,
+    "The built page is committed inside the package").
   - **The palette draws at most 200 rows**; typing narrows them. Paste inserts the copied steps' own YAML text (since
     2026-09-29), so `2.0` stays `2.0` and comments come along.
 

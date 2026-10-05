@@ -2026,16 +2026,16 @@ def editor_blueprint(
 
 
 def web_dist() -> Optional[Path]:
-    """``<repo>/frontend/dist`` when the canvas page is built there, else ``None``.
+    """``streamstudio/canvas`` inside the package when the canvas page is built there, else ``None``.
 
-    The page is a build artifact beside the package, never in it (navigaitor's shape): ``frontend/`` is
-    the committed source, ``frontend/dist`` is gitignored and produced by a server's start
-    (:func:`streamstudio.page.ensure_page_built`) or by :data:`BUILD_COMMAND`, and an install without it still
-    serves the API and a placeholder that says how to build. ``index.html`` is the test — a ``dist/`` left over
-    from an interrupted build must not be mistaken for a page.
+    The built page is COMMITTED inside the package (:func:`streamstudio.page.built_folder`), so every checkout and
+    every install — one from GitHub or a wheel, with no ``frontend/`` source at all — has it; a server's start
+    rebuilds it in a checkout whose page source changed (:func:`streamstudio.page.ensure_page_built`). Only a package
+    that carries no build at all answers ``None``, and serves the API and a placeholder that says how to build.
+    ``index.html`` is the test — a folder left over from an interrupted build must not be mistaken for a page.
     """
-    dist = page_module.FRONTEND / "dist"
-    return dist if (dist / "index.html").is_file() else None
+    built = page_module.built_folder()
+    return built if (built / "index.html").is_file() else None
 
 
 def page_blueprint(dist: Optional[Path] = None) -> Blueprint:
@@ -2053,7 +2053,7 @@ def page_blueprint(dist: Optional[Path] = None) -> Blueprint:
     ``dist`` holds.
 
     Args:
-        dist: The built page; ``None`` = the checkout's build, :func:`web_dist` (measured before 2026-10-01:
+        dist: The built page; ``None`` = the one the package carries, :func:`web_dist` (measured before 2026-10-01:
             ``page_blueprint()`` served the placeholder even with the page built, so a host had to know to pass
             ``web_dist()``). A directory without ``index.html`` serves the placeholder — how a test asks for it.
     """
@@ -2067,7 +2067,7 @@ def page_blueprint(dist: Optional[Path] = None) -> Blueprint:
 
     @blueprint.get("/")
     def index() -> Any:  # flask.Response from send_from_directory, or the placeholder str
-        problem = page_module.unbuildable(given if given is not None else page_module.FRONTEND / "dist")
+        problem = page_module.unbuildable(given if given is not None else page_module.built_folder())
         if problem is not None:
             return _unbuildable_page(problem)
         served = built()
@@ -2085,7 +2085,7 @@ def page_blueprint(dist: Optional[Path] = None) -> Blueprint:
             "<!doctype html><title>streamstudio editor</title>"
             "<h1>streamstudio editor</h1>"
             f"<p>The canvas page is not built. Build it once — <code>{html.escape(BUILD_COMMAND)}</code> — and reload; "
-            f"the page lands in <code>frontend/dist</code> beside the package. The API is up:</p>"
+            f"the page lands in <code>streamstudio/canvas</code> inside the package. The API is up:</p>"
             f"<ul>{items}</ul>{_TELL_THE_HOST}"
         )
 
@@ -2145,7 +2145,7 @@ def create_app(
     Args:
         graph_dir: The directory whose ``*.yaml`` files are the graphs (more can be opened from anywhere).
         history_depth: How many edits each document's ``undo`` can walk back.
-        web_dist: Where the built page is; ``None`` looks beside the package (:func:`web_dist`). A directory
+        web_dist: Where the built page is; ``None`` = the package's own (:func:`web_dist`). A directory
             without ``index.html`` serves the placeholder — which is how a test asks for it deterministically
             whatever the checkout holds.
         templates_dir: The templates folder; ``None`` = :func:`default_templates_dir`.

@@ -8,11 +8,14 @@ streamstudio/frontend && npm install && npm run build — and reload`` — until
 served.
 
 Every check here runs over a page folder of its own (``tmp_path``) with a FAKE ``npm`` and ``node`` on a PATH of their
-own: ``npm ci`` makes ``node_modules`` and npm's record of the install, ``npm run build`` empties ``dist`` and writes
-the page from ``src/App.tsx`` (what vite does), ``FAKE_NPM_FAIL=<ci|build>`` makes that step fail with output,
-``FAKE_NPM_HANG=<ci|build>`` makes it start a child of its own and never finish (a registry that drops the traffic),
-and ``FAKE_NPM_INTERRUPT=<ci|build>`` makes it send Ctrl+C's signal to the start while it runs. No test here runs the
-real npm or touches the checkout's ``frontend/``.
+own: ``npm ci`` makes ``node_modules`` and npm's record of the install, ``npm run build:page`` — the script a start
+runs: the page's own build, with no ``python3`` in it (``npm run build`` is the hand build that also records) — empties
+the page folder inside the package and writes the page there from ``src/App.tsx`` (what vite does: ``outDir:
+"../streamstudio/canvas"`` — a page folder ``<tmp>/frontend`` builds into ``<tmp>/streamstudio/canvas``, as a
+checkout's ``frontend/`` builds into ``streamstudio/canvas``), ``FAKE_NPM_FAIL=<ci|build>`` makes that step fail with
+output, ``FAKE_NPM_HANG=<ci|build>`` makes it start a child of its own and never finish (a registry that drops the
+traffic), and ``FAKE_NPM_INTERRUPT=<ci|build>`` makes it send Ctrl+C's signal to the start while it runs. No test here
+runs the real npm or touches the checkout's ``frontend/``.
 """
 
 import errno
@@ -81,7 +84,7 @@ here = Path.cwd()
 args = sys.argv[1:]
 with open(os.environ["FAKE_NPM_LOG"], "a") as log:
     log.write(" ".join(args) + "\\n")
-step = {{("ci",): "ci", ("run", "build"): "build"}}.get(tuple(args))
+step = {{("ci",): "ci", ("run", "build:page"): "build"}}.get(tuple(args))
 if step is None:
     sys.exit("fake npm: unexpected " + " ".join(args))
 if os.environ.get("FAKE_NPM_HANG") == step:  # npm, and a child of its own (vite, a download), never finish
@@ -103,10 +106,11 @@ if step == "ci":
     (here / "node_modules").mkdir()
     (here / "node_modules" / ".package-lock.json").write_text("{{}}")
 else:
-    shutil.rmtree(here / "dist", ignore_errors=True)
-    (here / "dist").mkdir()
+    out = Path(os.path.normpath(here / "../streamstudio/canvas"))  # vite's build.outDir, emptied first
+    shutil.rmtree(out, ignore_errors=True)
+    out.mkdir(parents=True)
     source = (here / "src" / "App.tsx").read_text()
-    (here / "dist" / "index.html").write_text("<!doctype html><title>built</title>" + source)
+    (out / "index.html").write_text("<!doctype html><title>built</title>" + source)
 print("vite v5.4.21 building for production...")
 """
 
@@ -205,6 +209,11 @@ def no_node(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     yield
 
 
+def _built(frontend: Path) -> Path:
+    """Where a build of the page in ``frontend`` lands: ``<parent>/streamstudio/canvas``, as vite writes it."""
+    return frontend.parent / "streamstudio" / "canvas"
+
+
 def _printed(capsys: pytest.CaptureFixture[str]) -> List[str]:
     return capsys.readouterr().out.splitlines()
 
@@ -254,12 +263,39 @@ class TestWhatTheBuildReads:
         (frontend / name).write_text((frontend / name).read_text() + " ")
         assert page.fingerprint(frontend) != before
 
-    @pytest.mark.parametrize("name", [".env", ".env.local", ".env.production", ".env.production.local"])
-    def test_an_env_file_the_production_build_loads_changes_the_fingerprint(self, frontend: Path, name: str) -> None:
-        """``vite build`` runs in production mode: these four are the ``.env`` files it reads."""
+    @pytest.mark.parametrize("name", [".env", ".env.production"])
+    def test_an_env_file_a_clone_carries_and_the_production_build_loads_changes_the_fingerprint(
+        self, frontend: Path, name: str
+    ) -> None:
+        """``vite build`` runs in production mode: ``.env`` and ``.env.production`` are the ``.env`` files it reads
+        that every clone has (``.env.local`` and ``.env.production.local`` are git-ignored: the next test)."""
         before = page.fingerprint(frontend)
         (frontend / name).write_text("VITE_X=1")
         assert page.fingerprint(frontend) != before
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            ".env.local",
+            ".env.production.local",
+            "src/notes.local",
+            "src/canvas/Node.tsx.local",
+            "public/favicon.svg.local",
+        ],
+    )
+    def test_a_file_git_ignores_is_never_an_input(self, frontend: Path, name: str) -> None:
+        """``frontend/.gitignore`` ignores ``*.local``: a clone never has such a file, so the committed record — which
+        every clone compares with ITS source — must not depend on one. Measured before: a ``.env.local`` on the
+        developer's machine moved the record, the guard passed there, and CI (a clone without the file) failed it; a
+        clone without Node then refused the page (``no-node``) although nothing of the page had changed. The page reads
+        no ``import.meta.env``, so such a file changes nothing the browser runs."""
+        (frontend / "public").mkdir(exist_ok=True)
+        before = page.fingerprint(frontend)
+        inputs = page.page_inputs(frontend)
+        (frontend / name).parent.mkdir(parents=True, exist_ok=True)
+        (frontend / name).write_text("VITE_DEBUG_PANEL=1")
+        assert page.fingerprint(frontend) == before
+        assert page.page_inputs(frontend) == inputs
 
     @pytest.mark.parametrize(
         "name",
@@ -282,6 +318,23 @@ class TestWhatTheBuildReads:
         (frontend / name).write_text("changed")
         assert page.fingerprint(frontend) == before
 
+    def test_the_same_source_has_the_same_fingerprint_on_every_machine(self, frontend: Path, tmp_path: Path) -> None:
+        """The committed record is compared with the source of EVERY checkout: the fingerprint reads relative paths
+        and bytes — never where the checkout is, never when its files were written."""
+        elsewhere = tmp_path / "another" / "machine" / "frontend"
+        shutil.copytree(frontend, elsewhere)
+        for path in elsewhere.rglob("*"):
+            os.utime(path, ns=(1_000_000_000, 1_000_000_000))  # a checkout writes every file at its own time
+        assert page.fingerprint(elsewhere) == page.fingerprint(frontend)
+
+    def test_a_line_ending_a_checkout_converted_is_a_change(self, frontend: Path) -> None:
+        """The con case, and why ``frontend/.gitattributes`` checks the source out with LF everywhere: the fingerprint
+        reads bytes, so a checkout that wrote ``\\r\\n`` would find the committed page out of date."""
+        before = page.fingerprint(frontend)
+        app = frontend / "src" / "App.tsx"
+        app.write_bytes(app.read_bytes().replace(b"\n", b"\r\n") + b"\r\n")
+        assert page.fingerprint(frontend) != before
+
 
 # ------------------------------------------------------------------------------------------------
 # the check at a start
@@ -296,9 +349,9 @@ class TestTheStartCheck:
         printed = _printed(capsys)
         assert printed[0] == NOT_BUILT and BUILT.match(printed[1]) and len(printed) == 2, printed
         assert check.state == "built" and list(check.said) == printed
-        assert npm.calls() == ["run build"], "node_modules is installed from this lock: no npm ci"
-        assert (frontend / "dist" / "index.html").read_text().endswith("export const App = 'first'")
-        assert (frontend / "dist" / page.STAMP).read_text().strip() == page.fingerprint(frontend)
+        assert npm.calls() == ["run build:page"], "node_modules is installed from this lock: no npm ci"
+        assert (_built(frontend) / "index.html").read_text().endswith("export const App = 'first'")
+        assert (_built(frontend) / page.STAMP).read_text().strip() == page.fingerprint(frontend)
 
     def test_an_unchanged_page_is_not_built_again_and_nothing_is_printed(
         self, frontend: Path, npm: FakeNpm, capsys: pytest.CaptureFixture[str]
@@ -308,7 +361,7 @@ class TestTheStartCheck:
         check = page.ensure_page_built(frontend)
         assert check.state == "current" and check.said == ()
         assert capsys.readouterr().out == ""
-        assert npm.calls() == ["run build"]
+        assert npm.calls() == ["run build:page"]
 
     def test_a_changed_source_file_is_built_again(
         self, frontend: Path, npm: FakeNpm, capsys: pytest.CaptureFixture[str]
@@ -320,8 +373,8 @@ class TestTheStartCheck:
         printed = _printed(capsys)
         assert printed[0] == CHANGED and BUILT.match(printed[1]) and len(printed) == 2, printed
         assert check.state == "built"
-        assert npm.calls() == ["run build", "run build"]
-        assert (frontend / "dist" / "index.html").read_text().endswith("'after the pull'")
+        assert npm.calls() == ["run build:page", "run build:page"]
+        assert (_built(frontend) / "index.html").read_text().endswith("'after the pull'")
 
     def test_a_changed_test_file_builds_nothing(
         self, frontend: Path, npm: FakeNpm, capsys: pytest.CaptureFixture[str]
@@ -330,27 +383,27 @@ class TestTheStartCheck:
         (frontend / "src" / "__tests__" / "app.test.ts").write_text("test('changed', () => {})")
         capsys.readouterr()
         assert page.ensure_page_built(frontend).state == "current"
-        assert capsys.readouterr().out == "" and npm.calls() == ["run build"]
+        assert capsys.readouterr().out == "" and npm.calls() == ["run build:page"]
 
     def test_a_page_built_by_hand_without_a_record_is_built_once(
         self, frontend: Path, npm: FakeNpm, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """A page built before this check existed (or by ``npm run build`` by hand) holds no record of its source."""
-        (frontend / "dist").mkdir()
-        (frontend / "dist" / "index.html").write_text("<!doctype html><title>built by hand</title>")
+        _built(frontend).mkdir(parents=True)
+        (_built(frontend) / "index.html").write_text("<!doctype html><title>built by hand</title>")
         check = page.ensure_page_built(frontend)
         printed = _printed(capsys)
         assert printed[0] == NO_RECORD and BUILT.match(printed[1]), printed
-        assert check.state == "built" and npm.calls() == ["run build"]
+        assert check.state == "built" and npm.calls() == ["run build:page"]
         assert page.ensure_page_built(frontend).state == "current"
 
     def test_a_record_that_is_not_a_fingerprint_counts_as_no_record(
         self, frontend: Path, npm: FakeNpm, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """Measured before: a record holding bytes that are not UTF-8 stopped the start with ``UnicodeDecodeError``."""
-        (frontend / "dist").mkdir()
-        (frontend / "dist" / "index.html").write_text("<!doctype html><title>the old page</title>")
-        (frontend / "dist" / page.STAMP).write_bytes(b"\xff\xfe")
+        _built(frontend).mkdir(parents=True)
+        (_built(frontend) / "index.html").write_text("<!doctype html><title>the old page</title>")
+        (_built(frontend) / page.STAMP).write_bytes(b"\xff\xfe")
         check = page.ensure_page_built(frontend)
         printed = _printed(capsys)
         assert printed[0] == NO_RECORD and BUILT.match(printed[1]), printed
@@ -383,7 +436,7 @@ class TestTheStartCheck:
         check = page.ensure_page_built(frontend)
         printed = _printed(capsys)
         assert printed[:2] == [NOT_BUILT, INSTALLING] and BUILT.match(printed[2]) and len(printed) == 3, printed
-        assert check.state == "built" and npm.calls() == ["ci", "run build"]
+        assert check.state == "built" and npm.calls() == ["ci", "run build:page"]
 
     def test_the_libraries_are_installed_again_when_the_lock_changed_since_the_last_install(
         self, frontend: Path, npm: FakeNpm, capsys: pytest.CaptureFixture[str]
@@ -397,9 +450,13 @@ class TestTheStartCheck:
         page.ensure_page_built(frontend)
         printed = _printed(capsys)
         assert printed[:2] == [CHANGED, INSTALLING] and BUILT.match(printed[2]), printed
-        assert npm.calls() == ["run build", "ci", "run build"]
+        assert npm.calls() == ["run build:page", "ci", "run build:page"]
         page.ensure_page_built(frontend)
-        assert npm.calls() == ["run build", "ci", "run build"], "installed and built from this lock: nothing to do"
+        assert npm.calls() == [
+            "run build:page",
+            "ci",
+            "run build:page",
+        ], "installed and built from this lock: nothing to do"
 
     def test_a_folder_without_page_source_is_never_checked(
         self, tmp_path: Path, npm: FakeNpm, capsys: pytest.CaptureFixture[str]
@@ -414,6 +471,154 @@ class TestTheStartCheck:
     def test_the_default_folder_is_the_one_beside_the_package(self) -> None:
         assert page.FRONTEND == Path(page.__file__).resolve().parent.parent / "frontend"
 
+    def test_a_build_lands_in_the_folder_inside_the_package(self, frontend: Path) -> None:
+        """``<repo>/frontend`` builds into ``<repo>/streamstudio/canvas`` — the package's own folder, so it is committed
+        and every install carries it; any page folder builds into the same place relative to it."""
+        assert page.built_folder() == Path(page.__file__).resolve().parent / "canvas"
+        assert page.built_folder(frontend) == _built(frontend)
+
+
+class TestAnInstallWithoutPageSource:
+    """An install — from GitHub, from a wheel — has no ``frontend/``: it serves the page its package carries, never the
+    placeholder, and never checks anything. Measured before: ``/`` answered ``The canvas page is not built. Build it
+    once — …`` after every ``pip install git+https://github.com/Gearlux/streamstudio.git@main``."""
+
+    @staticmethod
+    def _install(root: Path, with_page: bool) -> Path:
+        """A package folder as an install leaves it: ``streamstudio/`` with (or without) its built page, no
+        ``frontend/`` beside it. Answers where the page source WOULD be."""
+        canvas = root / "site-packages" / "streamstudio" / "canvas"
+        canvas.parent.mkdir(parents=True)
+        if with_page:
+            (canvas / "assets").mkdir(parents=True)
+            (canvas / "index.html").write_text(
+                '<!doctype html><title>the committed page</title><script src="./assets/app.js">'
+            )
+            (canvas / "assets" / "app.js").write_text("console.log('committed')")
+            (canvas / page.STAMP).write_text("ab" * 32 + "\n")
+        return root / "site-packages" / "frontend"
+
+    def test_the_page_the_package_carries_is_served_and_nothing_is_checked(
+        self, tmp_path: Path, npm: FakeNpm, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        source = self._install(tmp_path, with_page=True)
+        monkeypatch.setattr(page, "FRONTEND", source)
+        check = page.ensure_page_built()
+        assert (check.state, check.said, capsys.readouterr().out, npm.calls()) == ("no-source", (), "", [])
+        assert app_module.web_dist() == tmp_path / "site-packages" / "streamstudio" / "canvas"
+        client = _page().test_client()
+        assert client.get("/").get_data(as_text=True).startswith("<!doctype html><title>the committed page</title>")
+        assert client.get("/assets/app.js").get_data(as_text=True) == "console.log('committed')"
+
+    def test_a_package_that_carries_no_page_serves_the_placeholder(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The con case: the placeholder is left only for a package without a build at all."""
+        monkeypatch.setattr(page, "FRONTEND", self._install(tmp_path, with_page=False))
+        page.ensure_page_built()
+        assert app_module.web_dist() is None
+        assert "The canvas page is not built" in _page().test_client().get("/").get_data(as_text=True)
+
+
+class TestABuildByHand:
+    """``npm run build`` is ``python3 ../streamstudio/page.py begin && npm run build:page && python3
+    ../streamstudio/page.py``: streamstudio's own steps before and after the build, so a page built by hand records the
+    source it was made from with the ONE fingerprint (measured before: it left no record, the guard could not tell it
+    from an old page, and the next start built it once more) — the fingerprint taken BEFORE vite reads a file, and
+    refused at the end when a file changed meanwhile (measured: a line saved while vite was rendering was in the
+    record and not in the bundle, and every later start called the page current)."""
+
+    @staticmethod
+    def _checkout(frontend: Path, built: bool) -> Path:
+        """``frontend`` beside a ``streamstudio/`` holding this ``page.py`` and, when ``built``, the page vite left."""
+        package = frontend.parent / "streamstudio"
+        package.mkdir()
+        shutil.copy(page.__file__, package / "page.py")
+        if built:
+            _built(frontend).mkdir()
+            (_built(frontend) / "index.html").write_text("<!doctype html><title>built by hand</title>")
+        return package / "page.py"
+
+    def test_the_record_step_writes_the_fingerprint_and_the_next_start_needs_no_node(
+        self, frontend: Path, no_node: None, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        script = self._checkout(frontend, built=True)
+        done = subprocess.run([sys.executable, str(script)], cwd=frontend, capture_output=True, text=True, timeout=60)
+        assert done.returncode == 0, done.stderr
+        assert done.stdout.splitlines() == [
+            f"streamstudio: recorded the source of the editor's page in {_built(frontend) / page.STAMP}"
+        ]
+        assert (_built(frontend) / page.STAMP).read_text() == page.fingerprint(frontend) + "\n"
+        check = page.ensure_page_built(frontend)
+        assert (check.state, _printed(capsys)) == ("current", [])
+
+    def test_the_record_step_refuses_a_folder_without_a_built_page(self, frontend: Path) -> None:
+        """The con case: no page, no record — a record never vouches for a page that is not there."""
+        script = self._checkout(frontend, built=False)
+        done = subprocess.run([sys.executable, str(script)], cwd=frontend, capture_output=True, text=True, timeout=60)
+        assert done.returncode == 1
+        assert done.stderr.strip() == (
+            f"streamstudio: no built page in {_built(frontend)} (no index.html) — nothing to record"
+        )
+        assert not (_built(frontend) / page.STAMP).exists()
+
+    @staticmethod
+    def _run(script: Path, frontend: Path, *args: str) -> "subprocess.CompletedProcess[str]":
+        return subprocess.run(
+            [sys.executable, str(script), *args], cwd=frontend, capture_output=True, text=True, timeout=60
+        )
+
+    def test_a_source_that_did_not_change_is_recorded_and_the_note_taken_before_the_build_is_removed(
+        self, frontend: Path, no_node: None
+    ) -> None:
+        script = self._checkout(frontend, built=False)
+        begun = self._run(script, frontend, "begin")
+        assert (begun.returncode, begun.stdout, begun.stderr) == (0, "", "")
+        assert (frontend / page.BEGUN).read_text().strip() == page.fingerprint(frontend)
+        _built(frontend).mkdir()  # what vite does meanwhile
+        (_built(frontend) / "index.html").write_text("<!doctype html><title>built</title>")
+        done = self._run(script, frontend)
+        assert done.returncode == 0, done.stderr
+        assert (_built(frontend) / page.STAMP).read_text() == page.fingerprint(frontend) + "\n"
+        assert not (frontend / page.BEGUN).exists(), "the note belongs to one build"
+
+    def test_a_source_edited_while_the_page_was_built_is_not_recorded_and_the_next_start_builds_it(
+        self, frontend: Path, npm: FakeNpm, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The con case, measured: ``npm run build`` took 3 s, a line saved at ``rendering chunks`` was in the source
+        and in the record but not in the bundle, the guard passed and every start called the page ``current``."""
+        script = self._checkout(frontend, built=False)
+        assert self._run(script, frontend, "begin").returncode == 0
+        _built(frontend).mkdir()
+        (_built(frontend) / "index.html").write_text("<!doctype html><title>built from the first source</title>")
+        app = frontend / "src" / "App.tsx"
+        app.write_text(app.read_text() + "\n// saved while vite was reading the files")
+        done = self._run(script, frontend)
+        assert done.returncode == 1
+        assert done.stderr.strip() == (
+            "streamstudio: the editor's page's source changed since its build began — build again (npm run build)"
+        )
+        assert not (_built(frontend) / page.STAMP).exists()
+        assert page._built_from(_built(frontend)) != page.fingerprint(frontend), "the guard still fails"
+        check = page.ensure_page_built(frontend)
+        printed = _printed(capsys)
+        assert check.state == "built" and printed[0] == NO_RECORD, printed
+        assert (_built(frontend) / "index.html").read_text().endswith("saved while vite was reading the files")
+        assert page._built_from(_built(frontend)) == page.fingerprint(frontend)
+
+    def test_beginning_needs_no_built_page_and_leaves_one_alone(self, frontend: Path, no_node: None) -> None:
+        script = self._checkout(frontend, built=True)
+        before = (_built(frontend) / "index.html").read_text()
+        assert self._run(script, frontend, "begin").returncode == 0
+        assert (_built(frontend) / "index.html").read_text() == before
+        assert not (_built(frontend) / page.STAMP).exists()
+
+    def test_an_unknown_argument_is_refused_in_one_line(self, frontend: Path) -> None:
+        script = self._checkout(frontend, built=True)
+        done = self._run(script, frontend, "frobnicate")
+        assert done.returncode == 2 and not (_built(frontend) / page.STAMP).exists()
+        assert done.stderr.strip() == "usage: page.py [begin]   (no argument: record the page just built)"
+
 
 class TestWithoutNode:
     def test_a_page_never_built_starts_anyway_and_says_to_run_aisland_setup(
@@ -421,14 +626,14 @@ class TestWithoutNode:
     ) -> None:
         check = page.ensure_page_built(frontend)
         assert _printed(capsys) == [NO_NODE_NOT_BUILT]
-        assert check.state == "no-node" and not (frontend / "dist").exists()
+        assert check.state == "no-node" and not _built(frontend).exists()
 
     def test_an_out_of_date_page_starts_anyway_and_says_to_run_aisland_setup(
         self, frontend: Path, no_node: None, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        (frontend / "dist").mkdir()
-        (frontend / "dist" / "index.html").write_text("<!doctype html><title>the old page</title>")
-        (frontend / "dist" / page.STAMP).write_text("0" * 64)
+        _built(frontend).mkdir(parents=True)
+        (_built(frontend) / "index.html").write_text("<!doctype html><title>the old page</title>")
+        (_built(frontend) / page.STAMP).write_text("0" * 64)
         check = page.ensure_page_built(frontend)
         assert _printed(capsys) == [NO_NODE_OUT_OF_DATE]
         assert check.state == "no-node"
@@ -447,19 +652,19 @@ class TestWithoutNode:
     ) -> None:
         """A page built by hand (or before the record existed) may well be current: without Node the start cannot
         tell, so it keeps serving it — measured before: ``/`` stopped serving it and said it was out of date."""
-        (frontend / "dist").mkdir()
-        (frontend / "dist" / "index.html").write_text("<!doctype html><title>built by hand</title>")
+        _built(frontend).mkdir(parents=True)
+        (_built(frontend) / "index.html").write_text("<!doctype html><title>built by hand</title>")
         check = page.ensure_page_built(frontend)
         assert _printed(capsys) == [NO_NODE_NO_RECORD]
         assert check.state == "unverified"
-        assert page.unbuildable(frontend / "dist") is None
-        assert _page(frontend / "dist").test_client().get("/").get_data(as_text=True) == (
+        assert page.unbuildable(_built(frontend)) is None
+        assert _page(_built(frontend)).test_client().get("/").get_data(as_text=True) == (
             "<!doctype html><title>built by hand</title>"
         )
 
 
 class TestAFailingBuild:
-    @pytest.mark.parametrize("step, command", [("build", "npm run build"), ("ci", "npm ci")])
+    @pytest.mark.parametrize("step, command", [("build", "npm run build:page"), ("ci", "npm ci")])
     def test_the_start_goes_on_and_prints_npms_last_lines(
         self, frontend: Path, npm: FakeNpm, capsys: pytest.CaptureFixture[str], step: str, command: str
     ) -> None:
@@ -476,7 +681,7 @@ class TestAFailingBuild:
         ]
         assert check.state == "failed" and check.why == f"{command} exited with code 2"
         assert "error TS2304" in check.output
-        assert not (frontend / "dist" / page.STAMP).exists()
+        assert not (_built(frontend) / page.STAMP).exists()
 
     def test_an_npm_that_cannot_be_started_is_a_failure_not_a_traceback(
         self, frontend: Path, npm: FakeNpm, capsys: pytest.CaptureFixture[str]
@@ -496,9 +701,9 @@ class TestAFailingBuild:
         npm.fail(None)
         _the_next_start(monkeypatch)
         assert page.ensure_page_built(frontend).state == "built"
-        assert npm.calls() == ["run build", "run build"]
+        assert npm.calls() == ["run build:page", "run build:page"]
 
-    @pytest.mark.parametrize("step, command", [("build", "npm run build"), ("ci", "npm ci")])
+    @pytest.mark.parametrize("step, command", [("build", "npm run build:page"), ("ci", "npm ci")])
     def test_an_npm_that_never_finishes_is_stopped_with_everything_it_started(
         self,
         frontend: Path,
@@ -523,7 +728,7 @@ class TestAFailingBuild:
         assert check.state == "failed" and check.why == f"{command} did not finish in 1 s"
         npm_pid, its_child = npm.pids()
         assert not _still_running(npm_pid) and not _still_running(its_child)
-        assert not (frontend / "dist" / page.STAMP).exists()
+        assert not (_built(frontend) / page.STAMP).exists()
 
     def test_ctrl_c_while_npm_runs_ends_the_start_in_one_line_and_stops_npm(self, frontend: Path, npm: FakeNpm) -> None:
         """Measured before: a 45-line traceback ending ``KeyboardInterrupt`` and exit code -2."""
@@ -564,9 +769,9 @@ class TestTwoStartsAtOnce:
             thread.start()
             assert arrived.wait(timeout=30), "the second start never asked for the folder's lock"
             assert thread.is_alive(), "the second start did not wait for the first"
-            (frontend / "dist").mkdir()  # what the first start's build leaves
-            (frontend / "dist" / "index.html").write_text("<!doctype html><title>built by the first</title>")
-            (frontend / "dist" / page.STAMP).write_text(page.fingerprint(frontend))
+            _built(frontend).mkdir(parents=True)  # what the first start's build leaves
+            (_built(frontend) / "index.html").write_text("<!doctype html><title>built by the first</title>")
+            (_built(frontend) / page.STAMP).write_text(page.fingerprint(frontend))
         thread.join(timeout=30)
         assert [check.state for check in results] == ["current"]
         assert results[0].said == (WAITING,), "measured before: the second start waited 31 s and said nothing"
@@ -601,7 +806,7 @@ class TestOneStartChecksOnce:
         capsys.readouterr()
         again = page.ensure_page_built(frontend)
         assert capsys.readouterr().out == ""
-        assert npm.calls() == ["run build"]
+        assert npm.calls() == ["run build:page"]
         assert (again.state, again.why, again.output, again.said) == ("failed", first.why, first.output, ())
 
     def test_without_node_the_line_is_printed_once(
@@ -633,8 +838,8 @@ class TestOneStartChecksOnce:
         capsys.readouterr()
         taken = page.ensure_page_built(frontend)
         assert (taken.state, taken.why, taken.output) == ("failed", first.why, first.output)
-        assert capsys.readouterr().out == "" and npm.calls() == ["run build"]
-        problem = page.unbuildable(frontend / "dist")
+        assert capsys.readouterr().out == "" and npm.calls() == ["run build:page"]
+        problem = page.unbuildable(_built(frontend))
         assert problem is not None and problem.state == "failed", "the served page says the build failed"
         assert page.HANDED_DOWN not in os.environ, "the answer is for that one process, not for what it starts"
 
@@ -671,26 +876,26 @@ class TestOneStartChecksOnce:
 
 class TestThePageServed:
     def test_a_page_built_after_the_app_was_made_is_served(self, frontend: Path) -> None:
-        client = _page(frontend / "dist").test_client()
+        client = _page(_built(frontend)).test_client()
         assert "The canvas page is not built" in client.get("/").get_data(as_text=True)
-        (frontend / "dist").mkdir()
-        (frontend / "dist" / "index.html").write_text("<!doctype html><title>built</title>")
-        (frontend / "dist" / "app.js").write_text("console.log(1)")
+        _built(frontend).mkdir(parents=True)
+        (_built(frontend) / "index.html").write_text("<!doctype html><title>built</title>")
+        (_built(frontend) / "app.js").write_text("console.log(1)")
         assert client.get("/").get_data(as_text=True) == "<!doctype html><title>built</title>"
         assert client.get("/app.js").status_code == 200
 
     def test_without_node_the_page_says_so_instead_of_serving_the_old_page(self, frontend: Path, no_node: None) -> None:
-        (frontend / "dist").mkdir()
-        (frontend / "dist" / "index.html").write_text("<!doctype html><title>the old page</title>")
-        (frontend / "dist" / page.STAMP).write_text("0" * 64)  # built from another source: out of date
+        _built(frontend).mkdir(parents=True)
+        (_built(frontend) / "index.html").write_text("<!doctype html><title>the old page</title>")
+        (_built(frontend) / page.STAMP).write_text("0" * 64)  # built from another source: out of date
         page.ensure_page_built(frontend)
-        text = _page(frontend / "dist").test_client().get("/").get_data(as_text=True)
+        text = _page(_built(frontend)).test_client().get("/").get_data(as_text=True)
         assert "The editor&#x27;s page is out of date and Node is not installed — run aisland setup" in text, text
         assert "the old page" not in text
 
     def test_without_node_a_page_never_built_says_so(self, frontend: Path, no_node: None) -> None:
         page.ensure_page_built(frontend)
-        text = _page(frontend / "dist").test_client().get("/").get_data(as_text=True)
+        text = _page(_built(frontend)).test_client().get("/").get_data(as_text=True)
         assert "The editor&#x27;s page is not built and Node is not installed — run aisland setup" in text, text
 
     def test_a_failed_build_says_so_names_the_command_that_shows_why_and_its_last_lines(
@@ -698,7 +903,7 @@ class TestThePageServed:
     ) -> None:
         npm.fail("build")
         page.ensure_page_built(frontend)
-        text = _page(frontend / "dist").test_client().get("/").get_data(as_text=True)
+        text = _page(_built(frontend)).test_client().get("/").get_data(as_text=True)
         assert "Building the editor&#x27;s page failed when this server started" in text, text
         assert page.BUILD_COMMAND.replace("&", "&amp;") in text
         assert "error TS2304: Cannot find name &#x27;oops&#x27;." in text
@@ -706,7 +911,7 @@ class TestThePageServed:
     def test_a_later_good_build_serves_the_page_again(
         self, frontend: Path, npm: FakeNpm, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        client = _page(frontend / "dist").test_client()
+        client = _page(_built(frontend)).test_client()
         npm.fail("build")
         page.ensure_page_built(frontend)
         npm.fail(None)
@@ -795,7 +1000,7 @@ class TestAHostPanelIsToldThePageIsUnavailable:
             thread.join(timeout=10)
 
     def test_the_placeholder_tells_the_panel(self, frontend: Path) -> None:
-        assert self._messages(frontend / "dist", "/studio/?embed=1") == [
+        assert self._messages(_built(frontend), "/studio/?embed=1") == [
             {"source": "streamstudio", "type": "unavailable"}
         ]
 
@@ -805,7 +1010,7 @@ class TestAHostPanelIsToldThePageIsUnavailable:
             empty.mkdir()
             only_here.setenv("PATH", str(empty))
             assert page.ensure_page_built(frontend).state == "no-node"
-        assert self._messages(frontend / "dist", "/studio/?graph=sink&embed=1") == [
+        assert self._messages(_built(frontend), "/studio/?graph=sink&embed=1") == [
             {"source": "streamstudio", "type": "unavailable"}
         ]
 
@@ -814,13 +1019,13 @@ class TestAHostPanelIsToldThePageIsUnavailable:
             npm = FakeNpm(tmp_path, only_here)
             npm.fail("build")
             assert page.ensure_page_built(frontend).state == "failed"
-        assert self._messages(frontend / "dist", "/studio/?embed=1") == [
+        assert self._messages(_built(frontend), "/studio/?embed=1") == [
             {"source": "streamstudio", "type": "unavailable"}
         ]
 
     def test_a_page_outside_a_hosts_panel_posts_nothing(self, frontend: Path) -> None:
         """The con case: without ``?embed=1`` the page is not in a host's panel, and says nothing to its parent."""
-        assert self._messages(frontend / "dist", "/studio/") == []
+        assert self._messages(_built(frontend), "/studio/") == []
 
 
 # ------------------------------------------------------------------------------------------------
