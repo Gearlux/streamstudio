@@ -28,14 +28,14 @@ from streamstudio.bridge import _build_op_node
 from streamstudio.export import JOIN_CLASS_TYPE, UnsupportedTopologyError, compile_flow_documents, fold_branches
 from streamstudio.graphio import flow_yaml_to_workflow, workflow_to_yaml, yaml_to_workflow
 
-waivefront = pytest.importorskip("waivefront")
+waivefront = pytest.importorskip("waivefront.analysis")
 confluid = pytest.importorskip("confluid")
 
 RECORD = "RECORDSTREAM_RECORD"
 
 
 def _bte_yaml() -> str:
-    from waivefront.annotation import templates
+    from waivefront.analysis.annotation import templates
 
     return Path(templates()["signal"]["view_bte"]).with_suffix(".yaml").read_text()
 
@@ -268,14 +268,14 @@ class TestTheChainFoldsBack:
         differs), so it is compared against the default it equals."""
         import inspect
 
-        from waivefront import processing
+        from waivefront import analysis, processing
 
         workflow = flow_yaml_to_workflow(_bte_yaml(), NODE_CLASS_MAPPINGS, as_="graph", name="bte_view")
         exported = _ops_of(workflow_to_yaml(workflow, NODE_CLASS_MAPPINGS))
         source = _steps_of(_bte_yaml())
         assert [name for name, _ in exported] == [name for name, _ in source]
         for (name, got), (_, wanted) in zip(exported, source):
-            cls = getattr(processing, name)
+            cls = getattr(analysis, name, None) or getattr(processing, name)
             # A value the canvas does not carry falls back to the op's OWN default — what the
             # constructor stores for it (a `None` default the op turns into its built-in table).
             built = cls()
