@@ -14,6 +14,7 @@
 import { createContext, useContext } from "react";
 import type { Run } from "./api";
 import type { Group, Rect } from "./groups";
+import type { HostInfo } from "./host";
 import type { Form, Json, Supertypes } from "./model";
 
 /** What is being renamed in place: `node:<name>` (a node's title) or `group:<id>` (a box's title). */
@@ -26,6 +27,8 @@ export interface EditorApi {
    * and committed it into the second when the field was left.
    */
   graph: string;
+  /** The app the editor is mounted in (`GET api/workspace`), `null` standalone — the host card's title names it. */
+  host: HostInfo | null;
   form: Form;
   types: Supertypes;
   /** The latest run of this graph, or `null` — what the nodes paint their status from. */
@@ -60,6 +63,7 @@ const refused = async () => false;
 
 export const EditorContext = createContext<EditorApi>({
   graph: "",
+  host: null,
   form: {},
   types: {},
   run: null,

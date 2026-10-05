@@ -22,6 +22,7 @@ const idle: CommandState = {
   dirty: false,
   selected: 0,
   groupSelected: false,
+  wireSelected: false,
   clipboard: false,
   run: false,
   paused: false,
@@ -161,12 +162,31 @@ describe("enabled — an item is greyed when it cannot act", () => {
       expect(enabled(id, { ...idle, selected: 2 }), id).toBe(true);
     }
     expect(enabled("delete", { ...idle, groupSelected: true })).toBe(true);
+    expect(enabled("delete", { ...idle, wireSelected: true })).toBe(true); // a selected wire is removed
+    for (const id of ["cut", "copy", "group", "rename"] as CommandId[]) expect(enabled(id, { ...idle, wireSelected: true }), id).toBe(false);
   });
 
   it("rename acts on exactly one node, or on a selected group", () => {
     expect(enabled("rename", { ...idle, selected: 1 })).toBe(true);
     expect(enabled("rename", { ...idle, selected: 2 })).toBe(false);
     expect(enabled("rename", { ...idle, groupSelected: true })).toBe(true);
+  });
+
+  it("the host card is no node of the document: Rename… and Delete are greyed on it alone (2026-10-05)", () => {
+    // measured before: F2 on the host card opened no field and said nothing (TASKS.md); Delete was refused by the server
+    const host = { ...idle, selected: 1, hostSelected: true };
+    expect(enabled("rename", host)).toBe(false);
+    expect(enabled("delete", host)).toBe(false);
+    // a group or a wire selected beside it is still what Delete removes
+    expect(enabled("delete", { ...host, wireSelected: true })).toBe(true);
+    expect(enabled("delete", { ...host, groupSelected: true })).toBe(true);
+  });
+
+  it("with the host card in a mixed selection Delete acts on the document cards; Rename… stays one card's", () => {
+    const mixed = { ...idle, selected: 2, hostSelected: true };
+    expect(enabled("delete", mixed)).toBe(true);
+    expect(enabled("rename", mixed)).toBe(false);
+    expect(enabled("rename", { ...idle, selected: 1, hostSelected: false })).toBe(true); // the CON case
   });
 
   it("paste needs something copied", () => {

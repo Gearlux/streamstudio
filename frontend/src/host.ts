@@ -53,6 +53,14 @@ export function hostOf(workspace: unknown): HostInfo | null {
   return { name: named.trim() === "" ? "the host" : named.trim() };
 }
 
+/**
+ * The title of the host card (`<host>`) — what the host hands the graph when it runs it, never a node of the document:
+ * `from annotaide` in a host's panel, `from the host` standalone.
+ */
+export function hostCardTitle(host: HostInfo | null): string {
+  return `from ${host?.name ?? "the host"}`;
+}
+
 /** The socket a stream's records come from (`document.SOURCE`'s slot). */
 const SOURCE_SLOT = "source";
 

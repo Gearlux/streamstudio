@@ -7,7 +7,7 @@
  * other step. On a `Stream` the pick becomes a member of its `ops:` list instead — `oplists.ts` decides where.
  */
 import type { NodeSpec } from "./api";
-import { compatible, type Graph, type SocketType, type Supertypes } from "./model";
+import { compatible, type Graph, type Model, type ModelNode, type SocketType, type Supertypes } from "./model";
 
 /** The most rows the palette draws; the catalogue is hundreds of classes, and typing narrows it. */
 export const PALETTE_ROWS = 200;
@@ -91,16 +91,36 @@ export function spotBeside(
 }
 
 /**
- * The node a picked (or pasted) class goes after: the selected node when the model has it, else the flow's
- * output, else the last node the document spells (a `Stream`'s last op) — never the host's side or the
- * contract root, which are not steps. `undefined` when there is nothing to go after.
+ * Whether a node can be what an added step goes after: never the host's side (`<host>` — drawn, never written) nor the
+ * graph's root (`contract` — what the graph delivers, no step). The user's rule (2026-10-05): measured before, Add Node
+ * with the host card selected sent `{after: "<host>"}` and the server answered `a new flow step needs a name`.
+ */
+export const isAnchor = (node: Pick<ModelNode, "kind">): boolean => node.kind !== "host" && node.kind !== "contract";
+
+/**
+ * The node an add goes after, read off a selection: its LAST node the level draws that can be one (`isAnchor`) — so a
+ * selection holding only the host card or the root counts as none, and a mixed one acts on its document card.
+ */
+export function selectedAnchor(view: Pick<Model, "nodes">, selected: readonly string[]): string | undefined {
+  for (let index = selected.length - 1; index >= 0; index--) {
+    const found = view.nodes.find((node) => node.name === selected[index]);
+    if (found !== undefined && isAnchor(found)) return found.name;
+  }
+  return undefined;
+}
+
+/**
+ * The node a picked (or pasted) class goes after: the selected node when the model has it and it can be one
+ * (`isAnchor`), else the flow's output, else the last node the document spells (a `Stream`'s last op) — never the
+ * host's side or the contract root, which are not steps. `undefined` when there is nothing to go after.
  */
 export function stepAnchor(graph: Pick<Graph, "model">, selected: string | undefined): string | undefined {
   const names = graph.model.nodes.map((node) => node.name);
-  if (selected !== undefined && names.includes(selected)) return selected;
+  const chosen = graph.model.nodes.find((node) => node.name === selected);
+  if (chosen !== undefined && isAnchor(chosen)) return chosen.name;
   const output = graph.model.outputs.find((name) => names.includes(name));
   if (output !== undefined) return output;
-  const spelled = graph.model.nodes.filter((node) => node.kind !== "host" && node.kind !== "contract");
+  const spelled = graph.model.nodes.filter(isAnchor);
   return spelled.length > 0 ? spelled[spelled.length - 1].name : undefined;
 }
 

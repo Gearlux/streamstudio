@@ -1,7 +1,9 @@
 /**
  * The Nodes sidebar's pure half: the catalogue `GET api/palette` serves (every `@configurable` class the server can
- * describe) grouped by PACKAGE — the first segment of the class path, the thing a person knows a class by — then by
- * KIND, in the order a pipeline is read (sources, ops, … values, contracts), each non-empty section only. The search
+ * describe) as a TREE of folders — by PACKAGE (the first segment of the class path, the thing a person knows a class
+ * by), then by KIND in the order a pipeline is read (sources, ops, … values, contracts), then one folder per segment
+ * of the class's `@configurable(group=...)` path (`group="fourier/numpy"`: waivefront ▸ Ops ▸ fourier ▸ numpy) —
+ * confluid's presentation group, which exists for exactly this nesting. Only non-empty folders exist. The search
  * narrows by every typed word, the chips say what an entry reads and writes, and the parameter rows are what its
  * hover card lists. `panels/NodesSidebar.tsx` draws it; `menu/AddNodeMenu.tsx` reuses the kind order and the search.
  */
@@ -40,10 +42,25 @@ export function addableSpecs(specs: NodeSpec[]): NodeSpec[] {
 /** The package a class comes from: the first segment of its path. */
 export const packageOf = (classPath: string): string => classPath.split(".")[0];
 
-export interface KindSection {
+/**
+ * A folder of the tree: a kind inside a package, or one segment of a group path inside a kind or another group. Its
+ * sub-folders come first, alphabetically, then the classes that sit in it directly, by name.
+ */
+export interface Folder {
+  /** What its head shows: a group segment (`numpy`); for a kind, the kind (`op`). */
+  name: string;
+  /** Its path from the package, `/`-joined (`waivefront/op/fourier/numpy`) — what the sidebar remembers it under. */
+  key: string;
+  /** Every class beneath it, at any depth. */
+  count: number;
+  folders: Folder[];
+  /** The classes directly in it — for a kind, the ones whose class declares no group. */
+  specs: NodeSpec[];
+}
+
+export interface KindSection extends Folder {
   kind: string;
   label: string;
-  specs: NodeSpec[];
 }
 
 export interface PackageSection {
@@ -57,7 +74,34 @@ const kindRank = (kind: string): number => {
   return index < 0 ? KIND_ORDER.length : index;
 };
 
-/** Packages alphabetically; inside each, the kinds in `KIND_ORDER` (an unknown kind after, alphabetically); entries by name. */
+/** The segments of a `@configurable` group path; an absent group, and empty segments (`a//b`, a leading `/`), are none. */
+const groupPath = (group: string): string[] => group.split("/").filter((segment) => segment !== "");
+
+/** The folder `key` holding `specs`, each placed one folder deeper per segment of its group past `depth`. */
+function folder(name: string, key: string, specs: NodeSpec[], depth: number): Folder {
+  const direct: NodeSpec[] = [];
+  const deeper = new Map<string, NodeSpec[]>();
+  for (const spec of specs) {
+    const segment = groupPath(spec.group)[depth];
+    if (segment === undefined) direct.push(spec);
+    else deeper.set(segment, [...(deeper.get(segment) ?? []), spec]);
+  }
+  return {
+    name,
+    key,
+    count: specs.length,
+    folders: [...deeper.entries()]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([segment, entries]) => folder(segment, `${key}/${segment}`, entries, depth + 1)),
+    specs: direct.sort((a, b) => a.name.localeCompare(b.name) || a.class_path.localeCompare(b.class_path)),
+  };
+}
+
+/**
+ * Packages alphabetically; inside each, the kinds in `KIND_ORDER` (an unknown kind after, alphabetically); inside a
+ * kind, the folders of its classes' groups (see `Folder`). A package's own key is its name — the key the sidebar
+ * remembered an unfolded package under before kinds and groups folded too.
+ */
 export function groupSpecs(specs: NodeSpec[]): PackageSection[] {
   const byPackage = new Map<string, Map<string, NodeSpec[]>>();
   for (const spec of specs) {
@@ -70,12 +114,8 @@ export function groupSpecs(specs: NodeSpec[]): PackageSection[] {
     .map(([name, kinds]) => {
       const sections = [...kinds.entries()]
         .sort(([a], [b]) => kindRank(a) - kindRank(b) || a.localeCompare(b))
-        .map(([kind, entries]) => ({
-          kind,
-          label: kindLabel(kind),
-          specs: [...entries].sort((a, b) => a.name.localeCompare(b.name) || a.class_path.localeCompare(b.class_path)),
-        }));
-      return { name, count: sections.reduce((total, section) => total + section.specs.length, 0), kinds: sections };
+        .map(([kind, entries]): KindSection => ({ ...folder(kind, `${name}/${kind}`, entries, 0), kind, label: kindLabel(kind) }));
+      return { name, count: sections.reduce((total, section) => total + section.count, 0), kinds: sections };
     });
 }
 

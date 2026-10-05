@@ -164,6 +164,18 @@ export function findNode(model: Model, name: string): ModelNode | undefined {
 /** A subgraph's `<in>` / `<out>`: where the record enters and leaves it — drawn, never a step an edit acts on. */
 export const isBoundary = (node: ModelNode): boolean => node.kind === "boundary";
 
+/** The host card (`<host>`): what a host hands the graph — drawn, never written, so no edit renames or removes it. */
+export const isHostCard = (node: Pick<ModelNode, "kind">): boolean => node.kind === "host";
+
+/**
+ * `names` less the host card, in their own order — what Delete removes of a selection: with the host card in it, Delete
+ * acts on the document cards and leaves the host card where it is (the user's rule, 2026-10-05).
+ */
+export function withoutHost(view: Pick<Model, "nodes">, names: readonly string[]): string[] {
+  const hosts = new Set(view.nodes.filter(isHostCard).map((node) => node.name));
+  return names.filter((name) => !hosts.has(name));
+}
+
 /** The level's nodes a gesture acts on, in the model's order, boundaries left out — only those in `names`, if given. */
 export function stepNames(view: Model, names?: Iterable<string>): string[] {
   const wanted = names === undefined ? undefined : new Set(names);

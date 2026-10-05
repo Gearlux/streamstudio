@@ -2,7 +2,7 @@
 
 A consuming app mounts the editor's two blueprints under one prefix of its own (``/studio`` here) and passes a
 HOST: any object with a ``name`` (``GET /api/workspace`` answers ``host: {name}``, how the page knows it is mounted)
-and three methods (:class:`streamstudio.app.EditorHost`) —
+and four methods (:class:`streamstudio.app.EditorHost`) —
 
 * ``folder()`` names the folder the editor serves, asked at EACH request: a host that moves its state folder (the
   annotation workspace does on a workspace's first save) is followed, and a graph the editor holds unsaved follows
@@ -237,6 +237,9 @@ class FakeHost:
         if self.saved_error is not None:
             raise RuntimeError(self.saved_error)
 
+    def shipped(self) -> Mapping[str, Path]:
+        return {}
+
 
 def host_app(host: FakeHost, dist: Optional[Path] = None) -> Flask:
     """A host app as a consuming workspace builds it: its OWN routes (an ``/api/workspace`` of its own among them)
@@ -303,7 +306,7 @@ def _error(response: Any) -> str:
 
 
 class TestTheMount:
-    def test_a_host_is_any_object_with_the_three_methods(self, host: FakeHost) -> None:
+    def test_a_host_is_any_object_with_the_four_methods(self, host: FakeHost) -> None:
         assert isinstance(host, EditorHost)
         assert not isinstance(object(), EditorHost)
 

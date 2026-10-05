@@ -5,8 +5,8 @@ The editor never keeps a second document (``docs/rewrite.md`` §2.1). :class:`Do
 a YAML text, derives a :class:`Model` — nodes with typed sockets, wires, located problems —
 from ``confluid.load(path, until="document", texts=…)`` — the file, as the texts it holds spell
 it (markers kept, ``!ref`` kept, every marker stamped ``file:line:col``) — and every edit
-(``set_param``, ``add_step``, ``remove_step``, ``rename_node``) patches the TEXT through
-:mod:`streamstudio._yamltext`, re-derives, and is refused before anything is written when the
+(``set_param``, ``add_step``, ``add_node``, ``remove_step``, ``rename_node``, ``add_wire``, ``remove_wires``)
+patches the TEXT through :mod:`streamstudio._yamltext`, re-derives, and is refused before anything is written when the
 document no longer loads or :meth:`Document.check` gains a problem. Measured against the
 alternative: a re-dump of the shipped Bluetooth pane loses its 148 comment lines and bakes
 ``$DATA_ROOT`` in; a patch changes one line.
@@ -15,21 +15,26 @@ Three things the model is built from, and nothing else:
 
 * **the declarations** — ``recordstream.algorithm_spec`` for an ``Algorithm`` (its ``Input`` /
   ``Output`` slots are the node's entry sockets, typed by the item class), an op's own
-  ``consumes`` / ``produces`` / ``flags`` / ``reports`` for anything else, ``confluid.input_specs``
-  / ``output_specs`` / ``to_pydantic`` for constructor parameters and ``@output`` properties,
-  ``GraphContract.inputs`` / ``outputs`` for a graph's boundary;
+  ``consumes`` / ``produces`` / ``flags`` / ``reports`` for anything else, a source's ``produces`` for
+  its record-entry outputs, ``confluid.input_specs`` / ``output_specs`` / ``to_pydantic`` for
+  constructor parameters and ``@output`` properties, ``GraphContract.inputs`` / ``outputs`` /
+  ``records`` for a graph's boundary;
 * **the item registry** — ``recordstream.items`` names every socket type an entry can have, and
   ``issubclass`` between two registered items is the one subtyping rule a wire may lean on;
 * **the document's own shape** — a nested marker is a node wired into its parent's slot, a list
-  member is ``slot[i]``, a ``!ref:`` is a wire, a ``flow:`` step's ``from:`` / ``merge_from:`` /
-  ``bind:`` / ``requires`` are record, bind and gate wires.
+  member is ``slot[i]``, a ``!ref:`` is a wire, a root's ``delivered: {input: image}`` is a wire from
+  the card writing ``image`` into the stream it delivers, a ``flow:`` step's ``from:`` /
+  ``merge_from:`` / ``bind:`` / ``requires`` are record, bind and gate wires.
 
 Node names follow ``recordstream.flow.Tracer``: a flow step by its key, a list member by
 ``path[i]`` (``stream.ops[1]``), a nested marker by its document path (``processor.stream``),
-the contract root by its key, and — for a graph WITHOUT a contract — whatever the host must
-provide as ONE synthetic node ``<host>``. A graph with a contract needs no such node: the
-contract's ``inputs`` ARE the host's side, and an entry nothing produces is refused by
-recordstream's own chain check (``Tracer.check`` → ``check_chain``) in its own words.
+the contract root by its key, and the host's side as ONE synthetic node ``<host>`` — for a graph
+WITHOUT a contract, whatever its steps read that nothing produces; for a ROOTED graph, what its
+contract's ``inputs`` declare (``files · List[str]``; an item-typed input is an entry of the record
+the host hands in), and nothing more: an entry nothing produces is then refused by recordstream's own
+chain check (``Tracer.check`` → ``check_chain``) in its own words. Where the host PUTS an input when it
+runs the graph — the parameter of that name on exactly one card of the delivered stream's source chain
+(a ``FilesSource``'s ``files``) — is a derived ``host`` wire: drawn, never written, never removed.
 
 A types-only declaration (a ``Transform``'s tuple of classes) gives no entry sockets: nothing
 can be checked by name there, the node carries a note saying so, and the run shows the truth
@@ -52,6 +57,7 @@ mapping, so renaming an outer ``grey`` never touches an inner ``from: grey``.
 
 import copy
 import errno
+import functools
 import importlib
 import importlib.metadata
 import inspect
@@ -61,7 +67,7 @@ import sys
 import threading
 from collections import Counter
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import ModuleType
 from typing import (
@@ -80,6 +86,7 @@ from typing import (
     Sequence,
     Set,
     Tuple,
+    TypeVar,
     Union,
     cast,
     get_args,
@@ -109,6 +116,20 @@ from recordstream.items import get_item_type, item_type_names, item_types
 from recordstream.ops.contract import GRAPH_SLOT_KINDS, ChainContractError, ContractError, GraphContract
 
 from streamstudio._yamltext import Edit, YamlText, dedent, indent_lines, is_subgraph_marker, spell, spell_mapping
+from streamstudio.settings import (
+    LOCKED,
+    SETTINGS_ONLY,
+    Declared,
+    GraphMode,
+    SettingNode,
+    composed,
+    declared_settings,
+    graph_mode,
+    graph_name,
+    read_settings,
+    set_setting,
+)
+from streamstudio.settings import settings_path as settings_path_of
 
 if TYPE_CHECKING:  # the annotation only: layout is imported on first use (`_layout`), a separate concern
     from recordstream.flow.subgraph import Steps, Subgraph
@@ -142,7 +163,9 @@ NodeKind = Literal[
     "subgraph",
     "boundary",
 ]
-WireKind = Literal["record", "entry", "gate", "bind", "ref", "delivered", "list"]
+#: ``host`` is the one wire no text spells: where the host puts what it hands a rooted graph
+#: (:meth:`_Builder.host_wires`).
+WireKind = Literal["record", "entry", "gate", "bind", "ref", "delivered", "list", "host"]
 
 RECORD: SocketType = "Record"
 STREAM: SocketType = "Stream"
@@ -153,7 +176,8 @@ LIST_STR: SocketType = "List[str]"
 OBJECT: SocketType = "object"
 ANY: SocketType = "*"
 
-#: The synthetic node standing for what a contract-less graph's host provides.
+#: The synthetic node standing for what the host provides: a contract-less graph's unproduced reads, a rooted graph's
+#: declared ``inputs``. Never a node of the document — no parameters, never renamed, removed or written.
 HOST = "<host>"
 #: What joins a subgraph's name and an inner node's (``prep/grey``) — the engine's own separator, so the
 #: canvas, the sidecar and the tracer's descent spell a node inside a subgraph the same way.
@@ -863,7 +887,7 @@ def _describe(cls: type, kind: NodeKind, kwargs: Dict[str, Any], marker: Target)
             outputs.append(Socket(f"report:{declaration.reports}", "string", doc="this node's finding"))
         note = declaration.types_only
     elif kind == "source":
-        outputs = [Socket("stream", SOURCE), *_output_sockets(cls)]
+        outputs = [Socket("stream", SOURCE), *_entry_outputs(cls, instance), *_output_sockets(cls)]
     elif kind == "engine":
         outputs = [Socket("stream", STREAM), *_output_sockets(cls)]
     elif kind == "sink":
@@ -875,26 +899,57 @@ def _describe(cls: type, kind: NodeKind, kwargs: Dict[str, Any], marker: Target)
     return _Description(params, inputs, outputs, note, instance, declaration, error)
 
 
-def _describe_contract(kwargs: Dict[str, Any]) -> _Description:
-    """A ``GraphContract``: one INPUT per declared output slot, one OUTPUT per declared input.
+def _entry_outputs(cls: type, instance: Any) -> List[Socket]:  # instance: the built source of any class, or None
+    """A source's record entries as OUTPUT sockets — its ``produces`` (``{"image": "Image", "class": "Label"}``), the
+    declaration an op makes, read off the BUILT source when there is one: a source may answer it from its settings
+    (a HuggingFace source lists the metadata columns it keeps), so the outputs follow a setting's edit. Each carries
+    its record key as ``entry``, which is what a wire from it into a root's record entry is saved as."""
+    produces = _declared(instance, cls, "produces")
+    if not isinstance(produces, dict):
+        return []
+    return [Socket(str(key), _entry_type(str(kind)), entry=str(key)) for key, kind in produces.items()]
 
-    A slot delivered by a LITERAL (``classes: [cat, dog]``) is recorded as a spelled parameter of
-    the slot's name, so the dangling check sees it filled; a slot delivered by a marker or a
-    reference becomes a wire.
+
+#: The doc of a parameter that stands for a value written straight under a root's ``delivered:`` — a typed list in an
+#: output slot (``classes: [cat, dog]``), the key a record entry is read from (``input: image``).
+DELIVERED_LITERALLY = "delivered literally"
+
+
+def _describe_contract(kwargs: Dict[str, Any]) -> _Description:
+    """A ``GraphContract``: one INPUT per declared output slot (required), then one per ``records`` entry (an ENTRY
+    socket, never required: an entry nothing is wired into is read under its own name), then one per ``optional`` slot
+    (never required: the host has its own answer for a slot left unwired — wired, it is saved and checked like an
+    output). NO output: what the contract's ``inputs`` declare is the host card's (:meth:`_Builder.root_host`), so the
+    root draws only what is wired INTO it.
+
+    A slot delivered by a LITERAL (``classes: [cat, dog]``, ``input: image``) is recorded as a spelled parameter of
+    the slot's name, so the dangling check sees it filled — a record entry's key is drawn as a wire as well, from the
+    card that writes it (:meth:`_Builder.record_entry_wires`); a slot delivered by a marker or a reference becomes a
+    wire.
     """
-    raw_outputs, raw_inputs, raw_delivered = kwargs.get("outputs"), kwargs.get("inputs"), kwargs.get("delivered")
+    raw_outputs, raw_optional, raw_delivered = kwargs.get("outputs"), kwargs.get("optional"), kwargs.get("delivered")
+    raw_records = kwargs.get("records")
     declared_outputs: Dict[str, Any] = raw_outputs if isinstance(raw_outputs, dict) else {}
-    declared_inputs: Dict[str, Any] = raw_inputs if isinstance(raw_inputs, dict) else {}
+    declared_optional: Dict[str, Any] = raw_optional if isinstance(raw_optional, dict) else {}
+    declared_records: Dict[str, Any] = raw_records if isinstance(raw_records, dict) else {}
     inputs = [Socket(str(slot), _slot_kind(kind), required=True) for slot, kind in declared_outputs.items()]
-    outputs = [Socket(str(slot), _slot_kind(kind)) for slot, kind in declared_inputs.items()]
+    inputs += [Socket(str(entry), _entry_type(str(kind)), entry=str(entry)) for entry, kind in declared_records.items()]
+    inputs += [Socket(str(slot), _slot_kind(kind)) for slot, kind in declared_optional.items()]
     params = _params(GraphContract, kwargs, {"delivered"})
     delivered: Dict[str, Any] = raw_delivered if isinstance(raw_delivered, dict) else {}
     for slot, value in delivered.items():
         if value is not None and not _holds_fluid(value):
-            params[str(slot)] = Param(
-                str(slot), _slot_kind(declared_outputs.get(slot, ANY)), value, None, "delivered literally", {}, True
-            )
-    return _Description(params, inputs, outputs, "", None, _NO_DECLARATION, None)
+            kind = declared_outputs.get(slot, declared_records.get(slot, declared_optional.get(slot, ANY)))
+            params[str(slot)] = Param(str(slot), _slot_kind(kind), value, None, DELIVERED_LITERALLY, {}, True)
+    return _Description(params, inputs, [], "", None, _NO_DECLARATION, None)
+
+
+def _contract_slots(root: Node, declaration: str) -> Dict[str, str]:
+    """``{slot: kind}`` a root's ``declaration`` (``inputs``, ``outputs``, ``optional``, ``records``) spells —
+    ``{}`` when it spells none, or something that is not a mapping (the constructor's refusal says so)."""
+    found = root.params.get(declaration)
+    value = found.value if found is not None else None
+    return {str(slot): str(kind) for slot, kind in value.items()} if isinstance(value, dict) else {}
 
 
 def _slot_kind(kind: Any) -> SocketType:  # a declared kind: a string in the document
@@ -1103,6 +1158,8 @@ class _Builder:
             if isinstance(doc.get("flow"), dict):
                 self.derive_flow(doc["flow"], str(doc.get("outputs", "") or ""))
         self.resolve_references()
+        self.record_entry_wires()
+        self.host_wires()
         if self.host is not None:
             self.model.nodes.append(self.host)
         return _Derivation(
@@ -1202,6 +1259,7 @@ class _Builder:
         if kind == "contract":
             if self.contract is None:
                 self.contract = name
+                self.root_host(node)
             else:
                 self.problem(f"{name}: a second graph contract at {loc} — the root is {self.contract}", loc)
         if kind == "subgraph":
@@ -1266,10 +1324,12 @@ class _Builder:
 
     @staticmethod
     def choose_output(node: Node, accepted: Iterable[SocketType]) -> Optional[Socket]:
-        """The output a bare reference to ``node`` means: the first that meets the target, else its object."""
+        """The output a bare reference to ``node`` means: the first that meets the target, else its object. A record
+        ENTRY output (``image`` of a source) is never one: a ``!ref:`` hands over the object, not an entry of each of
+        its records."""
         accepted = tuple(accepted)
         for output in node.outputs:
-            if _meets_any(output.type, accepted):
+            if not output.entry and _meets_any(output.type, accepted):
                 return output
         primary = node.output(_PRIMARY_OUTPUT.get(node.kind, ""))
         return primary or (node.outputs[0] if node.outputs else None)
@@ -1307,6 +1367,74 @@ class _Builder:
                 continue
             self.wire_into(self.model.node(wanted), target, socket, kind)
 
+    def record_entry_wires(self) -> None:
+        """A root's record entry read from a KEY (``delivered: {input: image}``) is drawn as a wire from the card that
+        writes that key into the stream the root delivers (:func:`_record_writer`) — after every reference is wired,
+        since the delivered stream and its source are references. A key no card declares draws no wire; the entry's
+        socket is filled by the spelled parameter (:func:`_describe_contract`)."""
+        if self.contract is None:
+            return
+        root = self.model.node(self.contract)
+        for socket in root.inputs:
+            param = root.params.get(socket.name)
+            if (
+                not socket.entry
+                or param is None
+                or param.doc != DELIVERED_LITERALLY
+                or not isinstance(param.value, str)
+            ):
+                continue
+            found = _record_writer(self.model, root.name, param.value)
+            if found is not None:
+                self.wire(found[0], found[1], root, socket.name, "delivered", (socket.type,))
+
+    def root_host(self, root: Node) -> None:
+        """The HOST card of a rooted graph: one output per slot the contract's ``inputs`` declare — what the host hands
+        the graph when it runs it (``files · List[str]``). An item-typed slot (a pane's ``input · Signal``) is an ENTRY
+        of the record the host hands in, which a step reads by name (:meth:`entry_wires`). No card when the contract
+        declares no input, or inside a subgraph (whose ``<in>`` is its host side).
+
+        It replaces the root's own outputs (before 2026-10-05 the root drew the inputs as outputs, and the wires a step
+        read from them left the root): the root now draws only what is wired INTO it, and the host's side is one card,
+        as for a graph without a root."""
+        if self.prefix or self.host is not None:
+            return
+        declared = _contract_slots(root, "inputs")
+        if not declared:
+            return
+        names = item_type_names()
+        outputs = [
+            Socket(slot, kind, entry=slot) if kind in names else Socket(slot, _slot_kind(kind))
+            for slot, kind in declared.items()
+        ]
+        self.host = Node(HOST, "", "host", {}, [], outputs, "", str(self.path))
+        self.host.note = f"the inputs {root.name} declares — what the host hands the graph when it runs it"
+
+    def host_wires(self) -> None:
+        """Where the host PUTS what it hands in: for each output of the host card that names a constructor PARAMETER of
+        exactly one card of the delivered stream's source chain (:func:`_source_chain`), a ``host`` wire into that
+        parameter — the rule a host fills a graph's ``files`` by: an object in that chain with a ``files`` it can set.
+        None or several such cards draw no wire, and neither does a parameter whose type does not take the slot's.
+
+        Derived from the document's shape and never written: no text spells it, so it can be neither saved nor
+        removed (:data:`WIRE_FROM_THE_HOST`). A parameter the card does not show as a socket or a setting gets an input
+        socket of its own, as :meth:`wire_into` gives an undeclared slot."""
+        if self.contract is None or self.host is None:
+            return
+        _slot, stream = _delivered_stream(self.model, self.contract)
+        if stream is None:
+            return
+        chain = _source_chain(self.model, stream)
+        for output in self.host.outputs:
+            takers = [card for card in chain if output.name in _parameter_names(card)]
+            if len(takers) != 1:
+                continue
+            card = takers[0]
+            if card.input(output.name) is None and output.name not in card.params:
+                card.inputs.append(Socket(output.name, output.type))
+            if _meets_any(output.type, self.accepted_types(card, output.name)):
+                self.model.wires.append(Wire(HOST, output.name, card.name, output.name, "host", output.type))
+
     # -- chains ------------------------------------------------------------------------------
 
     def chain(self, members: Sequence[str]) -> None:
@@ -1339,10 +1467,10 @@ class _Builder:
                 self.wire(producer[0], producer[1], node, socket.name, "entry", (socket.type,))
                 continue
             if self.contract is not None:
-                root = self.model.node(self.contract)
-                declared = root.output(socket.entry)
-                if declared is not None:
-                    self.wire(root, declared, node, socket.name, "entry", (socket.type,))
+                # a rooted graph: the host card hands in what the contract declares (root_host), and nothing more
+                declared = self.host.output(socket.entry) if self.host is not None else None
+                if self.host is not None and declared is not None:
+                    self.wire(self.host, declared, node, socket.name, "entry", (socket.type,))
                 continue
             if host:
                 if self.host is None:
@@ -1439,7 +1567,7 @@ class _Builder:
         for step in steps:
             self.entry_wires(step.name, lineage[step.name], host=self.contract is None)
         if self.contract is not None:
-            self.provided = tuple(socket.name for socket in self.model.node(self.contract).outputs)
+            self.provided = tuple(_contract_slots(self.model.node(self.contract), "inputs"))
         elif self.host is not None:
             self.provided = tuple(socket.name for socket in self.host.outputs)
 
@@ -1493,6 +1621,111 @@ class _Builder:
                     self.wire(producer, out, node, "record", "gate", (RECORD,))
             for flag in declaration.flags:
                 raised.setdefault(flag, step.name)
+
+
+def _delivered_stream(model: Model, root: str) -> Tuple[Optional[str], Optional[str]]:
+    """``(the root's Stream output slot, the card wired into it)`` — ``(None, None)`` when the root declares no
+    ``Stream`` output, ``(slot, None)`` when nothing is wired into it yet."""
+    node = model.node(root)
+    slot = next((s.name for s in node.inputs if not s.entry and s.type == STREAM), None)
+    if slot is None:
+        return None, None
+    wired = next((w.source for w in model.wires if w.target == root and w.target_socket == slot), None)
+    return slot, wired
+
+
+def _source_chain(model: Model, card: str) -> List[Node]:
+    """The card ``card`` (the stream a root delivers) and the cards its records come from: the card wired into its
+    ``source`` slot, that card's own ``source``, … — where a host looks for the object to fill (``files``)."""
+    chain: List[Node] = []
+    name: Optional[str] = card
+    while name is not None and name not in [node.name for node in chain]:
+        chain.append(model.node(name))
+        name = next((w.source for w in model.wires if w.target == name and w.target_socket == "source"), None)
+    return chain
+
+
+def _parameter_names(node: Node) -> Set[str]:
+    """The constructor parameter names of a card's class — ``set()`` for a card without one (a synthetic card, a class
+    that does not resolve)."""
+    cls = _resolve(node.class_path) if node.class_path else None
+    return {parameter.name for parameter in _signature(cls)} if cls is not None else set()
+
+
+def _stream_cards(model: Model, stream: str) -> List[str]:
+    """The cards of a Stream in the order they write into its records: its source, then its ``ops`` members."""
+    source = [w.source for w in model.wires if w.target == stream and w.target_socket == "source"]
+    members: List[Tuple[int, str]] = []
+    for wire in model.wires:
+        found = re.fullmatch(r"ops\[(\d+)\]", wire.target_socket) if wire.target == stream else None
+        if found is not None and wire.kind == "list":
+            members.append((int(found.group(1)), wire.source))
+    return source[:1] + [name for _index, name in sorted(members)]
+
+
+def _record_writer(model: Model, root: str, key: str) -> Optional[Tuple[Node, Socket]]:
+    """The card — and its output — that writes the record key ``key`` into the stream ``root`` delivers: the LAST
+    member of its ``ops`` that produces ``key``, else its source when that produces it — what a record entry read
+    from ``key`` (``delivered: {input: key}``) is drawn from. ``None`` when no card declares it."""
+    _slot, stream = _delivered_stream(model, root)
+    if stream is None:
+        return None
+    for name in reversed(_stream_cards(model, stream)):
+        node = model.node(name)
+        output = next((s for s in node.outputs if s.entry == key), None)
+        if output is not None:
+            return node, output
+    return None
+
+
+def _head(name: str) -> str:
+    """The top-level key a node name starts with — ``stream`` for ``stream.source`` and ``stream.ops[1]``."""
+    return re.split(r"[.\[/]", name, maxsplit=1)[0]
+
+
+def _wire_ends(model: Model) -> Set[Tuple[str, str, str, str]]:
+    """Every wire of every level as its four ends."""
+    return {(w.source, w.source_socket, w.target, w.target_socket) for level in model.levels() for w in level.wires}
+
+
+def _is_entry_input(model: Model, node: str, socket: str) -> bool:
+    """Whether ``node.socket`` is an entry input — a root's record entry, a step's read of the record."""
+    holder = model.holder(node)
+    found = model.node(node).input(socket) if holder is not None else None
+    return found is not None and bool(found.entry)
+
+
+def _drawn(wanted: Tuple[str, str, str, str]) -> Callable[["_Derivation"], None]:
+    """A check of a wire edit's candidate: refused unless the wire it wrote is drawn exactly as it was drawn."""
+
+    def check(derivation: _Derivation) -> None:
+        if wanted not in _wire_ends(derivation.model):
+            raise ValueError(WIRE_NOT_YET)
+
+    return check
+
+
+def _taking(node: Node, kind: SocketType) -> Optional[str]:
+    """The first input of ``node`` a wire carrying ``kind`` can be saved into — a slot, then a setting, in the order the
+    card draws them — never the record, a record entry or a list member, which no saved wire goes into; ``None`` when no
+    input takes it. Where a wire dragged OUT of an output lands on the card added for it (``Document.add_node``)."""
+    for socket in node.inputs:
+        if (
+            socket.type != RECORD
+            and not socket.entry
+            and not _LIST_SOCKET.match(socket.name)
+            and _meets(kind, socket.type)
+        ):
+            return socket.name
+    for name, param in node.params.items():
+        if node.input(name) is None and _meets_any(kind, _schema_types(param.schema)):
+            return name
+    return None
+
+
+def _a(kind: str) -> str:
+    """The article a node kind takes in a sentence: ``an engine``, ``a value``."""
+    return "an" if kind[:1] in "aeiou" else "a"
 
 
 def _split_bind(ref: str) -> Tuple[str, str, str]:
@@ -1677,24 +1910,85 @@ def _mark_file(path: Path, mark: yaml.Mark, held: Collection[Path]) -> str:
     return str(path)
 
 
-def derive(path: Path, texts: Mapping[Path, str]) -> _Derivation:
-    """The model of the document at ``path`` as the texts spell it — never raises."""
+def _entry(path: Path, texts: Mapping[Path, str], settings: Optional[Path]) -> Tuple[Path, Mapping[Path, str]]:
+    """What confluid loads for the graph ``path``: the graph itself, or — with its ``settings`` file among ``texts`` —
+    the HELD document that is the graph with the settings over it (:func:`streamstudio.settings.composed`), its text
+    added to the texts. Nothing is written either way."""
+    if settings is None:
+        return path, texts
+    wrapper, text = composed(path, settings)
+    return wrapper, {**texts, wrapper: text}
+
+
+def _settings_texts(graph: Path) -> Dict[Path, str]:
+    """The settings file beside ``graph`` as a held text — ``{}`` when there is none (under :data:`_DISK_LOCK`)."""
+    beside = settings_path_of(graph)
+    return {beside.resolve(): beside.read_text()} if beside.is_file() else {}
+
+
+def _setting_nodes(model: Model) -> List[SettingNode]:
+    """Every node of every level, as the settings read it (the gate a branch sets is never a setting)."""
+    return [
+        SettingNode(node.name, node.class_path, tuple(name for name in node.params if name != GATE_PARAM))
+        for level in model.levels()
+        for node in level.nodes
+        if node.class_path
+    ]
+
+
+def settings_declared(text: str, path: Path, model: Model) -> Declared:
+    """The settings the graph ``text`` declares (its ``app:`` block), resolved against its drawing ``model``."""
+    return declared_settings(text, path, _setting_nodes(model), gate=GATE_PARAM)
+
+
+def _apply_settings(model: Model, path: Path, texts: Mapping[Path, str], settings: Path) -> None:
+    """Show every setting of the ``settings`` file on its node, and add a located problem for each line that is none
+    of the graph's settings (:func:`streamstudio.settings.read_settings`).
+
+    The model applies them ITSELF: confluid delivers a class line (``SetFloor.floor_db: -60.0``, a node with no name)
+    only at its ``settled`` stage, after the ``document`` stage the model is derived at — measured 2026-10-05, the
+    canvas showed ``-90.0`` while a run used ``-60.0``. A node's line (``flow.first.op.level``) is already in the
+    document; setting it again changes nothing."""
+    key = path.resolve()
+    graph_text = texts[key] if key in texts else path.read_text()
+    found = settings_declared(graph_text, path, model)
+    entries, problems = read_settings(texts[settings], settings, found, graph_name(settings))
+    for field_, value in entries:
+        node = model.node(field_.node)
+        param = node.params.get(field_.param)
+        if param is not None:
+            node.params[field_.param] = replace(param, value=value, spelled=True)
+    model.problems.extend(Problem(message, loc) for message, loc in problems)
+
+
+def derive(path: Path, texts: Mapping[Path, str], settings: Optional[Path] = None) -> _Derivation:
+    """The model of the document at ``path`` as the texts spell it — never raises.
+
+    ``settings`` is the graph's settings file when its text is among ``texts`` (resolved, as every key): the graph is
+    then loaded with the settings over it (:func:`_entry`), each setting shows on its node, and a line that is none of
+    the graph's settings is a located problem (:func:`_apply_settings`). Every message and location names the graph or
+    the settings file — never the held document that joins them."""
+    entry, loaded = _entry(path, texts, settings)
     try:
-        doc, included = _load_document(path, texts)
+        doc, included = _load_document(entry, loaded)
     except Exception as exc:  # noqa: BLE001 — every failure to load is reported as a problem
-        problem = _load_problem(path, exc, texts=texts)
+        problem = _load_problem(path, exc, texts=loaded)
         return _Derivation(Model(problems=[problem]), {}, None, [], None, (), [path.resolve()], {})
     derivation = _Builder(path).derive(doc)
-    files = [path.resolve()] + [p for p in included if p != path.resolve()]
+    aside = {path.resolve(), entry.resolve()} | ({settings} if settings is not None else set())
+    files = [path.resolve()] + [p for p in included if p not in aside]
+    if settings is not None:
+        _apply_settings(derivation.model, path, texts, settings)
     if not derivation.model.problems:
         # The document stage keeps the markers, so it can derive a document that does not BUILD — a
         # top-level key handed to a same-named constructor parameter, measured 2026-09-28 on a contract
         # placed before a flow whose ``outputs:`` line the contract then received. Only when deriving
         # found nothing, so one defect is one message.
         try:
-            _load_document(path, texts, build=True)
+            _load_document(entry, loaded, build=True)
         except Exception as exc:  # noqa: BLE001 — every failure to build is reported as a problem
-            problem = _load_problem(path, exc, "does not build", texts=texts, included=files)
+            known = [*files, *([settings] if settings is not None else [])]
+            problem = _load_problem(path, exc, "does not build", texts=loaded, included=known)
             derivation.model.problems.append(problem)
     return derivation._replace(files=files)
 
@@ -1731,13 +2025,13 @@ def _dangling(model: Model) -> List[Problem]:
                 continue
             if any(f" into {node.name}.{socket.name} (" in message for message in refused):
                 continue  # a wire WAS drawn to it and refused: that problem is already reported
-            out.append(
-                Problem(
-                    f"{node.name}.{socket.name} ({socket.type}) is required and nothing is wired into it at {node.loc}",
-                    node.loc,
-                )
-            )
+            out.append(Problem(_unwired(node, socket), node.loc))
     return out
+
+
+def _unwired(node: Node, socket: Socket) -> str:
+    """The problem of a required input nothing is wired into — what removing the wire into it leaves, and may."""
+    return f"{node.name}.{socket.name} ({socket.type}) is required and nothing is wired into it at {node.loc}"
 
 
 def _contract_problems(derivation: _Derivation) -> List[Problem]:
@@ -1749,7 +2043,8 @@ def _contract_problems(derivation: _Derivation) -> List[Problem]:
     root = model.node(derivation.contract)
     delivered: Dict[str, Any] = {}
     for wire in model.wires:
-        if wire.target == root.name and wire.kind == "delivered":
+        socket = root.input(wire.target_socket)
+        if wire.target == root.name and wire.kind == "delivered" and socket is not None and not socket.entry:
             cls = _resolve(model.node(wire.source).class_path)
             if cls is not None:
                 try:
@@ -1757,14 +2052,15 @@ def _contract_problems(derivation: _Derivation) -> List[Problem]:
                 except Exception:
                     continue
     for name, param in root.params.items():
-        if param.doc == "delivered literally":
+        if param.doc == DELIVERED_LITERALLY:
             delivered[name] = param.value
     contract = GraphContract(
         name=str(root.params["name"].value or ""),
-        inputs={s.name: s.type for s in root.outputs},
-        outputs={str(k): str(v) for k, v in (root.params["outputs"].value or {}).items()},
-        records={str(k): str(v) for k, v in (root.params["records"].value or {}).items()},
+        inputs=_contract_slots(root, "inputs"),
+        outputs=_contract_slots(root, "outputs"),
+        records=_contract_slots(root, "records"),
         delivered=delivered,
+        optional=_contract_slots(root, "optional"),
     )
     try:
         contract.check_declaration()
@@ -1852,6 +2148,64 @@ CANNOT_READ = (
 #: two ways on, in the words of the dialog and the menu.
 ALREADY_EXISTS = "{path} already exists — pick another name, or open it with File ▸ Open"
 
+#: The one plain line each wire the editor cannot save yet is refused with (``Document.add_wire`` /
+#: ``remove_wires``); the page shows it in a toast as it is, and nothing is drawn or written. A Stream's record
+#: wires ARE its ``ops:`` order, and a member of an op list is placed by its position in it.
+WIRE_CHANGES_ORDER = "This wire would change the order of the steps — the editor can't save that yet."
+#: A flow's wires are its steps' ``from:`` / ``bind:`` / gates, which no route writes yet.
+WIRE_IN_A_FLOW = "The editor can't save wires in this kind of graph yet."
+#: Any other wire there is no spelling for yet.
+WIRE_NOT_YET = "The editor can't save this wire yet."
+WIRE_INSIDE_A_SUBGRAPH = "The editor can't save wires inside a subgraph yet."
+#: A document whose root is ONE marker has no top-level key a ``!ref:`` could name.
+WIRE_ONE_OBJECT = (
+    "The editor can't save wires in this graph yet: the whole file is one object, with no top-level name a wire can "
+    "point at."
+)
+#: Only an entry output (a source's ``image``) can feed a root's record entry — what it is saved as is its key.
+WIRE_ENTRY_ONLY = "Only a record entry — like a source's image — can be wired into {entry}."
+#: A ``host`` wire is where the host puts what it hands in (``_Builder.host_wires``): no text spells it, so no edit
+#: takes it out.
+WIRE_FROM_THE_HOST = "The host fills this when it runs the graph — it isn't a wire you can remove."
+#: The host card (``<host>``) is drawn, never written: it cannot be renamed or removed.
+HOST_NOT_A_NODE = "{name} is the host's side of the graph, not a node of the document"
+
+#: The node kinds that are added AFTER a step or INTO an op list (``Document.add_step``); a class of any other kind is a
+#: CARD of its own (``Document.add_node``) — the kind the document derives (``_kind_of``), never the catalogue's word.
+_STEP_KINDS: Tuple[NodeKind, ...] = ("op", "algorithm", "subgraph")
+#: A card asked of a flow graph, whose top level is steps — the user's words (2026-10-05); ``{article} {kind}`` is the
+#: class's node kind (``a value``, ``an engine``).
+CARD_IN_A_FLOW = "The editor can't add {article} {kind} card to a flow graph yet — pick an op."
+#: The same inside a subgraph: its inside is a flow of its own.
+CARD_INSIDE_A_SUBGRAPH = "The editor can't add {article} {kind} card inside a subgraph yet — pick an op."
+#: An op asked as a card: it goes after a step or into an op list (``Document.add_step``).
+CARD_IS_AN_OP = "{name} is an op — the editor adds it after a step or to an op list, never as a card of its own."
+#: A document whose root is ONE marker has no top-level key a card could take.
+CARD_ONE_OBJECT = (
+    "The editor can't add a card to this graph yet: the whole file is one object, with no top-level name a card can "
+    "take."
+)
+#: A wire dropped on empty canvas names the end it was dragged out of; the card added for it is the other end.
+CARD_WIRE_ENDS = (
+    "a wire dropped on empty canvas names the end it was dragged out of — {source, source_socket} or "
+    "{target, target_socket}; the new card is its other end"
+)
+
+#: The ends of one wire, as the routes and the page name them: ``(source, source_socket, target, target_socket)``.
+WireEnds = Tuple[str, str, str, str]
+#: A socket that is a member of a list slot — ``ops[1]`` — and the slot.
+_LIST_SOCKET = re.compile(r"^(?P<slot>.+)\[\d+\]$")
+
+
+def _one_end(wire: WireEnds) -> bool:
+    """Whether a wire dropped on empty canvas names exactly the end it was dragged out of — ``(source, source_socket)``
+    or ``(target, target_socket)``, the other two blank (they are the card added for it)."""
+    source, source_socket, target, target_socket = wire
+    return (bool(source) and bool(source_socket) and not target and not target_socket) or (
+        bool(target) and bool(target_socket) and not source and not source_socket
+    )
+
+
 #: What the disk holds of the files a Save would write, against what the editor last read or wrote of them: the same
 #: text (``unchanged``, or no file yet for a steps file the editor holds but has not saved), another text (``changed``
 #: — Save refuses it), no file where there was one (``gone`` — deleted or moved away; Save writes it again), or a file
@@ -1907,7 +2261,8 @@ def _step_name_of(text: str) -> str:
 
 
 def _snake(class_path: str) -> str:
-    """``recordstream.ops.image.ConvertMode`` → ``convert_mode``: a generated step name for a list member."""
+    """``recordstream.ops.image.ConvertMode`` → ``convert_mode``: a generated step name for a list member, and the
+    top-level key a card moved out of a slot takes (:meth:`Document._moved_key`)."""
     return _step_name_of(_CAMEL_BOUNDARY.sub("_", class_path.rsplit(".", 1)[-1]).lower())
 
 
@@ -2132,8 +2487,28 @@ def _gained(before: Sequence[Problem], after: Sequence[Problem]) -> List[Problem
     return gained
 
 
+_Method = TypeVar("_Method", bound=Callable[..., Any])
+
+
+def _structural(method: _Method) -> _Method:
+    """Mark a :class:`Document` method that edits the graph ITSELF (a node, a wire, a step, the text): on a graph that
+    offers its settings only (``app: {graph: settings-only}``) it is refused FIRST, before any check of its own —
+    :data:`streamstudio.settings.LOCKED`, whatever else would have been wrong with it. ``_commit`` refuses the same
+    for any other change of such a graph (a parameter that is not one of its settings)."""
+
+    @functools.wraps(method)
+    def guarded(self: "Document", *args: Any, **kwargs: Any) -> Any:  # answers what the method answers
+        if self.mode == SETTINGS_ONLY:
+            raise ValueError(LOCKED.format(name=self.path.stem))
+        return method(self, *args, **kwargs)
+
+    return cast(_Method, guarded)
+
+
 class _Entry(NamedTuple):
-    """One step of the document's history: the texts before an edit, the rename it made, the shifts of a list's
+    """One step of the document's history: the texts before an edit, the renames it made (a rename; a wire whose
+    producer moved out of a slot to a top-level key — several, for several wires removed as one edit), the shifts of a
+    list's
     positional member names it made, in the order they were made (a Convert, a Paste, an add or a removal of list
     members — a removal of several members as ONE edit makes one shift per member), and — per shift — what to put
     back after the step that walks it again: on the undo stack what the edit's shifts dropped (a removed member's
@@ -2141,7 +2516,7 @@ class _Entry(NamedTuple):
     undo's shifts dropped (an added member's place and groups, which a redo then restores)."""
 
     texts: _Texts
-    rename: Optional[Tuple[str, str]]
+    renames: Tuple[Tuple[str, str], ...]
     members: Tuple[_MemberShift, ...] = ()
     dropped: Tuple[_Dropped, ...] = ()
 
@@ -2161,13 +2536,25 @@ class Document:
             compares against and :meth:`save` checks the disk against. ``None`` = the texts themselves
             (read or written just now); a file it leaves out has no text on disk yet (a steps file Move to its
             own file… made, held until Save).
+        shipped: The file a host SHIPS this graph in, while ``path`` is not written yet (:meth:`open_shipped`) —
+            ``None`` for a graph that is its own file.
+
+    The graph's SETTINGS file (:attr:`settings_path`, ``streamstudio.settings``) is one more text it holds — read
+    with the graph when it is there, held from the first setting changed when it is not.
     """
 
     def __init__(
-        self, path: Path, texts: _Texts, *, history_depth: int = 50, saved: Optional[Mapping[Path, str]] = None
+        self,
+        path: Path,
+        texts: _Texts,
+        *,
+        history_depth: int = 50,
+        saved: Optional[Mapping[Path, str]] = None,
+        shipped: Optional[Path] = None,
     ) -> None:
         # Stores only: the model is derived on first use and cached per text.
         self.path = Path(path)
+        self.shipped = None if shipped is None else Path(shipped)
         self.history_depth = int(history_depth)
         self._texts: _Texts = dict(texts)
         self._saved: _Texts = dict(texts) if saved is None else dict(saved)
@@ -2194,16 +2581,29 @@ class Document:
         self._joining = False
         self._joined_shifts: List[_MemberShift] = []
         self._joined_dropped: List[_Dropped] = []
+        self._joined_renames: List[Tuple[str, str]] = []
         # The member shifts the last undo or redo applied, in order (:attr:`stepped_shifts`).
         self._stepped: Tuple[_MemberShift, ...] = ()
 
     @classmethod
     def open(cls, path: Union[str, Path], *, history_depth: int = 50) -> "Document":
-        """Read the file's text; parse nothing."""
+        """Read the file's text, and its settings file's when it has one; parse nothing."""
         given = Path(path)
         with _DISK_LOCK:
-            text = given.read_text()
-        return cls(given, {given.resolve(): text}, history_depth=history_depth)
+            texts = {given.resolve(): given.read_text()}
+            texts.update(_settings_texts(given))
+        return cls(given, texts, history_depth=history_depth)
+
+    @classmethod
+    def open_shipped(cls, path: Union[str, Path], shipped: Union[str, Path], *, history_depth: int = 50) -> "Document":
+        """The graph ``path`` — a file NOT written yet — as a host ships it, in ``shipped``: it holds the shipped text
+        as the graph's and nothing unsaved, so a Save writes the graph only once it was changed (the COPY), and the
+        settings file beside ``path`` from the first setting changed. ``shipped`` itself is never written."""
+        given = Path(path)
+        with _DISK_LOCK:
+            texts = {given.resolve(): Path(shipped).read_text()}
+            texts.update(_settings_texts(given))
+        return cls(given, texts, history_depth=history_depth, shipped=Path(shipped))
 
     @classmethod
     def create(cls, path: Union[str, Path], text: str, *, history_depth: int = 50) -> "Document":
@@ -2241,6 +2641,7 @@ class Document:
             {Path(key): str(text) for key, text in held["texts"].items()},
             history_depth=history_depth,
             saved={Path(key): str(text) for key, text in held["saved"].items()},
+            shipped=None if held.get("shipped") is None else Path(str(held["shipped"])),
         )
         positions = held.get("positions")
         if positions is not None:
@@ -2265,10 +2666,12 @@ class Document:
         recovery file, ``streamstudio.app``) and :meth:`from_held` opens again: ``path``; ``texts``, the text of every
         file it spans by resolved path (the graph, a steps file it includes or holds); ``saved``, what each of those
         held when the editor last read or wrote it (none for a file never on disk); ``positions`` / ``groups`` held
-        here (``null`` when none were set) with ``positions_whole`` and ``layout_dirty``. The undo history is NOT
-        kept — an undo after a restore has nothing to walk back."""
+        here (``null`` when none were set) with ``positions_whole`` and ``layout_dirty``; ``shipped``, the file a host
+        ships the graph in while its own is not written (``null`` otherwise). The undo history is NOT kept — an undo
+        after a restore has nothing to walk back."""
         return {
             "path": str(self.path),
+            "shipped": None if self.shipped is None else str(self.shipped),
             "texts": {str(key): text for key, text in self._texts.items()},
             "saved": {str(key): text for key, text in self._saved.items() if key in self._texts},
             "positions": (
@@ -2305,6 +2708,9 @@ class Document:
         — what makes ``streamstudio.app.Studio.document`` read a document holding nothing unsaved again. A file gone
         from disk, one never written yet, and one that cannot be read do not count: never raises."""
         with _DISK_LOCK:
+            beside = self.settings_path.resolve()
+            if beside not in self._texts and beside.is_file():
+                return True  # a settings file written since the graph was read: what the graph runs changed
             for key in self._texts:
                 if key not in self._saved or not key.is_file():
                     continue
@@ -2320,7 +2726,8 @@ class Document:
         """The document BUILT from the texts the editor holds — saved or not, what the canvas shows — to
         the objects stage, solidified: what a run executes. Every call builds fresh objects (a run's ops
         keep state), and a document that does not build raises confluid's own located error."""
-        built, _paths = _load_document(self.path, self._texts, build=True, solidify=True)
+        entry, texts = _entry(self.path, self._texts, self._settings_in(self._texts))
+        built, _paths = _load_document(entry, texts, build=True, solidify=True)
         return built
 
     @property
@@ -2347,6 +2754,30 @@ class Document:
         return self.path.with_suffix(".layout.yaml")
 
     @property
+    def settings_path(self) -> Path:
+        """The graph's settings file — beside :attr:`path`, ``<graph>.settings.yaml`` (``streamstudio.settings``)."""
+        return settings_path_of(self.path)
+
+    @property
+    def mode(self) -> GraphMode:
+        """What the graph lets a person change, as its ``app: {graph: …}`` says (``editable`` without the line)."""
+        return graph_mode(self.text, self.path)[0]
+
+    @property
+    def is_shipped(self) -> bool:
+        """Whether the graph is still the one its host ships — its own file not written yet."""
+        return self.shipped is not None and not self.path.is_file()
+
+    def declared(self) -> Declared:
+        """The graph's settings, as its ``app:`` block declares them over the drawing the editor shows."""
+        return settings_declared(self.text, self.path, self.model)
+
+    def _settings_in(self, texts: Mapping[Path, str]) -> Optional[Path]:
+        """The settings file's key when ``texts`` hold its text, else ``None`` (the graph alone is loaded)."""
+        key = self.settings_path.resolve()
+        return key if key in texts else None
+
+    @property
     def model(self) -> Model:
         """The drawing derived from the current text (cached until the text changes)."""
         return self._derivation().model
@@ -2369,17 +2800,31 @@ class Document:
     def _derivation(self) -> _Derivation:
         key = self._key()
         if self._cache is None or self._cache[0] != key:
-            self._cache = (key, derive(self.path, self._texts), None)
+            self._cache = (key, derive(self.path, self._texts, self._settings_in(self._texts)), None)
         return self._cache[1]
 
     # -- editing -----------------------------------------------------------------------------
 
     def set_param(self, node: str, param: str, value: Any) -> None:  # value: any YAML scalar or container
         """Set one parameter: the located line is patched, or the line is inserted under the node when
-        the file left it at its default. Comments and ``$VAR`` spellings elsewhere are untouched."""
+        the file left it at its default. Comments and ``$VAR`` spellings elsewhere are untouched.
+
+        A SETTING (a field the graph's ``app:`` block names) goes to the settings file, never the graph: its line
+        there is replaced, or one is appended (:func:`streamstudio.settings.set_setting`). One the block names but no
+        setting can reach — two nodes with no name share its class — is refused, saying so."""
         found = self.model.node(node)
         if param not in found.params:
             raise ValueError(f"{node} has no parameter {param!r} (its parameters are: {list(found.params)})")
+        settings = self.declared()
+        setting = settings.field(node, param)
+        if setting is not None:
+            key = self.settings_path.resolve()
+            current = self._text_of(key) if key in self._texts or key.is_file() else ""
+            self._commit({key: set_setting(current, setting, value)}, f"{node}.{param} = {value!r}", found.loc)
+            return
+        unreachable = settings.unaddressable.get((node, param))
+        if unreachable is not None:
+            raise ValueError(f"{node}.{param} cannot be set: {unreachable}")
         if not found.loc:
             raise ValueError(f"{node} has no location in the document — nothing to patch")
         file, line, col = _split_loc(found.loc)
@@ -2387,6 +2832,7 @@ class Document:
         patched = YamlText(self._text_of(key)).set_kwarg(line, col, param, value)
         self._commit({key: patched}, f"{node}.{param} = {value!r}", found.loc)
 
+    @_structural
     def set_slot(self, node: str, slot: str, class_path: str, params: Dict[str, Any]) -> str:
         """Put a new object into the single slot ``slot`` of ``node`` — ``slot: !class:<class_path> {<params>}`` —
         replacing what it held (a marker, a ``!ref:``, nothing), and answer the name of the node now wired into it
@@ -2420,6 +2866,443 @@ class Document:
         wired = (wire.source for wire in self.model.wires if wire.target == node and wire.target_socket == slot)
         return next(wired, f"{node}.{slot}")
 
+    # -- wires -------------------------------------------------------------------------------
+
+    @_structural
+    def add_wire(self, source: str, source_socket: str, target: str, target_socket: str) -> str:
+        """Save the wire ``source.source_socket → target.target_socket`` drawn on the canvas, in the document's own
+        spelling, as ONE edit held until Save; answer the name of the card the wire now comes from.
+
+        Three spellings, each a text patch where it belongs: (a) into an OUTPUT slot of a ``GraphContract`` root,
+        ``delivered: {<slot>: !ref:<P>}`` — ``delivered:`` is made when the root has none; (b) into a single slot or
+        parameter of any other card, ``<slot>: !ref:<P>`` on that card's marker; (c) from a record ENTRY output (a
+        source's ``image``) into a record entry of the root, ``delivered: {<entry>: <key>}`` — the plain key the entry
+        is read from (:meth:`_wire_record_entry`). Whatever the input held is replaced.
+
+        ``P`` is the producer's TOP-LEVEL key: a ``!ref:`` names nothing else (confluid refuses ``!ref:stream.source``).
+        A producer written inside another card's slot (``stream.source``) is first MOVED OUT to a top-level key named
+        after its CLASS (:meth:`_moved_key`: ``hugging_face_source``, or ``hugging_face_source_2`` …), inserted above
+        the top-level key that held it and dedented, and the slot reads ``!ref:<P>``; its sidecar position and groups
+        follow the new name, those of the cards under it too, and it keeps the place it was drawn at. An ``alias`` card
+        wires as the card it is.
+
+        A bare ``!ref:P`` is DRAWN from P's first output that fits the input (:meth:`_Builder.choose_output`), so only
+        that output can be wired; and every edit must draw exactly the wire asked for, or it is refused unwritten.
+        Refused before anything is written, in one plain line: a record wire or a wire into an op list's member
+        (:data:`WIRE_CHANGES_ORDER`), a wire of a flow (:data:`WIRE_IN_A_FLOW`), one inside a subgraph, in a document
+        that is one object, from a card inside a list, and any other wire there is no spelling for yet.
+        """
+        derivation = self._derivation()
+        model = derivation.model
+        producer, taker = model.node(source), model.node(target)
+        output = producer.output(source_socket)
+        if output is None:
+            shown = ", ".join(s.name for s in producer.outputs)
+            raise ValueError(f"{source} has no output {source_socket!r} (its outputs are: {shown})")
+        socket = taker.input(target_socket)
+        if socket is None and target_socket not in taker.params:
+            shown = ", ".join([s.name for s in taker.inputs] + [n for n in taker.params if taker.input(n) is None])
+            raise ValueError(f"{target} has no input {target_socket!r} (its inputs are: {shown})")
+        self._refuse_wire_place(derivation, source, target)
+        if (source, source_socket, target, target_socket) in _wire_ends(model):
+            raise ValueError(f"{source}.{source_socket} is already wired into {target}.{target_socket}.")
+        if output.type == RECORD or (socket is not None and socket.type == RECORD):
+            raise ValueError(WIRE_CHANGES_ORDER)
+        listed = _LIST_SOCKET.match(target_socket)
+        if listed is not None:
+            if listed.group("slot") in OP_LISTS:
+                raise ValueError(WIRE_CHANGES_ORDER)
+            raise ValueError(f"The editor can't save this wire yet: {target}.{target_socket} is a member of a list.")
+        accepted = _Builder(self.path).accepted_types(taker, target_socket)
+        if not _meets_any(output.type, accepted):
+            shown = accepted[0] if len(accepted) == 1 else " | ".join(accepted)
+            raise ValueError(
+                f"{source}.{source_socket} ({output.type}) cannot be wired into {target}.{target_socket} ({shown}): "
+                "the types do not meet."
+            )
+        if taker.kind == "contract" and socket is not None and socket.entry:
+            return self._wire_record_entry(derivation, producer, output, taker, socket)
+        if output.entry:
+            raise ValueError(
+                f"The editor can't save this wire yet: {source}.{source_socket} is an entry of every record, and only "
+                "a record entry of the graph's root can take one."
+            )
+        if socket is not None and socket.entry:
+            raise ValueError(
+                f"The editor can't save this wire yet: {target}.{target_socket} reads the record entry "
+                f"'{socket.entry}' from the record it is handed."
+            )
+        origin = model.node(producer.alias_of) if producer.kind == "alias" else producer
+        under = (origin.name, f"{origin.name}.", f"{origin.name}/", f"{origin.name}[")
+        if (
+            origin.kind == "host"  # the host card is never written: where it puts an input is the host's own rule
+            or taker.kind in ("alias", "host", "boundary", "subgraph")
+            or not taker.loc
+            or target.startswith(under)
+        ):
+            raise ValueError(WIRE_NOT_YET)
+        if taker.kind == "contract" and socket is None:
+            raise ValueError(WIRE_NOT_YET)  # the root's own declaration (name, outputs …) is typed, never wired
+        moving = origin.name not in self._top_keys()
+        owner, slot = self._movable(origin, model) if moving else ("", "")
+        first = _Builder.choose_output(origin, accepted)
+        if first is None or first.name != source_socket:
+            only = first.name if first is not None else "none"
+            raise ValueError(
+                f"{source} has more than one output that fits {target}.{target_socket}; only {only} can be wired into "
+                "it."
+            )
+        main = self.path.resolve()
+        main_text = YamlText(self.text)
+        edits = _Edits()
+        name, rename, hoist = origin.name, None, []
+        if moving:
+            name = self._moved_key(origin, model)
+            _file, line, col = _split_loc(model.node(owner).loc)
+            mapping = main_text.node_at(line, col)
+            assert isinstance(mapping, yaml.MappingNode)
+            above = main_text.top_key_line(_head(origin.name))
+            hoist = main_text.hoist_edits(mapping, slot, name, above, keep_slot=True)
+            rename = (origin.name, name)
+        file, line, col = _split_loc(taker.loc)
+        key = Path(file).resolve()
+        text = main_text if key == main else YamlText(self._text_of(key))
+        reference = f"!ref:{name}"
+        if taker.kind == "contract":
+            taking = text.set_entry_edits(line, col, "delivered", target_socket, reference)
+        else:
+            taking = [text.set_marker_edit(line, col, target_socket, reference)]
+        if hoist:
+            edits.add(main, main_text, hoist)  # first: an insertion at the same place as the target's goes below it
+        edits.add(key, text, taking)
+        before = self.positions if rename is not None else {}
+        self._commit(
+            edits.texts(),
+            f"the wire {source}.{source_socket} → {target}.{target_socket}",
+            taker.loc,
+            rename=rename,
+            verify=_drawn((name, source_socket, target, target_socket)),
+        )
+        if rename is not None:
+            self._rekey(*rename)
+            self._pin(before, *rename)
+        return name
+
+    @_structural
+    def remove_wires(self, wires: Sequence[WireEnds]) -> None:
+        """Take one or several wires out as ONE edit — all of them or none, one undo entry (Delete on selected wires).
+
+        A wire into a root's slot or record entry drops its ``delivered:`` pair (and ``delivered:`` with its last one);
+        a ``!ref:`` drops its pair from the card it fills, whose parameter returns to its default; a card written INSIDE
+        the slot the wire fills is moved out to a top-level key named after its class, as :meth:`add_wire` moves one
+        (:meth:`_moved_key` — never a name the slot's owner takes as a parameter, or confluid would hand the card
+        straight back into the slot), and the slot is dropped: both cards stay, only the wire goes. The one problem a
+        removal may gain is the input it leaves open, when that input is required (``contract.stream (Stream) is
+        required and nothing is wired into it``); any other refuses it. Refused like :meth:`add_wire`, in one plain
+        line: a Stream's record wires, a flow's, a wire inside a subgraph, a wire drawn from what steps read and write
+        — and a ``host`` wire, which no text spells (:data:`WIRE_FROM_THE_HOST`)."""
+        if not wires:
+            raise ValueError("remove needs at least one wire")
+        model = self._derivation().model
+        drawn = _wire_ends(model)
+        for wire in wires:
+            if tuple(wire) not in drawn:
+                raise ValueError(f"{wire[0]}.{wire[1]} → {wire[2]}.{wire[3]} is not a wire of this graph")
+        # a root's record entry is drawn from the stream the root delivers: it goes before that stream's own wire would
+        ordered = sorted(wires, key=lambda wire: 0 if _is_entry_input(model, wire[2], wire[3]) else 1)
+        renames: List[Tuple[str, str]] = []
+        layout = _layout()
+        with self._one_edit():
+            for wire in ordered:
+                ends = list(wire)
+                for old, new in renames:  # a card an earlier wire moved out is named by its new name now
+                    ends[0], ends[2] = layout.rename_key(ends[0], old, new), layout.rename_key(ends[2], old, new)
+                moved = self._remove_wire(ends[0], ends[1], ends[2], ends[3])
+                if moved is not None:
+                    renames.append(moved)
+
+    def _remove_wire(
+        self, source: str, source_socket: str, target: str, target_socket: str
+    ) -> Optional[Tuple[str, str]]:
+        """One wire of :meth:`remove_wires`, committed; the ``(old, new)`` name of a card it moved out, else
+        ``None``."""
+        derivation = self._derivation()
+        model = derivation.model
+        wire = next(
+            (
+                w
+                for level in model.levels()
+                for w in level.wires
+                if (w.source, w.source_socket, w.target, w.target_socket)
+                == (source, source_socket, target, target_socket)
+            ),
+            None,
+        )
+        if wire is None:
+            raise ValueError(f"{source}.{source_socket} → {target}.{target_socket} is not a wire of this graph")
+        if wire.kind == "host":
+            raise ValueError(WIRE_FROM_THE_HOST)
+        self._refuse_wire_place(derivation, source, target)
+        if wire.kind in ("record", "list"):
+            raise ValueError(WIRE_CHANGES_ORDER)
+        if wire.kind in ("bind", "gate"):
+            raise ValueError(WIRE_IN_A_FLOW)
+        if wire.kind == "entry":
+            raise ValueError(
+                f"The editor can't save this wire yet: {target}.{target_socket} is fed by what the steps before it "
+                "write into the record, which no setting spells."
+            )
+        taker = model.node(target)
+        socket = taker.input(target_socket)
+        allow = [_unwired(taker, socket)] if socket is not None and socket.required else []
+        what = f"removing the wire {source}.{source_socket} → {target}.{target_socket}"
+        file, line, col = _split_loc(taker.loc)
+        key = Path(file).resolve()
+        text = YamlText(self._text_of(key))
+        marker = text.node_at(line, col)
+        delivered = wire.kind == "delivered"
+        found = text.pair(marker, "delivered") if delivered and isinstance(marker, yaml.MappingNode) else None
+        mapping = found[1] if found is not None else marker
+        held = text.pair(mapping, target_socket) if isinstance(mapping, yaml.MappingNode) else None
+        if held is None or not isinstance(mapping, yaml.MappingNode):
+            raise ValueError(WIRE_NOT_YET)
+        if source != (f"{target}.delivered.{target_socket}" if delivered else f"{target}.{target_socket}"):
+            if delivered:
+                edits = [text.cut_entry_edit(line, col, "delivered", target_socket)]
+            elif str(held[1].tag).startswith("!ref:"):
+                edits = [text.cut_pair_edit(mapping, target_socket)]
+            else:
+                raise ValueError(WIRE_NOT_YET)
+            self._commit({key: text.apply(edits)}, what, taker.loc, allow=allow)
+            return None
+        # the card is written INSIDE the slot: it moves out to a top-level key, and the slot goes
+        if key != self.path.resolve():
+            raise ValueError(f"The editor can't save this yet: {source} comes from {file}.")
+        assert isinstance(marker, yaml.MappingNode) and isinstance(mapping, yaml.MappingNode)
+        name = self._moved_key(model.node(source), model)
+        above = text.top_key_line(_head(source))
+        hoist = text.hoist_edits(mapping, target_socket, name, above, keep_slot=False)
+        if delivered and len(mapping.value) == 1:
+            hoist = [hoist[0], text.cut_pair_edit(marker, "delivered")]
+        before = self.positions
+        self._commit({key: text.apply(hoist)}, what, taker.loc, rename=(source, name), allow=allow)
+        self._rekey(source, name)
+        self._pin(before, source, name)
+        return source, name
+
+    def _refuse_wire_place(self, derivation: _Derivation, *names: str) -> None:
+        """Refuse, in one plain line, a wire between ``names`` the editor has no spelling for by WHERE they are:
+        inside a subgraph, in a document that is one object, in a flow (its wires are ``from:`` / ``bind:`` /
+        gates)."""
+        if any(SEPARATOR in name for name in names):
+            raise ValueError(WIRE_INSIDE_A_SUBGRAPH)
+        try:
+            root = YamlText(self.text).root
+        except yaml.YAMLError:
+            raise ValueError(WIRE_NOT_YET) from None
+        if not isinstance(root, yaml.MappingNode) or str(root.tag).startswith("!") or "_target_" in YamlText.keys(root):
+            raise ValueError(WIRE_ONE_OBJECT)
+        steps = {step.name for step in derivation.flow.steps} if derivation.flow is not None else set()
+        if any(_head(name) in steps for name in names):
+            raise ValueError(WIRE_IN_A_FLOW)
+
+    def _top_keys(self) -> List[str]:
+        """The main file's top-level keys — the names a ``!ref:`` can point at."""
+        root = YamlText(self.text).root
+        return YamlText.keys(root) if isinstance(root, yaml.MappingNode) else []
+
+    def _movable(self, node: Node, model: Model) -> Tuple[str, str]:
+        """``(owner, slot)`` of a card written in a single slot of another card of the main file — the card a wire from
+        it moves out — or the refusal saying why it cannot move: it sits inside a list, in a plain mapping, or in an
+        included file."""
+        name = node.name
+        if "[" in name:
+            raise ValueError(
+                f"The editor can't save a wire from {name} yet: it sits inside a list ({name[: name.index(']') + 1]})."
+            )
+        owner, dot, slot = name.rpartition(".")
+        holder = model.holder(owner) if dot else None
+        if holder is None or not model.node(owner).loc:
+            raise ValueError(
+                f"The editor can't save a wire from {name} yet: it sits in a plain mapping ({owner}), not in a card's "
+                "slot."
+            )
+        for each in (node, model.node(owner)):
+            if each.source_file and Path(each.source_file).resolve() != self.path.resolve():
+                raise ValueError(f"The editor can't save a wire from {name} yet: it comes from {each.source_file}.")
+        return owner, slot
+
+    def _moved_key(self, node: Node, model: Model) -> str:
+        """The top-level key the card ``node``, moved out of a slot, takes: its CLASS name in snake case (:func:`_snake`
+        — ``HuggingFaceSource`` → ``hugging_face_source``, ``HTTPSource`` → ``http_source``), else the first free
+        ``_2``, ``_3`` …. A key says what the card IS; the slot's name said only where it sat (every source moved out of
+        a Stream was ``source``, ``source_2`` …).
+
+        TAKEN is a top-level key, a loader word (``flow``, ``include`` …), a node — and a constructor parameter of ANY
+        card, the slot's owner included: confluid hands a top-level key to every constructor taking a parameter of that
+        name. Measured 2026-10-04: a top-level ``source`` reached a second Stream's unspelled ``source``, and overrode
+        the ``source`` a card ABOVE it spelled (last spec wins) — a wire nobody drew, and one silently lost; 2026-10-05:
+        ``second (no source written) got: FilesSource ['a.png']``. The owner too, since its slot may lose the reference
+        later (a removed wire), and a key named like it would then flow straight back in."""
+        return self._free_key(node.class_path or node.name, model)
+
+    def _free_key(self, class_path: str, model: Model) -> str:
+        """The top-level key a card of ``class_path`` takes by :meth:`_moved_key`'s rule — a card moved out of a slot,
+        and a card ADDED as one of its own (:meth:`add_node`) alike, so the two never name a card differently."""
+        wanted = _snake(class_path)
+        taken = set(self._top_keys()) | set(_TOP_LEVEL_NOT_NODES) | set(model.all_names())
+        for level in model.levels():
+            for each in level.nodes:
+                taken.update(_parameter_names(each))
+        return wanted if wanted not in taken else _free_step_name(wanted, taken)
+
+    def _pin(self, before: Mapping[str, Tuple[float, float]], old: str, new: str) -> None:
+        """Keep a card moved from ``old`` to ``new`` — and every card under it — where it was DRAWN: a place the sidecar
+        or this document held followed the name already (:meth:`_rekey`); a laid-out place is held now, since the
+        layout of the changed document could put the renamed card elsewhere."""
+        layout = _layout()
+        held = dict(self._positions or {})
+        for name, xy in before.items():
+            moved = layout.rename_key(name, old, new)
+            if moved != name:
+                held.setdefault(moved, xy)
+        self._positions = held
+
+    def _wire_record_entry(
+        self, derivation: _Derivation, producer: Node, output: Socket, root: Node, socket: Socket
+    ) -> str:
+        """:meth:`add_wire` into a record entry of the root: ``delivered: {<entry>: <key>}``, the key ``output`` writes
+        (a plain word — never a ``!ref:``, so the producer never moves). Only an entry output can feed it, and only the
+        card that writes that key LAST into the stream the root delivers — that is the card the entry is read from."""
+        model = derivation.model
+        entry = socket.name
+        if not output.entry:
+            raise ValueError(WIRE_ENTRY_ONLY.format(entry=entry))
+        slot, stream = _delivered_stream(model, root.name)
+        if slot is None:
+            raise ValueError(
+                f"{root.name} delivers no stream, and {root.name}.{entry} is read from a stream's records."
+            )
+        if stream is None:
+            raise ValueError(
+                f"Wire a stream into {root.name}.{slot} first — {root.name}.{entry} is read from the records it "
+                "delivers."
+            )
+        if producer.name not in _stream_cards(model, stream):
+            raise ValueError(
+                f"{producer.name} does not feed the stream {root.name} delivers ({stream}) — {root.name}.{entry} is "
+                "read from that stream's records."
+            )
+        writer = _record_writer(model, root.name, output.entry)
+        if writer is not None and writer[0].name != producer.name:
+            raise ValueError(
+                f"{root.name}.{entry} would be read from {writer[0].name}.{writer[1].name}, which writes "
+                f"'{output.entry}' after {producer.name} does."
+            )
+        file, line, col = _split_loc(root.loc)
+        key = Path(file).resolve()
+        text = YamlText(self._text_of(key))
+        edits = _Edits()
+        edits.add(key, text, text.set_entry_edits(line, col, "delivered", entry, spell(output.entry)))
+        self._commit(
+            edits.texts(),
+            f"the wire {producer.name}.{output.name} → {root.name}.{entry}",
+            root.loc,
+            verify=_drawn((producer.name, output.name, root.name, entry)),
+        )
+        return producer.name
+
+    # -- cards: a class that is not an op ------------------------------------------------------
+
+    @_structural
+    def add_node(self, class_path: str, params: Dict[str, Any], *, wire: Optional[WireEnds] = None) -> str:
+        """Add ``class_path`` — a class that is NOT an op — as a CARD of its own and answer its name: a new top-level
+        key ``<key>: !class:<class_path> {<params>}``, ONE edit held until Save (the user's design, 2026-10-05).
+
+        The key is :meth:`_moved_key`'s (:meth:`_free_key` — ``ClassNamesScan`` → ``class_names_scan``, ``_2`` … when
+        that name is a top-level key, a node or a constructor parameter of any card: confluid hands a top-level key to
+        every same-named parameter). The line goes directly ABOVE the graph's root and the comment lines written over
+        it (:meth:`YamlText.top_key_line`), so the root stays last, or at the end of the file when there is no root.
+
+        ``wire`` is a wire dragged out of a socket and dropped on empty canvas, its other end blank — the new card:
+        ``("", "", target, target_socket)`` (the card's first output that fits feeds that input) or ``(source,
+        source_socket, "", "")`` (that output goes into the card's first input that takes it, :func:`_taking`). It is
+        saved in the document's own spelling (:meth:`add_wire`) in the SAME edit — one undo takes both — or nothing is
+        added and the wire's refusal is the answer.
+
+        Refused before anything is written, in one plain line: an op (:data:`CARD_IS_AN_OP` — it goes after a step or
+        into a list), a flow graph (:data:`CARD_IN_A_FLOW`), a document that is one object or does not parse, a class
+        that does not resolve, a wire that does not name exactly one end (:data:`CARD_WIRE_ENDS`)."""
+        if wire is not None and not _one_end(wire):
+            raise ValueError(CARD_WIRE_ENDS)
+        derivation = self._derivation()
+        cls = _resolve(class_path)
+        if cls is None:
+            raise ValueError(f"cannot resolve the class {class_path!r}")
+        kind = _kind_of(cls)
+        if kind in _STEP_KINDS:
+            raise ValueError(CARD_IS_AN_OP.format(name=class_path.rsplit(".", 1)[-1]))
+        text = YamlText(self.text)
+        root = self._card_root(text)
+        if root is not None and "flow" in YamlText.keys(root):
+            raise ValueError(CARD_IN_A_FLOW.format(article=_a(kind), kind=kind))
+        name = self._free_key(class_path, derivation.model)
+        line = f"{name}: !class:{class_path} {spell_mapping(params)}"
+        head = _head(derivation.contract) if derivation.contract is not None else None
+        if root is not None and head is not None and head in YamlText.keys(root):
+            edit = text.insert_lines_edit(text.top_key_line(head), [line])
+        else:
+            end = len(text.text)
+            edit = (end, end, ("\n" if text.text and not text.text.endswith("\n") else "") + line + "\n")
+        changes = {self.path.resolve(): text.apply([edit])}
+        if wire is None:
+            self._commit(changes, f"add {class_path} as {name}", "")
+            return name
+        with self._one_edit():
+            self._commit(changes, f"add {class_path} as {name}", "")
+            self._wire_card(name, wire)
+        return name
+
+    def _card_root(self, text: YamlText) -> Optional[yaml.MappingNode]:
+        """The main file's top-level mapping a card is added to — ``None`` while the text holds nothing — or the refusal
+        saying why a card has no place: the text does not parse (located where it breaks), or the whole file is one
+        object (:data:`CARD_ONE_OBJECT`)."""
+        try:
+            root = text.root
+        except yaml.YAMLError as exc:
+            mark = getattr(exc, "problem_mark", None)  # a ReaderError (a control character) carries none
+            where = f"{self.path.resolve()}" + (f":{mark.line + 1}:{mark.column + 1}" if mark is not None else "")
+            raise ValueError(f"{where}: the text does not parse — fix it, then add the card") from None
+        if root is None:
+            return None
+        if not isinstance(root, yaml.MappingNode) or str(root.tag).startswith("!") or "_target_" in YamlText.keys(root):
+            raise ValueError(CARD_ONE_OBJECT)
+        return root
+
+    def _wire_card(self, name: str, wire: WireEnds) -> None:
+        """Save the dropped ``wire`` to the card ``name`` :meth:`add_node` has just written — inside its one edit: into
+        the input the wire was dragged out of, from the card's first output that fits it; out of the output it was
+        dragged out of, into the card's first input that takes it (:func:`_taking`)."""
+        source, source_socket, target, target_socket = wire
+        model = self._derivation().model
+        card = model.node(name)
+        if target:
+            output = _Builder.choose_output(card, _Builder(self.path).accepted_types(model.node(target), target_socket))
+            if output is None:
+                raise ValueError(f"{name} has no output a wire into {target}.{target_socket} could come from.")
+            self.add_wire(name, output.name, target, target_socket)
+            return
+        producer = model.node(source)
+        given = producer.output(source_socket)
+        if given is None:
+            shown = ", ".join(socket.name for socket in producer.outputs)
+            raise ValueError(f"{source} has no output {source_socket!r} (its outputs are: {shown})")
+        taking = _taking(card, given.type)
+        if taking is None:
+            raise ValueError(f"{name} has no input that takes {source}.{source_socket} ({given.type}).")
+        self.add_wire(source, source_socket, name, taking)
+
+    @_structural
     def add_step(
         self,
         name: str,
@@ -2428,6 +3311,7 @@ class Document:
         params: Dict[str, Any],
         *,
         into: Optional[str] = None,
+        wire: Optional[WireEnds] = None,
     ) -> str:
         """Add ``class_path`` after the node ``after`` and answer the new node's name.
 
@@ -2440,7 +3324,22 @@ class Document:
         ``- !class:…`` line in a block list, ``, !class:…`` inside a one-line ``[…]``; an empty ``ops: []`` under a
         block marker becomes a block list, and a list the marker does not spell is added. A member is named by its
         position (``name`` does not apply), and the later members' positions and groups follow them.
+
+        The host card and the root are never an anchor (the user's rule, 2026-10-05): ``after`` naming one counts as
+        none. A class whose node kind is not an op's (:data:`_STEP_KINDS`, as the DOCUMENT derives it — the catalogue
+        lists 35 classes as values the document derives as ops, ``FilterOp`` among them) has no place after a step or in
+        a list: it is a card of its own, :meth:`add_node` with ``wire`` — ``after``, ``into`` and ``name`` placing ops
+        only — and inside a subgraph it is refused (:data:`CARD_INSIDE_A_SUBGRAPH`). An op's ``wire`` is its place.
         """
+        derivation = self._derivation()
+        if after is not None and (derivation.model.node(after).kind == "host" or after == derivation.contract):
+            after = None
+        cls = _resolve(class_path)
+        kind = _kind_of(cls) if cls is not None else None
+        if kind is not None and kind not in _STEP_KINDS:
+            if after is not None and SEPARATOR in after:
+                raise ValueError(CARD_INSIDE_A_SUBGRAPH.format(article=_a(kind), kind=kind))
+            return self.add_node(class_path, params, wire=wire)
         if after is None or self._op_member(after) is not None:
             return self._add_member(after, into, class_path, params)
         if into is not None:
@@ -2449,7 +3348,6 @@ class Document:
             )
         if not name:
             raise ValueError(f"a new flow step needs a name — after {after!r}, it has none")
-        derivation = self._derivation()
         model = derivation.model
         anchor = model.node(after)
         level, after_local = self._level_of_step(anchor, derivation)
@@ -2463,6 +3361,7 @@ class Document:
         self._commit(edits.texts(), f"add_step {qualified!r} after {after!r}", anchor.loc)
         return qualified
 
+    @_structural
     def remove_step(self, name: str) -> None:
         """Remove a step of any level; what read it now reads what it read from, and the level's output moves
         to that step when the removed one was it. A member of an op list (``stream.ops[1]``) is taken out of its
@@ -2472,6 +3371,8 @@ class Document:
             return
         derivation = self._derivation()
         node = derivation.model.node(name)
+        if node.kind == "host":
+            raise ValueError(HOST_NOT_A_NODE.format(name=name))
         level, local = self._level_of_step(node, derivation)
         step = level.step(name)
         text = level.text
@@ -2506,6 +3407,7 @@ class Document:
             self._result_edit(edits, level, local, upstream)
         self._commit(edits.texts(), f"remove_step {name!r}", node.loc)
 
+    @_structural
     def remove_steps(self, names: Sequence[str]) -> None:
         """Remove several steps as ONE edit — all of them or none, and one undo entry (Cut, Delete of a
         selection). A step inside a subgraph that is removed too goes with it; the rest are removed last
@@ -2524,6 +3426,7 @@ class Document:
             for name in sorted(removed, key=order.index, reverse=True):
                 self.remove_step(name)
 
+    @_structural
     def rename_node(self, old: str, new: str) -> None:
         """Rename a node in ONE operation: its key, every ``from:`` / ``merge_from:`` / ``bind:`` / ``!ref:`` /
         ``outputs:`` that names it, its sidecar entry and every group that lists it.
@@ -2547,7 +3450,7 @@ class Document:
             shown = model.names() if not level_name else model.inside_of(level_name).names()
             raise ValueError(f"{qualified!r} is already a node (the nodes are: {shown})")
         if node.kind == "host":
-            raise ValueError(f"{old} is the host's side of the graph, not a node of the document")
+            raise ValueError(HOST_NOT_A_NODE.format(name=old))
         if node.kind == "boundary":
             raise ValueError(f"{old} is the boundary of the subgraph {level_name!r}, not a node of the document")
         if "[" in local:
@@ -2569,6 +3472,7 @@ class Document:
 
     # -- subgraphs ---------------------------------------------------------------------------
 
+    @_structural
     def convert_to_subgraph(self, nodes: Sequence[str], name: str) -> str:
         """Make CONSECUTIVE steps of one level (or consecutive members of one ``ops`` list) one subgraph step,
         as ONE edit; answer its node name.
@@ -2601,6 +3505,7 @@ class Document:
             return self._convert_members(nodes, derivation)
         return self._convert_steps(nodes, name, self._level(level_name, derivation), derivation)
 
+    @_structural
     def extract_steps(self, node: str, target: Path) -> Path:
         """*Move to its own file*: the inline steps of the subgraph ``node`` become the steps file ``target``
         (held in the editor like every other change — Save writes it) and its ``steps:`` becomes
@@ -2636,6 +3541,7 @@ class Document:
         self._commit(changes, f"move the steps of {node!r} to {target}", derivation.model.node(node).loc)
         return target
 
+    @_structural
     def include_steps(self, after: str, target: Path, name: Optional[str] = None) -> str:
         """*Insert steps file*: a new subgraph step after ``after`` (on its level) whose ``steps:`` is
         ``{include: <target, relative to the file the step is written in>}``; named ``name``, else after the
@@ -2659,6 +3565,7 @@ class Document:
         self._commit(edits.texts(), f"insert the steps file {target} after {after!r}", anchor.loc)
         return level.prefix + local
 
+    @_structural
     def insert_steps(self, after: str, steps_text: str, base: str) -> str:
         """A COPY of ``steps_text`` (a steps file's text: a template) as a new subgraph step after ``after``,
         named after ``base`` (made unique with ``_2`` …), ``result:`` its last step. Nothing links back.
@@ -2717,8 +3624,7 @@ class Document:
         entry = self._history.pop()
         texts = dict(self._texts)
         self._texts = dict(entry.texts)
-        if entry.rename is not None:
-            old, new = entry.rename
+        for old, new in reversed(entry.renames):
             self._rekey(new, old)
         applied: List[_MemberShift] = []
         undone: List[_Dropped] = [_Dropped({}, {})] * len(entry.members)
@@ -2729,7 +3635,7 @@ class Document:
             if index < len(entry.dropped):
                 self._restore_dropped(entry.dropped[index])
             applied.append(inverse)
-        self._redo.append(_Entry(texts, entry.rename, entry.members, tuple(undone)))
+        self._redo.append(_Entry(texts, entry.renames, entry.members, tuple(undone)))
         self._stepped = tuple(applied)
         return True
 
@@ -2742,15 +3648,14 @@ class Document:
         entry = self._redo.pop()
         texts = dict(self._texts)
         self._texts = dict(entry.texts)
-        if entry.rename is not None:
-            old, new = entry.rename
+        for old, new in entry.renames:
             self._rekey(old, new)
         redone: List[_Dropped] = []
         for index, shift in enumerate(entry.members):
             redone.append(self._shift_members(*shift))
             if index < len(entry.dropped):
                 self._restore_dropped(entry.dropped[index])
-        self._history.append(_Entry(texts, entry.rename, entry.members, tuple(redone)))
+        self._history.append(_Entry(texts, entry.renames, entry.members, tuple(redone)))
         self._stepped = tuple(entry.members)
         return True
 
@@ -2760,13 +3665,15 @@ class Document:
         ``(list, first, by)``: ``list[i]`` with ``i >= first`` became ``list[i + by]``. Empty after any other step."""
         return self._stepped
 
+    @_structural
     def replace_text(self, text: str) -> None:
         """Make ``text`` the main file's text: checked as a whole, refused (nothing changes) when it gains a
         problem over the current text, and the undo history starts over — the text arrived whole, not as
         a patch the history could hold. Nothing is written; positions and groups held here are kept."""
+        self._refuse_locked({self.path.resolve(): text})
         candidate: _Texts = {**self._texts, self.path.resolve(): text}
         before = self.check()
-        derivation = derive(self.path, candidate)
+        derivation = derive(self.path, candidate, self._settings_in(candidate))
         after = check(derivation, self.path)
         gained = _gained(before, after)
         if gained:
@@ -2775,6 +3682,23 @@ class Document:
         self._history.clear()
         self._redo.clear()
         self._cache = (self._key(), derivation, after)
+
+    def save_settings(self) -> List[Path]:
+        """Write the graph's SETTINGS file alone — what a settings sheet saves after each change (``?only=settings``):
+        a change of the graph itself the editor holds stays held, unsaved (user pick 2026-10-05; measured before, the
+        sheet's Save wrote the editor tab's unsaved change too). Refused like :meth:`save`, writing nothing, over a
+        settings file changed on disk since the editor read it, or one the disk will not take. Answers the file written
+        (resolved), ``[]`` when the settings hold nothing unsaved."""
+        key = self.settings_path.resolve()
+        text = self._texts.get(key)
+        if text is None or self._saved.get(key) == text:
+            return []
+        with _DISK_LOCK:
+            self._refuse_changed_on_disk([key])
+            self._refuse_unwritable([key])
+            self._write(key, text)
+            self._saved[key] = text
+        return [key]
 
     def save(self) -> List[Path]:
         """Write every file whose text changed, and the sidecar when positions or groups were set; answer the DOCUMENT
@@ -2821,6 +3745,10 @@ class Document:
         file is written to that file, under the same changed-on-disk and cannot-be-written refusals as
         :meth:`save`, and before ``target`` — a new graph never names a steps file that was not written. Refused
         when ``target`` exists and ``overwrite`` is not asked.
+
+        The graph's SETTINGS go with it: a settings text the editor holds is written beside ``target``
+        (``<target stem>.settings.yaml``, before ``target``) and is that graph's from now on — refused, like
+        ``target``, when a file is already there and ``overwrite`` is not asked. The old settings file stays as it was.
         """
         target = Path(target)
         old_main, new_main = self.path.resolve(), target.resolve()
@@ -2828,21 +3756,32 @@ class Document:
             return self.save()
         if target.exists() and not overwrite:
             raise ValueError(f"{target} already exists — pass overwrite: true to replace it")
-        others = {key: text for key, text in self._texts.items() if key != old_main and self._saved.get(key) != text}
+        old_settings, new_settings = self.settings_path.resolve(), settings_path_of(target).resolve()
+        carried = [new_settings] if old_settings in self._texts else []
+        if carried and new_settings.exists() and not overwrite:
+            raise ValueError(f"{new_settings} already exists — pass overwrite: true to replace it")
+        others = {
+            key: text
+            for key, text in self._texts.items()
+            if key not in (old_main, old_settings) and self._saved.get(key) != text
+        }
         with _DISK_LOCK:
             self._refuse_changed_on_disk(others)
-            self._refuse_unwritable([*others, target])
+            self._refuse_unwritable([*others, *carried, target])
             self._save_as_write(target, old_main, new_main, others)
-        return [*others, new_main]
+        return [*others, *carried, new_main]
 
     def _save_as_write(self, target: Path, old_main: Path, new_main: Path, others: _Texts) -> None:
         """The writes of :meth:`save_as`, once nothing is refused (under :data:`_DISK_LOCK`)."""
         editor_files = frozenset(self._texts)  # a steps file held but not saved yet still counts as beside it
+        old_settings, new_settings = self.settings_path.resolve(), settings_path_of(target).resolve()
 
         def moved(texts: _Texts) -> _Texts:
-            out = {key: text for key, text in texts.items() if key != old_main}
+            out = {key: text for key, text in texts.items() if key not in (old_main, old_settings)}
             if old_main in texts:
                 out[new_main] = rebase_includes(texts[old_main], old_main.parent, new_main.parent, editor_files)
+            if old_settings in texts:
+                out[new_settings] = texts[old_settings]
             return out
 
         held = moved(self._texts)
@@ -2850,15 +3789,19 @@ class Document:
         blocks = (self.positions, self.groups) if self._positions is not None or self._groups is not None else None
         for key, text in others.items():  # the included files first: a write cut short never leaves a graph naming them
             self._write(key, text)
+        if new_settings in held:
+            self._write(new_settings, held[new_settings])
         self._write(target, held[new_main])
         if blocks is not None:
             _layout().write_sidecar(new_sidecar, blocks[0], groups=blocks[1])
         elif old_sidecar.is_file():
             new_sidecar.write_bytes(old_sidecar.read_bytes())
         self._texts = held
-        self._saved = {**{k: t for k, t in self._saved.items() if k != old_main}, **others, new_main: held[new_main]}
-        self._history = [_Entry(moved(entry.texts), entry.rename, entry.members) for entry in self._history]
-        self._redo = [_Entry(moved(entry.texts), entry.rename, entry.members) for entry in self._redo]
+        kept = {k: t for k, t in self._saved.items() if k not in (old_main, old_settings)}
+        carried = {new_settings: held[new_settings]} if new_settings in held else {}
+        self._saved = {**kept, **others, **carried, new_main: held[new_main]}
+        self._history = [_Entry(moved(entry.texts), entry.renames, entry.members) for entry in self._history]
+        self._redo = [_Entry(moved(entry.texts), entry.renames, entry.members) for entry in self._redo]
         self.path = target
         self._cache = None
         self._layout_dirty = False
@@ -2953,6 +3896,7 @@ class Document:
             pieces.append((int(item.start_mark.index), dedent(block, column)))
         return self._inline_includes("".join(piece for _at, piece in sorted(pieces)), self._folder), "ops"
 
+    @_structural
     def paste_text(self, clip: str, after: str) -> List[str]:
         """Insert the clipboard ``clip`` after the node ``after`` as ONE edit; answer the new nodes' names.
 
@@ -3976,37 +4920,67 @@ class Document:
         *,
         rename: Optional[Tuple[str, str]] = None,
         members: Optional[_MemberShift] = None,
+        allow: Collection[str] = (),
+        verify: Optional[Callable[[_Derivation], None]] = None,
     ) -> None:
         """Validate a candidate text, then make it the document's — or refuse it, unwritten.
+
+        ``allow`` are problems the edit may gain because gaining them is what it is FOR, each at most once and compared
+        without its location: removing a wire into a required input leaves exactly that input open (``contract.stream
+        (Stream) is required and nothing is wired into it``), and nothing else — any other problem it gains still
+        refuses it. ``verify`` reads the candidate's derivation and raises to refuse it (a wire edit checks that the
+        wire it wrote is drawn exactly as it was drawn).
 
         A file this edit changes for the FIRST time (an included steps file) becomes held here, with the text
         it was read as (:meth:`_text_of`) as its saved baseline — and that text is what it held before every
         earlier edit too, so each older history entry gets it: undoing past this edit restores the file,
         rather than falling back to the disk, which a Save may have changed since (measured before: undo
         after Save showed the saved ``RGB``, and the next Save wrote it back)."""
+        self._refuse_locked(changes)
         before = self.check()
         candidate: _Texts = {**self._texts, **changes}
-        derivation = derive(self.path, candidate)
+        derivation = derive(self.path, candidate, self._settings_in(candidate))
         after = check(derivation, self.path)
         gained = _gained(before, after)
-        if gained:
+        spare = Counter(_where_free(message) for message in allow)
+        kept: List[Problem] = []
+        for problem in gained:
+            key = _where_free(problem.message)
+            if spare[key] > 0:
+                spare[key] -= 1
+            else:
+                kept.append(problem)
+        if kept:
             where = f" at {loc}" if loc else ""
-            raise ValueError(f"{what} refused{where}: " + "; ".join(problem.message for problem in gained))
+            raise ValueError(f"{what} refused{where}: " + "; ".join(problem.message for problem in kept))
+        if verify is not None:
+            verify(derivation)
         first_held = {key: self._read[key] for key in changes if key not in self._texts and key in self._read}
         self._hold(first_held)
         shifts: Tuple[_MemberShift, ...] = () if members is None else (members,)
         # the later members' names follow the edit (their places and groups) — and what the shift drops (a removed
         # member's) is kept with the edit, for the undo that brings the member back
         dropped = tuple(self._shift_members(*shift) for shift in shifts)
+        renames: Tuple[Tuple[str, str], ...] = () if rename is None else (rename,)
         if self._joining:
             self._joined_shifts.extend(shifts)
             self._joined_dropped.extend(dropped)
+            self._joined_renames.extend(renames)
         else:
-            self._history.append(_Entry({**self._texts, **first_held}, rename, shifts, dropped))
+            self._history.append(_Entry({**self._texts, **first_held}, renames, shifts, dropped))
             del self._history[: -self.history_depth]
             self._redo.clear()
         self._texts = candidate
         self._cache = (self._key(), derivation, after)
+
+    def _refuse_locked(self, changes: Mapping[Path, str]) -> None:
+        """Refuse every change but the settings file's of a graph that offers its settings only
+        (``app: {graph: settings-only}``, :data:`streamstudio.settings.LOCKED`) — before anything is held."""
+        if self.mode != SETTINGS_ONLY:
+            return
+        settings = self.settings_path.resolve()
+        if any(key != settings and text != self._texts.get(key) for key, text in changes.items()):
+            raise ValueError(LOCKED.format(name=self.path.stem))
 
     def _hold(self, first_held: _Texts) -> None:
         """Start holding files at the texts they were read as: their saved baseline, and what every earlier
@@ -4020,14 +4994,16 @@ class Document:
     def _one_edit(self) -> Iterator[None]:
         """Several commits as ONE edit: all of them, or none (a refusal of any restores everything, unwritten),
         and ONE history entry — the texts before the first — so one undo walks the whole of it back. The member
-        shifts the joined commits made (a removal of several list members) are that entry's, in order; a refusal
-        puts the positions and groups those shifts moved back too."""
+        shifts and the renames the joined commits made (a removal of several list members; of several wires, a card
+        moved out of a slot for one) are that entry's, in order; a refusal puts the positions and groups they moved
+        back too."""
         texts, saved, cache = dict(self._texts), dict(self._saved), self._cache
         history, redo = list(self._history), list(self._redo)
         layout_held = (self._positions, self._positions_whole, self._groups)
         self._joining = True
         self._joined_shifts = []
         self._joined_dropped = []
+        self._joined_renames = []
         try:
             yield
         except BaseException:
@@ -4041,7 +5017,12 @@ class Document:
             key: self._saved[key] for key in self._texts if key not in texts and key not in saved and key in self._saved
         }
         self._history.append(
-            _Entry({**texts, **first_held}, None, tuple(self._joined_shifts), tuple(self._joined_dropped))
+            _Entry(
+                {**texts, **first_held},
+                tuple(self._joined_renames),
+                tuple(self._joined_shifts),
+                tuple(self._joined_dropped),
+            )
         )
         del self._history[: -self.history_depth]
         self._redo.clear()
@@ -4058,6 +5039,11 @@ __all__ = [
     "BOUNDARY_IN",
     "BOUNDARY_OUT",
     "CANNOT_READ",
+    "CARD_INSIDE_A_SUBGRAPH",
+    "CARD_IN_A_FLOW",
+    "CARD_IS_AN_OP",
+    "CARD_ONE_OBJECT",
+    "CARD_WIRE_ENDS",
     "CHANGED_ON_DISK",
     "ClipKind",
     "DiskState",
@@ -4080,7 +5066,14 @@ __all__ = [
     "SUBGRAPH_CLASS",
     "Socket",
     "SocketType",
+    "WIRE_CHANGES_ORDER",
+    "WIRE_ENTRY_ONLY",
+    "WIRE_INSIDE_A_SUBGRAPH",
+    "WIRE_IN_A_FLOW",
+    "WIRE_NOT_YET",
+    "WIRE_ONE_OBJECT",
     "Wire",
+    "WireEnds",
     "WireKind",
     "check",
     "derive",

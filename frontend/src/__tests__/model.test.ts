@@ -3,7 +3,17 @@
  * model → React Flow derivation. The DOM half is measured under playwright in `tests/test_canvas.py`.
  */
 import { describe, expect, it } from "vitest";
-import { compatible, handleId, modelToFlow, parseHandle, socketType, type Model, type ModelNode } from "../model";
+import {
+  WIRE_KINDS,
+  compatible,
+  handleId,
+  modelToFlow,
+  parseHandle,
+  requiredMark,
+  socketType,
+  type Model,
+  type ModelNode,
+} from "../model";
 
 const node = (name: string, extra: Partial<ModelNode> = {}): ModelNode => ({
   name,
@@ -86,5 +96,47 @@ describe("modelToFlow", () => {
       className: "wire wire-record",
       data: { kind: "record", type: "Record" },
     });
+  });
+});
+
+describe("a rooted graph's host card and root (the server's model, drawn as it is)", () => {
+  /** The files graph a host workspace seeds, as `GET …/graphs/<name>` answers it — the two cards that matter here. */
+  const files: Model = {
+    nodes: [
+      node("file_source", { kind: "source" }),
+      node("contract", {
+        kind: "contract",
+        inputs: [
+          { name: "stream", type: "Stream", required: true, doc: "", entry: "" },
+          { name: "input", type: "Image", required: false, doc: "", entry: "input" },
+          { name: "classes", type: "List[str]", required: false, doc: "", entry: "" },
+        ],
+      }),
+      node("<host>", { kind: "host", class_path: "", outputs: [{ name: "files", type: "List[str]", required: false, doc: "", entry: "" }] }),
+    ],
+    wires: [{ source: "<host>", source_socket: "files", target: "file_source", target_socket: "files", kind: "host", type: "List[str]" }],
+    problems: [],
+    outputs: [],
+  };
+
+  it("the host wire is an edge classed wire-host, which the page draws dashed", () => {
+    expect(WIRE_KINDS).toContain("host");
+    const { edges } = modelToFlow(files, {});
+    expect(edges[0]).toMatchObject({
+      id: "wire:<host>.files->file_source.files",
+      sourceHandle: "out:files",
+      targetHandle: "in:files",
+      className: "wire wire-host",
+      data: { kind: "host", type: "List[str]" },
+    });
+  });
+
+  it("an optional slot shows no required mark; a required one does", () => {
+    const root = files.nodes[1];
+    expect(root.inputs.map((socket) => [socket.name, requiredMark(socket)])).toEqual([
+      ["stream", "*"],
+      ["input", ""],
+      ["classes", ""],
+    ]);
   });
 });

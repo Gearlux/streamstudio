@@ -582,18 +582,20 @@ def _bte_view_model() -> "Model":
 
 
 def test_bte_view_derives_into_twenty_nine_layers_one_column_apart() -> None:
-    """The shipped Bluetooth pane is a 29-step chain (24 before 2026-09-30) plus its contract root (the
-    host's inputs, which no step names by entry, so it carries no wire): the steps stay one row, 340 px
-    apart, and the root sits under the first step — below its BOTTOM. Measured 2026-10-01: the root was at
-    (40, 240) = ``row(1)``, inside ``known`` (373 px, 40..413) but for its last 8 px; now (40, 430)."""
+    """The shipped Bluetooth pane is a 29-step chain (24 before 2026-09-30) plus its contract root and, since
+    2026-10-05, the host card holding the root's two inputs (no step names either by entry, so neither card carries a
+    wire): the steps stay one row, 340 px apart, the root sits under the first step — below its BOTTOM — and the host
+    card under the root. Measured 2026-10-01: the root was at (40, 240) = ``row(1)``, inside ``known`` (373 px, 40..413)
+    but for its last 8 px; now (40, 430), and the host card (40, 630)."""
     pos = layered_layout(_bte_view_model())
-    assert len(pos) == 30
-    steps = {name: xy for name, xy in pos.items() if name != "contract"}
+    assert len(pos) == 31
+    steps = {name: xy for name, xy in pos.items() if name not in ("contract", "<host>")}
     xs = sorted(x for x, _ in steps.values())
     assert xs == [column(i) for i in range(29)]
     assert {y for _, y in steps.values()} == {row(0)}
     assert pos["known"] == (column(0), row(0))
     assert pos["contract"] == (column(0), 430.0)
+    assert pos["<host>"] == (column(0), 630.0)
 
 
 def test_bte_views_first_layout_overlaps_no_two_cards_of_a_column() -> None:

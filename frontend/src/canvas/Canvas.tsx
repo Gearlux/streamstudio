@@ -10,9 +10,11 @@
  * The canvas owns the gestures and hands each to the app, which owns the routes:
  *
  * - **dragging a wire** — `isValidConnection` applies the model's meet rule (`compatible`, with the server's type
- *   table) WHILE dragging, so a mismatch never becomes an edge. A drop on a handle whose type meets becomes a dashed
- *   PROPOSAL edge and a warning naming the spelling the document would need (no route writes a wire yet). A drop on
- *   EMPTY canvas opens the palette narrowed to the classes that can take (or give) the dragged type.
+ *   table) WHILE dragging, so a mismatch never becomes an edge. A drop on a handle whose type meets is handed to the
+ *   app (`onWire`), which asks the server to SAVE it (`wires.ts`) and draws the answer — the canvas draws no edge of its
+ *   own, so a wire the server refuses is never drawn. A drop on EMPTY canvas opens the palette narrowed to the classes
+ *   that can take (or give) the dragged type.
+ * - **clicking a wire** — React Flow selects it; Delete (the app's command) takes the selected wires out.
  * - **dragging a node or a group** — on release, every document node whose ABSOLUTE position changed (a dragged
  *   group moves its members) goes to `PUT …/positions`; a node whose centre lands in a group's box joins it, one
  *   that lands outside its box leaves it, and a sized box moved by its title takes its new corner — handed over as
@@ -57,14 +59,12 @@ import {
   Controls,
   MiniMap,
   ReactFlow,
-  addEdge,
   applyEdgeChanges,
   applyNodeChanges,
   useNodesInitialized,
   useOnSelectionChange,
   useReactFlow,
   useStoreApi,
-  type Connection,
   type EdgeChange,
   type NodeChange,
   type NodeTypes,
@@ -90,6 +90,7 @@ import {
 import { EMPTY_MODEL, breadcrumb, isBoundary, levelModel, levelPositions } from "../levels";
 import { CLASS_MIME } from "../panels/NodesSidebar";
 import { addToSelection, shiftAddsCard } from "../selection";
+import type { Connected } from "../wires";
 import {
   compatible,
   modelToFlow,
@@ -153,10 +154,13 @@ export interface CanvasProps {
   fitOnOpen?: boolean;
   /** A drag changed the layout — the app writes it (positions and, when they changed, groups) as one gesture. */
   onLayout: (change: LayoutChange) => void;
-  /** A wire was drawn that the document cannot express yet; `message` says why and what it would be spelled as. */
-  onProposal: (message: string) => void;
-  /** The selected DOCUMENT nodes (a group box is not one), in the model's order, and the selected group ids. */
-  onSelection: (names: string[], groups: string[]) => void;
+  /** A wire was drawn between sockets whose types meet: the app asks the server to save it and draws the answer. */
+  onWire: (connection: Connected) => void;
+  /**
+   * The selected DOCUMENT nodes (a group box is not one), in the model's order, the selected group ids, and how many
+   * wires are selected.
+   */
+  onSelection: (names: string[], groups: string[], wires: number) => void;
   onPalette: (gesture: PaletteGesture) => void;
   onNodeClick: (name: string) => void;
   onContextMenu: (request: CanvasMenuRequest) => void;
@@ -209,7 +213,7 @@ export function Canvas({
   showMinimap = true,
   fitOnOpen = false,
   onLayout,
-  onProposal,
+  onWire,
   onSelection,
   onPalette,
   onNodeClick,
@@ -237,7 +241,6 @@ export function Canvas({
   const flow = useReactFlow<CanvasNode, CanvasEdge>();
   const store = useStoreApi<CanvasNode, CanvasEdge>();
   const pressedSelection = useRef<string[]>([]);
-  const proposals = useRef(0);
   const initialized = useNodesInitialized();
 
   // Each level keeps its viewport: leaving one remembers where it was looked at, entering one puts that back — or,
@@ -295,13 +298,14 @@ export function Canvas({
 
   useOnSelectionChange<CanvasNode, CanvasEdge>({
     onChange: useCallback(
-      ({ nodes: picked }: { nodes: CanvasNode[] }) => {
+      ({ nodes: picked, edges: wires }: { nodes: CanvasNode[]; edges: CanvasEdge[] }) => {
         const ids = new Set(picked.filter((node) => node.type === "generic").map((node) => node.id));
         const groups = picked.filter((node) => node.type === "group").map((node) => (node.type === "group" ? node.data.group.id : ""));
         // the level's steps, in the model's order — a subgraph's <in>/<out> is drawn, never acted on
         onSelection(
           view.nodes.filter((node) => !isBoundary(node) && ids.has(node.name)).map((node) => node.name),
           groups,
+          wires.length,
         );
       },
       [view.nodes, onSelection],
@@ -314,7 +318,7 @@ export function Canvas({
   }, []);
 
   const isValidConnection = useCallback(
-    (connection: Connection | CanvasEdge) => {
+    (connection: Connected | CanvasEdge) => {
       if (connection.source === connection.target) return false;
       const source = typeOf(connection.source, connection.sourceHandle);
       const target = typeOf(connection.target, connection.targetHandle);
@@ -323,21 +327,8 @@ export function Canvas({
     [typeOf, types],
   );
 
-  const onConnect = useCallback(
-    (connection: Connection) => {
-      const type = typeOf(connection.source, connection.sourceHandle) ?? "*";
-      const edge: CanvasEdge = {
-        ...connection,
-        id: `proposal${++proposals.current}`,
-        className: "wire wire-proposal",
-        animated: true,
-        data: { kind: "proposal", type },
-      };
-      setEdges((current) => addEdge(edge, current));
-      onProposal(proposalMessage(graph, connection));
-    },
-    [graph, onProposal, typeOf],
-  );
+  // the server saves it, or refuses it in one line; either way the canvas draws only what the document holds
+  const onConnect = useCallback((connection: Connected) => onWire(connection), [onWire]);
 
   // A wire released over NOTHING (no handle within reach: `isValid` is null) opens the palette; a release on a
   // handle whose type does not meet is simply refused, as it was while dragging.
@@ -589,23 +580,5 @@ export function Canvas({
         )}
       </footer>
     </div>
-  );
-}
-
-/** Why a drawn wire is not written, in the document's own spelling — per document form (docs/rewrite.md §5). */
-export function proposalMessage(graph: Graph, connection: Connection): string {
-  const file = graph.path.split("/").pop() ?? graph.path;
-  const from = parseHandle(connection.sourceHandle)?.socket ?? "?";
-  const to = parseHandle(connection.targetHandle)?.socket ?? "?";
-  const why =
-    graph.kind === "flow"
-      ? `on ${connection.target} it would be spelled 'from: ${connection.source}' (a record wire) or ` +
-        `'bind: {${to}: ${connection.source}.${from}}' (a value), and no route writes those yet`
-      : graph.kind === "graph"
-        ? "in a Stream the record wires ARE the ops order, and the editor cannot reorder ops yet"
-        : `a slot is wired by '${to}: !ref:${connection.source}', which the editor cannot write yet`;
-  return (
-    `${file}: the wire ${connection.source}.${from} → ${connection.target}.${to} is drawn as a proposal, ` +
-    `not written — ${why}. The editor writes parameters, positions, names, groups and steps.`
   );
 }

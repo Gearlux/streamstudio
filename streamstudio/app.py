@@ -113,9 +113,11 @@ from streamstudio.document import (
     Document,
     Model,
     Node,
+    WireEnds,
     rebase_path,
 )
 from streamstudio.page import BUILD_COMMAND, PageCheck, ensure_page_built, page_check_environment
+from streamstudio.settings import is_settings_file
 
 if sys.platform != "win32":  # the folder lock between editors (:func:`_folder_lock`) is POSIX's flock
     import fcntl
@@ -182,9 +184,10 @@ _STEM = re.compile(r"[\w][\w .-]*")
 #: The one op every starter holds: it reads and writes no record entry, so each starter derives clean
 #: whatever the host provides, and a run of it prints what reached it.
 _STARTER_OP = "recordstream.ops.debug.PrintRecordOp"
-#: The suffixes of the ComfyUI form's two halves of ONE range field (``deviation_hz__lo`` / ``__hi``) — how an
-#: ``app:`` block written for that editor names a range parameter; here they name the one field.
-_RANGE_HALVES = ("__lo", "__hi")
+
+#: What a Save may write alone — the graph's settings file (``POST …/save {only: "settings"}``, a settings sheet's).
+SaveOnly = Literal["settings"]
+SAVE_ONLY: Tuple[str, ...] = get_args(SaveOnly)
 
 logger = get_logger(__name__)
 
@@ -218,7 +221,7 @@ class HostRecord:
 @runtime_checkable
 class EditorHost(Protocol):
     """What an app that mounts the editor gives it — ``editor_blueprint(host=…)``; any object with a ``name`` and
-    these three methods (no base class; :func:`isinstance` checks the shape). Each is called on a request's thread.
+    these four methods (no base class; :func:`isinstance` checks the shape). Each is called on a request's thread.
 
     ``name`` is how the page names the host in what it says (``record: annotaide's selection``); ``GET /api/workspace``
     answers it as ``host: {name}`` (``null`` for a standalone editor), which is also how the page knows a Run of a
@@ -236,6 +239,12 @@ class EditorHost(Protocol):
     ``saved(paths)`` is told, after every Save and Save As that wrote a document file, which ones it wrote (resolved,
     the graph's own last; a Save of positions alone writes only the layout sidecar and tells nothing). A failure
     raised here does not undo the Save: the answer is the saved graph plus ``host_error`` in words.
+
+    ``shipped()`` names the graphs the host SHIPS, by name, each with the file it ships it in — outside the folder (a
+    package's template). Such a graph is listed and opened while the folder holds no file of its name; a change of
+    one of its settings writes only its settings file into the folder, and the first Save of a change to the graph
+    itself writes the graph there — the folder's copy, which wins from then on. The shipped file is never written.
+    A host that ships nothing answers ``{}``. Asked whenever the list is read, so it must be cheap.
     """
 
     name: str
@@ -250,6 +259,10 @@ class EditorHost(Protocol):
 
     def saved(self, paths: Sequence[Path]) -> None:
         """The document files a Save wrote."""
+        ...
+
+    def shipped(self) -> Mapping[str, Path]:
+        """The graphs the host ships: name → the file it ships it in."""
         ...
 
 
@@ -307,13 +320,15 @@ def _file_entry(path: Path, kind: FileEntryKind) -> Dict[str, str]:
 
 
 def _is_graph_file(path: Path) -> bool:
-    """A ``*.yaml`` file of a graph folder that is a graph: not hidden, not a sidecar, not a steps file."""
+    """A ``*.yaml`` file of a graph folder that is a graph: not hidden, not a sidecar, not a steps file, not a graph's
+    settings file (``streamstudio.settings``)."""
     name = path.name
     return (
         path.is_file()
         and not name.startswith(".")
         and not name.endswith(SIDECAR_SUFFIX)
         and not name.endswith(STEPS_SUFFIX)
+        and not is_settings_file(path)
     )
 
 
@@ -326,28 +341,6 @@ def _step_names(text: str) -> List[str]:
     if not isinstance(root, yaml.MappingNode):
         return []
     return [key for key in YamlText.keys(root) if key != "include"]
-
-
-def _app_entry(entry: yaml.Node) -> Optional[Tuple[str, str]]:
-    """``(class, param)`` of one ``app.inputs`` entry — a sequence of two scalars — else ``None``."""
-    if not isinstance(entry, yaml.SequenceNode) or len(entry.value) != 2:
-        return None
-    first, second = entry.value
-    if not isinstance(first, yaml.ScalarNode) or not isinstance(second, yaml.ScalarNode):
-        return None
-    return str(first.value), str(second.value)
-
-
-def _app_param(param: str, known: Mapping[str, Any]) -> Optional[str]:  # known: a node's form, schemas of any shape
-    """The field an ``app:`` entry's parameter names among ``known``: itself, or — for ``<param>__lo`` /
-    ``<param>__hi``, the ComfyUI form's halves of one range (:data:`_RANGE_HALVES`) — ``<param>``; ``None`` when
-    neither is a parameter."""
-    if param in known:
-        return param
-    for half in _RANGE_HALVES:
-        if param.endswith(half) and param[: -len(half)] in known:
-            return param[: -len(half)]
-    return None
 
 
 def _first_comment(text: str) -> str:
@@ -669,6 +662,9 @@ class Studio:
         self._paths: Dict[str, Path] = {}
         self._documents: Dict[str, Document] = {}
         self._runs: Dict[str, Run] = {}
+        # The graphs a host ships (``EditorHost.shipped``), by list name: the file each is shipped in, while the
+        # folder holds no file of that name (its entry in ``_paths`` is where the copy would be written).
+        self._shipped: Dict[str, Path] = {}
 
     # -- the folder --------------------------------------------------------------------------
 
@@ -709,17 +705,42 @@ class Studio:
 
     def _scan(self) -> None:
         """Bring the registry up to date with the folder: a file that appeared is added under a free name, an
-        entry whose file is gone is dropped — unless the editor holds it (open: its Save writes the file again)."""
+        entry whose file is gone is dropped — unless the editor holds it (open: its Save writes the file again) or the
+        host ships it. A graph the host ships (:meth:`EditorHost.shipped`) is listed under its own name while no entry
+        holds that name — its entry is ``<folder>/<name>.yaml``, where its copy would be written."""
         folder = self.graph_dir  # first: a host's folder that moved is followed before a file is missed
+        self._shipped = self._host_ships()
         for name in [n for n, path in self._paths.items() if n not in self._documents and not path.is_file()]:
-            del self._paths[name]
+            if name not in self._shipped:
+                del self._paths[name]
         known = {path.resolve() for path in self._paths.values()}
-        if not folder.is_dir():
-            return
-        for path in sorted(folder.glob("*.yaml")):
-            if _is_graph_file(path) and path.resolve() not in known:
-                self._paths[self._free_name(path.stem)] = path
-                known.add(path.resolve())
+        if folder.is_dir():
+            for path in sorted(folder.glob("*.yaml")):
+                if _is_graph_file(path) and path.resolve() not in known:
+                    self._paths[self._free_name(path.stem)] = path
+                    known.add(path.resolve())
+        for name in self._shipped:
+            if name not in self._paths and (folder / f"{name}.yaml").resolve() not in known:
+                self._paths[name] = folder / f"{name}.yaml"
+
+    def _host_ships(self) -> Dict[str, Path]:
+        """What the host ships (:meth:`EditorHost.shipped`) — ``{}`` for a standalone editor; a host that fails to say
+        is a refusal in words naming it, like a folder it cannot name."""
+        if self.host is None:
+            return {}
+        try:
+            return {str(name): Path(path) for name, path in self.host.shipped().items()}
+        except Exception as exc:  # noqa: BLE001 — whatever the host raised: the request's refusal, in words
+            raise ValueError(
+                f"{self.host.name} could not name the graphs it ships: {type(exc).__name__}: {exc}"
+            ) from exc
+
+    def shipped(self, name: str) -> bool:
+        """Whether the graph ``name`` is the one its host ships — the folder holds no file of it yet."""
+        held = self._documents.get(name)
+        if held is not None:
+            return held.is_shipped
+        return name in self._shipped and not self._paths[name].is_file()
 
     def _free_name(self, stem: str) -> str:
         """``stem`` when no entry holds it, else ``stem~2``, ``stem~3`` … — two files of one stem side by side."""
@@ -763,14 +784,19 @@ class Studio:
         refused as changed on disk. A document holding unsaved work is never re-read: its Save is what refuses."""
         self.follow()
         held = self._documents.get(name)
-        if held is not None and not held.dirty and held.path.is_file() and held.changed_on_disk():
+        readable = held is not None and (held.path.is_file() or held.is_shipped)
+        if held is not None and not held.dirty and readable and held.changed_on_disk():
             logger.debug(f"{held.path} changed on disk and the editor held nothing unsaved of it — read again")
             del self._documents[name]
         if name not in self._documents:
             path = self.path_of(name)
-            if not path.is_file():
+            if path.is_file():
+                self._documents[name] = Document.open(path, history_depth=self.history_depth)
+            elif name in self._shipped:
+                shipped = self._shipped[name]
+                self._documents[name] = Document.open_shipped(path, shipped, history_depth=self.history_depth)
+            else:
                 raise KeyError(f"no graph named {name!r}: its file {path} is gone (the graphs are: {self.names()})")
-            self._documents[name] = Document.open(path, history_depth=self.history_depth)
         return self._documents[name]
 
     def kind(self, name: str) -> GraphKind:
@@ -791,17 +817,26 @@ class Studio:
         return document is not None and document.dirty
 
     def graphs(self) -> List[Dict[str, Any]]:
-        """``[{name, path, kind, dirty}]`` of every graph of the list."""
+        """``[{name, path, kind, dirty, shipped}]`` of every graph of the list — ``shipped``: still the graph its host
+        ships, the folder holding no file of it."""
         return [
-            {"name": name, "path": str(self.path_of(name)), "kind": self.kind(name), "dirty": self.dirty(name)}
+            {
+                "name": name,
+                "path": str(self.path_of(name)),
+                "kind": self.kind(name),
+                "dirty": self.dirty(name),
+                "shipped": self.shipped(name),
+            }
             for name in self.names()
         ]
 
     def graph(self, name: str) -> Dict[str, Any]:
-        """``{name, path, kind, text, model, positions, groups, history_depth, dirty}`` of one graph."""
+        """``{name, path, kind, text, model, positions, groups, history_depth, dirty, shipped}`` of one graph —
+        ``path`` is where its Save writes (for a shipped graph: where its copy would go)."""
         document = self.document(name)
         return {
             "name": name,
+            "shipped": document.is_shipped,
             "path": str(document.path),
             "kind": self.kind(name),
             "text": document.text,
@@ -857,6 +892,8 @@ class Studio:
             raise KeyError(f"no file {target}")
         if target.name.endswith(SIDECAR_SUFFIX):
             raise ValueError(f"{target} is a layout sidecar, not a graph")
+        if is_settings_file(target):
+            raise ValueError(f"{target} is a graph's settings file, not a graph — open the graph beside it")
         if target.suffix != ".yaml":
             raise ValueError(f"{target} is not a .yaml file")
         self._scan()
@@ -930,10 +967,16 @@ class Studio:
             return folder / resolved.relative_to(folder.resolve())
         return resolved
 
-    def save(self, name: str) -> Dict[str, Any]:
+    def save(self, name: str, only: str = "") -> Dict[str, Any]:
         """Write what the editor holds of ``name`` (refused, writing nothing, over a file changed on disk or a file
-        the disk will not take — :meth:`Document.save`), and tell the host which document files it wrote."""
-        written = self.document(name).save()
+        the disk will not take — :meth:`Document.save`), and tell the host which document files it wrote.
+
+        ``only="settings"`` writes the graph's settings file alone (:meth:`Document.save_settings`) — what the page
+        shown with ``?only=settings`` saves after each change; a change of the graph itself stays held."""
+        if only and only not in SAVE_ONLY:
+            raise ValueError(f"only must be one of {', '.join(SAVE_ONLY)} — got {only!r}")
+        document = self.document(name)
+        written = document.save_settings() if only == "settings" else document.save()
         return self._tell_host(written, self.graph(name))
 
     def _tell_host(self, written: Sequence[Path], answer: Dict[str, Any]) -> Dict[str, Any]:
@@ -982,6 +1025,11 @@ class Studio:
         """Drop everything the editor holds of ``name`` — edits, history, positions, groups — and read the
         file again."""
         document = self.document(name)
+        if document.is_shipped:
+            assert document.shipped is not None  # is_shipped says so
+            reopened = Document.open_shipped(document.path, document.shipped, history_depth=self.history_depth)
+            self._documents[name] = reopened
+            return self.graph(name)
         if not document.path.is_file():
             raise ValueError(f"{document.path} is not on disk any more — Save writes it again")
         self._documents[name] = Document.open(document.path, history_depth=self.history_depth)
@@ -1163,6 +1211,19 @@ class Studio:
         made = self.document(name).set_slot(node, slot, class_path, params)
         return {**self.graph(name), "set": made}
 
+    def add_wire(self, name: str, source: str, source_socket: str, target: str, target_socket: str) -> Dict[str, Any]:
+        """Save a wire drawn on the canvas in the document's own spelling (:meth:`Document.add_wire`; one edit, held
+        until Save). Answers the graph plus ``wired``: the name of the card the wire comes from now — ``source`` for a
+        ``stream.source`` that was moved out of its slot to a top-level key, since a ``!ref:`` names only those."""
+        wired = self.document(name).add_wire(source, source_socket, target, target_socket)
+        return {**self.graph(name), "wired": wired}
+
+    def remove_wires(self, name: str, wires: Sequence[WireEnds]) -> Dict[str, Any]:
+        """Take wires out as ONE edit — all or none, one undo entry (Delete on selected wires;
+        :meth:`Document.remove_wires`)."""
+        self.document(name).remove_wires(wires)
+        return self.graph(name)
+
     def add_step(
         self,
         name: str,
@@ -1171,11 +1232,22 @@ class Studio:
         class_path: str,
         params: Dict[str, Any],
         into: Optional[str] = None,
+        wire: Optional[WireEnds] = None,
     ) -> Dict[str, Any]:
         """Add ``class_path`` after the node ``after`` — a flow step named ``step``, or a member of an op list
-        (``stream.ops[1]``) — or, with no ``after``, at the end of the op list ``into`` (``stream.ops``); one edit.
-        Answers the graph plus ``added``: the new node's name (a member's is its position, ``stream.ops[2]``)."""
-        added = self.document(name).add_step(step or "", after, class_path, params, into=into)
+        (``stream.ops[1]``) — or, with no ``after``, at the end of the op list ``into`` (``stream.ops``); one edit. A
+        class that is not an op is a card of its own instead (:meth:`add_node`, with the dropped ``wire``). Answers the
+        graph plus ``added``: the new node's name (a member's is its position, ``stream.ops[2]``)."""
+        added = self.document(name).add_step(step or "", after, class_path, params, into=into, wire=wire)
+        return {**self.graph(name), "added": added}
+
+    def add_node(
+        self, name: str, class_path: str, params: Dict[str, Any], wire: Optional[WireEnds] = None
+    ) -> Dict[str, Any]:
+        """Add ``class_path`` — a class that is not an op — as a CARD of its own: a new top-level key named after its
+        class, above the graph's root (:meth:`Document.add_node`); with ``wire``, the wire dropped on empty canvas is
+        saved to it in the same edit. Answers the graph plus ``added``: the card's name (``class_names_scan``)."""
+        added = self.document(name).add_node(class_path, params, wire=wire)
         return {**self.graph(name), "added": added}
 
     def remove_step(self, name: str, step: str) -> Dict[str, Any]:
@@ -1372,61 +1444,29 @@ class Studio:
         return form
 
     def app_form(self, name: str) -> Dict[str, Any]:
-        """The graph's SETTINGS: the fields its ``app:`` block lists — ``{declared, fields, form, problems}``.
+        """The graph's SETTINGS: the fields its ``app:`` block lists — ``{declared, graph, fields, form, problems}``.
 
         ``app.inputs`` lists ``[Class, param]`` pairs (the ComfyUI editor's App view showed only those); the class is
         the short or the dotted name of a node's class. ``fields`` is one ``{node, param, loc}`` per node of that
         class, in the block's order (``loc`` is the entry's ``file:line:col``); ``<param>__lo`` / ``<param>__hi`` —
         the ComfyUI form's two halves of one range — name the ONE field ``<param>``. ``form`` holds those fields in
         :meth:`form`'s shape. An entry naming no node, no parameter of its class, or the gate (``requires``, never a
-        field) is a located problem in words — the block is read from the text the editor holds. A graph with no
-        ``app:`` block answers ``declared: false`` and nothing else."""
+        field) is a located problem in words — the block is read from the text the editor holds — and so is one
+        naming a class two nodes with no name share, which no setting can reach (``streamstudio.settings``): it gives
+        no field. ``graph`` is what the graph lets a person change (``editable``, or ``settings-only`` from an
+        ``app: {graph: settings-only}`` line; a word it does not know is a problem). A graph with no ``app:`` inputs
+        answers ``declared: false`` and no field."""
         document = self.document(name)
-        try:
-            inputs = YamlText(document.text).path("app", "inputs")
-        except yaml.YAMLError:
-            inputs = None  # a text that does not parse: the model already carries its problem
-        if not isinstance(inputs, yaml.SequenceNode):
-            return {"declared": False, "fields": [], "form": {}, "problems": []}
+        settings = document.declared()
+        problems = [{"message": message, "loc": loc} for message, loc in settings.problems]
+        if not settings.declared:
+            return {"declared": False, "graph": settings.mode, "fields": [], "form": {}, "problems": problems}
         full = self.form(name)
-        nodes = [node for level in document.model.levels() for node in level.nodes if node.class_path]
-        classes = ", ".join(sorted({node.class_path.rsplit(".", 1)[-1] for node in nodes})) or "none"
-        fields: List[Dict[str, str]] = []
         narrowed: Dict[str, Dict[str, Any]] = {}
-        problems: List[Dict[str, str]] = []
-
-        def refuse(loc: str, message: str) -> None:
-            problems.append({"message": f"{loc}: {message}", "loc": loc})
-
-        for entry in inputs.value:
-            loc = f"{document.path}:{entry.start_mark.line + 1}:{entry.start_mark.column + 1}"
-            pair = _app_entry(entry)
-            if pair is None:
-                refuse(loc, "an app input is a [Class, param] pair")
-                continue
-            class_name, param = pair
-            spelled = f"[{class_name}, {param}]"
-            if param == GATE_PARAM:
-                refuse(loc, f"the app input {spelled} is the gate a branch sets, not a setting — it is never a field")
-                continue
-            matched = [node for node in nodes if class_name in (node.class_path, node.class_path.rsplit(".", 1)[-1])]
-            if not matched:
-                refuse(loc, f"the app input {spelled} names no node of this graph (its classes are: {classes})")
-                continue
-            known = full.get(matched[0].name, {})
-            field = _app_param(param, known)
-            if field is None:
-                listed = ", ".join(sorted(known)) or "none"
-                refuse(
-                    loc, f"the app input {spelled} names no parameter of {class_name} (its parameters are: {listed})"
-                )
-                continue
-            for node in matched:
-                if field in narrowed.get(node.name, {}):
-                    continue  # the other half of a range, or the same pair twice: one field
-                narrowed.setdefault(node.name, {})[field] = full.get(node.name, {}).get(field, {})
-                fields.append({"node": node.name, "param": field, "loc": loc})
-        return {"declared": True, "fields": fields, "form": narrowed, "problems": problems}
+        for field in settings.fields:
+            narrowed.setdefault(field.node, {})[field.param] = full.get(field.node, {}).get(field.param, {})
+        fields = [{"node": field.node, "param": field.param, "loc": field.loc} for field in settings.fields]
+        return {"declared": True, "graph": settings.mode, "fields": fields, "form": narrowed, "problems": problems}
 
     # -- the HuggingFace pickers --------------------------------------------------------------
 
@@ -1730,6 +1770,44 @@ def _flag(body: Mapping[str, Any], key: str) -> bool:  # one optional JSON boole
     return value
 
 
+#: The four names a wire is given by, in the order of :data:`streamstudio.document.WireEnds`.
+_WIRE_FIELDS = ("source", "source_socket", "target", "target_socket")
+
+
+def _wire(body: Mapping[str, Any]) -> WireEnds:  # one wire's four required text fields
+    source, source_socket, target, target_socket = (str(_field(body, key)) for key in _WIRE_FIELDS)
+    return source, source_socket, target, target_socket
+
+
+def _wire_list(body: Mapping[str, Any]) -> List[WireEnds]:  # ``wires``: a list of {source, source_socket, …}
+    value = _field(body, "wires")
+    if not isinstance(value, list) or not all(
+        isinstance(item, dict) and all(isinstance(item.get(key), str) for key in _WIRE_FIELDS) for item in value
+    ):
+        raise ValueError(f"'wires' must be a list of {{{', '.join(_WIRE_FIELDS)}}}, got {value!r}")
+    return [_wire(item) for item in value]
+
+
+def _dropped(body: Mapping[str, Any]) -> Optional[WireEnds]:  # ``wire``: the end a wire was dragged out of, or absent
+    """An add's optional ``wire`` — a wire dragged out of a socket and dropped on empty canvas: ``{source,
+    source_socket}`` or ``{target, target_socket}``, the end it was dragged out of. The other end is the card the add
+    makes, left blank (``Document.add_node`` refuses anything but exactly one end)."""
+    value = body.get("wire")
+    if value is None:
+        return None
+    if (
+        not isinstance(value, dict)
+        or set(value) - set(_WIRE_FIELDS)
+        or not all(isinstance(item, str) for item in value.values())
+    ):
+        raise ValueError(
+            "'wire' must be the end a wire was dragged out of — {source, source_socket} or {target, target_socket} — "
+            f"got {value!r}"
+        )
+    source, source_socket, target, target_socket = (str(value.get(key, "")) for key in _WIRE_FIELDS)
+    return source, source_socket, target, target_socket
+
+
 def editor_blueprint(
     graph_dir: Optional[Path] = None,
     *,
@@ -1864,7 +1942,7 @@ def editor_blueprint(
 
     @blueprint.post("/api/graphs/<name>/save")
     def save(name: str) -> Response:
-        return jsonify(_studio().save(name))
+        return jsonify(_studio().save(name, _text(_body(), "only") or ""))
 
     @blueprint.post("/api/graphs/<name>/save-as")
     def save_as(name: str) -> Response:
@@ -1936,6 +2014,14 @@ def editor_blueprint(
             )
         )
 
+    @blueprint.post("/api/graphs/<name>/wires")
+    def add_wire(name: str) -> Response:
+        return jsonify(_studio().add_wire(name, *_wire(_body())))
+
+    @blueprint.post("/api/graphs/<name>/wires/remove")
+    def remove_wires(name: str) -> Response:
+        return jsonify(_studio().remove_wires(name, _wire_list(_body())))
+
     @blueprint.post("/api/graphs/<name>/steps")
     def add_step(name: str) -> Response:
         body = _body()
@@ -1947,7 +2033,15 @@ def editor_blueprint(
                 str(_field(body, "class_path")),
                 _mapping(body, "params"),
                 into=_text(body, "list"),
+                wire=_dropped(body),
             )
+        )
+
+    @blueprint.post("/api/graphs/<name>/nodes")
+    def add_node(name: str) -> Response:
+        body = _body()
+        return jsonify(
+            _studio().add_node(name, str(_field(body, "class_path")), _mapping(body, "params"), wire=_dropped(body))
         )
 
     @blueprint.delete("/api/graphs/<name>/steps/<path:node>")

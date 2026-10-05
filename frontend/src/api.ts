@@ -19,6 +19,7 @@ import type { HostRun } from "./host";
 import type { Form, Graph, GraphSummary, Json, NewGraphKind, Positions, Problem, Supertypes } from "./model";
 import type { NameShift } from "./levels";
 import type { RestoredSummary, Workspace } from "./recovery";
+import type { WireEnds } from "./wires";
 
 export class ApiError extends Error {
   constructor(
@@ -129,6 +130,12 @@ export type Saved = Graph & { host_error?: string };
  */
 export const saveGraph = (name: string): Promise<Saved> => call("POST", `${graphPath(name)}/save`);
 
+/**
+ * `POST api/graphs/<name>/save` `{only: "settings"}` — write the graph's SETTINGS file alone (a settings sheet's save,
+ * `?only=settings`): a change of the graph itself the editor holds stays unsaved.
+ */
+export const saveSettings = (name: string): Promise<Saved> => call("POST", `${graphPath(name)}/save`, { only: "settings" });
+
 /** `POST api/graphs/<name>/save-as` `{path, overwrite?}` — write it to `path`; the list entry now names the new file. */
 export const saveGraphAs = (name: string, path: string, overwrite = false): Promise<Saved> =>
   call("POST", `${graphPath(name)}/save-as`, overwrite ? { path, overwrite } : { path });
@@ -211,22 +218,46 @@ export const setParam = (name: string, node: string, param: string, value: Json)
  */
 export type StepPlace = { after: string; list?: undefined } | { list: string; after?: undefined };
 
+/**
+ * A wire dragged out of a socket and dropped on empty canvas, by the end it was dragged out of: the card added for it is
+ * the other end — fed by that output (`{source, source_socket}`), or feeding that input (`{target, target_socket}`).
+ */
+export type DraggedEnd = { target: string; target_socket: string } | { source: string; source_socket: string };
+
 export type NewStep = {
   name: string;
   class_path: string;
   params: Record<string, Json>;
-} & StepPlace;
+  /** The dropped wire a CARD is picked from — saved to the card in the same edit (an op's place is its wire). */
+  wire?: DraggedEnd;
+} & (StepPlace | { after?: undefined; list?: undefined });
 
 /**
  * `POST api/graphs/<name>/steps` — insert a `flow:` step after `after`. Inside a subgraph both names are QUALIFIED:
  * `{name: "prep/threshold", after: "prep/grey"}` inserts into prep's `steps:`. On an op list (DESIGN2 §3) `after` names
  * a MEMBER — `{after: "stream.ops[1]"}` inserts the class as `stream.ops[2]` — and `{list: "stream.ops"}` appends it as
  * the list's last member (an empty `ops: []` becomes a block list); `name` is the step name a flow step would take,
- * sent either way (a member is named by its position). The answer is the graph plus `added`: the new node's name as the
- * server made it (`stream.ops[2]`; a flow step's own, qualified name).
+ * sent either way (a member is named by its position). A class that is not an op (2026-10-05, `cards.ts`) is a CARD of
+ * its own — a top-level key named after its class, above the graph's root, the place unused — with the dropped `wire`
+ * saved to it. The answer is the graph plus `added`: the new node's name as the server made it (`stream.ops[2]`; a flow
+ * step's own, qualified name; a card's key, `class_names_scan`).
  */
 export const addStep = (name: string, step: NewStep): Promise<Graph & { added?: string }> =>
   call("POST", `${graphPath(name)}/steps`, { ...step });
+
+/**
+ * `POST api/graphs/<name>/nodes` `{class_path, params, wire?}` — a class that is not an op as a CARD of its own, the
+ * route an agent names it by (the page's adds go through `addStep`, which hands such a class over): `class_names_scan:
+ * !class:…ClassNamesScan {}` above the graph's root, the dropped `wire` saved to it in the same edit. Refused in one
+ * plain line on a flow graph. The answer is the graph plus `added`, the card's name.
+ */
+export const addNode = (
+  name: string,
+  classPath: string,
+  params: Record<string, Json>,
+  wire?: DraggedEnd,
+): Promise<Graph & { added?: string }> =>
+  call("POST", `${graphPath(name)}/nodes`, wire === undefined ? { class_path: classPath, params } : { class_path: classPath, params, wire });
 
 /** `DELETE api/graphs/<name>/steps/<path:node>` — remove a step; what read it now reads what it read from. */
 export const removeStep = (name: string, node: string): Promise<Graph> =>
@@ -254,6 +285,19 @@ export const setSlot = (
   classPath: string,
   params: Record<string, Json>,
 ): Promise<Graph & { set?: string }> => call("POST", `${graphPath(name)}/slot`, { node, slot, class_path: classPath, params });
+
+/**
+ * `POST api/graphs/<name>/wires` `{source, source_socket, target, target_socket}` — SAVE a wire drawn on the canvas, in
+ * the document's own spelling (`wires.ts`); held until Save, one undo entry. The answer is the graph plus `wired`: the card
+ * the wire comes from now (`source` for a `stream.source` the server moved out of its slot). A wire the editor cannot save
+ * yet is a `400` with one plain line (`This wire would change the order of the steps — the editor can't save that yet.`).
+ */
+export const addWire = (name: string, wire: WireEnds): Promise<Graph & { wired?: string }> =>
+  call("POST", `${graphPath(name)}/wires`, { ...wire });
+
+/** `POST api/graphs/<name>/wires/remove` `{wires}` — take every wire listed out as ONE edit (Delete on selected wires). */
+export const removeWires = (name: string, wires: WireEnds[]): Promise<Graph> =>
+  call("POST", `${graphPath(name)}/wires/remove`, { wires });
 
 /** `POST api/graphs/<name>/rename` `{node, new}` — the key, every reference to it, and the sidecar entry. */
 export const renameNode = (name: string, node: string, newName: string): Promise<Graph> =>
@@ -422,8 +466,13 @@ export interface AppField {
  * field; a class two nodes share gives one field each), their `form` in `GET …/form`'s shape, and every entry that
  * names nothing as a located `problem`. `{declared: false, fields: [], form: {}, problems: []}` without a block.
  */
+/** What a graph lets a person change (`app: {graph: …}`): everything, or its settings alone. */
+export type GraphMode = "editable" | "settings-only";
+
 export interface AppForm {
   declared: boolean;
+  /** `settings-only`: the server refuses every edit but a setting (the graph is fixed where it is shipped). */
+  graph: GraphMode;
   fields: AppField[];
   form: Form;
   problems: Problem[];

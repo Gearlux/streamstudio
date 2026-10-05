@@ -289,10 +289,16 @@ runs `check()` on every one, and keeps JSON and YAML side by side until the flip
 - The `app:` block in 9 shipped pane files stays as the settings form's field list (`GET …/app`, landed
   2026-10-01 with phase 4a); a `__lo`/`__hi` pair names ONE field, so the shipped blocks still read as written.
 - A `Stream` with an `ops:` list is drawn as a chain of record wires between the ops.
-- A hand-drawn wire is a PROPOSAL until a route can spell it (phase 3 part 1, 2026-09-28): no phase-2 route writes
-  a wire — a Stream's record wires ARE its `ops:` order, a flow's are `from:` / `bind:`, a contract's `!ref:` — so
-  a drop whose types meet stays dashed on the canvas, a toast names the spelling the document would need, the file
-  is untouched, and the next model refresh drops it. A mismatch is refused WHILE dragging and never becomes an edge.
+- A hand-drawn wire is SAVED by the server in the document's own spelling, or refused in one plain line (approved
+  2026-10-04): a drop whose types meet is sent to `POST …/wires` as its two ends, and the canvas draws the answer —
+  `delivered: {<slot>: !ref:<P>}` into a root's output slot, `<slot>: !ref:<P>` into any other card's single slot,
+  `delivered: {<entry>: <key>}` from a record-entry output into a root's record entry (`input: image`). A `!ref:`
+  names a top-level key only, so a producer written inside another card's slot is moved out to one first (`source`,
+  or `source_2` when a top-level key, a card or another card's parameter has the name). One edit, held until Save,
+  one undo; Delete on selected wires removes them as one edit. Refused, nothing drawn or written: a Stream's record
+  wires and a wire into an `ops:` member (`This wire would change the order of the steps — the editor can't save that
+  yet.` — they ARE the list's order), a flow's `from:` / `bind:` / gate wires (`The editor can't save wires in this
+  kind of graph yet.`), a wire inside a subgraph. A mismatch is refused WHILE dragging and never becomes an edge.
 - Two datasets in one graph are the existing `JointStream`, drawn with one socket per stream.
 - Taken while landing phase 3 part 2 (2026-09-28): undo is TWO histories under one gesture — a document edit is
   undone by the document's own text history on the server (`POST …/undo`, shared with an agent's edits), a move, an
@@ -300,9 +306,10 @@ runs `check()` on every one, and keeps JSON and YAML side by side until the flip
   only, stored as the page spelled them (`docs/architecture.md` has both records). A rerun from the run panel sends
   only the values that differ from what the run's node holds, and a value typed there is a trial, never written.
 - Taken while closing phase 3 (2026-09-28), gathered from what landed:
-  - **The wire rule** stands as written above for EVERY document edit the canvas cannot route — today a drawn wire.
-    The page never writes a spelling the document did not state; a missing route is an item in
-    `streamstudio/TASKS.md`. Adding to and removing from a `Stream`'s `ops:` list became routes on 2026-09-29 (§6c).
+  - **The wire rule**: the page never writes a spelling the document did not state — every edit is a route, and a
+    gesture with no route yet is refused in words, never drawn (a drawn wire since 2026-10-04, above); a missing route
+    is an item in `streamstudio/TASKS.md`. Adding to and removing from a `Stream`'s `ops:` list became routes on
+    2026-09-29 (§6c), saving a drawn wire on 2026-10-04.
   - **Groups live in the sidecar only**, stored as the page spelled them; the server reads inside a group only to
     follow a rename.
   - **Positions and the layout history are the page's.** The server stores what the page sends (`PUT …/positions`,

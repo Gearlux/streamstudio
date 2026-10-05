@@ -4,7 +4,7 @@
  * graph.
  */
 import { describe, expect, it } from "vitest";
-import { embedFromSearch, graphFromSearch, missingGraphMessage, pageHref, pickGraph, tabFromSearch } from "../link";
+import { embedFromSearch, graphFromSearch, missingGraphMessage, onlyFromSearch, pageHref, pickGraph, tabFromSearch } from "../link";
 import type { GraphSummary } from "../model";
 
 const summary = (name: string, dirty = false): GraphSummary => ({ name, path: `/w/${name}.yaml`, kind: "flow", dirty });
@@ -100,5 +100,20 @@ describe("missingGraphMessage — the graph named, and the graphs there are", ()
   it("an empty folder says it holds none; an unknown folder is 'here'", () => {
     expect(missingGraphMessage("view_bte", [], "/w/state")).toBe("There is no graph 'view_bte' in /w/state — it holds no graph yet.");
     expect(missingGraphMessage("x", [summary("a")], "")).toBe("There is no graph 'x' here — the graphs there are: a.");
+  });
+});
+
+describe("onlyFromSearch — ?only=settings shows the graph's settings and nothing else (a host's settings sheet)", () => {
+  it("settings by name; none, or any other word, is the whole page", () => {
+    expect(onlyFromSearch("?graph=view_bte&only=settings&embed=1")).toBe("settings");
+    expect(onlyFromSearch("?graph=view_bte&embed=1")).toBeNull();
+    expect(onlyFromSearch("?only=canvas")).toBeNull();
+    expect(onlyFromSearch("?only=")).toBeNull();
+  });
+
+  it("is the host's, kept as given while the page follows the graph and the tab", () => {
+    const url = new URL(pageHref("http://h/studio/?graph=view_fft&only=settings&embed=1", "view_bte", "", "settings"));
+    expect(url.searchParams.get("only")).toBe("settings");
+    expect(url.searchParams.get("graph")).toBe("view_bte");
   });
 });

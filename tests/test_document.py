@@ -24,6 +24,7 @@ from recordstream import Algorithm, Image, Input, Label, Mask, Output, Param, Re
 import streamstudio
 from streamstudio.document import Document, Model, Problem, _gained, _include_names, _load_problem
 from streamstudio.layout import Group, read_groups, read_sidecar, write_sidecar
+from streamstudio.settings import settings_path
 
 MOD = __name__
 
@@ -486,7 +487,7 @@ class TestDerive:
     def test_a_stream_document_names_its_members_by_path_and_position(self, tmp_path: Path) -> None:
         model = _open(tmp_path, SOURCE_TEXT).model
         names = [node.name for node in model.nodes]
-        assert names == ["stream", "stream.source", "stream.ops[0]", "stream.ops[1]", "names", "contract"]
+        assert names == ["stream", "stream.source", "stream.ops[0]", "stream.ops[1]", "names", "contract", "<host>"]
         stream = model.node("stream")
         assert stream.kind == "engine"
         assert [(s.name, s.type) for s in stream.inputs] == [("source", "Source"), ("ops[0]", "Op"), ("ops[1]", "Op")]
@@ -533,19 +534,47 @@ class TestDerive:
         assert host.inputs == []
 
     def test_a_contract_root_has_an_input_per_output_slot_and_the_delivered_wires(self, tmp_path: Path) -> None:
+        """One input per output slot (required), then one per record entry (an entry socket, never required). What the
+        contract's ``inputs`` declare is the HOST card's (``<host>``, last): the root has no output."""
         model = _open(tmp_path, SOURCE_TEXT).model
         contract = model.node("contract")
         assert contract.kind == "contract"
         assert [(s.name, s.type, s.required) for s in contract.inputs] == [
             ("stream", "Stream", True),
             ("classes", "List[str]", True),
+            ("input", "Image", False),
         ]
-        assert [(s.name, s.type) for s in contract.outputs] == [("files", "List[str]")]
+        assert contract.outputs == []
+        host = model.nodes[-1]
+        assert (host.name, host.kind) == ("<host>", "host")
+        assert [(s.name, s.type, s.entry) for s in host.outputs] == [("files", "List[str]", "")]
         assert _wires(model, "delivered") == [
             ("stream", "stream", "contract", "stream"),
             ("names", "class_names", "contract", "classes"),
         ]
         assert model.problems == []
+
+    def test_a_rooted_flow_reads_an_item_typed_input_from_the_host_card(self, tmp_path: Path) -> None:
+        """A pane-shaped root: the host hands in an ``image`` — an item type, so an ENTRY of the record the host hands
+        the flow — drawn as an entry output of the host card; the head step's read of it is a wire from there (before
+        2026-10-05 the root carried it as its own output and the wire left the root). The chain check starts from it."""
+        document = _open(tmp_path, CONTRACT_FLOW_TEXT)
+        model = document.model
+        assert model.nodes[-1].name == "<host>"
+        assert [(s.name, s.type, s.entry) for s in model.node("<host>").outputs] == [("image", "Image", "image")]
+        assert model.node("contract").outputs == []
+        assert ("<host>", "image", "gain", "image") in _wires(model, "entry")
+        assert not [wire for wire in model.wires if wire.source == "contract"]
+        assert document.check() == []
+
+    def test_a_root_that_declares_no_inputs_draws_no_host_card(self, tmp_path: Path) -> None:
+        """The CON case: nothing to hand in, no card — and a step reading an entry nobody hands in is the chain
+        check's refusal, never a host that supplies anything (the card a graph WITHOUT a root gets)."""
+        document = _open(tmp_path, CONTRACT_FLOW_TEXT.replace("  inputs: {image: Image}\n", ""))
+        assert "<host>" not in document.model.names()
+        problems = document.check()
+        assert len(problems) == 1
+        assert "gain: DocGain needs the record entry 'image', which nothing before it produces" in problems[0].message
 
     def test_a_value_producer_has_its_outputs_plus_an_object_output(self, tmp_path: Path) -> None:
         names = _open(tmp_path, SOURCE_TEXT).model.node("names")
@@ -620,13 +649,13 @@ class TestDerive:
         with pytest.raises(KeyError, match="decode.*count"):
             model.node("nope")
 
-    def test_the_bluetooth_pane_derives_30_nodes_and_59_wires(self) -> None:
+    def test_the_bluetooth_pane_derives_31_nodes_and_59_wires(self) -> None:
         """Measured 2026-09-30 on the shipped ``bte_view.yaml``: 29 steps plus the ``contract:`` root —
-        30 nodes, whose root's outputs are the host's two entries — and 59 wires: 28 ``from:`` record
-        wires, 10 gate wires (one per ``requires:``), 21 entry wires (who produced what a node reads),
-        and no host wire — the head node (``CollectKnownAccessCodes``) reads its Signal by TYPE and
-        declares nothing, and no step reads ``input`` or ``regions`` by name, so the root wires to
-        nothing and no ``<host>`` node is drawn. The day before it was 25 nodes and 49 wires (23 / 9 /
+        30 nodes — and 59 wires: 28 ``from:`` record wires, 10 gate wires (one per ``requires:``), 21 entry
+        wires (who produced what a node reads), and no host wire — the head node (``CollectKnownAccessCodes``)
+        reads its Signal by TYPE and declares nothing, and no step reads ``input`` or ``regions`` by name.
+        Since 2026-10-05 the root's two inputs — the host's two entries — are drawn on the HOST card, the
+        31st node, which no wire leaves. The day before it was 25 nodes and 49 wires (23 / 9 /
         17): the pane then gained five steps — ``known``, ``channel``, ``overlap``, ``eye`` and ``edr`` —
         one more gate (``classify.try_edr`` → ``edr``) and four more entry wires (``channel`` into
         ``tune`` and ``limit``, ``inst_freq`` into ``eye``, ``burst`` into ``edr``).
@@ -635,7 +664,7 @@ class TestDerive:
         """
         path = _bte_path()
         model = Document.open(path).model
-        assert len(model.nodes) == 30
+        assert len(model.nodes) == 31
         assert len(model.wires) == 59
         kinds: Dict[str, int] = {}
         for wire in model.wires:
@@ -648,16 +677,21 @@ class TestDerive:
         assert ("classify", "try_edr", "edr") in gates
         root = model.node("contract")
         assert root.kind == "contract"
-        assert [(s.name, s.type) for s in root.outputs] == [("input", "Signal"), ("regions", "Regions")]
-        assert not any(node.kind == "host" for node in model.nodes)
+        assert root.outputs == []
+        host = model.nodes[-1]
+        assert (host.name, host.kind) == ("<host>", "host")
+        assert [(s.name, s.type, s.entry) for s in host.outputs] == [
+            ("input", "Signal", "input"),
+            ("regions", "Regions", "regions"),
+        ]
 
     def test_the_selection_graph_derives_its_root_two_gates_and_no_problem(self) -> None:
         """Measured 2026-10-01 on the shipped ``selection_stats.yaml`` — the graph the signal workspace runs
         over a selection for its info panel, rooted like a pane since that day: six steps plus the
-        ``contract:`` root (the host's ``input`` and ``regions``) — 7 nodes — and 12 wires: 5 ``from:``
-        record wires, the two gate wires from the floor-method chooser's outcomes to the floor node each
-        one runs, and 5 entry wires. No step reads ``input`` or ``regions`` by name, so the root wires to
-        nothing and no ``<host>`` node is drawn; the document reports no problem.
+        ``contract:`` root — 7 nodes — and 12 wires: 5 ``from:`` record wires, the two gate wires from the
+        floor-method chooser's outcomes to the floor node each one runs, and 5 entry wires; the document
+        reports no problem. Since 2026-10-05 the host's ``input`` and ``regions`` are drawn on the HOST card,
+        the 8th node — no step reads either by name, so no wire leaves it.
 
         This pins the waivefront file's declarations from here; a change there shows up here first.
         """
@@ -672,6 +706,7 @@ class TestDerive:
             "mean",
             "median",
             "levels",
+            "<host>",
         ]
         kinds: Dict[str, int] = {}
         for wire in model.wires:
@@ -680,17 +715,19 @@ class TestDerive:
         assert _wires(model, "gate") == [("method", "mean", "mean", "record"), ("method", "median", "median", "record")]
         root = model.node("contract")
         assert root.kind == "contract"
-        assert [(s.name, s.type) for s in root.outputs] == [("input", "Signal"), ("regions", "Regions")]
-        assert not any(node.kind == "host" for node in model.nodes)
+        assert root.outputs == []
+        assert [(s.name, s.type, s.entry) for s in model.node("<host>").outputs] == [
+            ("input", "Signal", "input"),
+            ("regions", "Regions", "regions"),
+        ]
 
     def test_the_detection_model_derives_its_root_and_no_problem(self) -> None:
         """Measured 2026-10-01 on the shipped ``threshold_detector_model.yaml`` — the detection workspace's
-        MODEL graph, rooted that day: the ``contract:`` root (the host's ``input`` and ``target`` and the IQ
-        ``signal`` the first step reads), seven steps, and the ``threshold`` step's ``ConfigureOp`` members
-        (its two floor ops and the ``Threshold`` it configures) — 11 nodes — and 9 wires: 6 ``from:``
-        record wires, the 2 list members and the configured target. No step reads ``input``, ``target``
-        or ``signal`` by name, so the root wires to nothing and no ``<host>`` node is drawn; the document
-        reports no problem.
+        MODEL graph, rooted that day: the ``contract:`` root, seven steps, and the ``threshold`` step's
+        ``ConfigureOp`` members (its two floor ops and the ``Threshold`` it configures) — 11 nodes — and 9
+        wires: 6 ``from:`` record wires, the 2 list members and the configured target; the document reports no
+        problem. Since 2026-10-05 the host's ``input`` and ``target`` and the IQ ``signal`` the first step reads
+        are drawn on the HOST card, the 12th node — no step reads them by name, so no wire leaves it.
 
         This pins the waivefront file's declarations from here; a change there shows up here first.
         """
@@ -709,6 +746,7 @@ class TestDerive:
             "regions",
             "prediction",
             "narrowed",
+            "<host>",
         ]
         kinds: Dict[str, int] = {}
         for wire in model.wires:
@@ -716,13 +754,18 @@ class TestDerive:
         assert kinds == {"record": 6, "list": 2, "ref": 1}
         root = model.node("contract")
         assert root.kind == "contract"
-        assert [(s.name, s.type) for s in root.outputs] == [
-            ("input", "Image"),
-            ("target", "Boxes"),
-            ("signal", "Signal"),
+        assert root.outputs == []
+        assert [(s.name, s.type, s.entry) for s in model.node("<host>").outputs] == [
+            ("input", "Image", "input"),
+            ("target", "Boxes", "target"),
+            ("signal", "Signal", "signal"),
         ]
-        assert root.inputs == [], "the graph hands back each record: it declares no output slot to wire"
-        assert not any(node.kind == "host" for node in model.nodes)
+        # the graph hands back each record: no output slot to wire, one entry socket per record entry (read under its
+        # own name — nothing is wired into it, and an entry socket is never required)
+        assert [(s.name, s.type, s.required, s.entry) for s in root.inputs] == [
+            ("input", "Image", False, "input"),
+            ("target", "Boxes", False, "target"),
+        ]
 
     def test_the_detection_models_root_is_what_its_chain_is_checked_against(self, tmp_path: Path) -> None:
         """The root's entries are what the chain check starts from — shown on a COPY of the shipped model
@@ -777,7 +820,8 @@ class TestDerive:
         root cut off is fed by a synthetic ``<host>`` that supplies anything, so the same insert is
         ACCEPTED and the host grows a ``spectrogram`` output — measured 2026-09-27, before the root.
         The entries the refusal lists at that point are the host's two plus ``known_codes``, which the
-        pane's head step ``known`` writes (since 2026-09-30).
+        pane's head step ``known`` writes (since 2026-09-30). The rooted pane's host card (2026-10-05) holds
+        the contract's two inputs and never grows one.
         """
         source = _bte_path().read_text()
         rooted = tmp_path / "bte_view.yaml"
@@ -799,7 +843,7 @@ class TestDerive:
             "the chain has input, known_codes, regions at that point" in message
         )
         assert doc.text == source
-        assert not any(node.kind == "host" for node in doc.model.nodes)
+        assert [s.name for s in doc.model.node("<host>").outputs] == ["input", "regions"]
 
         mark = "# The graph's ROOT"
         assert mark in source, "the shipped pane carries its contract block (appended after its last entry)"
@@ -815,8 +859,9 @@ class TestDerive:
         pytest.importorskip("waivefront.processing")  # registers the twin's registry-key classes
         path = _shipped("psd_slice_view.yaml")
         model = Document.open(path).model
-        # The twin's `contract:` root (2026-09-28) is its last entry, so it derives as the last node.
-        assert [node.name for node in model.nodes] == ["stream", "stream.ops[0]", "stream.ops[1]", "contract"]
+        # The twin's `contract:` root (2026-09-28) is its last entry, so it derives as the last node of the document;
+        # the host card that draws its two inputs (2026-10-05) follows it.
+        assert [node.name for node in model.nodes] == ["stream", "stream.ops[0]", "stream.ops[1]", "contract", "<host>"]
         assert model.node("stream.ops[1]").class_path.endswith("PsdSlice")
         assert _wires(model, "record") == [("stream.ops[0]", "record", "stream.ops[1]", "record")]
         assert model.problems == []
@@ -1420,20 +1465,26 @@ class TestSetParam:
     def test_the_bluetooth_pane_keeps_its_259_comment_lines(self, tmp_path: Path) -> None:
         """Measured on the shipped file (2026-10-01): 457 lines, 259 of them comments — the other clone's
         grown chain (448 / 255 without it) plus this workspace's ``contract:`` root; ``set_param`` on
-        ``size.max_band_hz`` changes ONE line and every comment survives."""
+        ``size.hint`` changes ONE line and every comment survives. ``size.max_band_hz`` is one of the pane's
+        SETTINGS (its ``app:`` block names it), so it goes to the settings file and the graph's text stays whole."""
         source = _bte_path()
         path = tmp_path / source.name
         path.write_text(source.read_text())
         doc = Document.open(path)
         before = doc.text
         assert _comment_lines(before) == 259
-        doc.set_param("size", "max_band_hz", 30.0e6)
+        doc.set_param("size", "hint", "a packet")
         after = doc.text
         assert _comment_lines(after) == 259
         differing = [(a, b) for a, b in zip(before.splitlines(), after.splitlines()) if a != b]
-        assert differing == [("      max_band_hz: 6.0e6", "      max_band_hz: 30000000.0")]
+        hint = "      hint: a Bluetooth packet is at most 2 MHz wide and 17 ms long"
+        assert differing == [(hint, "      hint: a packet")]
         assert len(after.splitlines()) == len(before.splitlines())
+        doc.set_param("size", "max_band_hz", 30.0e6)
+        assert doc.text == after, "a setting leaves the graph's text as it was"
         assert doc.model.node("size").params["max_band_hz"].value == 30.0e6
+        doc.save()
+        assert settings_path(path).read_text() == "flow.size.op.max_band_hz: 30000000.0\n"
 
 
 # ------------------------------------------------------------------------------------------------
@@ -1451,7 +1502,16 @@ class TestSteps:
             f"  floor:\n    op: !class:{MOD}.DocBackground\n      percentile: 30.0\n    from: floor2\n"
         ) in doc.text
         model = doc.model
-        assert [n.name for n in model.nodes] == ["contract", "gain", "floor2", "floor", "decide", "bright", "mask"]
+        assert [n.name for n in model.nodes] == [
+            "contract",
+            "gain",
+            "floor2",
+            "floor",
+            "decide",
+            "bright",
+            "mask",
+            "<host>",  # the host card: the inputs
+        ]
         assert ("gain", "record", "floor2", "record") in _wires(model, "record")
         assert ("floor2", "record", "floor", "record") in _wires(model, "record")
         assert doc.check() == []
@@ -1487,7 +1547,7 @@ class TestSteps:
         assert "bright:" not in doc.text
         assert f"  mask:\n    op: !class:{MOD}.DocMaskFrom {{}}\n    from: decide\n" in doc.text
         model = doc.model
-        assert [n.name for n in model.nodes] == ["contract", "gain", "floor", "decide", "mask"]
+        assert [n.name for n in model.nodes] == ["contract", "gain", "floor", "decide", "mask", "<host>"]
         assert ("decide", "record", "mask", "record") in _wires(model, "record")
         assert doc.check() == []
 
@@ -1527,7 +1587,7 @@ class TestRename:
         assert "  level:\n" in doc.text and "  floor:\n" not in doc.text
         assert "    from: level\n" in doc.text
         assert "    bind: {threshold: level.background}\n" in doc.text
-        assert [n.name for n in doc.model.nodes] == ["contract", "gain", "level", "decide", "bright", "mask"]
+        assert [n.name for n in doc.model.nodes] == ["contract", "gain", "level", "decide", "bright", "mask", "<host>"]
         assert doc.positions["level"] == (10.0, 20.0)
         assert "floor" not in doc.positions
         assert doc.check() == []
@@ -1590,7 +1650,16 @@ class TestHistory:
         assert doc.redo() and doc.text == t2
         assert doc.redo() and doc.text == t3
         assert doc.redo() is False
-        assert [n.name for n in doc.model.nodes] == ["contract", "gain", "floor2", "floor", "test", "bright", "mask"]
+        assert [n.name for n in doc.model.nodes] == [
+            "contract",
+            "gain",
+            "floor2",
+            "floor",
+            "test",
+            "bright",
+            "mask",
+            "<host>",
+        ]
 
     def test_undoing_a_rename_restores_the_old_names_position_and_group(self, tmp_path: Path) -> None:
         """Measured before the fix: undo restored the TEXT only — the sidecar stayed keyed by the new name,
@@ -1710,7 +1779,7 @@ class TestNaming:
         main = _write(tmp_path, main_text, "main.yaml")
         doc = Document.open(main)
         model = doc.model
-        assert [n.name for n in model.nodes] == ["contract", "floor", "level", "again"]
+        assert [n.name for n in model.nodes] == ["contract", "floor", "level", "again", "<host>"]
         assert model.node("floor").source_file == str(sub.resolve())
         assert model.node("floor").loc == f"{sub.resolve()}:1:8"
         assert model.node("again").source_file == str(main)

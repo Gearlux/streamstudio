@@ -15,6 +15,7 @@ const state: CommandState = {
   dirty: true,
   selected: 1,
   groupSelected: false,
+  wireSelected: false,
   clipboard: false,
   run: false,
   paused: false,
@@ -183,6 +184,16 @@ describe("nodeMenu — right-click on a node", () => {
 
   it("CON: a node without source slots has no Set item", () => {
     expect(labels(nodeMenu({ ...context(), node: node("op"), ...actions, slots: [] }))).not.toContain("Set source…");
+  });
+
+  it("on the host card Rename… and Delete are greyed — it is no node of the document (2026-10-05)", () => {
+    // measured before: F2 on the host card did nothing and said nothing; Delete answered the server's refusal
+    const host = { ...node("host"), name: "<host>", class_path: "" };
+    const entries = nodeMenu({ ...context(), state: { ...state, selected: 1, hostSelected: true }, node: host, ...actions });
+    expect(item(entries, "Rename…").disabled).toBe(true);
+    expect(item(entries, "Delete").disabled).toBe(true);
+    const card = nodeMenu({ ...context(), node: node("op"), ...actions });
+    expect([item(card, "Rename…").disabled, item(card, "Delete").disabled]).toEqual([false, false]);
   });
 });
 

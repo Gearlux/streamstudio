@@ -5,13 +5,14 @@
  * are drawn and the line under the search box says how many there are and to type to narrow; filtering the
  * whole list on every keystroke is cheap, drawing it is not.
  *
- * A pick is handed to the app, which inserts the class where the meta line says (`POST …/steps`): `added after grey`
+ * A pick is handed to the app, which inserts an op where the meta line says (`POST …/steps`): `added after grey`
  * (a flow step, or a list member — `added after stream.ops[1]`), or `added at the end of stream.ops` (an op list with no
- * member selected, `oplists.insertTarget`). `data-opened-ms` on the root is the time from the gesture to the list
- * being in the DOM, measured in the page — what the tests print.
+ * member selected, `oplists.insertTarget`); any other class is a card of its own at the gesture's point, wired to the
+ * dropped wire's end (`cards.ts`). `data-opened-ms` on the root is the time from the gesture to the list being in the
+ * DOM, measured in the page — what the tests print.
  */
 import { useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
-import type { NodeSpec } from "../api";
+import type { DraggedEnd, NodeSpec } from "../api";
 import type { Supertypes } from "../model";
 import { insertLabel, type InsertTarget } from "../oplists";
 import { plainDoc } from "../rst";
@@ -24,6 +25,8 @@ export interface PaletteRequest {
   target: InsertTarget;
   /** A dropped wire's type and side; absent for a double-click. */
   filter?: PaletteFilter;
+  /** The end the dropped wire was dragged out of: a CARD picked here is wired to it in the same edit (`cards.ts`). */
+  wire?: DraggedEnd;
   /** `performance.now()` at the gesture. */
   openedAt: number;
 }

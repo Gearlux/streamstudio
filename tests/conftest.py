@@ -3,6 +3,7 @@
 from typing import List
 
 import pytest
+from recordstream.sources import huggingface
 
 from streamstudio import app as app_module
 
@@ -19,3 +20,16 @@ def page_checks(monkeypatch: pytest.MonkeyPatch) -> List[str]:
     calls: List[str] = []
     monkeypatch.setattr(app_module, "ensure_page_built", lambda frontend=None: calls.append("checked"))
     return calls
+
+
+@pytest.fixture(autouse=True)
+def no_hub(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test asks the HuggingFace Hub for a dataset's description.
+
+    A HuggingFace source card's record-entry outputs are the source's ``produces``, which — with every metadata
+    column kept (``"*"``, the default) — reads the dataset's description through
+    ``recordstream.sources.huggingface.described_columns``: a network call on every derive of a graph holding such a
+    source. Here it answers ``()``, what it answers offline (the source then declares ``image`` and ``class`` only); a
+    test that needs a dataset's columns patches it again.
+    """
+    monkeypatch.setattr(huggingface, "described_columns", lambda path, name=None, revision=None: ())

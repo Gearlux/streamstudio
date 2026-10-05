@@ -10,13 +10,23 @@
  * — the button, a double-click on the card (the canvas) or Open in its menu shows its inside; a BOUNDARY node is a
  * subgraph's `<in>` / `<out>`, where the record enters and leaves it — a small pill, never renamed.
  *
+ * A graph's ROOT (a `GraphContract`, kind `contract`) shows only what is connected to it: its sockets — one input per
+ * output slot it must be delivered, one per record entry its records carry, one per optional slot (no `*`: the host has
+ * its own answer when it is left unwired) — and, on the class line, the contract's `name` (`classification source`)
+ * instead of `GraphContract`. Its declaration (`name`, `inputs`, `outputs`, `optional`, `records`, `delivered`) is the
+ * document's text, never a row of widgets. A slot or entry filled by a value written straight under `delivered:`
+ * (`classes: [cat, dog]`, `input: pixels`) shows that value on its row (`data-filled`). What the contract's `inputs`
+ * declare is the HOST card's (`<host>`, kind `host`): titled after the host (`from annotaide`, `from the host`
+ * standalone, `data-host-title`), never renamed — it is no node of the document.
+ *
  * Double-clicking the name edits it in place: Enter is `POST …/rename` (the key, every reference, the sidecar
  * entry and group membership in ONE edit), the typed name kept on the node's level (`mono` inside prep is sent
  * as `prep/mono`); a refused name (one in use, a list member) leaves the old name and the page shows the server's
  * message. After a run, the node carries its status (`data-run-status`: ok / paused / error / dropped / not
  * reached — coloured), its wall time and its generation, read from the latest run.
  *
- * Every element a test needs is addressable by `data-*`: the root by `data-node` / `data-kind` / `data-class`
+ * Every element a test needs is addressable by `data-*`: the root by `data-node` / `data-kind` / `data-class`, the class
+ * line by `data-subtitle`
  * (and `data-run-status` / `data-generation` after a run), a handle by `data-node` / `data-socket` / `data-type` /
  * `data-kind`, a widget by `data-param`, the rename field by `data-rename`, a subgraph's open button by
  * `data-open-subgraph` and its step list by `data-inner-steps`, a source slot's Set source… button by `data-set-slot`
@@ -25,13 +35,31 @@
 import { useEffect, useState, type KeyboardEvent } from "react";
 import { Handle, Position, type NodeProps } from "@xyflow/react";
 import { useEditor } from "../context";
+import { hostCardTitle } from "../host";
 import { isBoundary, levelOfNode, renamedTo, shortName } from "../levels";
-import { handleId, shortClass, socketColor, type GenericNode, type HandleKind, type ModelNode } from "../model";
+import {
+  handleId,
+  requiredMark,
+  shortClass,
+  socketColor,
+  type GenericNode,
+  type HandleKind,
+  type Json,
+  type ModelNode,
+} from "../model";
 import { isSourceSlot } from "../slots";
 import { ParamWidget, valuesOf } from "./ParamWidget";
 
-/** What the class line says for a node without a class of its own. */
+/** The `param.doc` of a value written straight under a root's `delivered:` (`document.DELIVERED_LITERALLY`). */
+const DELIVERED_LITERALLY = "delivered literally";
+
+/** A filled slot's value as its row shows it: a word as it is, anything else as JSON. */
+const filledText = (value: Json): string => (typeof value === "string" ? value : JSON.stringify(value));
+
+/** What the class line says: a root's contract name, the class short name, or — without a class — what the node is. */
 function classLine(node: ModelNode): string {
+  const named = node.params.name?.value;
+  if (node.kind === "contract" && typeof named === "string" && named !== "") return named;
   const cls = shortClass(node.class_path);
   if (cls) return cls;
   if (node.kind === "host") return "what the host provides";
@@ -46,7 +74,8 @@ export function GenericNodeView({ data, selected }: NodeProps<GenericNode>) {
   const { graph, form, run, setParam, chooseSlot } = useEditor();
   const node = data.node;
   const schemas = form[node.name] ?? {};
-  const params = Object.values(node.params);
+  // a graph's root shows only its sockets: its declaration is the document's text, never a row of widgets
+  const params = node.kind === "contract" ? [] : Object.values(node.params);
   const values = valuesOf(node.params);
   const status = run?.statuses[node.name];
   const traced = status === undefined ? undefined : run?.trace.nodes.find((entry) => entry.node === node.name);
@@ -65,7 +94,9 @@ export function GenericNodeView({ data, selected }: NodeProps<GenericNode>) {
       <div className="title">
         <NodeName node={node} />
         <span className="badge">{node.kind}</span>
-        <div className="cls">{classLine(node)}</div>
+        <div className="cls" data-subtitle>
+          {classLine(node)}
+        </div>
       </div>
       {node.kind === "subgraph" && <SubgraphBar node={node} />}
       {status && (
@@ -81,8 +112,13 @@ export function GenericNodeView({ data, selected }: NodeProps<GenericNode>) {
           <SocketHandle node={node} kind="in" name={socket.name} type={socket.type} doc={socket.doc} />
           <span className="label">
             {socket.name}
-            {socket.required && <b title="an input nothing may leave unwired">*</b>}
+            {requiredMark(socket) && <b title="an input nothing may leave unwired">{requiredMark(socket)}</b>}
             <i>{socket.type}</i>
+            {node.params[socket.name]?.doc === DELIVERED_LITERALLY && (
+              <span className="filled" data-filled={filledText(node.params[socket.name].value)} title="written under delivered:">
+                = {filledText(node.params[socket.name].value)}
+              </span>
+            )}
           </span>
           {isSourceSlot(socket) && (
             <button
@@ -157,7 +193,7 @@ function SubgraphBar({ node }: { node: ModelNode }) {
 
 /** The name in the title; a double-click, F2 or Rename… edits it in place (the editor context says which title). */
 function NodeName({ node }: { node: ModelNode }) {
-  const { rename, editing: which, setEditing } = useEditor();
+  const { rename, editing: which, setEditing, host } = useEditor();
   const editing = which === `node:${node.name}`;
   const own = shortName(node.name);
   const [draft, setDraft] = useState(own);
@@ -165,6 +201,12 @@ function NodeName({ node }: { node: ModelNode }) {
     if (editing) setDraft(own);
   }, [editing, own]);
   if (isBoundary(node)) return <span className="name">{own}</span>;
+  if (node.kind === "host")
+    return (
+      <span className="name" data-host-title title="what the host hands this graph — not a node of the document">
+        {hostCardTitle(host)}
+      </span>
+    );
   if (!editing) {
     return (
       <span

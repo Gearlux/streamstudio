@@ -182,7 +182,13 @@ class TestTheAppForm:
         ]
 
     def test_a_graph_without_an_app_block_declares_nothing(self, client: Any) -> None:
-        assert _ok(client.get("/api/graphs/plain/app")) == {"declared": False, "fields": [], "form": {}, "problems": []}
+        assert _ok(client.get("/api/graphs/plain/app")) == {
+            "declared": False,
+            "graph": "editable",
+            "fields": [],
+            "form": {},
+            "problems": [],
+        }
 
     def test_the_form_follows_what_the_editor_holds_not_the_file(self, client: Any, graph_dir: Path) -> None:
         text = PANE_TEXT.replace("    - [Missing, level]\n", "    - [FormOther, floor_db]\n")
@@ -205,9 +211,9 @@ class TestTheShippedPanes:
     @pytest.mark.parametrize(
         "package, pane, entries, fields, all_fields",
         [
-            ("waivefront.analysis.annotation", "bte_view.yaml", 32, 30, 247),
-            ("waivefront.analysis.annotation", "clock_view.yaml", 12, 9, 49),
-            ("waivefront.analysis.annotation", "cell_view.yaml", 6, 6, 66),
+            ("waivefront.analysis.annotation", "bte_view.yaml", 32, 30, 248),
+            ("waivefront.analysis.annotation", "clock_view.yaml", 12, 9, 50),
+            ("waivefront.analysis.annotation", "cell_view.yaml", 6, 6, 67),
             ("waivefront.annotation", "write_annotations.yaml", 1, 1, 14),
         ],
     )

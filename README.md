@@ -291,15 +291,30 @@ the list. An unreadable file is refused with its name, and the list is untouched
 
 ### The Nodes sidebar
 
-`N` (or the **Nodes** button) opens every class the editor can describe, grouped by **package** (the first part of
-the class path) and then by **kind** — Sources, Ops, Algorithms, Engines, Sinks, Runnables, Values, Contracts. The
-search box narrows by every word you type. Each entry shows its name, one line of description and coloured chips
+`N` (or the **Nodes** button) opens every class the editor can describe as a tree of folders: the **package** (the
+first part of the class path), inside it the **kind** — Sources, Ops, Algorithms, Engines, Sinks, Runnables, Values,
+Contracts — and inside a kind one folder per part of the class's `@configurable` **group**:
+
+```python
+@configurable(category="op", group="numpy")          # recordstream ▸ Ops ▸ numpy ▸ Threshold
+class Threshold: ...
+
+@configurable(category="op", group="fourier/numpy")  # <package> ▸ Ops ▸ fourier ▸ numpy ▸ FourierOp
+class FourierOp: ...
+```
+
+Every folder shows how many classes it holds and starts folded; a folder lists its sub-folders first, then the
+classes that sit in it directly. A class without a group sits straight under its kind. The folders you open are
+remembered in this browser. The search box narrows by every word you type (in the name, the class path or the
+description) and opens every folder on the way to a match; clearing it folds them back as they were. Each entry shows its name, one line of description and coloured chips
 for the record entries it reads and writes. Hovering shows the whole description and the parameters; a long list
 ends with `+37 more parameters` rather than running off the window. Docstring markup such as
 ``:class:`DirectorySink` `` and ``` ``fields.json`` ``` shows as inline code.
 
 **Click** an entry to add it after the selected node; **drag** it onto the canvas to place it where you drop it.
-The footer says which: `Click adds after grey · drag places it`. On a Pipeline (a `Stream` with an `ops:` list) with
+A class that is not an op — a value, a source, an engine, a sink — is a card of its own instead
+([below](#a-class-that-is-not-an-op--a-card-of-its-own)): a click lets the editor lay it out, a drag places it.
+The footer says where an op goes: `Click adds after grey · drag places it`. On a Pipeline (a `Stream` with an `ops:` list) with
 nothing selected it reads `Click adds at the end of stream.ops · drag places it` ([Pipelines](#pipelines--adding-to-and-removing-from-an-ops-list)).
 The `Subgraph` class is not listed — an empty one
 is refused — and the footer says how one is made instead:
@@ -350,7 +365,8 @@ stream: !class:recordstream.core.stream.Stream
 | select two members, press `Delete` | both lines go, as ONE edit — one Ctrl+Z brings both back |
 | delete every member | `ops: []` — a stream that passes records through unchanged |
 
-The palette, right-click ▸ Add Node ▸ and a wire dropped on empty canvas add the same way. Every other line —
+The palette, right-click ▸ Add Node ▸ and a wire dropped on empty canvas add an op the same way (any other class is
+a card of its own, [next](#a-class-that-is-not-an-op--a-card-of-its-own)). Every other line —
 comments included — stays byte for byte. A later member keeps its place on the canvas and its group when its
 number changes (`stream.ops[3]` → `stream.ops[2]`), and an undo moves the numbers back.
 
@@ -371,10 +387,193 @@ number changes (`stream.ops[3]` → `stream.ops[2]`), and an undo moves the numb
   that says which, answers `this graph holds 2 op lists (stream.ops, other.ops) — select a member of one, or the node
   holding it, to add to it`.
 
+### A class that is not an op — a card of its own
+
+An op goes after a step or into an op list. Any other class — a value like `ClassNamesScan`, a source, an engine, a
+sink — is a CARD of its own: right-click ▸ Add Node ▸, the double-click palette, a Nodes-sidebar entry dropped on the
+canvas or the palette of a wire dropped on empty canvas write it as a NEW top-level key, ONE edit (one Ctrl+Z), and
+draw the card where you asked — the right-click, the drop, the wire's release. On the files graph a host workspace
+seeds (its template spells a comment line for the root), right-click ▸ Add Node ▸ ClassNamesScan — nothing selected,
+or the host card selected — changes the text to:
+
+```yaml
+stream: !class:recordstream.core.stream.Stream
+  source: !ref:file_source
+  ops:
+    - !class:recordstream.ops.image.ReadImage {field: file, output: image}
+class_names_scan: !class:recordstream.ops.contract.ClassNamesScan {}
+# The graph's ROOT — what this graph must deliver; the host applies a drop through its check.
+contract: !class:recordstream.ops.contract.GraphContract
+  …
+```
+
+and **Check graph** finds nothing. Before, the same gesture was refused:
+
+```
+nothing selected        add recordstream.ops.contract.ClassNamesScan to stream.ops at [1] refused at …/files.yaml:12:7:
+                        cannot wire stream.ops[1].object (object) into stream.ops[1] (Op) at …/files.yaml:9:9: the types do not meet
+the host card selected  a new flow step needs a name — after '<host>', it has none
+```
+
+- **The key is named after the class**, as a card moved out of a slot is ([Wiring](#wiring--a-drawn-wire-is-saved)):
+  `ClassNamesScan` → `class_names_scan`, a second one `class_names_scan_2`, and `_2`, `_3` … whenever the name is a
+  top-level key, a card, or a setting of any card (a top-level key is handed to every card with a setting of that name).
+- **The line goes directly above the graph's root** and the comment lines written over it, so the root stays last; a
+  graph without a root gets it at the end of the file. Its values are spelled on its line (`{names: [cat, dog]}`).
+- **A wire dropped on empty canvas, then a card picked:** the wire is saved to the new card in the same edit. Drag out
+  of the root's `classes` socket, drop it on empty canvas, pick `ClassNamesOutput`, and the text gains
+  `class_names_output: !class:recordstream.ops.contract.ClassNamesOutput {}` above the root and
+  `classes: !ref:class_names_output` under its `delivered:` — one Ctrl+Z takes both. Out of an output, the wire goes
+  into the card's first input that takes it (`file_source.stream` → `class_names_scan.source`). When the wire cannot be
+  saved nothing is added, and its one line says why (`class_names_scan has no input that takes stream.ops[0].image
+  (Image).`).
+- **The host card and the root are never what something is added after:** with only them selected, an op goes where it
+  goes with nothing selected.
+- **Which classes are ops is the document's word**, not the catalogue's: a class the Nodes sidebar files under Values
+  but whose `__call__` takes the record (`FilterOp`) still goes into the list.
+- **Where a card cannot go yet**, in one line, nothing written: a flow graph (`The editor can't add a value card to a
+  flow graph yet — pick an op.` — `an engine card` for a `Stream`), the inside of a subgraph (`The editor can't add a
+  value card inside a subgraph yet — pick an op.`), a file that is one object.
+
+### Wiring — a drawn wire is saved
+
+Drag from an output to an input whose type meets it. The editor writes the wire into the document as ONE edit — held
+until Save like every edit, one Ctrl+Z takes it out — and the canvas draws what the document now says: reopen the graph
+and the wire is still there. An input that held something is replaced. A wire the editor cannot save yet is refused at
+once with one line in a toast, and nothing is drawn or written.
+
+On the source graph a host workspace seeds — its source written inside the Stream's slot, the graph's root after it:
+
+```yaml
+stream: !class:recordstream.core.stream.Stream
+  source: !class:recordstream.sources.huggingface.HuggingFaceSource {path: ylecun/mnist}
+  ops: []
+contract: !class:recordstream.ops.contract.GraphContract
+  name: "classification source"
+  outputs: {"stream": "Stream", "classes": "List[str]"}
+  records: {"input": "Image", "target": "Label"}
+  delivered:
+    stream: !ref:stream
+```
+
+drawing `stream.source.class_names → contract.classes`, then `hugging_face_source.image → contract.input` and
+`hugging_face_source.class → contract.target`, and pressing Save writes
+(`tests/test_wires.py::TestTheUsersSourceGraph`):
+
+```yaml
+hugging_face_source: !class:recordstream.sources.huggingface.HuggingFaceSource {path: ylecun/mnist}
+stream: !class:recordstream.core.stream.Stream
+  source: !ref:hugging_face_source
+  ops: []
+contract: !class:recordstream.ops.contract.GraphContract
+  name: "classification source"
+  outputs: {"stream": "Stream", "classes": "List[str]"}
+  records: {"input": "Image", "target": "Label"}
+  delivered:
+    stream: !ref:stream
+    classes: !ref:hugging_face_source
+    input: image
+    target: class
+```
+
+| the wire goes into | it is written as |
+| --- | --- |
+| an output slot of the graph's root (`classes`), or an optional one | `classes: !ref:hugging_face_source` under the root's `delivered:` — `delivered:` is added when the root has none |
+| a slot or a setting of any other card (`thing` of `holder`) | `thing: !ref:hugging_face_source` on that card (`{size: 1, thing: !ref:hugging_face_source }` in a one-line card — the space is YAML's) |
+| a record entry of the root (`input`), from a card's record entry (`image`) | `input: image` under `delivered:` — the key the root reads `input` from |
+
+- **A `!ref:` names a top-level key only**, so a card written inside another card's slot (`stream.source`) is MOVED
+  OUT first: its lines become a top-level key named after its CLASS, in snake case — `HuggingFaceSource` →
+  `hugging_face_source:`, `FilesSource` → `files_source:`, `HTTPSource` → `http_source:` — placed above the key that
+  held it, and the slot reads `!ref:hugging_face_source`. When that name is taken — by a top-level key, a card, or a
+  setting name of ANY card, the one whose slot it sat in included (a top-level key is handed to every card with a
+  setting of that name: a key `source` would be given to a second Stream, and back to the first once its wire is
+  removed) — it is `hugging_face_source_2`, `_3` …. The card keeps its place on the canvas and its groups; Ctrl+Z puts
+  it back in the slot.
+- **A card hands itself over, not one output**: `!ref:hugging_face_source` is drawn from the card's FIRST output that
+  fits the input, so drawing another one is refused — `hugging_face_source has more than one output that fits
+  holder.thing; only stream can be wired into it.`
+- **The record entries.** The root card has one input per output slot (`stream`, `classes`, each marked `*`), then one
+  per record entry (`input · Image`, `target · Label`), then one per OPTIONAL slot — `optional: {classes: "List[str]"}`
+  — without the `*`: the host has its own answer when it is left unwired, so it is never a problem; wired, it is
+  written under `delivered:` and removed like an output slot. A source card has one output per record entry it declares
+  — its class's `produces` (`image · Image`, `class · Label`) — next to `stream`, and a step card one per entry it
+  writes (`ReadImage`: `image · Image`, following its `output`); the outputs follow the card's settings: a HuggingFace
+  source with `metadata_features: [coarse_label]` gets a `coarse_label · Label` output, and with every column kept
+  (`*`, the default) it lists the columns its dataset's description names (CIFAR-100: `coarse_label`). A record entry
+  is read from the card that writes the key LAST into the stream the root delivers: wire from the last step that
+  writes `image`, or the source when none does. A key no card declares draws no wire; the root's row shows it
+  (`input · Image = pixels`).
+- **The root card shows only what you connect** — its sockets, no rows for `name`, `inputs`, `outputs`, `optional`,
+  `records`, `delivered` (the text tab shows the declaration) — and its second header line is the contract's name
+  (`classification source`). It has no outputs: what its `inputs` declare is the host card's.
+- **The host card.** A graph whose root declares `inputs` — what a host hands it when it runs it — draws them on one
+  card of their own, titled after the host: `from <host>` in a host's panel, `from the host` standalone. One output
+  per input: `files · List[str]`; an item-typed input (a pane's `input · Signal`) is an entry of the record the host
+  hands in, and the wire to a step that reads it by name leaves this card. It is no node of the document — it has no
+  settings, **Rename… and Delete are greyed** while it is all that is selected (with other cards selected, Delete
+  removes those and leaves it), and the routes refuse both (`<host> is the host's side of the graph, not a node of the
+  document`); nothing added goes after it. A graph without a root gets the same card for what its steps read that
+  nothing produces.
+- **The dashed wire — where the host puts an input.** When exactly one card of the stream the root delivers, or of
+  its source chain (the card in its `source` slot, that card's own `source`, …), takes a setting named like an
+  input, a DASHED wire runs from the host card into that setting: the host fills it there when it runs the graph.
+  It is derived from the document, never written; none or several such cards, no wire. Deleting it is refused —
+  `The host fills this when it runs the graph — it isn't a wire you can remove.`
+
+The files graph a host workspace seeds (`tests/test_wires.py::TestTheFilesGraph`):
+
+```yaml
+file_source: !class:recordstream.sources.files.FilesSource {}
+stream: !class:recordstream.core.stream.Stream
+  source: !ref:file_source
+  ops:
+    - !class:recordstream.ops.image.ReadImage {field: file, output: image}
+contract: !class:recordstream.ops.contract.GraphContract
+  name: classification files
+  inputs: {files: "List[str]"}
+  outputs: {stream: Stream}
+  optional: {classes: "List[str]"}
+  records: {input: Image}
+  delivered:
+    stream: !ref:stream
+    input: image
+```
+
+is drawn as these wires, and **Check graph** finds nothing:
+
+```
+<host>.files         ╌╌>  file_source.files      dashed: where the host puts the files it is handed
+file_source.stream   ──>  stream.source
+stream.ops[0].op     ──>  stream.ops[0]          the read-image step, a member of ops
+stream.stream        ──>  contract.stream *
+stream.ops[0].image  ──>  contract.input         input: image
+                          contract.classes       optional, unwired
+```
+
+**Removing.** Click a wire (`Cmd`+click on a Mac, `Ctrl`+click elsewhere, adds more) and press Delete or Backspace: one edit, one undo for all of them. A
+`delivered:` pair goes (and `delivered:` with its last one); a `!ref:` goes and the setting returns to its default; a
+card written inside the slot is moved out to a top-level key named after its class and both cards stay. Removing the
+wire into a required input leaves it open — **Check graph** then lists it (`contract.classes (List[str]) is required
+and nothing is wired into it`); a removal that would break anything else is refused, and so is the dashed wire from
+the host card.
+
+What cannot be saved yet — one line each, nothing drawn or written:
+
+```
+a record wire, or a wire into a member of ops      This wire would change the order of the steps — the editor can't save that yet.
+a wire of a flow (from:, bind:, a gate)              The editor can't save wires in this kind of graph yet.
+a wire inside a subgraph                             The editor can't save wires inside a subgraph yet.
+from a card inside a list member                     The editor can't save a wire from stream.ops[1].op yet: it sits inside a list (stream.ops[1]).
+into a record entry, from what is not one            Only a record entry — like a source's image — can be wired into input.
+any other                                            The editor can't save this wire yet.
+```
+
 ### Set source… — putting a source into a `Stream`
 
-A `Stream`'s `source` is a SLOT that one object fills, not a list, and a wire drawn into it cannot say which object
-to build — so the canvas asks for a class and its values instead. Three ways in, one dialog: the **set…** button on
+A `Stream`'s `source` is a SLOT that one object fills, not a list. A wire drawn into it brings a card that is already
+on the canvas ([Wiring](#wiring--a-drawn-wire-is-saved)); to put a NEW object into it the canvas asks for a class and
+its values instead. Three ways in, one dialog: the **set…** button on
 the `source` row of the card, **Set source…** in the node's right-click menu, or a wire dragged out of the `source`
 slot and dropped on empty canvas. The dialog lists the classes the slot takes (the sources first, then the engines —
 a `Stream` is a source too), then the chosen class's form, with the [pickers](#pickers); **Set source** sends only the
@@ -416,7 +615,8 @@ an op into the source slot       stream.source = !class:recordstream.ops.numpy.T
 | a group's title bar | Rename… · Colour ▸ · Ungroup · Convert group to subgraph |
 
 A right-click on a node that is not selected selects it first, so the node menu acts on what you see highlighted.
-Run to here runs one record and pauses before the node.
+Run to here runs one record and pauses before the node. On the host card Rename… and Delete are greyed — it is the
+host's side of the graph, not a node of the document.
 
 ### Where a node is drawn — the first layout
 
@@ -599,10 +799,11 @@ the server's located message.
 | you do | the page calls | what the document says afterwards (in the editor, until Save) |
 | --- | --- | --- |
 | change a widget on a node, or in the **settings** tab | `POST …/param` | the value on its own line (a refused value reverts) |
-| click a Nodes-sidebar entry, or pick one in the palette / Add Node ▸ | `POST …/steps` — on a flow `{after}` the selected node (else the flow's output; inside a subgraph, its last step); on a Pipeline `{after}` the selected member, else `{list: "stream.ops"}` | on a flow a new step, `from:` the anchor; on a Pipeline a new member after the selected one, or at the end of the list |
+| click a Nodes-sidebar entry, or pick one in the palette / Add Node ▸ | `POST …/steps` — on a flow `{after}` the selected node (else the flow's output; inside a subgraph, its last step); on a Pipeline `{after}` the selected member, else `{list: "stream.ops"}`; the host card and the root are never the selected node | on a flow a new step, `from:` the anchor; on a Pipeline a new member after the selected one, or at the end of the list; a class that is not an op: a card of its own, `class_names_scan: !class:…ClassNamesScan {}` above the root ([A class that is not an op](#a-class-that-is-not-an-op--a-card-of-its-own)), drawn where the menu or the palette was opened |
 | drag a sidebar entry onto the canvas | `POST …/steps`, then its position | the same, placed at the drop point |
-| drag a wire out of a socket and drop it on nothing | the palette, narrowed to the classes that fit that type | the step (or member) inserted after that node; out of a Pipeline's empty `transforms[0]` input, at the end of its `transforms` |
-| drag a wire between two sockets | nothing — a dashed proposal | unchanged: no route writes a wire yet; a mismatch is refused while dragging |
+| drag a wire out of a socket and drop it on nothing | the palette, narrowed to the classes that fit that type; a pick sends `POST …/steps` with `wire` — the end dragged out of | the step (or member) inserted after that node; out of a Pipeline's empty `transforms[0]` input, at the end of its `transforms`; a card: written and wired as ONE edit (out of the root's `classes`, `classes: !ref:class_names_output`) |
+| drag a wire between two sockets whose types meet ([Wiring](#wiring--a-drawn-wire-is-saved)) | `POST …/wires {source, source_socket, target, target_socket}` | the wire in the document's own spelling — `classes: !ref:hugging_face_source` under the root's `delivered:`, `thing: !ref:hugging_face_source` on a card, `input: image` for a record entry; a card inside another card's slot moved out to a top-level key named after its class first. A wire it cannot save yet: one line in a toast, nothing drawn (a mismatch is refused while dragging) |
+| click a wire (`Cmd`/`Ctrl`+click adds more), `Delete` | ONE `POST …/wires/remove` | the wires gone — a `delivered:` or `!ref:` pair dropped; a card written inside the slot moved out, both cards kept — one undo brings all back. The dashed wire from the host card is refused in one line |
 | `F2`, or double-click a node's name | `POST …/rename` | the key and every reference to it, on its own level |
 | select nodes, `Delete` | ONE `POST …/steps/remove` | the steps (or list members) gone and what read them rewired — one undo brings all back |
 | click a card, then `Shift`+click more cards | nothing — the selection | each Shift+clicked card is ADDED to the selection; Shift+click never takes one out |
@@ -626,17 +827,23 @@ the server's located message.
 
 ### What it refuses, and how it says so
 
-A refused edit changes nothing. The message is the server's, verbatim (paths shortened to `…`):
+A refused edit changes nothing. The message is the server's, verbatim (paths shortened to `…`). A refusal's or a
+warning's toast has a small **copy** button on its corner: it copies the whole message — to report it — and then
+says `copied` (`copy failed` when the browser refuses the clipboard); a click on the message itself closes the toast.
 
 | you try | what you see |
 | --- | --- |
 | drag an `Image` output onto a `Label` input | the wire does not attach — no edge, no message |
-| drag between two sockets whose types meet, where the document has no such wire | a dashed wire and `wires.yaml: the wire decode.image → boost.image is drawn as a proposal, not written — on boost it would be spelled 'from: decode' (a record wire) or 'bind: {image: decode.image}' (a value), and no route writes those yet. …` |
+| drag a wire between two steps of a `flow:` (`decode.image` → `boost.image`) | `The editor can't save wires in this kind of graph yet.` — no edge |
+| drag a record wire on a Pipeline (`stream.ops[0]` → `stream.ops[2]`) | `This wire would change the order of the steps — the editor can't save that yet.` — no edge |
+| drag a second output of a card into an input another of its outputs fits first (`source.class_names` → an untyped setting) | `source has more than one output that fits holder.thing; only stream can be wired into it.` |
 | type a value the class refuses (`limit` → `-1`) | `clip.limit = -1 refused at …/clip.yaml:5:9: clip: Failed to construct Clip at …/clip.yaml:5:9: limit must be positive, got -1` — the widget shows the old value again |
 | delete every step of a subgraph from inside it | `'prep/grey' is the only step of the subgraph 'prep' — nothing would be left for it to return; remove 'prep' instead` — nothing is removed |
 | add a step named `a/b` inside `prep` | `'a/b' is not a name on the level of 'prep' — name it 'b'` |
 | add a step to a subgraph whose steps are written on one line | `…/demo.yaml:6:14: the steps of the subgraph 'prep' are written on one line ({…}) — spell them as a block mapping, one step per line, to add a step` |
 | add a class to a list written in brackets over several lines | `…/brackets.yaml:2:8: stream.ops is written in brackets over several lines — spell it as a block list (one '- ' item per line) to add to it or remove from it` |
+| add a class that is not an op (`ClassNamesScan`) to a flow graph | `The editor can't add a value card to a flow graph yet — pick an op.` (`an engine card` for a `Stream`; inside a subgraph `… inside a subgraph yet — pick an op.`) |
+| pick a card from a wire whose end the card cannot take (`stream.ops[0].image` → `ClassNamesScan`) | `class_names_scan has no input that takes stream.ops[0].image (Image).` — nothing is added |
 | add a class on a graph holding two op lists, nothing selected | `this graph holds 2 op lists (stream.ops, other.ops) — select a member of one, or the node holding it, to add to it` (the page's words; nothing is sent) |
 | drag a wire out of the FIRST member's `record` input and drop it on nothing | `nothing feeds stream.ops[0] — a step can only be inserted after another one` (the page's words) |
 | rename a node to a name in use | `'gain' is already a node (the nodes are: ['gain', 'clip'])` — the title goes back |
@@ -660,7 +867,9 @@ A refused edit changes nothing. The message is the server's, verbatim (paths sho
   hands the editor a record, never the files for a source.
 - **Folding the side panel in a host's panel.** It stays 320 px wide; a large graph opens fitted, every card shown,
   and you zoom in to read it.
-- **Writing a wire.** A drawn wire stays a dashed proposal until a route can write `from:`, `bind:` or `!ref:`.
+- **Wires that change the order of steps, and a flow's wires.** A Pipeline's record wires ARE its `ops:` order, and a
+  `flow:`'s wires are its steps' `from:` / `bind:` / gates: drawing one is refused in one line
+  ([Wiring](#wiring--a-drawn-wire-is-saved)). Reorder a Pipeline by removing and adding members.
 - **A member at the START of a list.** Adding goes after a member or at the end, so a new first member is made by
   adding it and deleting the ones before it. Paste, Insert template and Insert steps file place by the older rule:
   after the selected node — into an empty `ops: []` with nothing selected they are refused.
@@ -734,8 +943,9 @@ A name nothing defines imports them all, once; a later miss then costs nothing.
 
 **Node names** are one scheme shared by the model, the engine, the sidecar and
 the routes: a `flow:` step by its key (`floor`), a list member by `path[i]` (`stream.ops[1]`), a nested marker by
-its document path (`processor.stream`), a contract root by its key (`contract`), the host's side of a graph
-without a contract as one node, `<host>`, and a node inside a subgraph as `<subgraph>/<step>` (`prep/grey`), with
+its document path (`processor.stream`), a contract root by its key (`contract`), the host's side of a graph as one
+node, `<host>` — for a graph without a contract what its steps read that nothing produces, for a rooted one the
+`inputs` its contract declares — and a node inside a subgraph as `<subgraph>/<step>` (`prep/grey`), with
 the two boundary nodes `prep/<in>` and `prep/<out>`. An inner node carries the `file:line:col` of its own line —
 in the steps file when the steps are included.
 
@@ -756,19 +966,22 @@ script, a tool — is served as always.
 | GET | `/api/workspace` | `{folder, session, recovery, host}` — `host` is `{name}` for an editor mounted with a host ([Mounting the editor in a host app](#mounting-the-editor-in-a-host-app)), `null` standalone; `recovery` is `null`, or the unsaved work a stop kept: `{saved_at, graphs: [{name, path, disk: unchanged\|changed\|gone\|unreadable, reason, changed_on_disk, saved_at}], error, aside}`; for a file that cannot be used, `graphs` is empty, `error` says why and `aside` is where discard moves it |
 | POST | `/api/workspace/recovery/restore` | open the kept graphs (unsaved, no undo history) and remove the file; answers the graph list, each entry with `restored`; `404` when there is nothing kept |
 | POST | `/api/workspace/recovery/discard` | remove the file (move an unreadable one aside); answers the graph list; `404` when there is nothing kept |
-| GET | `/api/graphs` | `[{name, path, kind, dirty}]` — `kind` is `flow`, `graph` or `contract` |
+| GET | `/api/graphs` | `[{name, path, kind, dirty, shipped}]` — `kind` is `flow`, `graph` or `contract`; `shipped` is a graph the host ships whose folder holds no copy yet ([A graph the host ships](#a-graph-the-host-ships)) |
 | POST | `/api/graphs` | `{name, kind: flow\|pipeline\|source, dir?}` — WRITE the starter to `<dir or the graph folder>/<name>.yaml` at once and add it to the list; answers the graph with `dirty: false` (its `name` may be `fresh~2`). Refused, writing nothing, when the file exists, the name breaks the file-name rule, or the folder is not a writable folder (`404` when it does not exist) |
 | POST | `/api/graphs/open` | `{path}` — add any `.yaml` on this machine to the list |
 | GET | `/api/files?dir=&show=` | `{dir, parent, entries: [{name, path, kind: dir\|yaml\|file}]}` — folders first; `show=graphs` (the default: File ▸ Open, a folder picker) adds the `*.yaml` files but the layout sidecars, `show=all` (a file picker) every file as `file`; hidden entries never; no `dir` = the graph folder; `$VAR` in `dir` is expanded |
-| GET | `/api/graphs/<name>` | `{name, path, kind, text, model, positions, groups, history_depth, dirty}`; `model.inside` holds each subgraph's inside, recursively |
+| GET | `/api/graphs/<name>` | `{name, shipped, path, kind, text, model, positions, groups, history_depth, dirty}`; `model.inside` holds each subgraph's inside, recursively; `model` shows each setting of the graph's settings file on its node, `text` is the graph's own |
 | PUT | `/api/graphs/<name>` | `{text}` replaces the whole document in the editor; the history starts over |
-| POST | `/api/graphs/<name>/save` | write every changed file and the sidecar — refused when a file changed on disk |
+| POST | `/api/graphs/<name>/save` | write every changed file — the graph, its settings file, a steps file — and the sidecar; refused when a file changed on disk. `{only: "settings"}` writes the graph's settings file alone (a settings sheet's save): a change of the graph itself stays held |
 | POST | `/api/graphs/<name>/save-as` | `{path, overwrite?}` — write the graph to another file; the entry follows it |
 | POST | `/api/graphs/<name>/revert` | read the file again, dropping unsaved changes |
 | GET | `/api/graphs/<name>/check` | `{problems: [{message, loc}]}` |
-| POST | `/api/graphs/<name>/param` | `{node, param, value}` — patch one value on its own line, or insert it when the file left the default |
+| POST | `/api/graphs/<name>/param` | `{node, param, value}` — a SETTING (a field the `app:` block names) goes to the graph's settings file, one line each ([A graph's settings file](#a-graphs-settings-file--graphsettingsyaml)); any other parameter: patch one value on its own line, or insert it when the file left the default |
 | POST | `/api/graphs/<name>/slot` | `{node, slot, class_path, params}` — put a new object into a single slot (`stream.source`), replacing what it held; one edit. Answers the graph plus `set` (the node now in the slot, `stream.source`) |
-| POST | `/api/graphs/<name>/steps` | `{name?, after?, list?, class_path, params}` — `after` a flow step: a new step on its level named `name`, and what read `after` now reads it; `after` an op-list member (`stream.ops[1]`): a new member after it; no `after` and `list: "stream.ops"`: a new member at the end. Answers the graph plus `added` (the new node's name) |
+| POST | `/api/graphs/<name>/wires` | `{source, source_socket, target, target_socket}` — save a drawn wire in the document's own spelling ([Wiring](#wiring--a-drawn-wire-is-saved)); one edit. Answers the graph plus `wired` (the card the wire comes from now — `source` for a `stream.source` moved out of its slot); a wire it cannot save yet is a `400` with one plain line |
+| POST | `/api/graphs/<name>/wires/remove` | `{wires: [{source, source_socket, target, target_socket}, …]}` — remove several wires as ONE edit, all or nothing |
+| POST | `/api/graphs/<name>/steps` | `{name?, after?, list?, class_path, params}` — `after` a flow step: a new step on its level named `name`, and what read `after` now reads it; `after` an op-list member (`stream.ops[1]`): a new member after it; no `after` and `list: "stream.ops"`: a new member at the end. `after` naming the host card or the root counts as none. A class that is not an op is a card of its own, as `…/nodes` makes it (`after`, `list` and `name` place ops only), and `wire` is the end a dropped wire was dragged out of. Answers the graph plus `added` (the new node's name) |
+| POST | `/api/graphs/<name>/nodes` | `{class_path, params, wire?}` — a class that is not an op as a card of its own: a new top-level key named after its class (`class_names_scan`, `_2` …), above the root and its comment lines, else at the end; one edit. `wire` — `{target, target_socket}` (the card feeds that input, from its first output that fits) or `{source, source_socket}` (that output goes into the card's first input that takes it) — is saved in the same edit, or nothing is added. Refused in one line for an op, a flow graph, a file that is one object. Answers the graph plus `added` |
 | DELETE | `/api/graphs/<name>/steps/<node>` | remove one step (what read it now reads what it read from) or one list member |
 | POST | `/api/graphs/<name>/steps/remove` | `{nodes}` — remove several steps or members as ONE edit, all or nothing; removing every member leaves `ops: []` |
 | POST | `/api/graphs/<name>/rename` | `{node, new}` — the key, every reference on its level, its position and group entries (for a subgraph: every `prep/…` name) |
@@ -787,7 +1000,7 @@ script, a tool — is served as always.
 | PUT | `/api/graphs/<name>/groups` | `{groups: [{id, title, color, nodes, bounds?, parent?}, …]}` — stored as sent |
 | GET | `/api/types` | `{socket type: [the types it may be wired into]}` — the meet rule the canvas applies while you drag |
 | GET | `/api/graphs/<name>/form` | `{node: JSON-schema properties}` from `confluid.to_pydantic` — the settings form, every level; a parameter with a picker carries `picker` ([Pickers](#pickers)); `requires` (the gate a branch sets) is never a field |
-| GET | `/api/graphs/<name>/app` | `{declared, fields: [{node, param, loc}], form, problems: [{message, loc}]}` — the graph's `app:` fields ([Settings: a graph's `app:` fields](#settings-a-graphs-app-fields)); `declared: false` and nothing else without an `app:` block |
+| GET | `/api/graphs/<name>/app` | `{declared, graph, fields: [{node, param, loc}], form, problems: [{message, loc}]}` — the graph's `app:` fields ([Settings: a graph's `app:` fields](#settings-a-graphs-app-fields)); `graph` is `editable` or `settings-only` ([A graph that offers its settings only](#a-graph-that-offers-its-settings-only)); `declared: false` and no field without an `app:` block |
 | GET | `/api/hf/datasets` | `{datasets, reason}` — the HuggingFace datasets this machine has cached, and why there are none when there are none |
 | GET | `/api/hf/features?path=&name=&split=` | `{features, all_columns}` — the columns of that dataset (`[]` without one, or when it cannot be read) and the `metadata_features` word for "every other column" (`*`) |
 | GET | `/api/hf/splits?path=&name=` | `{splits}` — the split names of that dataset |
@@ -800,12 +1013,12 @@ script, a tool — is served as always.
 ### Mounting the editor in a host app
 
 A consuming Flask app mounts the API and the page under ONE prefix of its own — the page calls `api/…` relative to
-its own address, so the two must sit side by side — and gives the editor a HOST: any object with a `name` and three
+its own address, so the two must sit side by side — and gives the editor a HOST: any object with a `name` and four
 methods.
 
 ```python
 from pathlib import Path
-from typing import Sequence
+from typing import Mapping, Sequence
 
 from streamstudio.app import HostRecord, editor_blueprint, page_blueprint, studio_of
 
@@ -826,6 +1039,9 @@ class WorkspaceHost:
 
     def saved(self, paths: Sequence[Path]) -> None:            # after every Save, Save As and New… that wrote one
         workspace.rerun_panes_reading(paths)                   # spelled under folder() as folder() spells it
+
+    def shipped(self) -> Mapping[str, Path]:                   # the graphs it ships from outside folder() — or {}
+        return {"view_bte": package_dir / "bte_view.yaml"}
 
 
 app.register_blueprint(editor_blueprint(host=WorkspaceHost()), url_prefix="/studio")   # /studio/api/…
@@ -877,6 +1093,9 @@ class Host:
 
     def saved(self, paths) -> None:
         print("saved:", [p.name for p in paths])
+
+    def shipped(self):
+        return {}
 
 
 app = Flask(__name__)
@@ -931,8 +1150,13 @@ The Run asked the host for its record and set its fill on `mask` (`Threshold` ha
   editor; spell what the source reads (a folder, files) to run it here`.
 - **`saved(paths)`** is told, after every Save, Save As and New… (New writes its starter file at once), which graph
   files it wrote — the graph's own last: `[…/prep.steps.yaml, …/sub.yaml]`. A Save of positions alone writes only the
-  layout sidecar and tells nothing; Save as template… writes no graph and tells nothing. If `saved` raises, the write
-  stands: the answer is the graph plus `host_error: "RuntimeError: …"`, for the page to show.
+  layout sidecar and tells nothing; Save as template… writes no graph and tells nothing. A Save of a changed SETTING
+  tells the settings file (`[…/view_bte.settings.yaml]`). If `saved` raises, the write stands: the answer is the graph
+  plus `host_error: "RuntimeError: …"`, for the page to show.
+- **`shipped()`** names the graphs the host ships from OUTSIDE its folder (a package's templates), by name: each is
+  listed and opened while the folder holds no file of its name ([A graph the host ships](#a-graph-the-host-ships)).
+  A host that ships nothing answers `{}`. If it raises, the request is a refusal in words naming the host, like
+  `folder()`'s.
 - **Every path the host is handed is spelled ONE way** — under `folder()` exactly as `folder()` spells it, for a file
   in that folder (else resolved): `record(graph, path)` and `saved(paths)` name `/var/…/T/workspace-x/view_x.yaml`
   for a folder given as `/var/…/T/workspace-x`, never its resolved `/private/var/…` twin. A host can match a path with
@@ -1029,13 +1253,133 @@ in `GET …/form`) is a problem in words, at the entry's `file:line:col`:
 ```
 
 The settings tab lists those fields until **all parameters** is ticked, which lists every parameter of the level the
-canvas shows. A graph WITHOUT an `app:` block names no settings, and the tab says so rather than listing its Stream's
+canvas shows. A value set in a field the block names is a SETTING: it goes to the graph's settings file, never into
+the graph ([A graph's settings file](#a-graphs-settings-file--graphsettingsyaml)). A graph WITHOUT an `app:` block names no settings, and the tab says so rather than listing its Stream's
 plumbing, the values a host fills in at Run and its root contract as though they were settings:
 
 ```
 ☐ all parameters   the graph has no app: block
 This graph names no settings — it has no app: block. Its parameters are on the canvas; tick all parameters to list every one here.
 ```
+
+### A graph's settings file — `<graph>.settings.yaml`
+
+The values a person changes of the fields the `app:` block names never go into the graph: they go into a file of
+their own beside it, one line each. The graph keeps its nodes and wiring; the settings file keeps values.
+
+```yaml
+# view_pane.yaml — the graph (here a host ships it, see below)
+flow:
+  first:
+    op: !class:knobs_demo.Knobs {level: 0.25}
+  second:
+    op: !class:knobs_demo.Knobs {}
+    from: first
+outputs: second
+app:
+  inputs:
+    - [Knobs, level]
+```
+
+```
+POST …/view_pane/param {node: second, param: level, value: 0.9}   then   POST …/view_pane/save
+saved: ['view_pane.settings.yaml']                 # what the host is told — the graph itself is not written
+view_pane.settings.yaml: 'flow.second.op.level: 0.9\n'
+```
+
+A setting names its node:
+
+| the node | its line |
+| --- | --- |
+| a `flow:` step — by its NAME, so two nodes of one class are set apart | `flow.second.op.level: 0.9` |
+| a top-level object — by its key | `sink.output_dir: /data/out` |
+| a node with no name (a member of an `ops:` list) — by its CLASS, while the class is used by that node alone | `AcfSlice.max_points: 512` (or the block `AcfSlice: {max_points: 512}`) |
+
+The editor shows each setting on its node (the canvas and the settings tab read the same model); the text tab shows the
+graph itself. Undo takes a setting back like any edit. Save writes only the files that changed — the settings file
+alone after a setting, the graph after a change to the graph. Save As takes the settings along
+(`<new>.settings.yaml`, refused like the graph when a file is already there) and leaves the old settings file as it
+was. A field the `app:` block does NOT name (ticked in with *all parameters*) is a change to the graph, as before.
+
+**Loading them together.** The two are ONE confluid document by confluid's own `include:` rule: the graph first, the
+settings below it, so a setting wins over what the graph spells. A host runs it with `load_graph` — the settings file
+may sit anywhere (a host keeps a shipped graph's in its own folder); nothing is written:
+
+```python
+from streamstudio.settings import load_graph, settings_path
+
+built = load_graph(package / "pane_view.yaml", state / "view_pane.settings.yaml")   # None, or a missing file: the graph alone
+built["flow"]["first"]["op"].level, built["flow"]["second"]["op"].level              # (0.25, 0.9)
+settings_path(Path("state/view_bte.yaml"))                                            # state/view_bte.settings.yaml
+```
+
+**A line that is none of the graph's settings is refused where it is written** — by `load_graph` (a `SettingsError`)
+and by the editor's Check. Confluid by itself warns and IGNORES an unknown key, so a misspelt setting would run the
+graph's value:
+
+```
+state/view_pane.settings.yaml:2:1: flow.second.op.levle is not a setting of view_pane — its settings are: flow.first.op.level, flow.second.op.level
+```
+
+So are a class line that two nodes with no name share (`SetKnobs is the class of 2 nodes with no name
+(stream.ops[1], stream.ops[2]) — a setting cannot tell them apart; give them names (flow steps) to set each`), the
+`app:` entry naming such a class (a located problem in `GET …/app`, and no field), and a `flow:` block — confluid merges
+one by moving its step to the END of the flow, so the refusal names the one-line spelling instead
+(`… write each setting on a line of its own: flow.first.op.level: 0.9`).
+
+Two edits that would leave a setting naming nothing are refused while the setting is there: removing or renaming the
+node a setting names (`… flow.first.op.level is not a setting of pane …`) — change or remove the line first.
+
+#### A graph the host ships
+
+A host may SHIP graphs from outside its folder (`shipped()`, [Mounting the editor in a host app](#mounting-the-editor-in-a-host-app)).
+Such a graph is listed and opened while the folder holds no file of its name — `shipped: true` in the list and in the
+graph — and it holds nothing unsaved. A change of a setting writes only its settings file into the folder; the FIRST
+Save of a change to the graph itself writes the graph there, and that copy wins from then on (`shipped: false`). The
+shipped file is never written. Revert of a graph not copied yet reads the shipped file again.
+
+```
+GET /studio/api/graphs              -> [('view_pane', shipped: True)]     state/: []
+a setting changed, Save             -> state/: ['view_pane.settings.yaml']
+a step added, Save                  -> state/: ['view_pane.settings.yaml', 'view_pane.yaml']   (saved: ['view_pane.yaml'])
+```
+
+The settings stay in force on the copy: the canvas of the copy shows them, and a Run runs them.
+
+#### A graph that offers its settings only
+
+A graph may say that a person changes its settings and nothing else — `graph: settings-only` in its `app:` block. The
+editor then refuses every other change (a node, a wire, a step, a rename, the text, a parameter the block does not name)
+before anything is held, and `GET …/app` answers `graph: settings-only` so a host can leave out its button to the
+canvas:
+
+```yaml
+app:
+  graph: settings-only
+  inputs:
+    - [Knobs, level]
+```
+
+```
+POST …/locked/steps {…}   ->  400 {"error": "locked offers its settings only — its graph is fixed where it is shipped"}
+```
+
+Without the line a graph is `editable`; another word is a located problem (`…:6:10: graph: frozen is not what a graph
+lets a person change — one of: editable, settings-only`) and the graph stays editable.
+
+#### The settings and nothing else — `?only=settings`
+
+A host that shows a graph's settings in a sheet of its own opens the page with `?only=settings` (beside `?embed=1`):
+no menus, no canvas, no tabs and no *all parameters* box — the `app:` fields alone, at the panel's full width — and
+every change is SAVED at once, so the host hears `saved` and re-runs what reads the graph. The save writes the
+settings file ALONE (`POST …/save {only: "settings"}`): a change of the graph itself that the editor holds unsaved in
+another view of the same graph stays unsaved there. Toasts and the restore question work as on the whole page.
+
+```html
+<iframe src="/studio/?graph=view_bte&embed=1&only=settings"></iframe>
+```
+
+A graph without an `app:` block says `This graph names no settings — it has no app: block.`
 
 ### Pickers
 

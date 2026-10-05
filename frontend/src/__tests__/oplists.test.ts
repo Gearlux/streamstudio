@@ -209,6 +209,22 @@ describe("insertTarget — where an ADDED node goes", () => {
   });
 });
 
+describe("insertTarget on the files graph — the host card and the root are no anchor (2026-10-05)", () => {
+  // a rooted Stream: its level is taken as a flow's steps (graph kind "contract"), and the last spelled card is the
+  // member ops[0]; measured before, the host card selected made the add `{after: "<host>"}`
+  const files: Model = {
+    ...pipeline(1),
+    nodes: [...pipeline(1).nodes, node("contract", "contract", [["stream", "Stream"]]), node("<host>", "host", [])],
+  };
+
+  it("the host card or the root selected: where nothing selected puts it", () => {
+    const none = insertTarget(files, "", "contract", undefined);
+    expect(none).toEqual({ kind: "after", node: "stream.ops[0]" });
+    expect(insertTarget(files, "", "contract", "<host>")).toEqual(none);
+    expect(insertTarget(files, "", "contract", "contract")).toEqual(none);
+  });
+});
+
 describe("wireTarget — a wire dropped on empty canvas names the node the pick goes after", () => {
   it("dragged out of a member (or into the next one, whose record it reads): after that member", () => {
     expect(wireTarget(pipeline(3), "", "graph", "stream.ops[1]")).toEqual({ kind: "after", node: "stream.ops[1]" });

@@ -245,8 +245,9 @@ class TestGraphs:
         }
         assert all(entry["kind"] in GRAPH_KINDS for entry in listed)
         assert listed[1]["path"] == str(graph_dir / "pets.yaml")
-        assert set(listed[1]) == {"name", "path", "kind", "dirty"}
+        assert set(listed[1]) == {"name", "path", "kind", "dirty", "shipped"}
         assert [entry["dirty"] for entry in listed] == [False] * 4
+        assert [entry["shipped"] for entry in listed] == [False] * 4, "a standalone editor's graphs are its folder's"
 
     def test_an_edited_graph_is_listed_dirty_and_the_others_are_not(self, client: Any) -> None:
         client.post("/api/graphs/pets/param", json={"node": "stream.ops[1]", "param": "low_level", "value": 0.9})
@@ -865,6 +866,231 @@ class TestTypes:
             assert compatible(a, b) == document_module._meets(a, b), (a, b)
 
 
+# ------------------------------------------------------------------------------------------------
+# wires: a drawn wire is one edit, held until Save; a refusal is one plain line
+# ------------------------------------------------------------------------------------------------
+
+#: The source graph a classification workspace seeds: its source sits in the Stream's slot.
+SEED_TEXT = """\
+stream: !class:recordstream.core.stream.Stream
+  source: !class:recordstream.sources.huggingface.HuggingFaceSource {path: ylecun/mnist}
+  ops: []
+contract: !class:recordstream.ops.contract.GraphContract
+  name: "classification source"
+  outputs: {"stream": "Stream", "classes": "List[str]"}
+  records: {"input": "Image", "target": "Label"}
+  delivered:
+    stream: !ref:stream
+"""
+
+
+#: The files graph a host workspace seeds: the host hands in ``files``, which it puts into ``file_source``.
+FILES_TEXT = """\
+file_source: !class:recordstream.sources.files.FilesSource {}
+stream: !class:recordstream.core.stream.Stream
+  source: !ref:file_source
+  ops:
+    - !class:recordstream.ops.image.ReadImage {field: file, output: image}
+contract: !class:recordstream.ops.contract.GraphContract
+  name: classification files
+  inputs: {files: "List[str]"}
+  outputs: {stream: Stream}
+  optional: {classes: "List[str]"}
+  records: {input: Image}
+  delivered:
+    stream: !ref:stream
+    input: image
+"""
+
+
+def _ends(source: str, source_socket: str, target: str, target_socket: str) -> Dict[str, str]:
+    return {"source": source, "source_socket": source_socket, "target": target, "target_socket": target_socket}
+
+
+class TestWires:
+    def test_a_wire_is_one_edit_held_until_save_and_names_the_card_it_comes_from(self, graph_dir: Path) -> None:
+        (graph_dir / "seed.yaml").write_text(SEED_TEXT)
+        client = create_app(graph_dir).test_client()
+        response = client.post(
+            "/api/graphs/seed/wires", json=_ends("stream.source", "class_names", "contract", "classes")
+        )
+        assert response.status_code == 200
+        body = response.get_json()
+        # moved out of the Stream's slot (a !ref: names a top-level key only), to a key named after its class
+        assert body["wired"] == "hugging_face_source"
+        assert body["text"].startswith("hugging_face_source: !class:recordstream.sources.huggingface.HuggingFaceSource")
+        assert body["text"].endswith("    stream: !ref:stream\n    classes: !ref:hugging_face_source\n")
+        wire = {
+            **_ends("hugging_face_source", "class_names", "contract", "classes"),
+            "kind": "delivered",
+            "type": "List[str]",
+        }
+        assert wire in body["model"]["wires"]
+        assert body["dirty"] is True
+        assert (graph_dir / "seed.yaml").read_text() == SEED_TEXT
+        undone = client.post("/api/graphs/seed/undo").get_json()
+        assert undone["changed"] is True and undone["text"] == SEED_TEXT
+
+    def test_a_wire_the_editor_cannot_save_is_400_with_one_plain_line(self, client: Any) -> None:
+        response = client.post(
+            "/api/graphs/pets/wires", json=_ends("stream.ops[1]", "record", "stream.ops[0]", "record")
+        )
+        assert response.status_code == 400
+        assert _error(response) == "This wire would change the order of the steps — the editor can't save that yet."
+        assert client.get("/api/graphs/pets").get_json()["dirty"] is False
+
+    def test_a_wire_of_a_flow_is_400(self, client: Any) -> None:
+        response = client.post("/api/graphs/flow/wires", json=_ends("gain", "record", "mask", "record"))
+        assert response.status_code == 400
+        assert _error(response) == "The editor can't save wires in this kind of graph yet."
+
+    def test_an_unknown_node_is_404_naming_the_nodes(self, client: Any) -> None:
+        response = client.post("/api/graphs/pets/wires", json=_ends("nosuch", "stream", "stream", "source"))
+        assert response.status_code == 404
+        assert "stream.ops[1]" in _error(response)
+
+    def test_a_missing_end_is_400_naming_it(self, client: Any) -> None:
+        response = client.post(
+            "/api/graphs/pets/wires", json={"source": "stream.source", "source_socket": "stream", "target": "stream"}
+        )
+        assert response.status_code == 400
+        assert _error(response) == ("the request needs 'target_socket' (it has: ['source', 'source_socket', 'target'])")
+
+    def test_removing_several_wires_is_one_edit(self, client: Any, graph_dir: Path) -> None:
+        response = client.post(
+            "/api/graphs/source/wires/remove",
+            json={
+                "wires": [
+                    _ends("stream", "stream", "contract", "stream"),
+                    _ends("names", "class_names", "contract", "classes"),
+                ]
+            },
+        )
+        assert response.status_code == 200
+        body = response.get_json()
+        assert "delivered" not in body["text"]
+        assert not [w for w in body["model"]["wires"] if w["kind"] == "delivered"]
+        assert body["dirty"] is True
+        assert (graph_dir / "source.yaml").read_text() == SOURCE_TEXT
+        undone = client.post("/api/graphs/source/undo").get_json()
+        assert undone["text"] == SOURCE_TEXT  # ONE undo brings both back
+
+    def test_a_removal_the_editor_cannot_save_is_400(self, client: Any) -> None:
+        response = client.post(
+            "/api/graphs/pets/wires/remove",
+            json={"wires": [_ends("stream.ops[0]", "record", "stream.ops[1]", "record")]},
+        )
+        assert response.status_code == 400
+        assert _error(response) == "This wire would change the order of the steps — the editor can't save that yet."
+
+    def test_the_host_wire_is_answered_and_its_removal_is_400_with_its_line(self, graph_dir: Path) -> None:
+        """The host card and its dashed ``host`` wire reach the page in the model like every node and wire; removing
+        the wire is refused in its one line, and nothing changes."""
+        (graph_dir / "files.yaml").write_text(FILES_TEXT)
+        client = create_app(graph_dir).test_client()
+        model = client.get("/api/graphs/files").get_json()["model"]
+        host = {**_ends("<host>", "files", "file_source", "files"), "kind": "host", "type": "List[str]"}
+        assert host in model["wires"]
+        assert [(node["name"], node["kind"]) for node in model["nodes"]][-1] == ("<host>", "host")
+        response = client.post(
+            "/api/graphs/files/wires/remove", json={"wires": [_ends("<host>", "files", "file_source", "files")]}
+        )
+        assert response.status_code == 400
+        assert _error(response) == "The host fills this when it runs the graph — it isn't a wire you can remove."
+        body = client.get("/api/graphs/files").get_json()
+        assert body["text"] == FILES_TEXT and body["dirty"] is False
+
+    def test_a_malformed_wire_list_is_400(self, client: Any) -> None:
+        response = client.post("/api/graphs/pets/wires/remove", json={"wires": [{"source": "stream"}]})
+        assert response.status_code == 400
+        assert _error(response) == (
+            "'wires' must be a list of {source, source_socket, target, target_socket}, got [{'source': 'stream'}]"
+        )
+
+
 def test_magic_mock_is_not_left_installed() -> None:
     """No test here patches the factory — the real one is what the module exports."""
     assert not isinstance(app_module.create_app, MagicMock)
+
+
+# ------------------------------------------------------------------------------------------------
+# a class that is not an op is a card of its own (2026-10-05)
+# ------------------------------------------------------------------------------------------------
+
+#: The class a person picked on the files graph, and the one a wire out of the root's ``classes`` takes.
+SCAN = "recordstream.ops.contract.ClassNamesScan"
+NAMES = "recordstream.ops.contract.ClassNamesOutput"
+
+
+class TestAddingACard:
+    """``POST …/nodes`` — a class that is not an op, as a new top-level key named after its class above the root; and
+    ``POST …/steps``, what the page sends for every add, hands such a class over the same way."""
+
+    def test_a_card_is_one_edit_held_until_save_named_after_its_class(self, graph_dir: Path) -> None:
+        (graph_dir / "files.yaml").write_text(FILES_TEXT)
+        client = create_app(graph_dir).test_client()
+        response = client.post("/api/graphs/files/nodes", json={"class_path": SCAN, "params": {}})
+        assert response.status_code == 200
+        body = response.get_json()
+        assert body["added"] == "class_names_scan"
+        assert body["text"] == FILES_TEXT.replace("contract: ", f"class_names_scan: !class:{SCAN} {{}}\ncontract: ", 1)
+        assert ("class_names_scan", "value") in [(node["name"], node["kind"]) for node in body["model"]["nodes"]]
+        assert body["dirty"] is True
+        assert (graph_dir / "files.yaml").read_text() == FILES_TEXT
+        assert client.get("/api/graphs/files/check").get_json() == {"problems": []}
+        undone = client.post("/api/graphs/files/undo").get_json()
+        assert undone["changed"] is True and undone["text"] == FILES_TEXT
+
+    def test_the_wire_dropped_with_it_is_saved_in_the_same_edit(self, graph_dir: Path) -> None:
+        (graph_dir / "files.yaml").write_text(FILES_TEXT)
+        client = create_app(graph_dir).test_client()
+        response = client.post(
+            "/api/graphs/files/nodes",
+            json={"class_path": NAMES, "params": {}, "wire": {"target": "contract", "target_socket": "classes"}},
+        )
+        assert response.status_code == 200
+        body = response.get_json()
+        assert body["added"] == "class_names_output"
+        assert body["text"].endswith("    input: image\n    classes: !ref:class_names_output\n")
+        wire = {**_ends("class_names_output", "class_names", "contract", "classes"), "kind": "delivered"}
+        assert wire in [{key: w[key] for key in wire} for w in body["model"]["wires"]]
+        undone = client.post("/api/graphs/files/undo").get_json()
+        assert undone["text"] == FILES_TEXT  # ONE undo takes the card and its wire
+
+    def test_the_users_measured_request_now_adds_the_card(self, graph_dir: Path) -> None:
+        """``POST …/steps {"after": "<host>", …ClassNamesScan}`` answered ``a new flow step needs a name — after
+        '<host>', it has none``: the host card is no anchor, and a class that is not an op is a card of its own."""
+        (graph_dir / "files.yaml").write_text(FILES_TEXT)
+        client = create_app(graph_dir).test_client()
+        response = client.post("/api/graphs/files/steps", json={"after": "<host>", "class_path": SCAN, "params": {}})
+        assert response.status_code == 200
+        assert response.get_json()["added"] == "class_names_scan"
+
+    def test_the_pages_add_carries_the_dragged_end_through_steps(self, graph_dir: Path) -> None:
+        (graph_dir / "files.yaml").write_text(FILES_TEXT)
+        client = create_app(graph_dir).test_client()
+        response = client.post(
+            "/api/graphs/files/steps",
+            json={
+                "name": "classnamesoutput",
+                "class_path": NAMES,
+                "params": {},
+                "wire": {"target": "contract", "target_socket": "classes"},
+            },
+        )
+        assert response.status_code == 200
+        assert response.get_json()["text"].endswith("    classes: !ref:class_names_output\n")
+
+    def test_a_flow_graph_refuses_it_with_one_plain_line(self, client: Any) -> None:
+        response = client.post("/api/graphs/flow/nodes", json={"class_path": SCAN, "params": {}})
+        assert response.status_code == 400
+        assert _error(response) == "The editor can't add a value card to a flow graph yet — pick an op."
+        assert client.get("/api/graphs/flow").get_json()["dirty"] is False
+
+    def test_a_malformed_wire_is_400(self, client: Any) -> None:
+        response = client.post("/api/graphs/pets/nodes", json={"class_path": SCAN, "wire": "contract.classes"})
+        assert response.status_code == 400
+        assert _error(response) == (
+            "'wire' must be the end a wire was dragged out of — {source, source_socket} or {target, target_socket} — "
+            "got 'contract.classes'"
+        )

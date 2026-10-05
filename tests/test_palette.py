@@ -142,7 +142,7 @@ class TestKindsAndSockets:
         spec = describe(GraphContract)
         assert spec.kind == "contract"
         assert spec.inputs == [] and spec.outputs == []
-        assert set(spec.params_schema) == {"name", "inputs", "outputs", "records", "delivered"}
+        assert set(spec.params_schema) == {"name", "inputs", "outputs", "records", "delivered", "optional"}
 
     def test_dataset_processor_is_a_runnable_wired_from_a_stream(self) -> None:
         spec = describe(DatasetProcessor)

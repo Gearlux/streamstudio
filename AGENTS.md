@@ -124,10 +124,12 @@ Invariants:
 - **No logic in the routes:** each `/api` route parses its request and calls ONE `Studio` method, so phase 5's tools
   cannot drift from the page. All state lives on `app.extensions["streamstudio"]` (`studio_of(app)`), never at module
   level — the catalogue (`catalogue.CATALOGUE`, see "The canvas page") is the one exception.
-- The graph list leaves out hidden files, `*.layout.yaml` and `*.steps.yaml`; a file is read before it enters the
-  registry. (`tests/test_app_files.py`)
+- The graph list leaves out hidden files, `*.layout.yaml`, `*.steps.yaml` and `*.settings.yaml` (File ▸ Open refuses
+  a settings file); a file is read before it enters the registry. (`tests/test_app_files.py`,
+  `tests/test_graph_settings.py::TestTheSettingsFile`)
 - **The settings form:** `requires` (`document.GATE_PARAM`) is never a field, but stays in the MODEL (the gate wire
-  and `card_height` read it). `GET …/app` problems are never added to `Document.check()`. The page narrows to the
+  and `card_height` read it). `GET …/app` problems are never added to `Document.check()` — a SETTINGS FILE's problem
+  is (it stops a host loading the graph; next section). The page narrows to the
   `app:` fields — a graph without an `app:` block shows none and says so — until *all parameters* is ticked.
   (`tests/test_app_form.py`, `frontend/src/__tests__/settings.test.ts`)
 - **Pickers are derived in `palette.picker_of`** (a stamp, then the HuggingFace names, then file/folder names) —
@@ -138,12 +140,40 @@ Invariants:
 - The canvas modules import neither navigaitor, nor annotaide, nor ComfyUI. Tests that read a waivefront document
   `pytest.importorskip("waivefront")`; the rest use synthetic documents.
 
+## A graph's settings file (`settings.py`, user design 2026-10-05)
+
+arch: "A graph's settings live in a file of their own"; pins `tests/test_graph_settings.py`.
+
+- **A SETTING (a field the `app:` block names) never goes into the graph:** `Document.set_param` writes it into
+  `<graph>.settings.yaml` (`settings.set_setting`: its line replaced, else appended; comments kept); every other
+  parameter is a graph edit. The model shows each setting on its node (`document._apply_settings` — confluid delivers
+  a class line only at its `settled` stage, after the `document` stage the model is derived at); the text tab shows
+  the graph.
+- **Composition is confluid's `include:` rule and nothing else** — the held, never-written document
+  `include: [<graph>, <settings>]` (`settings.composed`), loaded with `texts=`. Root ruling "A configuration utility,
+  not a compiler": never a second precedence rule, a new spelling, or a walker into confluid for settings.
+- **A setting names its node:** a flow step `flow.<step>.op.<param>`, a top-level object `<key>.<param>`, any other
+  node `<Class>.<param>` only while that class is the node's alone (user pick). Everything else is REFUSED at its
+  `file:line:col` (`settings.read_settings`): a key that is none of the graph's settings, a class two unnamed nodes
+  share, a `flow:` block (confluid moves the step to the end of the flow). Never fall back to confluid's
+  warn-and-ignore. `settings.load_graph` is what a host runs: `SettingsError` for the settings file's problems only.
+- **`app: {graph: settings-only}`** refuses every change but a setting: `@_structural` on each structural `Document`
+  method refuses FIRST (before its own checks); `_commit` / `replace_text` refuse any other change of the graph
+  (`_refuse_locked`). A new structural method gets `@_structural`. `GET …/app` answers `graph`.
+- **Save As takes the held settings along** (`<new>.settings.yaml`, refused when one is there unasked); the old
+  settings file stays. Removing or renaming a node a setting names is refused while the setting is there.
+
 ## Mounted in a host
 
 arch: "A host mounts the editor through three methods"; pins `tests/test_host.py`.
 
 - `editor_blueprint` takes exactly one of `graph_dir` and `host`. `EditorHost` is a Protocol (`name`, `folder()`,
-  `record()`, `saved()`), no base class.
+  `record()`, `saved()`, `shipped()`), no base class.
+- **`shipped()`** names graphs the host ships from OUTSIDE its folder: listed under their name while the folder holds no
+  file of it (`Studio._scan`), opened with `Document.open_shipped` (the shipped text, nothing unsaved). A settings
+  change writes only the settings file into the folder; the first Save of a graph change writes the copy, which wins
+  from then on. The shipped file is NEVER written; Revert reads it again. Answers carry `shipped`.
+  (`tests/test_graph_settings.py::TestAShippedGraph`)
 - **`folder()` is asked at EACH request** — never cache it. A moved folder rebases every held document WITH its
   unsaved texts and history (`Document.moved`); never re-open documents on a move. Relative includes follow the move
   (`document.follow_includes`).
@@ -178,8 +208,51 @@ arch: "A host mounts the editor through three methods"; pins `tests/test_host.py
   React Flow page over the document routes".
 - The meet rule is the server's (`GET /api/types` = `document.supertypes()`), applied while dragging.
   (`tests/test_app.py::TestTypes::test_the_route_agrees_with_the_documents_own_meet_rule`)
-- **A hand-drawn wire the document cannot spell is a dashed proposal, never written** — making it an edit takes a
-  route (`TASKS.md`), never page logic that guesses a spelling.
+- **A drawn wire is saved by the SERVER, in the document's own spelling, or refused in one plain line** — the page
+  sends the two ends (`POST …/wires`, `…/wires/remove`) and draws the answer; it never draws an edge of its own and
+  never chooses a spelling. `Document.add_wire` writes `delivered: {<slot>: !ref:<P>}` into a root's output slot,
+  `<slot>: !ref:<P>` into any other card's single slot, `delivered: {<entry>: <key>}` from a record-entry output into a
+  root's record entry; a record or op-list wire, a flow's, one inside a subgraph is refused (`document.WIRE_*`, the
+  verbatim lines). `P` is a TOP-LEVEL key (a `!ref:` names nothing else): a producer inside a slot is moved out to
+  `_moved_key` — its CLASS name in snake case (`_snake`: `hugging_face_source`), never the slot's, and never a name that
+  is a top-level key, a node or a constructor parameter of ANY card, the slot's owner included (confluid hands a
+  top-level key to every same-named parameter) — and its sidecar entries follow (`_rekey` + `_pin`). Every wire edit
+  re-derives and must draw exactly the wire asked for (`_drawn`), and a removal may gain only its own open required
+  input (`_commit(allow=…)`). A card's record-entry outputs are its built instance's `produces` (a source's, an op's —
+  `ReadImage` follows its `output`); the root card draws no parameter rows. (`tests/test_wires.py`,
+  `tests/test_app.py::TestWires`, `frontend/src/__tests__/wires.test.ts`, `tests/test_canvas.py::TestDrawingWires`,
+  `::TestWiringTheSourceGraph`) arch: "A drawn wire is saved in the document's own spelling", update 2026-10-05.
+- **A rooted graph's `inputs` are the HOST card's, never the root's** (user approval 2026-10-05): `_Builder.root_host`
+  draws ONE `<host>` card (kind `host`) with an output per declared input — an item-typed one is an entry
+  (`entry=<slot>`) a step's read is wired from — and the root has NO outputs; `_Derivation.provided` and
+  `_contract_problems` read the declaration from the root's parameters (`_contract_slots`). A root without `inputs`
+  draws no card. The card is never a document node: Rename and Delete are refused (`HOST_NOT_A_NODE`) — on the page
+  they are GREYED while it is all that is selected, and Delete of a mixed selection leaves it
+  (`CommandState.hostSelected`, `levels.withoutHost`) — and a wire from it is not saved (`WIRE_NOT_YET`). **A `host`
+  wire** (`_Builder.host_wires`) runs from it into the parameter of that name on EXACTLY ONE card of the delivered
+  stream's source chain (`_source_chain`) — the host's own fill-by-shape rule —
+  and is never saved; its removal is refused verbatim (`WIRE_FROM_THE_HOST`); the page draws it dashed (`.wire-host`)
+  and titles the card `host.hostCardTitle` (`from <host>`, `from the host`). A root's `optional` slots are inputs
+  without the required mark, after its record entries, wired and removed like an output, never a problem unwired.
+  (`tests/test_wires.py::TestTheFilesGraph`, `::TestTheHostWire`, `::TestAnOptionalSlot`,
+  `tests/test_document.py::TestDerive`, `frontend/src/__tests__/{host,model,wires}.test.ts`,
+  `tests/test_canvas.py::TestTheFilesGraphsHostCard`) arch: "What a host hands a rooted graph is one HOST card".
+- **A class that is not an op is a CARD of its own** (user's design 2026-10-05): `Document.add_node` writes
+  `<key>: !class:<path> {<params>}` as ONE edit — the key by the move-out rule (`_free_key`, shared with `_moved_key`;
+  never a name a card takes as a parameter), the line above the root and its comment lines (`YamlText.top_key_line`),
+  else at the end — and saves a dropped `wire` (one end given, the card the other) in the SAME edit via `add_wire`, or
+  adds nothing. `add_step` hands every class whose DOCUMENT kind (`_kind_of`) is not in `_STEP_KINDS` to it: the
+  catalogue's kind is never the decider (35 classes it lists as values are ops to the document — `FilterOp`); the page
+  sends every add to `POST …/steps` and only places a card (`cards.addPlan`, at the gesture's point by `added`). The host
+  card and the root are never an anchor (`add_step` reads such an `after` as none; the page's `steps.selectedAnchor`). A
+  flow graph and a subgraph's inside refuse a card verbatim (`CARD_IN_A_FLOW`, `CARD_INSIDE_A_SUBGRAPH`; the user's
+  line). `add_node` is `@_structural`. (`tests/test_add_node.py`, `tests/test_app.py::TestAddingACard`,
+  `frontend/src/__tests__/{cards,steps}.test.ts`, `tests/test_canvas.py::TestACardOfItsOwn`) arch: "A class that is not
+  an op is a card of its own".
+- A refusal's or a warning's toast has a **copy** button (`Toasts.tsx`, `toast.copyText`) OUTSIDE the `[data-toast]`
+  box: that box's text stays the message alone, which the canvas tests read. (`frontend/src/__tests__/toast.test.ts`)
+- A test that derives a graph holding a HuggingFace source never asks the Hub: `tests/conftest.py::no_hub` answers its
+  description with nothing; a test needing a dataset's columns patches `described_columns` itself.
 - **Undo is two histories:** a document edit is undone by `POST …/undo` — the page never restores text of its own; a
   move, arrange or group is page state with before/after and never enters the document's history. arch: "Undo is two
   histories".
@@ -218,6 +291,11 @@ arch: "A host mounts the editor through three methods"; pins `tests/test_host.py
   iframe's `src`. A gesture belongs to the graph it began on. An unknown `?graph=` opens nothing.
   (`tests/test_canvas.py::TestMountedInAHost`, `::TestSetSourceInAHost`, `::TestTheHostHearsAndFollows`,
   `frontend/src/__tests__/{host,link,pickers,slots}.test.ts`) arch: "The page in a host's panel".
+- **`?only=settings`** (a host's settings sheet, `link.onlyFromSearch`) renders the settings form and nothing else —
+  no bar, canvas, Nodes sidebar, tabs or *all parameters* box (`SettingsForm fixed`) — and SAVES each change at once
+  (`App.commitParam`; user pick 2026-10-05), the settings file ALONE (`Document.save_settings`, `POST …/save {only:
+  "settings"}`): a change of the graph itself held in another view stays held (user pick 2026-10-05). Dialogs and toasts stay. (`tests/test_canvas.py::TestTheSettingsOnlyPage`,
+  `frontend/src/__tests__/{link,settings}.test.ts`)
 - Dialogs take the keyboard and give it back (`Modal`).
 
 ### Testing the page

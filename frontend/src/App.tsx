@@ -14,6 +14,10 @@
  * One command table (`commands.ts`) drives the menu bar, the right-click menus and the keyboard, so a shortcut and a
  * menu item always do the same thing and are greyed together; keys are ignored while typing in a field.
  *
+ * Wires (`wires.ts`): a wire drawn between sockets whose types meet is sent to `POST …/wires` and the server's answer is
+ * drawn — the wire saved in the document's own spelling, one edit, one undo — or the server's one plain line is a
+ * warning and nothing is drawn. Delete with wires selected (and no card) sends them all in one `POST …/wires/remove`.
+ *
  * Subgraphs (DESIGN §3 F2): the canvas draws ONE level — the top, or the inside of a subgraph node (`prep`,
  * `prep/inner`, `levels.ts`). Open (the node's button, a double-click, its menu) enters one; a breadcrumb crumb or
  * Escape goes up. Inside, every gesture targets that level: the nodes it acts on are the level's (qualified,
@@ -25,7 +29,9 @@
  * Op lists (DESIGN2 §3): on a `Stream` (a plain graph whose level holds an `ops` / `transforms` list) a class added
  * from the Nodes sidebar, Add Node ▸ or either palette becomes a list MEMBER — after the selected member, else at the
  * end of the list (`oplists.insertTarget`, `POST …/steps {list}`); Delete and Cut remove members like steps, in ONE
- * `POST …/steps/remove`. Members are named by position, so after a remove nothing stays selected.
+ * `POST …/steps/remove`. Members are named by position, so after a remove nothing stays selected. A class that is not
+ * an op is a CARD of its own (`cards.ts`, 2026-10-05): the server writes it as a top-level key above the root, wired to
+ * a dropped wire's end, and the page draws it where the gesture was; the host card and the root are never an anchor.
  *
  * Unsaved work of the last session (DESIGN2 §1): before any graph is loaded the page asks `GET api/workspace`; when
  * the last stop kept unsaved work, the recovery dialog asks Restore / Open the saved files first (`recovery.ts`).
@@ -56,6 +62,7 @@ import { ReactFlowProvider, useReactFlow } from "@xyflow/react";
 import {
   ApiError,
   addStep,
+  addWire,
   checkGraph,
   convertToSubgraph,
   copyNodes,
@@ -82,11 +89,13 @@ import {
   redo as postRedo,
   relayout,
   removeSteps,
+  removeWires,
   renameNode,
   rerun as postRerun,
   restoreRecovery,
   revertGraph,
   saveGraph,
+  saveSettings,
   saveGraphAs,
   saveTemplate,
   setParam as postParam,
@@ -94,10 +103,12 @@ import {
   trace,
   undo as postUndo,
   type Copied,
+  type DraggedEnd,
   type NodeSpec,
   type Run,
   type Template,
 } from "./api";
+import { addPlan, draggedWire } from "./cards";
 import { Canvas, type CanvasMenuRequest, type LayoutChange, type PaletteGesture } from "./canvas/Canvas";
 import { Palette, type PaletteRequest } from "./canvas/Palette";
 import { needsCatalogue, onFirstNeed } from "./catalogue";
@@ -144,6 +155,7 @@ import {
   findNode,
   followShifts,
   innerSteps as innerStepsOf,
+  isHostCard,
   levelAnchor,
   levelFromSearch,
   levelModel,
@@ -155,6 +167,7 @@ import {
   shiftName,
   shortName,
   stepNames,
+  withoutHost,
   type NameShift,
 } from "./levels";
 import {
@@ -162,6 +175,7 @@ import {
   embedFromSearch,
   graphFromSearch,
   missingGraphMessage,
+  onlyFromSearch,
   pageHref,
   pickGraph,
   tabFromSearch,
@@ -176,7 +190,7 @@ import type { CanvasNode, Form, Graph, GraphSummary, Json, Model, NewGraphKind, 
 import { NodesSidebar } from "./panels/NodesSidebar";
 import { RunPanel } from "./panels/RunPanel";
 import { SettingsForm } from "./panels/SettingsForm";
-import { addedMember, beside, inputTarget, insertTarget, shiftsMembers, stepFields, wireTarget, type InsertTarget } from "./oplists";
+import { addedMember, beside, inputTarget, insertTarget, shiftsMembers, wireTarget, type InsertTarget } from "./oplists";
 import {
   answered as recoveryAnswered,
   discardQuestion,
@@ -187,8 +201,10 @@ import {
 import { nextNode } from "./run";
 import { addableSpecs } from "./sidebar";
 import { sourceSlots, type Slot } from "./slots";
-import { spotBeside, stepName, uniqueName } from "./steps";
+import { selectedAnchor, spotBeside, stepName, uniqueName } from "./steps";
 import { useToasts } from "./toast";
+import { Toasts } from "./Toasts";
+import { connectionEnds, deleteWires, drawWire, selectedWires, type Connected, type WireEnds } from "./wires";
 import "./styles.css";
 
 export default function App() {
@@ -248,11 +264,20 @@ function Editor() {
   const [saves, setSaves] = useState(0);
   const [selection, setSelection] = useState<string[]>([]);
   const [groupsSelected, setGroupsSelected] = useState<string[]>([]);
+  /** How many wires are selected — Delete takes them out when no card is selected. */
+  const [wiresSelected, setWiresSelected] = useState(0);
   const [palette, setPalette] = useState<PaletteRequest | null>(null);
   /** In a host's panel (`?embed=1`): the menus and every function, no app chrome (`link.ts`, `host.ts`). */
   const [embed] = useState(() => embedFromSearch(window.location.search));
+  /**
+   * `?only=settings` (a host's settings sheet, `link.ts`): the graph's settings form and nothing else — no menu bar,
+   * canvas, Nodes sidebar or tabs; toasts and dialogs as ever — and every change SAVED at once (`commitParam`).
+   */
+  const [settingsOnly] = useState(() => onlyFromSearch(window.location.search) === "settings");
   /** The side panel's tab — the one a link asks for (`?tab=settings`), then the person's. */
   const [tab, setTab] = useState<SideTab>(() => tabFromSearch(window.location.search));
+  /** The tab the side panel shows: the settings, always, on a settings-only page. */
+  const sideTab: SideTab = settingsOnly ? "settings" : tab;
   /**
    * The settings tab's "all parameters" tick, per graph, for the page's life — kept here, not in the tab, which unmounts
    * when another tab is shown (measured before: the tick was lost every time the person looked at the run tab).
@@ -376,6 +401,7 @@ function Editor() {
     setInspected(undefined);
     setSelection([]);
     setGroupsSelected([]);
+    setWiresSelected(0);
     setPalette(null);
     setContext(null);
     setEditing(null);
@@ -672,6 +698,9 @@ function Editor() {
     [flow],
   );
 
+  /** The selected wires' ends, read from React Flow at the gesture (`selectedNow`'s reason). */
+  const selectedWiresNow = useCallback((): WireEnds[] => selectedWires(flow.getEdges()), [flow]);
+
   /** Make exactly `names` the selection (on the canvas; the listener then updates `data-selection`). */
   const selectOnly = useCallback(
     (names: string[]) => {
@@ -688,12 +717,13 @@ function Editor() {
 
   /**
    * Where a step is inserted, on the level drawn: after the last selected node, else — at the top — the flow's output
-   * or the last node, and — inside a subgraph — the last inner step (`levels.levelAnchor`).
+   * or the last node, and — inside a subgraph — the last inner step (`levels.levelAnchor`). The host card and the root
+   * are never an anchor (`steps.selectedAnchor`).
    */
   const anchorNow = useCallback((): string | undefined => {
     if (graphRef.current === null) return undefined;
-    const selected = selectedNow();
-    return levelAnchor(viewNow(), levelRef.current, selected[selected.length - 1]);
+    const view = viewNow();
+    return levelAnchor(view, levelRef.current, selectedAnchor(view, selectedNow()));
   }, [selectedNow, viewNow]);
 
   /**
@@ -703,8 +733,8 @@ function Editor() {
   const targetNow = useCallback((): InsertTarget => {
     const current = graphRef.current;
     if (current === null) return { kind: "none" };
-    const selected = selectedNow();
-    return insertTarget(viewNow(), levelRef.current, current.kind, selected[selected.length - 1]);
+    const view = viewNow();
+    return insertTarget(view, levelRef.current, current.kind, selectedAnchor(view, selectedNow()));
   }, [selectedNow, viewNow]);
 
   // ---- levels: which subgraph's inside the canvas draws ----------------------------------------------------------
@@ -715,6 +745,7 @@ function Editor() {
     setLevel(next);
     setSelection([]);
     setGroupsSelected([]);
+    setWiresSelected(0);
     setPalette(null);
     setContext(null);
     setEditing(null);
@@ -938,29 +969,35 @@ function Editor() {
   );
 
   /**
-   * Add a class where `target` says (`targetNow()` by default): after a step or a list member, or at the end of an op
-   * list. Placed at `at`, else beside the node it follows (an append: the list's last member, else its holder).
+   * Add a class: an op where `target` says (`targetNow()` by default) — after a step or a list member, or at the end of
+   * an op list — placed at `at`, else beside the node it follows (an append: the list's last member, else its holder);
+   * any other class (its catalogue `kind`) as a CARD of its own, drawn at `at` and wired to the dropped `wire`
+   * (`cards.ts` — the server places it by the kind the document derives).
    */
   const addClass = useCallback(
-    async (classPath: string, at?: XY, given?: InsertTarget): Promise<void> => {
+    async (spec: { class_path: string; kind?: string }, at?: XY, given?: InsertTarget, wire?: DraggedEnd): Promise<void> => {
       const current = graphRef.current;
       if (current === null) return;
       const target = given ?? targetNow();
-      const where = stepFields(target);
-      if (where === undefined) {
-        const why = target.kind === "none" ? target.why : undefined;
-        push("error", `${fileOf(current)}: ${why ?? "nothing to add after — a step is inserted after another one"}`);
-        return;
-      }
       const view = viewNow();
       // named on the level drawn: `threshold` at the top, `prep/threshold` inside prep (a list member is named by
-      // its position whatever is sent)
+      // its position, a card after its class, whatever is sent)
       const taken = view.nodes.map((node) => shortName(node.name));
-      const name = qualify(levelRef.current, stepName(classPath, taken));
-      const member = addedMember(view, target);
-      const near = beside(view, target);
+      const name = qualify(levelRef.current, stepName(spec.class_path, taken));
+      const plan = addPlan(spec.kind, spec.class_path, name, target, wire);
+      if ("refused" in plan) {
+        push("error", `${fileOf(current)}: ${plan.refused}`);
+        return;
+      }
+      const member = plan.card ? undefined : addedMember(view, target);
+      const near = plan.card ? undefined : beside(view, target);
       try {
-        const next = await addStep(current.name, { name, ...where, class_path: classPath, params: {} });
+        const next = await addStep(current.name, plan.request);
+        if (plan.card) {
+          // drawn where the person asked, under the name the server gave it (`class_names_scan`)
+          accept(await placeNew(current, next, at, next.added), { kind: "document" });
+          return;
+        }
         // a member: the server's `added` names it (the page's own reckoning only when an answer lacks it)
         const placed = member === undefined ? undefined : (next.added ?? member);
         const cut = placed === undefined ? -1 : placed.lastIndexOf("[");
@@ -1275,17 +1312,46 @@ function Editor() {
     [accept, anchorNow, placeNew, push],
   );
 
+  /**
+   * A wire drawn between two sockets whose types meet: the server SAVES it (`POST …/wires`) and its answer is drawn —
+   * or its one plain line is a warning and nothing is drawn (`wires.ts`).
+   */
+  const onWire = useCallback(
+    (connection: Connected) => {
+      const current = graphRef.current;
+      if (current === null) return;
+      void drawWire(connectionEnds(connection), {
+        add: (wire) => addWire(current.name, wire),
+        accept: (next) => accept(next, { kind: "document" }),
+        refuse: (message) => push("warning", message),
+      });
+    },
+    [accept, push],
+  );
+
+  /**
+   * Delete: the selected cards (their wires go with them) — never the host card, which a mixed selection leaves where it
+   * is — else the selected boxes, else the selected wires.
+   */
   const deleteSelection = useCallback(() => {
     const current = graphRef.current;
     if (current === null) return;
-    const nodes = selectedNow();
+    const nodes = withoutHost(viewNow(), selectedNow());
     if (nodes.length > 0) {
       void removeNodes(nodes);
       return;
     }
     const boxes = selectedGroupsNow();
-    if (boxes.length > 0) void writeGroups(current.groups.filter((group) => !boxes.includes(group.id)));
-  }, [removeNodes, selectedGroupsNow, selectedNow, writeGroups]);
+    if (boxes.length > 0) {
+      void writeGroups(current.groups.filter((group) => !boxes.includes(group.id)));
+      return;
+    }
+    void deleteWires(selectedWiresNow(), {
+      remove: (wires) => removeWires(current.name, wires),
+      accept: (next) => accept(next, { kind: "document" }),
+      refuse: (message) => push("warning", message),
+    });
+  }, [accept, push, removeNodes, selectedGroupsNow, selectedNow, selectedWiresNow, viewNow, writeGroups]);
 
   const selectAll = useCallback(() => {
     flow.setNodes((all) => all.map((node) => (node.type === "generic" && !node.selected ? { ...node, selected: true } : node)));
@@ -1315,6 +1381,37 @@ function Editor() {
       push("error", errorMessage(exc));
     }
   }, [accept, host, postToHost, push]);
+
+  /**
+   * The settings sheet's Save (`?only=settings`): the graph's SETTINGS file alone (`api.saveSettings`) — a change of the
+   * graph itself the editor's tab holds stays unsaved there (user pick 2026-10-05). The host hears it like any Save.
+   */
+  const saveSettingsAlone = useCallback(async () => {
+    const current = graphRef.current;
+    if (current === null) return;
+    try {
+      const { host_error: hostError, ...saved } = await saveSettings(current.name);
+      accept(saved);
+      postToHost(savedMessage(saved.name, saved.path)); // a host re-runs what reads this graph at once
+      if (hostError !== undefined) push("warning", `${fileOf(saved)} is saved, but ${host?.name ?? "the host"} said: ${hostError}`);
+    } catch (exc) {
+      push("error", errorMessage(exc));
+    }
+  }, [accept, host, postToHost, push]);
+
+  /**
+   * How the page writes a parameter: `setParam`, and on a settings-only page (`?only=settings`) the settings' Save right
+   * after — the sheet holds no unsaved state, and the host hears every change at once (its pane asks again). A setting
+   * the server refuses saves nothing.
+   */
+  const commitParam = useCallback(
+    async (node: string, param: string, value: Json): Promise<boolean> => {
+      const done = await setParam(node, param, value);
+      if (done && settingsOnly) await saveSettingsAlone();
+      return done;
+    },
+    [saveSettingsAlone, setParam, settingsOnly],
+  );
 
   const saveAs = useCallback(async () => {
     const current = graphRef.current;
@@ -1658,11 +1755,10 @@ function Editor() {
       return;
     }
     if (!gesture.from) {
-      const selected = gesture.selected ?? [];
       setPalette({
         screen: gesture.screen,
         openedAt: gesture.openedAt,
-        target: insertTarget(view, level, current.kind, selected[selected.length - 1]),
+        target: insertTarget(view, level, current.kind, selectedAnchor(view, gesture.selected ?? [])),
       });
       return;
     }
@@ -1670,18 +1766,21 @@ function Editor() {
     // from an OUTPUT: the new node takes the type and goes after the node dragged from; from an INPUT: it gives the
     // type and goes before that node — after whatever feeds its record (inside a subgraph, never after its <in>); a
     // Stream's member goes into its list the same way (`oplists.wireTarget`). From an op-list item input (a Pipeline's
-    // `transforms[k]`) the pick becomes that list's item k (`oplists.inputTarget` — P3)
+    // `transforms[k]`) the pick becomes that list's item k (`oplists.inputTarget` — P3). The host card is no anchor; a
+    // CARD picked here is wired to the end the wire was dragged out of (`cards.draggedWire`)
     const listed = kind === "in" ? inputTarget(view, node, socket) : undefined;
     const after = kind === "out" ? node : levelPredecessor(view, node);
+    const anchor = after === undefined ? undefined : selectedAnchor(view, [after]);
+    const why =
+      after === undefined
+        ? `nothing feeds ${node} — a step can only be inserted after another one`
+        : `${after} is the host's side of the graph — an op is inserted after a step`;
     setPalette({
       screen: gesture.screen,
       openedAt: gesture.openedAt,
       filter: { type, side: kind === "out" ? "inputs" : "outputs" },
-      target:
-        listed ??
-        (after === undefined
-          ? { kind: "none", why: `nothing feeds ${node} — a step can only be inserted after another one` }
-          : wireTarget(view, level, current.kind, after)),
+      target: listed ?? (anchor === undefined ? { kind: "none", why } : wireTarget(view, level, current.kind, anchor)),
+      wire: draggedWire(gesture.from),
     });
   }, [chooseSlot, slotOf, viewNow]);
 
@@ -1690,8 +1789,9 @@ function Editor() {
       const request = palette;
       setPalette(null);
       if (request === null) return;
-      // the new node lands where the gesture was (the double-click, the wire's release); `none` is refused there
-      void addClass(spec.class_path, flow.screenToFlowPosition(request.screen), request.target);
+      // the new node lands where the gesture was (the double-click, the wire's release); an op with nowhere to go is
+      // refused there, a card never is
+      void addClass(spec, flow.screenToFlowPosition(request.screen), request.target, request.wire);
     },
     [addClass, flow, palette],
   );
@@ -1856,11 +1956,16 @@ function Editor() {
     ],
   );
 
+  /** The model of the level drawn, as this render draws it (`viewNow` reads it at a gesture). */
+  const shownView = graph === null ? EMPTY_MODEL : (levelModel(graph.model, shown) ?? EMPTY_MODEL);
   const commandState: CommandState = {
     graph: graph !== null,
     dirty: dirtyShown,
     selected: selection.length,
+    // the host card is drawn, never written: Rename… and Delete leave it (`commands.enabled`)
+    hostSelected: withoutHost(shownView, selection).length < selection.length,
     groupSelected: groupsSelected.length > 0,
+    wireSelected: wiresSelected > 0,
     clipboard: hasClip || copyPending,
     run: run !== null,
     paused: run !== null && run.paused_at !== null && nextNode(run) !== undefined,
@@ -1882,12 +1987,14 @@ function Editor() {
     return {
       ...commandState,
       selected: selected.length,
+      hostSelected: withoutHost(viewNow(), selected).length < selected.length,
       groupSelected: selectedGroupsNow().length > 0,
+      wireSelected: selectedWiresNow().length > 0,
       // a copy pressed a moment ago is on its way: Paste waits for it (the state above renders a frame later)
       clipboard: clipboard.current !== null || copying.current !== null,
       traced: run !== null && last !== undefined && run.trace.nodes.some((node) => node.node === last),
     };
-  }, [commandState, run, selectedGroupsNow, selectedNow]);
+  }, [commandState, run, selectedGroupsNow, selectedNow, selectedWiresNow, viewNow]);
 
   // the recovery question is answered first: no shortcut acts while it is asked (or still on its way), and the bar and
   // the canvas are INERT — out of reach of the mouse and of Tab (P5: measured before, Tab reached the New menu and the
@@ -1970,7 +2077,7 @@ function Editor() {
             close={close}
             onPick={(spec) => {
               close();
-              void addClass(spec.class_path, request.flow);
+              void addClass(spec, request.flow);
             }}
           />
         ),
@@ -1990,7 +2097,7 @@ function Editor() {
     const node = graph ? findNode(graph.model, request.node) : undefined;
     if (!node) return [];
     // the right-clicked node was made the selection a moment ago: the commands see it through the state below
-    const state = selection.includes(node.name) ? commandState : { ...commandState, selected: 1 };
+    const state = selection.includes(node.name) ? commandState : { ...commandState, selected: 1, hostSelected: isHostCard(node) };
     return nodeMenu({
       ...menuContext,
       state,
@@ -2016,10 +2123,11 @@ function Editor() {
   const editor = useMemo<EditorApi>(
     () => ({
       graph: shownGraph,
+      host,
       form,
       types,
       run,
-      setParam,
+      setParam: commitParam,
       rename,
       updateGroup,
       ungroup,
@@ -2031,23 +2139,22 @@ function Editor() {
       browse,
       chooseSlot,
     }),
-    [shownGraph, form, types, run, setParam, rename, updateGroup, ungroup, resizeGroup, editing, openSubgraph, model, browse, chooseSlot],
+    [shownGraph, host, form, types, run, commitParam, rename, updateGroup, ungroup, resizeGroup, editing, openSubgraph, model, browse, chooseSlot],
   );
 
   const inspectedNode = graph !== null && inspected !== undefined ? findNode(graph.model, inspected) : undefined;
   /** Run sends the host's record: a host is there and the graph has no source of its own (`host.runRecord`). */
   const fromHost = graph !== null && host !== null && !hasOwnSource(graph.model);
-  const targetShown: InsertTarget = graph
-    ? insertTarget(levelModel(graph.model, shown) ?? EMPTY_MODEL, shown, graph.kind, until)
-    : { kind: "none" };
+  const targetShown: InsertTarget = graph ? insertTarget(shownView, shown, graph.kind, selectedAnchor(shownView, selection)) : { kind: "none" };
 
   return (
     <EditorContext.Provider value={editor}>
       <div
-        className={`app${embed ? " embed" : ""}`}
+        className={`app${embed ? " embed" : ""}${settingsOnly ? " settings-only" : ""}`}
         data-embed={embed ? "true" : "false"}
+        data-only={settingsOnly ? "settings" : ""}
         data-host={host?.name ?? ""}
-        data-side-tab={tab}
+        data-side-tab={sideTab}
         data-graph={graph?.name ?? ""}
         data-ready={graph === null ? "false" : "true"}
         data-saves={saves}
@@ -2058,7 +2165,7 @@ function Editor() {
         data-recovery={recoveryPhase}
         style={{ ["--nodes-width" as string]: sidebar ? "300px" : "0px" }}
       >
-        <header className="bar" ref={bar}>
+        {!settingsOnly && <header className="bar" ref={bar}>
           {/* in a host's panel the host's own page says what app this is: no second brand */}
           {!embed && (
             <span className="brand" title="streamstudio">
@@ -2121,17 +2228,17 @@ function Editor() {
               Run
             </button>
           </div>
-        </header>
-        <main className={`body${sidebar ? " with-nodes" : ""}`} ref={body}>
-          {sidebar && (
+        </header>}
+        <main className={`body${sidebar && !settingsOnly ? " with-nodes" : ""}`} ref={body}>
+          {sidebar && !settingsOnly && (
             <NodesSidebar
               specs={addable}
               target={targetShown}
-              onAdd={(spec) => void addClass(spec.class_path)}
+              onAdd={(spec) => void addClass(spec)}
               onClose={toggleSidebar}
             />
           )}
-          {graph !== null ? (
+          {settingsOnly ? null : graph !== null ? (
             <Canvas
               graph={graph}
               types={types}
@@ -2139,15 +2246,16 @@ function Editor() {
               showMinimap={minimap}
               fitOnOpen={embed}
               onLayout={onLayout}
-              onProposal={(message) => push("warning", message)}
-              onSelection={(names, groups) => {
+              onWire={onWire}
+              onSelection={(names, groups, wires) => {
                 setSelection(names);
                 setGroupsSelected(groups);
+                setWiresSelected(wires);
               }}
               onPalette={onPalette}
               onNodeClick={onNodeClick}
               onContextMenu={onContextMenu}
-              onDropClass={(classPath, at) => void addClass(classPath, at)}
+              onDropClass={(classPath, at) => void addClass(specs?.find((spec) => spec.class_path === classPath) ?? { class_path: classPath }, at)}
               onOpenSubgraph={openSubgraph}
               onLevel={goTo}
             />
@@ -2193,29 +2301,37 @@ function Editor() {
             </div>
           )}
           <aside className="side">
-            <nav className="tabs">
-              {SIDE_TABS.map((name) => (
-                <button key={name} data-tab={name} aria-selected={tab === name} onClick={() => setTab(name)}>
-                  {name}
-                </button>
-              ))}
-            </nav>
-            {tab === "text" && (
+            {!settingsOnly && (
+              <nav className="tabs">
+                {SIDE_TABS.map((name) => (
+                  <button key={name} data-tab={name} aria-selected={tab === name} onClick={() => setTab(name)}>
+                    {name}
+                  </button>
+                ))}
+              </nav>
+            )}
+            {settingsOnly && graph === null && (
+              <p className="dim" data-graph-missing={missing ?? undefined}>
+                {missing !== null ? missingGraphMessage(missing, graphs, folder) : "reading the graph…"}
+              </p>
+            )}
+            {sideTab === "text" && (
               <>
                 <h2 title={graph?.path}>{graph ? fileTitle(graph) : ""}</h2>
                 <pre data-yaml>{graph?.text ?? ""}</pre>
               </>
             )}
-            {tab === "settings" && graph !== null && (
+            {sideTab === "settings" && graph !== null && (
               <SettingsForm
                 key={graph.name}
                 graph={graph}
                 level={shown}
                 all={allParams[graph.name] === true}
                 onAll={(all) => setAllParams((ticked) => ({ ...ticked, [graph.name]: all }))}
+                fixed={settingsOnly}
               />
             )}
-            {tab === "run" && graph !== null && (
+            {sideTab === "run" && graph !== null && (
               <RunPanel
                 file={fileOf(graph)}
                 run={run}
@@ -2284,13 +2400,7 @@ function Editor() {
             onDiscard={() => void discardWork()}
           />
         )}
-        <div className="toasts">
-          {toasts.map((toast) => (
-            <div key={toast.id} className={`toast toast-${toast.level}`} data-toast={toast.level} onClick={() => dismiss(toast.id)}>
-              {toast.text}
-            </div>
-          ))}
-        </div>
+        <Toasts toasts={toasts} dismiss={dismiss} />
       </div>
     </EditorContext.Provider>
   );
