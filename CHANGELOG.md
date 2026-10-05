@@ -8,6 +8,14 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **The catalogue is built by a helper process, and a class's settings arrive when you select it.** Serving the
+  editor's page starts `python -P -m streamstudio.catalogue`, which imports every installed package that declares
+  classes and describes them; the editor itself no longer imports them (its memory after the catalogue: 0.13 GB,
+  before 1.17 GB). `GET /api/palette` answers every class WITHOUT its settings (0.60 MB, before 11.7 MB) and `503`
+  when the helper stopped before answering; `GET /api/palette/<class path>` answers one class with them. Set source…
+  and the Nodes sidebar's card ask for a class's settings when it is selected and say `loading the settings…` until
+  they arrive. Measured on a busy machine: the list 31 s after the editor opened (before: 55 s), at once when asked
+  after the helper has answered.
 - **The canvas editor's page ships built, inside the package** — `streamstudio/canvas` (`index.html`, its js and css,
   and `.built-from`, the record of the source it was built from), committed and in the wheel. Every install serves the
   page: an install from GitHub, which carries no `frontend/`, answered `/` with `The canvas page is not built. Build it

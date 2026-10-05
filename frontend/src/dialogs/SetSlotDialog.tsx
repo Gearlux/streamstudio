@@ -8,18 +8,21 @@
  *       …                                                [Back]            [Cancel] [Set source]
  *
  * The list is every class the slot's type takes (the model's meet rule — the sources, and the engines), sources first;
- * the form is the class's constructor schema, through the ONE widget (`ParamWidget`) with its pickers — a folder field's
- * file browser, a HuggingFace source's datasets, columns and splits. A value is held by the dialog until Set; only the
+ * the form is the class's constructor schema, asked when the class is picked (`api.settingsOf`: once per class, at once
+ * when its package is loaded in the server, else when the catalogue's helper has described it — "loading the settings…"
+ * until then, Set waiting), through the ONE widget (`ParamWidget`) with its pickers — a folder field's file browser, a
+ * HuggingFace source's datasets, columns and splits. A value is held by the dialog until Set; only the
  * values changed from the constructor's defaults are sent. Set waits while a required parameter is empty. A refusal
  * stays in the dialog in the server's words, with everything typed kept; while Set is on its way both buttons wait.
  *
  * Hooks: `data-dialog="set-slot"`, `data-slot-node` / `data-slot-name` (on the body), `data-slot-step` (`pick` | `form`),
  * `data-slot-search`, `data-slot-list`, `data-slot-class=<class path>` per row, `data-slot-chosen` (the class of the
- * form), `data-slot-effect`, `data-slot-missing` (the required parameters still empty), `data-slot-refused`,
+ * form), `data-slot-settings` (`loading` | `ready`), `data-slot-effect`, `data-slot-missing` (the required parameters
+ * still empty), `data-slot-refused`,
  * `data-slot-busy`, `data-slot-back`, `data-slot-cancel`, `data-slot-confirm`; each field's `data-param` is the widget's.
  */
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
-import type { NodeSpec } from "../api";
+import { errorMessage, settingsOf, type NodeSpec, type NodeSpecWithSettings } from "../api";
 import { ParamWidget } from "../canvas/ParamWidget";
 import type { Json, Model, Supertypes } from "../model";
 import { plainDoc } from "../rst";
@@ -50,6 +53,8 @@ export function SetSlotDialog({ slot, specs, types, model, onSet, onCancel }: Se
   const [query, setQuery] = useState("");
   const [active, setActive] = useState(0);
   const [chosen, setChosen] = useState<NodeSpec | null>(null);
+  /** The chosen class's settings once they arrived (`api.settingsOf`), else `null`. */
+  const [settings, setSettings] = useState<NodeSpecWithSettings | null>(null);
   const [typed, setTyped] = useState<Record<string, Json>>({});
   const [refused, setRefused] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -60,18 +65,31 @@ export function SetSlotDialog({ slot, specs, types, model, onSet, onCancel }: Se
   useEffect(() => {
     list.current?.querySelector<HTMLElement>('[aria-selected="true"]')?.scrollIntoView({ block: "nearest" });
   }, [active]);
-  // a class picked: the keyboard goes to its first field (else Set) — measured before: the search box went with the list
-  // and the focus fell to the page, where Escape and Tab did nothing
+  // a class picked: its settings are asked at once; an answer for a class no longer chosen (Back, another pick) is dropped
+  useEffect(() => {
+    setSettings(null);
+    if (chosen === null) return;
+    let current = true;
+    settingsOf(chosen.class_path).then(
+      (spec) => current && setSettings(spec),
+      (exc: unknown) => current && setRefused(errorMessage(exc)),
+    );
+    return () => {
+      current = false;
+    };
+  }, [chosen]);
+  // its settings in: the keyboard goes to the first field (else Set) — measured before: the search box went with the
+  // list and the focus fell to the page, where Escape and Tab did nothing
   useEffect(() => {
     const here = form.current;
-    if (chosen === null || here === null) return;
+    if (settings === null || here === null) return;
     const field = here.querySelector<HTMLElement>("input[data-param], select[data-param], textarea[data-param]");
     (field ?? here.closest("[data-dialog]")?.querySelector<HTMLElement>("[data-slot-confirm]"))?.focus();
-  }, [chosen]);
+  }, [settings]);
 
   const candidates = useMemo(() => (specs === null ? [] : slotCandidates(specs, slot.type, types, query)), [specs, slot.type, types, query]);
   const shown = candidates.slice(0, PALETTE_ROWS);
-  const params = useMemo(() => (chosen === null ? [] : draftParams(chosen)), [chosen]);
+  const params = useMemo(() => (settings === null ? [] : draftParams(settings)), [settings]);
   const values = draftValues(params, typed);
   const missing = missingRequired(params, typed);
 
@@ -88,7 +106,7 @@ export function SetSlotDialog({ slot, specs, types, model, onSet, onCancel }: Se
     if (!busy) onCancel();
   };
   const set = async () => {
-    if (chosen === null || missing.length > 0 || busy) return;
+    if (chosen === null || settings === null || missing.length > 0 || busy) return;
     setBusy(true);
     setRefused(null);
     const said = await onSet(chosen.class_path, slotParams(params, typed));
@@ -125,7 +143,7 @@ export function SetSlotDialog({ slot, specs, types, model, onSet, onCancel }: Se
             type="button"
             className="button primary"
             data-slot-confirm
-            disabled={chosen === null || missing.length > 0 || busy}
+            disabled={chosen === null || settings === null || missing.length > 0 || busy}
             onClick={() => void set()}
           >
             {confirm}
@@ -182,11 +200,17 @@ export function SetSlotDialog({ slot, specs, types, model, onSet, onCancel }: Se
             </ul>
           </>
         ) : (
-          <div ref={form} className="set-slot-form" data-slot-chosen={chosen.class_path}>
+          <div
+            ref={form}
+            className="set-slot-form"
+            data-slot-chosen={chosen.class_path}
+            data-slot-settings={settings === null ? "loading" : "ready"}
+          >
             <p className="modal-message" data-slot-effect>
               {slotEffect(slot, model, chosen.name)}
             </p>
-            {params.length === 0 && <p className="dim">{chosen.name} takes no parameter.</p>}
+            {settings === null && refused === null && <p className="modal-hint">loading the settings…</p>}
+            {settings !== null && params.length === 0 && <p className="dim">{chosen.name} takes no parameter.</p>}
             {params.map((param) => (
               <label className="field" key={param.name} title={param.doc}>
                 <span>

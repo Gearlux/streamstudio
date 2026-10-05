@@ -306,12 +306,25 @@ is refused — and the footer says how one is made instead:
 `A subgraph is made from steps: Graph ▸ Convert selection to subgraph, Insert template ▸ or Insert steps file…`.
 Double-clicking empty canvas opens the same catalogue as a search palette.
 
-**When the catalogue is read.** The editor builds it by importing every installed package that declares classes —
-6.5–8.4 s on a fresh editor with the training and detection backends installed. The page asks for it the first time
-you open something that lists it — the Nodes sidebar, Add Node ▸, the palette or Set source… — and never as it
-opens, so opening a graph or changing a value does not wait for it. Until it arrives those four show
-`loading the catalogue…`; after that it is kept for as long as the page is open. A page that starts with the
-sidebar open (it remembers) asks at once.
+**When the catalogue is read.** Building it means importing every installed package that declares classes (torch,
+TensorFlow, JAX, the training and detection backends) and describing each class. The editor does that in a separate
+helper process, started when the editor's page opens; the editor itself never imports those packages for it, so it
+stays small and its other requests do not wait. The page asks for the catalogue the first time you open something
+that lists it — the Nodes sidebar, Add Node ▸, the palette or Set source… — and never as it opens. Until it arrives
+those four show `loading the catalogue…`; after that it is kept for as long as the page is open. Measured 2026-10-05
+with every backend installed, on a busy machine (load ~120):
+
+```
+you open the editor, then at once Set source…   list after 31 s      (before: 55 s, built inside the editor)
+you look at a graph first, Set source… later    list at once (3 ms)  once the helper has answered
+the editor's memory after the catalogue         0.13 GB              (before: 1.17 GB)
+```
+
+A class's **settings** are not in the list: they are asked for when you select the class — pick it in Set source…, or
+rest the pointer on it in the Nodes sidebar — and kept for the page's life. A class whose package the editor has
+already loaded answers at once; any other once the helper has described every class's settings (about 13 s after the
+list, at that load); until then the dialog and the card say `loading the settings…`. A class only the editor's own
+process registered (one a host app defined) is listed and described too.
 
 ### Pipelines — adding to and removing from an `ops:` list
 
@@ -665,13 +678,11 @@ A refused edit changes nothing. The message is the server's, verbatim (paths sho
   graphs spelling `_target_: WindowSignal`, `streamstudio <folder>`'s first graph list still takes about 6 s: nothing
   has imported that class's package, so the walk above goes through every backend listed before it (85 entry
   points). An editor mounted in a host app that has already imported the package is not affected.
-- **One short class name for two installed classes, before the catalogue is opened.** `FourierOp` is the name of a
-  NumPy op (`waivefront.fourier`) and of a torch op (`waivefront.fourier_torch`); with every package installed, 18
-  short names are shared like this (`WindowOp`, `MeanSquaredError`, …). Until the catalogue has been opened (the
-  Nodes sidebar, Add Node ▸, the palette or Set source…), a graph spelling `_target_: FourierOp` is drawn with the
-  first of the two the lookup imports, the NumPy one; a run refuses the name (`AmbiguousClassError 'FourierOp' is
-  registered by 2 classes, so a bare lookup cannot choose between them`), and a graph opened after the catalogue says
-  `cannot resolve the class 'FourierOp'`. Spell such a class by its dotted path: `_target_:
+- **One short class name for two installed classes.** `FourierOp` is the name of a NumPy op (`waivefront.fourier`)
+  and of a torch op (`waivefront.fourier_torch`); with every package installed, 18 short names are shared like this
+  (`WindowOp`, `MeanSquaredError`, …). A graph spelling `_target_: FourierOp` is drawn with the first of the two the
+  lookup imports, the NumPy one, while a run refuses the name (`AmbiguousClassError 'FourierOp' is registered by 2
+  classes, so a bare lookup cannot choose between them`). Spell such a class by its dotted path: `_target_:
   waivefront.fourier.FourierOp`.
 
 ### The document model and node names
@@ -710,8 +721,8 @@ canvas, Check graph, a run, Copy and Save as template alike; a `prep.steps.yaml`
 package defining it is imported. On the first document naming such a class, the editor imports the installed
 packages' `confluid.configurables` entry points one at a time — those of packages already loaded first, then the
 rest in their listed order — and stops at the first that registers it; the rest are left for a later miss, and none
-is imported twice. A package another request is still importing (the catalogue imports every package in its own
-request) is waited for, so a class half a second from being registered is never reported as missing.
+is imported twice. A package another request is still importing (two first lookups at once) is waited for, so a
+class half a second from being registered is never reported as missing.
 Measured 2026-10-02, the editor mounted in a host app over a sink graph naming one class:
 
 ```
@@ -780,7 +791,8 @@ script, a tool — is served as always.
 | GET | `/api/hf/datasets` | `{datasets, reason}` — the HuggingFace datasets this machine has cached, and why there are none when there are none |
 | GET | `/api/hf/features?path=&name=&split=` | `{features, all_columns}` — the columns of that dataset (`[]` without one, or when it cannot be read) and the `metadata_features` word for "every other column" (`*`) |
 | GET | `/api/hf/splits?path=&name=` | `{splits}` — the split names of that dataset |
-| GET | `/api/palette` | every configurable class as a typed node spec; `?refresh=1` rescans the registry |
+| GET | `/api/palette` | every configurable class as a typed node spec, without its settings (`params_schema`, `params_defs`); waits for the catalogue's helper process, which serving the page starts; `?refresh=1` runs a new one (it sees packages installed or edited since). `503 {error}` when the helper stopped before it answered — the next request runs a new one |
+| GET | `/api/palette/<class path>` | one class's whole node spec, settings included — at once when its package is loaded in the editor, else when the helper has described it; `404 {error}` naming the close class paths for an unknown one |
 | POST | `/api/graphs/<name>/trace` | `{record, until}` — run record `#record` of the graph's own source through what the editor holds, pausing before `until` (`prep/scaled` pauses inside); a graph with no source runs the record its host supplies (`record` does not apply). Answers the run: `{run, graph, record, host, trace, statuses, generations, paused_at}` — `record: null` and `host: {label, filled: {node: {attribute: value}}}` for a host's record |
 | GET | `/api/runs/<run>` | the trace: per node its params, inputs, outputs, status and milliseconds; inner rows carry `parent` |
 | POST | `/api/runs/<run>/rerun` | `{node, params}` — rebuild one node through its constructor and rerun from it |

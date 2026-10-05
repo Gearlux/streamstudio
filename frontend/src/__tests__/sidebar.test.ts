@@ -4,10 +4,11 @@
  * the parameter rows its hover card lists.
  */
 import { describe, expect, it } from "vitest";
-import type { NodeSpec } from "../api";
+import type { NodeSpecWithSettings } from "../api";
 import { KIND_ORDER, SUBGRAPH_CLASS, addableSpecs, chips, groupSpecs, kindLabel, packageOf, paramRows, sidebarMatches } from "../sidebar";
 
-const spec = (class_path: string, kind: string, extra: Partial<NodeSpec> = {}): NodeSpec => ({
+// with its settings — what a selected class answers (`GET api/palette/<class>`); a list entry is the same less those
+const spec = (class_path: string, kind: string, extra: Partial<NodeSpecWithSettings> = {}): NodeSpecWithSettings => ({
   class_path,
   name: class_path.split(".").pop() ?? class_path,
   category: "",

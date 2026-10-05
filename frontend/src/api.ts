@@ -13,6 +13,7 @@
  * with `dirty`; only `save` / `save-as` write files. A node name in a URL may be QUALIFIED (`prep/grey`, a node
  * inside a subgraph): the routes take it as `<path:node>`, so each segment is encoded on its own (`nodePath`).
  */
+import { oncePerClass } from "./catalogue";
 import type { Group } from "./groups";
 import type { HostRun } from "./host";
 import type { Form, Graph, GraphSummary, Json, NewGraphKind, Positions, Problem, Supertypes } from "./model";
@@ -359,15 +360,17 @@ export const putGroups = (name: string, groups: Group[]): Promise<{ groups: Grou
 // the palette, the form, the types
 // ---------------------------------------------------------------------------------------------------
 
-/** One class as a node, as `streamstudio/palette.py`'s `NodeSpec` serialises — what the palette lists. */
+/**
+ * One class as a node, as the catalogue's list carries it (`streamstudio/palette.py`'s `listed`) — what the palette,
+ * the Nodes sidebar, Add Node ▸ and Set source… list. Its settings are not in it: they are asked for when the class is
+ * selected (`settingsOf`).
+ */
 export interface NodeSpec {
   class_path: string;
   name: string;
   category: string;
   group: string;
   kind: string;
-  params_schema: Record<string, Json>;
-  params_defs: Record<string, Json>;
   inputs: { name: string; type: string; required: boolean; doc: string }[];
   outputs: { name: string; type: string; required: boolean; doc: string }[];
   consumes: Record<string, string>;
@@ -381,9 +384,23 @@ export interface NodeSpec {
   problem: string;
 }
 
-/** `GET api/palette` — every configurable class as a node spec; `refresh` rescans the registry. */
+/** One class with its settings: the constructor's JSON-schema `properties` (a `picker` marked where one applies) and
+ * the `$defs` they refer to — `streamstudio/palette.py`'s whole `NodeSpec`. */
+export interface NodeSpecWithSettings extends NodeSpec {
+  params_schema: Record<string, Json>;
+  params_defs: Record<string, Json>;
+}
+
+/** `GET api/palette` — every configurable class as a node spec, without its settings; `refresh` runs a new build. */
 export const getPalette = (refresh = false): Promise<NodeSpec[]> =>
   call("GET", refresh ? "api/palette?refresh=1" : "api/palette");
+
+/** `GET api/palette/<class path>` — one class with its settings. */
+export const getNodeSpec = (classPath: string): Promise<NodeSpecWithSettings> =>
+  call("GET", `api/palette/${encodeURIComponent(classPath)}`);
+
+/** A class's settings, asked when it is selected — once per class for the page's life (`catalogue.oncePerClass`). */
+export const settingsOf = oncePerClass(getNodeSpec);
 
 /**
  * `GET api/graphs/<name>/form` — `{node: JSON-schema properties}`: every parameter of every node (a step's gate,

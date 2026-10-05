@@ -5,7 +5,7 @@
  * narrows by every typed word, the chips say what an entry reads and writes, and the parameter rows are what its
  * hover card lists. `panels/NodesSidebar.tsx` draws it; `menu/AddNodeMenu.tsx` reuses the kind order and the search.
  */
-import type { NodeSpec } from "./api";
+import type { NodeSpec, NodeSpecWithSettings } from "./api";
 import type { Json } from "./model";
 
 /** The kinds the palette serves (`streamstudio/palette.py::NodeKind`, less the document-only ones), in reading order. */
@@ -143,7 +143,7 @@ function typeWord(schema: Schema): string {
 }
 
 /** The constructor's parameters from `params_schema` (pydantic's `properties`), in their declared order. */
-export function paramRows(spec: Pick<NodeSpec, "params_schema">): ParamRow[] {
+export function paramRows(spec: Pick<NodeSpecWithSettings, "params_schema">): ParamRow[] {
   return Object.entries(spec.params_schema).map(([name, value]) => {
     const schema = asSchema(value) ?? {};
     const has = "default" in schema;
