@@ -733,7 +733,10 @@ class TestAFailingBuild:
     def test_ctrl_c_while_npm_runs_ends_the_start_in_one_line_and_stops_npm(self, frontend: Path, npm: FakeNpm) -> None:
         """Measured before: a 45-line traceback ending ``KeyboardInterrupt`` and exit code -2."""
         npm.interrupt("build")
+        # Ctrl+C goes back to Python's own handler first, as in a terminal: a Jenkins step starts with SIGINT
+        # ignored, and a child that inherits that installs no KeyboardInterrupt (it then ran into the 120 s timeout).
         start = (
+            "import signal; signal.signal(signal.SIGINT, signal.default_int_handler); "
             "import sys; from pathlib import Path; from streamstudio import page; "
             "page.ensure_page_built(Path(sys.argv[1]))"
         )
