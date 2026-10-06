@@ -50,9 +50,13 @@ EDIT = {"node": "mask", "param": "low_level", "value": 0.9}
 #: ``python -m streamstudio.cli`` — with the start's check of the editor's page replaced first: a start checks
 #: whether the checkout's ``frontend/`` changed since its last build and runs npm when it did, and no test builds the
 #: checkout's own page (``tests/conftest.py::page_checks`` does the same for the tests that start in-process).
+#: Ctrl+C first goes back to Python's own handler, as in a terminal: a Jenkins step starts with SIGINT ignored, a child
+#: inherits that, and Python then installs no KeyboardInterrupt — measured 2026-10-05, the SIGINT case timed out after
+#: 60 s under ``trap '' INT`` and passed in 1.4 s without it.
 EDITOR_CLI = [
     sys.executable,
     "-c",
+    "import signal; signal.signal(signal.SIGINT, signal.default_int_handler); "
     "import runpy, streamstudio.app as app; app.ensure_page_built = lambda frontend=None: None; "
     "runpy.run_module('streamstudio.cli', run_name='__main__', alter_sys=True)",
 ]

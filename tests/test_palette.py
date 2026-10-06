@@ -10,7 +10,11 @@ can be wired INTO (a ``Stream``, an ``Iterable`` source, ``Any``). A class whose
 still listed, with the reason in ``problem`` — the palette never drops a class and never crashes on one.
 """
 
+import json
+import subprocess
+import sys
 import time
+from pathlib import Path
 from typing import Annotated, Any, Callable, Dict, Iterable, List, Literal, Mapping, Optional
 
 import pytest
@@ -273,17 +277,33 @@ class TestSocketRules:
         assert types_meet(source, target) is meets
 
 
+#: The cheap set, listed in a FRESH interpreter that imports what this module imports and nothing else. Inside a test
+#: run the registry holds every class the other test modules imported: measured 2026-10-06, 912 specs and 3.6 s of
+#: CPU, 7.4 s under coverage (a Jenkins failure) — against 62 specs and 0.05 s alone. Its own CPU time, so another
+#: process's load does not count either.
+_CHEAP_SET_PROBE = """
+import json, time
+import recordstream.core.stream, recordstream.ops.contract, recordstream.ops.numpy
+from streamstudio.palette import palette
+started = time.process_time()
+specs = palette(refresh=True, scan=False)
+print(json.dumps({"seconds": time.process_time() - started, "names": sorted({s.name for s in specs}),
+                  "count": len(specs), "sorted": specs == sorted(specs, key=lambda s: s.class_path)}))
+"""
+
+
 class TestPaletteAndLookup:
-    def test_the_registry_as_imported_is_the_cheap_set(self) -> None:
-        started = time.perf_counter()
-        specs = palette(refresh=True, scan=False)
-        elapsed = time.perf_counter() - started
-        names = {s.name for s in specs}
-        assert {"Scale", "Threshold", "ConnectedComponents", "Stream", "GraphContract"} <= names
-        assert len(specs) >= 50
-        assert specs == sorted(specs, key=lambda s: s.class_path)
-        print(f"\ncheap set: {len(specs)} specs in {elapsed * 1000:.0f} ms")
-        assert elapsed < 5.0
+    def test_the_registry_as_imported_is_the_cheap_set(self, tmp_path: Path) -> None:
+        done = subprocess.run(
+            [sys.executable, "-c", _CHEAP_SET_PROBE], capture_output=True, text=True, timeout=120, cwd=tmp_path
+        )
+        assert done.returncode == 0, done.stderr
+        listed = json.loads(done.stdout.strip().splitlines()[-1])
+        assert {"Scale", "Threshold", "ConnectedComponents", "Stream", "GraphContract"} <= set(listed["names"])
+        assert listed["count"] >= 50
+        assert listed["sorted"]
+        print(f"\ncheap set: {listed['count']} specs in {listed['seconds'] * 1000:.0f} ms")
+        assert listed["seconds"] < 5.0
 
     def test_the_cached_list_is_returned_by_identity(self) -> None:
         first = palette(scan=False)
