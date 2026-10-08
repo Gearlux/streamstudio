@@ -136,9 +136,9 @@ def test_what_an_imported_package_prints_never_reaches_the_answer() -> None:
 
 
 def test_the_helper_lists_every_installed_class_as_its_full_spec_less_the_settings() -> None:
-    pytest.importorskip("waivefront")
     entries, specs = run_helper()
-    assert len(entries) == len(specs) >= 400
+    assert len(entries) == len(specs)
+    assert THRESHOLD in [spec["class_path"] for spec in specs]
     assert entries == [
         {key: value for key, value in spec.items() if key not in ("params_schema", "params_defs")} for spec in specs
     ]

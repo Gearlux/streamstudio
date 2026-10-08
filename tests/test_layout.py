@@ -19,7 +19,7 @@ carries the rows.
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, List, Tuple, cast
+from typing import Dict, List, Tuple, cast
 
 import pytest
 
@@ -41,9 +41,6 @@ from streamstudio.layout import (
     stale_positions,
     write_sidecar,
 )
-
-if TYPE_CHECKING:  # the annotation only: these tests drive the layout with stand-ins, never the document code
-    from streamstudio.document import Model
 
 
 @dataclass
@@ -573,21 +570,23 @@ def test_a_column_of_only_unwired_nodes_keeps_the_models_order() -> None:
     assert [pos[n] for n in "zyx"] == [(column(0), row(0)), (column(0), row(1)), (column(0), row(2))]
 
 
-def _bte_view_model() -> "Model":
-    """The shipped Bluetooth pane's model — skipped where its package is not installed."""
-    annotation = pytest.importorskip("waivefront.analysis.annotation")
-    from streamstudio.document import Document
+def _pane_shaped_graph() -> Graph:
+    """A 29-step chain shaped like a domain's pane (measured 2026-10-01 on a real one): the ``contract`` root first in
+    the model (unwired, five parameters), a tall first step — one input, ten parameters, three outputs, 373 px —, 28
+    more steps in a line, and the unwired host card holding the root's two inputs last."""
+    steps = [card("known", 1, 10, 3)] + [card(f"step{i}", 1, 2, 1) for i in range(1, 29)]
+    root = card("contract", 0, 5, 0, kind="contract")
+    host = card("<host>", 0, 0, 2, note="what the host hands the graph", kind="host")
+    return Graph([root, *steps, host], [Wire(a.name, b.name) for a, b in zip(steps, steps[1:])])
 
-    return Document.open(Path(annotation.__file__).parent / "bte_view.yaml").model
 
-
-def test_bte_view_derives_into_twenty_nine_layers_one_column_apart() -> None:
-    """The shipped Bluetooth pane is a 29-step chain (24 before 2026-09-30) plus its contract root and, since
-    2026-10-05, the host card holding the root's two inputs (no step names either by entry, so neither card carries a
-    wire): the steps stay one row, 340 px apart, the root sits under the first step — below its BOTTOM — and the host
-    card under the root. Measured 2026-10-01: the root was at (40, 240) = ``row(1)``, inside ``known`` (373 px, 40..413)
-    but for its last 8 px; now (40, 430), and the host card (40, 630)."""
-    pos = layered_layout(_bte_view_model())
+def test_a_pane_shaped_chain_derives_into_twenty_nine_layers_one_column_apart() -> None:
+    """A 29-step chain plus its contract root and the host card holding the root's inputs (no step names either by
+    entry, so neither card carries a wire): the steps stay one row, 340 px apart, the root sits under the first step —
+    below its BOTTOM — and the host card under the root. Measured 2026-10-01 on a real pane before the rule: the root
+    at (40, 240) = ``row(1)``, inside the first step (373 px, 40..413) but for its last 8 px; now (40, 430), and the
+    host card (40, 630)."""
+    pos = layered_layout(_pane_shaped_graph())
     assert len(pos) == 31
     steps = {name: xy for name, xy in pos.items() if name not in ("contract", "<host>")}
     xs = sorted(x for x, _ in steps.values())
@@ -598,12 +597,13 @@ def test_bte_view_derives_into_twenty_nine_layers_one_column_apart() -> None:
     assert pos["<host>"] == (column(0), 630.0)
 
 
-def test_bte_views_first_layout_overlaps_no_two_cards_of_a_column() -> None:
-    """By the ESTIMATED boxes (``card_height``, an upper bound of the drawn card): within every column each card
-    ends at least ``CARD_GAP`` above the next one's top; ``known`` is estimated at its measured 373 px."""
-    model = _bte_view_model()
-    pos = layered_layout(model)
-    height = {node.name: card_height(node) for node in model.nodes}
+def test_a_pane_shaped_chains_first_layout_overlaps_no_two_cards_of_a_column() -> None:
+    """By the ESTIMATED boxes (``card_height``, an upper bound of the drawn card): within every column each card ends
+    at least ``CARD_GAP`` above the next one's top; the tall first step is estimated at the real one's measured
+    373 px."""
+    graph = _pane_shaped_graph()
+    pos = layered_layout(graph)
+    height = {node.name: card_height(node) for node in graph.nodes}
     assert height["known"] == 373
     columns: Dict[float, List[str]] = {}
     for name, (x, _) in pos.items():

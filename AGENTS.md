@@ -33,8 +33,8 @@ Invariants:
 - **Never re-dump a document.** `Document` derives its model from `confluid.load(path, until="document",
   texts=…)`; every edit is a TEXT patch at the marker's location through `_yamltext.YamlText`. An edit that stops the
   document loading, or adds a problem to `check()`, is refused with the located message and changes nothing.
-  (`tests/test_document.py::TestSetParam::test_the_bluetooth_pane_keeps_its_259_comment_lines`) arch: "The graph
-  document is the truth".
+  (`tests/test_document.py::TestSetParam::test_a_setting_goes_to_the_settings_file_and_a_parameter_patches_one_line`)
+  arch: "The graph document is the truth".
 - `check()` also BUILDS the document once deriving found nothing; a document that derives but does not build is ONE
   located problem. (`tests/test_document.py::TestProblems::test_a_document_that_derives_but_does_not_build_is_one_located_problem`)
 - A load problem is located where the error IS (`document._load_problem`), never by a pattern alone: a path may hold
@@ -146,8 +146,10 @@ Invariants:
   arch: "A plugin supplies the list beside a field".
 - `POST …/slot` replaces one slot's value as one edit; a list slot or a typed parameter is refused.
   (`tests/test_app_slot.py`)
-- The canvas modules import neither navigaitor, nor annotaide, nor ComfyUI. Tests that read a waivefront document
-  `pytest.importorskip("waivefront")`; the rest use synthetic documents.
+- The canvas modules import neither navigaitor, nor annotaide, nor ComfyUI. The canvas editor's tests use synthetic
+  documents only — a graph SHAPED like a domain's (`test_canvas.py`'s `PANE_SHAPED_TEXT`), never the domain's file; a
+  domain's shipped graphs are pinned in that domain's own suite. Only the ComfyUI editor's tests still read one, until
+  phase 4 step 3 deletes them (user ruling 2026-10-08).
 
 ## A graph's settings file (`settings.py`, user design 2026-10-05)
 
@@ -362,8 +364,9 @@ arch: "A host mounts the editor through three methods"; pins `tests/test_host.py
   guarded import stays undeclared. (`tests/test_packaging.py::test_module_scope_imports_are_declared_dependencies`)
 - No requirement, extras included, carries a URL — PyPI refuses it.
   (`tests/test_packaging.py::test_no_requirement_is_a_direct_url`)
-- The `[waivefront]` extra stays declared, but the README never prints an install command for it (it resolves
-  nowhere). (`tests/test_packaging.py::test_the_readme_does_not_advertise_an_unresolvable_extra`)
+- **No package that depends on streamstudio is one of its dependencies** — not even in an extra, not through another
+  package (user ruling 2026-10-08: a domain depends on the editor, never the reverse). The walk reads INSTALLED
+  metadata: reinstall a stale editable before trusting a pass. (`tests/test_dependencies.py`)
 - Every file under `web/`, every file of the built page `canvas/` (never a `.map`), `config.default.yaml` and
   `py.typed` are in `package-data`; `MANIFEST.in` ships the CHANGELOG.
   (`tests/test_packaging.py::test_every_web_asset_is_shipped`,
