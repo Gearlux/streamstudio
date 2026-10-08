@@ -95,14 +95,6 @@ dev = [
     "pytest-cov>=4.0.0,<7.0.0",
 ]
 
-# The signal-domain node set — a PLUGIN, never a requirement: every use of it in this
-# package is a guarded import with a working fallback (a viridis-only colormap list, a
-# placeholder IMAGE), and its nodes reach the palette through entry-point discovery, so
-# installing it by ANY means is what switches them on. The extra names it and nothing
-# more: PyPI rejects a requirement carrying a URL (warehouse refuses "direct dependency"),
-# so a git-pinned transitive cannot be restated here. See the README for how to obtain it.
-waivefront = ["waivefront"]
-
 [project.urls]
 Homepage = "https://github.com/Gearlux/streamstudio"
 Repository = "https://github.com/Gearlux/streamstudio.git"
@@ -194,10 +186,10 @@ ignore_missing_imports = true
 module = ["comfy.*", "comfy_execution.*"]
 ignore_missing_imports = true
 
-# The optional `[waivefront]` extra and the sonair package: PLUGINS this package works without (every
-# use is a guarded import, a TYPE_CHECKING import, or a test that `pytest.importorskip`s it). waivefront
-# is not on PyPI, so CI cannot install it; sonair is, but the one test that imports its engine modules
-# also needs the heavy keras / torch engine extras, which CI does not install.
+# The signal-domain package and the sonair package: PLUGINS this package works without, never declared (a
+# domain depends on this package, never the reverse; every use is a guarded import, a TYPE_CHECKING import, or a
+# test that `pytest.importorskip`s it). CI installs neither: sonair's one test also needs the heavy keras / torch
+# engine extras.
 [[tool.mypy.overrides]]
 module = ["waivefront.*", "sonair.*"]
 ignore_missing_imports = true

@@ -1435,44 +1435,43 @@ class TestFirstLayout:
     """The server's first layout (no sidecar yet) stacks a column's cards by their heights, so a fresh open draws
     no card over another — the page's MEASURED boxes, not the server's estimate."""
 
-    def test_the_bluetooth_pane_opened_fresh_draws_no_card_over_another(
+    def test_a_pane_shaped_chain_opened_fresh_draws_no_card_over_another(
         self, open_graph: Callable[[str], Opened], graph_dir: Path
     ) -> None:
-        """Measured 2026-10-01 before the rule: ``contract`` at (40, 240) under ``known`` (373 px tall, 40..413) —
-        the one overlapping pair; after: ``contract`` at (40, 430), 17 px below ``known``'s bottom. Since 2026-10-05 the
-        root's two inputs are the host card's, the 31st card, under the root at (40, 630)."""
-        annotation = pytest.importorskip("waivefront.analysis.annotation")
-        shipped = Path(annotation.__file__).parent / "bte_view.yaml"
-        (graph_dir / "bte_view.yaml").write_text(shipped.read_text())
-        assert not layout.sidecar_path(graph_dir / "bte_view.yaml").exists()
-        opened = open_graph("bte_view")
+        """A 29-step chain with a tall first card, a contract root and its host card — a domain pane's shape. Measured
+        2026-10-01 on a real pane before the rule: ``contract`` at (40, 240) under the 373 px head (40..413) — the one
+        overlapping pair; after: ``contract`` at (40, 430), 17 px below the head's bottom, and the host card under the
+        root at (40, 630)."""
+        path = graph_dir / "pane_shaped.yaml"
+        path.write_text(PANE_SHAPED_TEXT)
+        assert not layout.sidecar_path(path).exists()
+        assert layout.card_height(Document.open(path).model.node("head")) == 373
+        opened = open_graph("pane_shaped")
         page = opened.page
         names = page.locator(NODE).evaluate_all("ns => ns.map(n => n.dataset.node)")
         assert len(names) == 31 and "<host>" in names
         boxes = node_boxes(page, *names)
         overlapping = [(a, b) for i, a in enumerate(names) for b in names[i + 1 :] if overlap(boxes[a], boxes[b])]
         assert overlapping == []
-        known, contract = node_translate(page, "known"), node_translate(page, "contract")
-        assert known == (40.0, 40.0)
-        assert contract == (40.0, 430.0)
+        assert node_translate(page, "head") == (40.0, 40.0)
+        assert node_translate(page, "contract") == (40.0, 430.0)
         assert node_translate(page, "<host>") == (40.0, 630.0)
         assert opened.errors == []
 
-    def test_the_detection_model_opened_fresh_draws_no_card_over_another(
+    def test_a_model_graph_with_configured_members_opened_fresh_draws_no_card_over_another(
         self, open_graph: Callable[[str], Opened], graph_dir: Path
     ) -> None:
-        """Measured 2026-10-01 on the shipped ``threshold_detector_model.yaml``, rooted that day: 11 cards —
-        the seven steps, the ``threshold`` step's three ``ConfigureOp`` members and the ``contract`` root,
-        which wires to nothing — none drawn over another; since 2026-10-05 a 12th, the host card holding the root's
-        three inputs."""
-        waivefront = pytest.importorskip("waivefront")
-        shipped = Path(waivefront.__file__).parent / "annotation" / "threshold_detector_model.yaml"
-        (graph_dir / "threshold_detector_model.yaml").write_text(shipped.read_text())
-        assert not layout.sidecar_path(graph_dir / "threshold_detector_model.yaml").exists()
-        opened = open_graph("threshold_detector_model")
+        """A model graph shaped like a domain's detection model (measured 2026-10-01 on a real one): its steps, the
+        ``ConfigureOp`` step's member cards — its two ops and the target it configures —, the ``contract`` root, which
+        wires to nothing, and the host card holding the root's input: none drawn over another."""
+        path = graph_dir / "model_shaped.yaml"
+        path.write_text(MODEL_SHAPED_TEXT)
+        assert Document.open(path).check() == []
+        assert not layout.sidecar_path(path).exists()
+        opened = open_graph("model_shaped")
         page = opened.page
         names = page.locator(NODE).evaluate_all("ns => ns.map(n => n.dataset.node)")
-        assert len(names) == 12 and "contract" in names and "<host>" in names
+        assert {"threshold.ops[0]", "threshold.ops[1]", "threshold.target", "contract", "<host>"} <= set(names)
         boxes = node_boxes(page, *names)
         overlapping = [(a, b) for i, a in enumerate(names) for b in names[i + 1 :] if overlap(boxes[a], boxes[b])]
         assert overlapping == []
@@ -3877,6 +3876,93 @@ class TinyFileName:
 #: A pane graph as a host serves it: a flow with no source — the host supplies the record, the window and the band —
 #: and an ``app:`` block naming the three settings a person tunes from the host (a ``__lo``/``__hi`` pair is ONE
 #: field; ``TinyGain`` is the class of two steps, so its entry is a field on each).
+@configurable(category="op", group="canvas-test")
+class TallHead:
+    """A first step with ten parameters: as tall a card as a domain pane's head (one input, ten parameters, three
+    outputs — 373 px, measured 2026-10-01 on a real one).
+
+    Args:
+        p0: A parameter.
+        p1: A parameter.
+        p2: A parameter.
+        p3: A parameter.
+        p4: A parameter.
+        p5: A parameter.
+        p6: A parameter.
+        p7: A parameter.
+        p8: A parameter.
+        p9: A parameter.
+    """
+
+    produces = {"image": "Image"}
+
+    def __init__(
+        self,
+        p0: float = 0.0,
+        p1: float = 0.0,
+        p2: float = 0.0,
+        p3: float = 0.0,
+        p4: float = 0.0,
+        p5: float = 0.0,
+        p6: float = 0.0,
+        p7: float = 0.0,
+        p8: float = 0.0,
+        p9: float = 0.0,
+    ) -> None:
+        self.p0, self.p1, self.p2, self.p3, self.p4 = p0, p1, p2, p3, p4
+        self.p5, self.p6, self.p7, self.p8, self.p9 = p5, p6, p7, p8, p9
+
+    def __call__(self, record: Record) -> Record:
+        return {**record, "image": Image(np.zeros((2, 2), dtype=np.float32))}
+
+
+@configurable(category="op", group="canvas-test")
+class PaneDecide:
+    """Raise ``wide`` or ``narrow`` — a stand-in for a classifier whose outcomes gate the steps after it.
+
+    Args:
+        level: The width that splits the two.
+    """
+
+    consumes = {"image": "Image"}
+    produces = {"image": "Image"}
+    flags = ("wide", "narrow")
+
+    def __init__(self, level: float = 0.5) -> None:
+        self.level = float(level)
+
+    @property
+    def wide(self) -> bool:
+        return True
+
+    @property
+    def narrow(self) -> bool:
+        return False
+
+    def __call__(self, record: Record) -> Record:
+        return record
+
+
+@configurable(category="op", group="canvas-test")
+class PaneGated:
+    """Keep the record — a step that runs only on the flag a decision before it raised.
+
+    Args:
+        level: A threshold.
+        requires: The flag this step runs on (the gate a branch sets).
+    """
+
+    consumes = {"image": "Image"}
+    produces = {"image": "Image"}
+
+    def __init__(self, level: float = 0.5, requires: str = "") -> None:
+        self.level = float(level)
+        self.requires = requires
+
+    def __call__(self, record: Record) -> Record:
+        return record
+
+
 HOST_PANE_TEXT = f"""\
 # a pane: the host supplies the record, the window and the band
 flow:
@@ -3901,6 +3987,88 @@ app:
 """
 
 HOST_PANE_STEPS = ["window", "band", "gain", "boost"]
+
+
+def _pane_shaped_text() -> str:
+    """A 29-step chain shaped like a domain's pane: the tall ``head``, 28 ``TinyGain`` steps in a line, and a contract
+    root whose two inputs no step reads by name (so neither the root nor its host card carries a wire)."""
+    steps = [f"  head:\n    op: !class:{MOD}.TallHead {{}}\n"]
+    previous = "head"
+    for index in range(1, 29):
+        steps.append(f"  step{index}:\n    op: !class:{MOD}.TinyGain {{}}\n    from: {previous}\n")
+        previous = f"step{index}"
+    return (
+        "flow:\n"
+        + "".join(steps)
+        + f"outputs: {previous}\n"
+        + "contract: !class:recordstream.ops.contract.GraphContract\n"
+        + "  name: pane-shaped view\n  inputs: {capture: Image, boxes: Boxes}\n  outputs: {}\n"
+    )
+
+
+PANE_SHAPED_TEXT = _pane_shaped_text()
+
+#: A model graph shaped like a domain's detection model: a ``ConfigureOp`` step whose two ops and target are cards of
+#: their own, and a contract root.
+MODEL_SHAPED_TEXT = f"""\
+flow:
+  decode:
+    op: !class:{MOD}.TinyDecode {{}}
+  gain:
+    op: !class:{MOD}.TinyGain {{gain: 2.0}}
+    from: decode
+  threshold:
+    op: !class:recordstream.ops.configure.ConfigureOp
+      ops:
+        - !class:recordstream.ops.formula.FormulaOp {{field: image, formula: "amax(a)"}}
+        - !class:recordstream.ops.formula.FormulaOp {{field: image, formula: "a * 0.5"}}
+      source: image
+      param: low_level
+      target: !class:recordstream.ops.numpy.Threshold
+        field: image
+    from: gain
+  components:
+    op: !class:recordstream.ops.numpy.ConnectedComponents
+      min_area_bins: 4
+      output: bin_boxes
+    from: threshold
+  narrowed:
+    op: !class:recordstream.ops.structure.SelectFields
+      keys: [image, bin_boxes]
+    from: components
+outputs: narrowed
+contract: !class:recordstream.ops.contract.GraphContract
+  name: model-shaped graph
+  inputs: {{image: Image}}
+  outputs: {{}}
+"""
+
+#: A pane whose ``app:`` block names a ``(min, max)`` range as a ``__lo``/``__hi`` pair and one plain parameter, and
+#: whose last step runs on a decision's flag (``requires``).
+GATED_PANE_TEXT = f"""\
+# a pane: settings and a gate
+flow:
+  window:
+    op: !class:{MOD}.PaneWindow {{}}
+  band:
+    op: !class:{MOD}.PaneBand {{}}
+    from: window
+  decide:
+    op: !class:{MOD}.PaneDecide {{}}
+    from: band
+  wide:
+    op: !class:{MOD}.PaneGated
+      level: 0.25
+      requires: wide
+    from: decide
+outputs: wide
+
+app:
+  inputs:
+    - [PaneBand, deviation_hz__lo]
+    - [PaneBand, deviation_hz__hi]
+    - [PaneGated, level]
+"""
 
 #: A chain whose records come from a source still to be chosen (Set source…).
 HOST_SOURCE_TEXT = f"""\
@@ -4147,26 +4315,26 @@ class TestMountedInAHost:
         assert page.locator("[data-settings-none]").count() == 0
         assert opened.errors == []
 
-    def test_the_shipped_bluetooth_pane_shows_its_app_fields_and_never_a_gate(
-        self, browser: Any, hosted: Hosted
-    ) -> None:
-        """The real pane: its ``app:`` block's 32 entries are 30 fields (two ``__lo``/``__hi`` pairs), where the whole
-        graph has every parameter of 30 nodes; a step's ``requires`` gate is a field in neither list."""
-        annotation = pytest.importorskip("waivefront.analysis.annotation")
-        shipped = Path(annotation.__file__).parent / "bte_view.yaml"
-        (hosted.folder / "bte_view.yaml").write_text(shipped.read_text())
-        opened = open_hosted(browser, hosted, "graph=bte_view&tab=settings&embed=1")
+    def test_a_panes_app_fields_are_its_settings_and_a_gate_is_never_one(self, browser: Any, hosted: Hosted) -> None:
+        """A pane whose ``app:`` block lists three entries — a ``__lo``/``__hi`` pair and one plain parameter — shows
+        two fields, where the whole graph shows every parameter of its nodes; a step's ``requires`` gate is a field in
+        neither list, though the gate is in the graph (its wire). Measured first on a domain's pane: 32 entries, 30
+        fields."""
+        (hosted.folder / "gated.yaml").write_text(GATED_PANE_TEXT)
+        model = hosted_api(hosted, "api/graphs/gated")["model"]
+        assert [wire["kind"] for wire in model["wires"]].count("gate") == 1
+        opened = open_hosted(browser, hosted, "graph=gated&tab=settings&embed=1")
         page = opened.page
-        wait_ready(page, "bte_view")
+        wait_ready(page, "gated")
         settings = page.wait_for_selector('[data-settings][data-settings-mode="app"]')
-        app = hosted_api(hosted, "api/graphs/bte_view/app")
-        assert (len(app["fields"]), app["problems"]) == (30, [])
-        assert settings.get_attribute("data-settings-fields") == "30"
+        app = hosted_api(hosted, "api/graphs/gated/app")
+        assert (len(app["fields"]), app["problems"]) == (2, [])
+        assert settings.get_attribute("data-settings-fields") == "2"
         page.locator("[data-settings-all]").check()
         page.wait_for_selector('[data-settings][data-settings-mode="all"]')
-        form = hosted_api(hosted, "api/graphs/bte_view/form")
+        form = hosted_api(hosted, "api/graphs/gated/form")
         every = sum(len(params) for params in form.values())
-        assert every > 200
+        assert every > 2
         assert page.locator("[data-settings]").get_attribute("data-settings-fields") == str(every)
         assert page.locator('[data-settings] [data-param="requires"]').count() == 0
         assert opened.errors == []
@@ -4961,16 +5129,14 @@ class TestTheEmbeddedPanelsFields:
 
 
 class TestTheEmbeddedPanelOpensFitted:
-    @pytest.mark.parametrize("graph", ["pane", "bte_view"])
+    @pytest.mark.parametrize("graph", ["pane", "pane_shaped"])
     def test_a_graph_opened_in_a_small_panel_shows_every_card(self, browser: Any, hosted: Hosted, graph: str) -> None:
-        """Measured before: zoom 1 from the top-left — at 900x700, 1 of the shipped Bluetooth pane's 30 cards and 1 of
-        this pane's 5 (and, with the fit clamped at zoom 0.1, 17 of the 30). The standalone page keeps its zoom-1 first
-        view (``TestEnteringASubgraphIsReadable`` and the drag tests measure at zoom 1)."""
-        if graph == "bte_view":
-            annotation = pytest.importorskip("waivefront.analysis.annotation")
-            (hosted.folder / "bte_view.yaml").write_text(
-                (Path(annotation.__file__).parent / "bte_view.yaml").read_text()
-            )
+        """Measured before: zoom 1 from the top-left — at 900x700, 1 of a domain pane's 30 cards and 1 of this pane's 5
+        (and, with the fit clamped at zoom 0.1, 17 of the 30); ``pane_shaped`` is that pane's shape, 31 cards. The
+        standalone page keeps its zoom-1 first view (``TestEnteringASubgraphIsReadable`` and the drag tests measure at
+        zoom 1)."""
+        if graph == "pane_shaped":
+            (hosted.folder / "pane_shaped.yaml").write_text(PANE_SHAPED_TEXT)
         page = browser.new_page(viewport={"width": 900, "height": 700})
         errors: List[str] = []
         page.on("pageerror", lambda exc: errors.append(f"pageerror: {exc}"))

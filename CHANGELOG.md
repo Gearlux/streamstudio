@@ -23,7 +23,8 @@ All notable changes to this project are documented here. The format follows
 
 - **A host's `open` of the graph shown shows a setting the host saved.** The page re-presents the graph when its model
   changed, not only its text — a setting saved through the editor by the host leaves the text as it was.
-
+- **No domain extra.** streamstudio declares no domain package, not even as an extra: a domain's classes appear in
+  the palette when it is installed by any means, as every plugin's do.
 - **Set source… keeps the keyboard while a picked class's settings load.** The dialog's box holds the focus from the
   pick until the first field can take it, so Escape cancels in between (before, the focus was on the page there).
 - **A class that is not an op is a card of its own.** Add Node ▸, the double-click palette, a Nodes-sidebar entry and

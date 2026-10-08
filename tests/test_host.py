@@ -522,36 +522,6 @@ class TestTheHostsRecord:
             "a host supplies the record (mount the editor in one) or wire a source"
         )
 
-    def test_the_shipped_psd_slice_pane_runs_a_hosts_signal_window(self, tmp_path: Path) -> None:
-        """The shipped PSD slice pane (a Stream with no source, rooted by its host contract) through a host that
-        hands it an IQ capture, a 2 ms window and a 400 kHz band: ``WindowSignal`` gets the window, ``PsdSlice`` the
-        band, and the slice runs."""
-        pytest.importorskip("waivefront")
-        import waivefront.annotation as annotation
-        from waivefront.items import Regions, Signal
-
-        folder = tmp_path / "panes"
-        folder.mkdir()
-        shutil.copy(Path(annotation.__file__).with_name("psd_slice_view.yaml"), folder / "view_psd.yaml")
-
-        class SignalHost(FakeHost):
-            def record(self, graph: str, path: Path) -> HostRecord:
-                noise = (np.random.default_rng(0).standard_normal(8192) * (1 + 1j)).astype(np.complex64)
-                capture = Signal(data=noise, samplerate=1.0e6, center_freq=2.4e9)
-                return HostRecord(
-                    record={"input": capture, "regions": Regions()},
-                    fills=({"start_s": 0.001, "stop_s": 0.003}, {"f0_hz": 2.3998e9, "f1_hz": 2.4002e9}),
-                    label="capture · 1–3 ms",
-                )
-
-        client = host_app(SignalHost(folder)).test_client()
-        body = _ok(client.post(f"{PREFIX}/api/graphs/view_psd/trace", json={}))
-        assert body["host"]["filled"] == {
-            "stream.ops[0]": {"start_s": 0.001, "stop_s": 0.003},  # WindowSignal: the window
-            "stream.ops[1]": {"f0_hz": 2.3998e9, "f1_hz": 2.4002e9},  # PsdSlice: the band its threshold reads
-        }
-        assert body["statuses"] == {"stream.ops[0]": "ok", "stream.ops[1]": "ok"}
-
 
 # ------------------------------------------------------------------------------------------------
 # saved: the host is told which files a Save wrote
