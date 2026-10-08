@@ -150,14 +150,14 @@ def _colormap_choices() -> List[str]:
 
     Sourced from waivefront's ``COLORMAPS`` tuple (itself ``get_args(Colormap)``) so the dropdown,
     ``value_to_image``'s annotation, and navigaitor's form-spec all enumerate ONE source of truth.
-    Falls back to a single ``"viridis"`` option when the ``[waivefront]`` extra is absent (the IMAGE
+    Falls back to a single ``"viridis"`` option when waivefront is not installed (the IMAGE
     output is a placeholder then anyway), so the node still registers without waivefront installed.
     """
     try:
         from waivefront.visualizers import COLORMAPS
 
         return list(COLORMAPS)
-    except ImportError:  # waivefront extra not installed — see _to_image's placeholder path.
+    except ImportError:  # waivefront not installed — see _to_image's placeholder path.
         return ["viridis"]
 
 
@@ -414,8 +414,8 @@ class RecordExtractorNode:
         try:
             from waivefront.visualizers import value_to_image
         except ImportError:
-            # waivefront extra absent — degrade to a 1×1 placeholder so the text/number outputs
-            # still work; install streamstudio[waivefront] to render images.
+            # waivefront not installed — degrade to a 1×1 placeholder so the text/number outputs
+            # still work; installing it renders images.
             logger.debug("RecordExtractorNode: waivefront not installed; IMAGE output is a placeholder.")
             return torch.zeros((1, 1, 1, 3), dtype=torch.float32)
         rgb = value_to_image(value, colormap=colormap, max_size=max_size)

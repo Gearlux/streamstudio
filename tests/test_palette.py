@@ -19,6 +19,7 @@ from typing import Annotated, Any, Callable, Dict, Iterable, List, Literal, Mapp
 
 import pytest
 from annotated_types import Interval
+from confluid import configurable
 from recordstream.algorithm import Algorithm, Input, Output, Param
 from recordstream.core.stream import JointStream, Stream
 from recordstream.items import Image, Mask
@@ -32,6 +33,7 @@ from streamstudio.palette import (
     NodeSpec,
     describe,
     palette,
+    registered,
     slot_socket_type,
     socket_type,
     spec_for,
@@ -60,6 +62,17 @@ class Broken:
 
     def __init__(self, x: "NoSuchType" = None) -> None:  # type: ignore[name-defined]  # noqa: F821
         self.x = x
+
+
+@configurable(category="op", group="palette-test")
+class Decides:
+    """An op that raises one of two findings and writes a report — a classifier's shape."""
+
+    flags = ("wide", "narrow")
+    reports = "decide"  # one report name, as an op declares it
+
+    def __call__(self, record: Any) -> Any:
+        return record
 
 
 def make_widget(size: int = 3) -> object:
@@ -125,6 +138,13 @@ class TestKindsAndSockets:
         assert sockets(spec, "inputs") == {"record": "Record"}
         assert spec.consumes_types == [] and spec.produces_types == []
         assert spec.flags == [] and spec.reports == []
+
+    def test_an_op_with_flags_and_a_report_shows_one_record_outcome_per_flag_and_a_report_output(self) -> None:
+        spec = describe(Decides)
+        assert spec.flags == ["wide", "narrow"] and spec.reports == ["decide"]
+        outputs = sockets(spec, "outputs")
+        assert outputs["wide"] == "Record" and outputs["narrow"] == "Record"
+        assert outputs["report:decide"] == "object"
 
     def test_an_any_parameter_is_a_wildcard_input_socket_and_still_a_parameter(self) -> None:
         spec = describe(PutField)
@@ -330,31 +350,17 @@ class TestPaletteAndLookup:
 
 
 def test_the_full_scan_lists_every_installed_class() -> None:
-    pytest.importorskip("waivefront")
+    """The full scan (every ``confluid.configurables`` entry point imported) describes every class the registry then
+    holds, once, and caches the list; a class whose introspection fails is listed with its reason, never dropped."""
     started = time.perf_counter()
     specs = palette(refresh=True)
     elapsed = time.perf_counter() - started
     print(f"\nfull scan: {len(specs)} specs in {elapsed:.1f} s")
-    assert len(specs) >= 400
+    assert len(specs) == len(registered(scan=True))
     assert palette() is specs
-    by_name = {s.name: s for s in specs}
-    floor = by_name["NoiseFloorEstimate"]
-    assert floor.kind == "algorithm"
-    assert sockets(floor, "inputs") == {"record": "Record", "spectrogram": "Spectrogram"}
-    assert sockets(floor, "outputs") == {
-        "record": "Record",
-        "op": "Op",
-        "noise_floor_db": "number",
-        "noise_floor_method": "string",
-    }
-    assert floor.params_schema["percentile"]["minimum"] == 0.0
-    # the registry holds a class whose constructor annotations do not resolve; it is listed, not dropped
-    broken = [s for s in specs if s.problem]
-    assert broken, "expected at least one class the introspection refuses"
-    assert all(s.kind == "op" and s.inputs == [] for s in broken)
-    # an op with flags and a report shows one record outcome per flag and a report output
-    classify = by_name["ClassifyBluetooth"]
-    outs = sockets(classify, "outputs")
-    assert outs["ble"] == "Record" and outs["try_weak"] == "Record" and outs["report:classify"] == "object"
-    assert classify.flags == ["fsk", "ble", "bredr", "try_weak", "try_classic", "try_frame", "try_edr"]
-    assert classify.reports == ["classify"]
+    by_path = {s.class_path: s for s in specs}
+    threshold = by_path["recordstream.ops.numpy.Threshold"]
+    assert threshold.kind == "op"
+    assert sockets(threshold, "outputs") == {"record": "Record", "op": "Op"}
+    assert threshold.params_schema["low_op"]["enum"] == [">", ">="]
+    assert all(s.kind == "op" and s.inputs == [] for s in specs if s.problem)

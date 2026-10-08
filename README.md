@@ -2615,7 +2615,7 @@ Every record wire keeps the single `RECORDSTREAM_RECORD` socket string, so any o
 | `datasets` | HuggingFace `Dataset` ↔ `HF_DATASET` socket. |
 | `liquifai` | App / CLI framework. |
 | `loggair` | Logging. |
-| `waivefront` *(optional plugin — install it and its nodes appear)* | RF-domain ops + visualizers (spectrogram, IQ time/freq). |
+| any package declaring `confluid.configurables` *(a plugin, never a dependency — install it and its classes appear)* | A domain's ops and visualizers; the ComfyUI editor renders images through one when it is installed. |
 
 ## Development
 
