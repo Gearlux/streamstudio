@@ -14,11 +14,13 @@ classes defined in this module (spelled ``!class:<this module>.<Class>``).
 import sys
 import types
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from typing import Annotated, Any, Dict, List, Literal, Optional, Tuple
 
 import pytest
 import yaml
+from annotated_types import Interval
 from confluid import configurable
+from pydantic import Field
 from recordstream import Algorithm, Image, Input, Label, Mask, Output, Param, Record, register_item
 
 import streamstudio
@@ -54,6 +56,32 @@ class DocGain:
 
     def __call__(self, record: Record) -> Record:
         return {**record, "image": record["image"] * self.gain + self.offset}
+
+
+@configurable(category="op", group="doc-test")
+class DocRuled:
+    """A rule and a level only one of its values reads.
+
+    Args:
+        rule: How to decide.
+        level: The ``fixed`` rule's level.
+    """
+
+    consumes: Dict[str, str] = {}
+    produces: Dict[str, str] = {}
+
+    def __init__(
+        self,
+        rule: Literal["fixed", "median"] = "median",
+        level: Annotated[
+            float, Interval(ge=-250.0, le=50.0), Field(json_schema_extra={"applies_when": {"rule": ["fixed"]}})
+        ] = -150.0,
+    ) -> None:
+        self.rule = rule
+        self.level = level
+
+    def __call__(self, record: Record) -> Record:
+        return record
 
 
 @configurable(category="op", group="doc-test")
@@ -601,6 +629,14 @@ class TestDerive:
         assert floor.params["percentile"].type == "number"
         assert floor.params["percentile"].doc == "Percentile rank across the per-row medians."
         assert floor.params["percentile"].schema["type"] == "number"
+
+    def test_a_params_schema_keeps_which_values_of_another_param_read_it(self, tmp_path: Path) -> None:
+        """``applies_when`` (an ``Annotated`` ``Field`` mark) reaches the settings form, which grays the field by it."""
+        text = f"flow:\n  pick:\n    op: !class:{MOD}.DocRuled {{rule: fixed}}\n"
+        pick = _open(tmp_path, text).model.node("pick")
+        assert pick.params["level"].schema["applies_when"] == {"rule": ["fixed"]}
+        assert (pick.params["level"].schema["minimum"], pick.params["level"].schema["maximum"]) == (-250.0, 50.0)
+        assert "applies_when" not in pick.params["rule"].schema
 
     def test_a_named_form_op_gets_entry_sockets_outcomes_and_a_report_output(self, tmp_path: Path) -> None:
         decide = _open(tmp_path, FLOW_TEXT).model.node("decide")

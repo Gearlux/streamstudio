@@ -93,3 +93,34 @@ export function settingsSections(model: Model, form: Form, app: AppForm | null, 
 
 /** How many fields the sections hold. */
 export const fieldCount = (sections: SettingsSection[]): number => sections.reduce((total, section) => total + section.fields.length, 0);
+
+/** The schema key a parameter names the values of OTHER parameters it is read under: `{rule: ["fixed"]}`. */
+export const APPLIES_WHEN = "applies_when";
+
+const listed = (allowed: string[]): string =>
+  allowed.length < 2 ? allowed.join("") : `${allowed.slice(0, -1).join(", ")} or ${allowed[allowed.length - 1]}`;
+
+/**
+ * Why a field is grayed out, or `""` while it is live. A parameter only some values of another one read (a threshold
+ * detector's level, read by its `fixed` rule alone) says so in its schema — `applies_when: {rule: ["fixed"]}` — and is
+ * grayed while that parameter holds any other value: `rule is cfar — read only while rule is fixed`. The value is the
+ * host's when it sends one (`values`, a pane's knob: what the host RUNS), else the node's; compared as text, as a host's
+ * field holds it. A declaration that is no map of lists, or names a parameter neither holds, grays nothing — a field
+ * is never taken away on a guess. Grayed is never hidden and never refused: the field keeps its value.
+ */
+export function offReason(
+  schema: Record<string, Json> | undefined,
+  nodeValues: Record<string, Json | undefined>,
+  hostValues: Record<string, Json | undefined> = {},
+): string {
+  const declared = schema?.[APPLIES_WHEN];
+  if (typeof declared !== "object" || declared === null || Array.isArray(declared)) return "";
+  for (const [name, allowed] of Object.entries(declared)) {
+    if (!Array.isArray(allowed)) continue;
+    const value = hostValues[name] !== undefined ? hostValues[name] : nodeValues[name];
+    if (value === undefined || value === null) continue;
+    const texts = allowed.map((entry) => String(entry));
+    if (!texts.includes(String(value))) return `${name} is ${String(value)} — read only while ${name} is ${listed(texts)}`;
+  }
+  return "";
+}

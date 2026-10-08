@@ -202,3 +202,25 @@ describe("parseHostCommand — the one command a host sends the page", () => {
     expect(parseHostCommand(null)).toBeUndefined();
   });
 });
+
+describe("values — what the host runs a graph with over its settings (a pane's knobs)", () => {
+  it("names the graph and its values, by setting name", () => {
+    expect(parseHostCommand({ target: "streamstudio", type: "values", graph: " view_detect ", values: { rule: "cfar", margin_db: 12 } })).toEqual({
+      type: "values",
+      graph: "view_detect",
+      values: { rule: "cfar", margin_db: 12 },
+    });
+    expect(parseHostCommand({ target: "streamstudio", type: "values", graph: "view_detect", values: {} })).toEqual({
+      type: "values",
+      graph: "view_detect",
+      values: {},
+    });
+  });
+
+  it("CON: from anyone but a host, without a graph, or with values that are no map — no command", () => {
+    expect(parseHostCommand({ source: "streamstudio", type: "values", graph: "g", values: {} })).toBeUndefined();
+    expect(parseHostCommand({ target: "streamstudio", type: "values", graph: "", values: {} })).toBeUndefined();
+    expect(parseHostCommand({ target: "streamstudio", type: "values", graph: "g" })).toBeUndefined();
+    expect(parseHostCommand({ target: "streamstudio", type: "values", graph: "g", values: ["cfar"] })).toBeUndefined();
+  });
+});

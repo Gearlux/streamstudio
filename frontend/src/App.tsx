@@ -277,6 +277,8 @@ function Editor() {
   const [settingsOnly] = useState(() => onlyFromSearch(window.location.search) === "settings");
   /** The side panel's tab — the one a link asks for (`?tab=settings`), then the person's. */
   const [tab, setTab] = useState<SideTab>(() => tabFromSearch(window.location.search));
+  /** What the host runs each graph with over its settings (`values`, `host.ts`) — the settings form grays by it. */
+  const [hostValues, setHostValues] = useState<Record<string, Record<string, Json>>>({});
   /** The tab the side panel shows: the settings, always, on a settings-only page. */
   const sideTab: SideTab = settingsOnly ? "settings" : tab;
   /**
@@ -799,7 +801,11 @@ function Editor() {
         // is what the file says now — shown when it differs (measured before: the panel kept the first text read).
         try {
           const fresh = await getGraph(command.graph);
-          if (graphRef.current?.name === command.graph && fresh.text !== graphRef.current.text) {
+          // the text, or the MODEL: a host saving a setting itself (a pane's knob) leaves the graph's text as it was
+          const changed =
+            graphRef.current !== null &&
+            (fresh.text !== graphRef.current.text || JSON.stringify(fresh.model) !== JSON.stringify(graphRef.current.model));
+          if (graphRef.current?.name === command.graph && changed) {
             linkedLevel.current = command.level ?? levelRef.current;
             present(fresh, await getForm(command.graph));
             return;
@@ -847,6 +853,7 @@ function Editor() {
       if (event.source !== window.parent || event.origin !== window.location.origin) return; // its own host only
       const command = parseHostCommand(event.data);
       if (command?.type === "commit") void commitAskedRef.current();
+      else if (command?.type === "values") setHostValues((all) => ({ ...all, [command.graph]: command.values }));
       else if (command !== undefined) void openAskedRef.current(command);
     };
     window.addEventListener("message", onMessage);
@@ -2355,6 +2362,7 @@ function Editor() {
                 all={allParams[graph.name] === true}
                 onAll={(all) => setAllParams((ticked) => ({ ...ticked, [graph.name]: all }))}
                 fixed={settingsOnly}
+                hostValues={hostValues[graph.name]}
               />
             )}
             {sideTab === "run" && graph !== null && (

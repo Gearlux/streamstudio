@@ -1197,8 +1197,20 @@ listens to its own parent window only:
   studio.contentWindow.postMessage({target: "streamstudio", type: "open", graph: "view_fft", tab: "run"}, location.origin);
   // …or, about to READ what the page writes (a run button beside a settings panel): write the field being typed in
   studio.contentWindow.postMessage({target: "streamstudio", type: "commit"}, location.origin);
+  // …or say what the host RUNS the graph with over its settings (values it applies by name and never writes)
+  studio.contentWindow.postMessage({target: "streamstudio", type: "values", graph: "view_scan",
+                                    values: {rule: "fixed"}}, location.origin);
 </script>
 ```
+
+A host that saves a SETTING itself does it through the editor — `studio_of(app).document(name).set_param(node, param,
+value)`, then `studio_of(app).save(name, only="settings")`, the editor staying the settings file's one writer — and
+posts `open` for the graph shown: the page shows the new value (an `open` of the graph shown re-presents it when its
+text or its model changed).
+
+`values` changes nothing written: the settings form grays a field by the host's value of the parameter it depends on
+(below, [A field another parameter does not ask for is grayed](#a-field-another-parameter-does-not-ask-for-is-grayed))
+instead of the graph's — the values a host sent last stand until it sends others for that graph.
 
 A field is written when it is LEFT, so a host button pressed while a field still holds its typed value would read the
 file before that write lands. `commit` leaves the field (writing it — and, on a `?only=settings` page, saving it) and
@@ -1268,6 +1280,30 @@ plumbing, the values a host fills in at Run and its root contract as though they
 ☐ all parameters   the graph has no app: block
 This graph names no settings — it has no app: block. Its parameters are on the canvas; tick all parameters to list every one here.
 ```
+
+#### A field another parameter does not ask for is grayed
+
+A parameter only some values of ANOTHER parameter read says so in its schema — `applies_when: {<parameter>: [values]}`,
+a pydantic `Field` mark on the constructor parameter, which `confluid.to_pydantic` carries into `GET …/form` and
+`GET …/app` — and the settings form GRAYS it while that parameter holds any other value: disabled, its value kept, its
+title saying why. Nothing is hidden and nothing is refused.
+
+```python
+class Detector:
+    def __init__(
+        self,
+        rule: Literal["fixed", "median"] = "median",
+        level: Annotated[float, Field(json_schema_extra={"applies_when": {"rule": ["fixed"]}})] = -150.0,
+    ) -> None: ...
+```
+
+```
+rule    median
+level   -150        (grayed — title: "rule is median — read only while rule is fixed")
+```
+
+The value compared is the host's when it sent one (`values`, above), else the node's; compared as text. A declaration
+that is no map of lists, or names a parameter the node does not hold, grays nothing. Several entries must all hold.
 
 ### A graph's settings file — `<graph>.settings.yaml`
 

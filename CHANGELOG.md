@@ -13,8 +13,16 @@ All notable changes to this project are documented here. The format follows
   the node's current values (`fn(values) -> (names, reason)`), never failing a request (20 s at most).
 - **`commit`, a host's command:** the page writes the field being typed in (on a settings-only page, saves it) and
   answers `{type: "committed", graph}` once every write is done — what a host reads before it runs what the page wrote.
+- **A field another parameter does not ask for is grayed.** A parameter whose schema carries
+  `applies_when: {<parameter>: [values]}` (an `Annotated` pydantic `Field` mark) is grayed in the settings form while
+  that parameter holds another value — kept, never hidden, its title saying which value it waits for.
+- **`values`, a host's command:** `{type: "values", graph, values}` — what the host runs the graph with over its
+  settings; the settings form grays by the host's value before the node's. It writes nothing.
 
 ### Changed
+
+- **A host's `open` of the graph shown shows a setting the host saved.** The page re-presents the graph when its model
+  changed, not only its text — a setting saved through the editor by the host leaves the text as it was.
 
 - **Set source… keeps the keyboard while a picked class's settings load.** The dialog's box holds the focus from the
   pick until the first field can take it, so Escape cancels in between (before, the focus was on the page there).
