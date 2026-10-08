@@ -135,6 +135,15 @@ Invariants:
 - **Pickers are derived in `palette.picker_of`** (a stamp, then the HuggingFace names, then file/folder names) —
   never imported from `bridge`. The HuggingFace lookups are called through the package at call time so tests patch
   them; no test touches the network. (`tests/test_pickers.py`)
+- **A plugin's LIST beside a stamped field** (`lookups.py`, 2026-10-08): a `streamstudio.plugins` module's `LOOKUPS =
+  {tag: fn(values) -> (names, reason)}`; the palette marks a stamped field whose tag a plugin lists `lookup: true`
+  beside its `picker` (a built-in picker kind never), and `GET /api/lookups/<tag>` answers `lookups.answer` — NEVER an
+  error: no plugin, a raise and a list slower than `TIMEOUT_S` (a daemon thread) each answer `[]` with the reason. The
+  table is read once per process (`_FOUND`) — like `catalogue.CATALOGUE`, it describes the installed packages, the same
+  for every app a process mounts; tests replace `_FOUND`. A plugin that fails to import is a `warning`. The page sends
+  the node's text/number/switch values and keys its cache on all of them (`pickers.pluginLookupKey`). The canvas
+  modules still name no vendor. (`tests/test_plugin_lookups.py`, `frontend/src/__tests__/{pickers,api}.test.ts`)
+  arch: "A plugin supplies the list beside a field".
 - `POST …/slot` replaces one slot's value as one edit; a list slot or a typed parameter is refused.
   (`tests/test_app_slot.py`)
 - The canvas modules import neither navigaitor, nor annotaide, nor ComfyUI. Tests that read a waivefront document
@@ -289,6 +298,10 @@ arch: "A host mounts the editor through three methods"; pins `tests/test_host.py
   for one. `?embed=1` removes chrome, never a function. The `state`/`saved`/`open`/`unavailable` messages are a
   contract with the hosts — change them only together. A host switches graphs with `open`, never by setting the
   iframe's `src`. A gesture belongs to the graph it began on. An unknown `?graph=` opens nothing.
+  **`commit`** (2026-10-08) is the host's second command: the page blurs the field being typed in (which writes it;
+  on `?only=settings` saves it), waits for every write on its way (`writes`, filled by `commitParam`), and posts
+  `committed` — a host READING what the page writes (a tool's run beside a settings panel) asks it first; never answer
+  before the writes land. (`tests/test_canvas.py::TestTheHostHearsAndFollows::test_commit_writes_the_field_being_typed_in_and_answers_committed`)
   (`tests/test_canvas.py::TestMountedInAHost`, `::TestSetSourceInAHost`, `::TestTheHostHearsAndFollows`,
   `frontend/src/__tests__/{host,link,pickers,slots}.test.ts`) arch: "The page in a host's panel".
 - **`?only=settings`** (a host's settings sheet, `link.onlyFromSearch`) renders the settings form and nothing else —

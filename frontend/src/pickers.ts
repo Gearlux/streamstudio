@@ -29,7 +29,13 @@ import type { Json } from "./model";
 
 /** The pickers the page draws, by the server's names (`schema.picker`). */
 export const PICKERS = ["directory", "file", "hf_dataset", "hf_feature", "hf_split", "hf_metadata"] as const;
-export type Picker = (typeof PICKERS)[number];
+
+/**
+ * A list an installed PLUGIN supplies for a producer's own tag: the server marks such a field `lookup: true` beside the
+ * tag (`streamstudio.lookups`), and the page asks `GET api/lookups/<tag>` with the node's current values.
+ */
+export const PLUGIN_LIST = "plugin";
+export type Picker = (typeof PICKERS)[number] | typeof PLUGIN_LIST;
 
 /** The pickers that list what the editor's machine knows about a HuggingFace dataset. */
 export type LookupPicker = Exclude<Picker, "directory" | "file">;
@@ -43,7 +49,31 @@ export const ALL_COLUMNS = "*";
 /** The picker the server marked the field with, or `undefined` — none, or one the page does not draw. */
 export function pickerFor(schema: Record<string, Json>): Picker | undefined {
   const named = schema.picker;
-  return typeof named === "string" && (PICKERS as readonly string[]).includes(named) ? (named as Picker) : undefined;
+  if (typeof named !== "string") return undefined;
+  if ((PICKERS as readonly string[]).includes(named)) return named as Picker;
+  return schema.lookup === true ? PLUGIN_LIST : undefined;
+}
+
+/** The tag of a producer's own picker a plugin lists (`schema.picker` beside `lookup: true`), else `""`. */
+export const pluginTag = (schema: Record<string, Json>): string =>
+  pickerFor(schema) === PLUGIN_LIST ? String(schema.picker) : "";
+
+/**
+ * What a plugin's list is asked with: the node's values that are text, a number or a switch, as text — a list may
+ * depend on the field beside it (the versions of the dataset named there). A container value is not sent.
+ */
+export function pluginValues(values: Record<string, Json | undefined>): Record<string, string> {
+  const sent: Record<string, string> = {};
+  for (const [name, value] of Object.entries(values)) {
+    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") sent[name] = String(value);
+  }
+  return sent;
+}
+
+/** A plugin list's question as one key — the tag and every value it is asked with, so a changed field asks again. */
+export function pluginLookupKey(tag: string, values: Record<string, Json | undefined>): string {
+  const sent = pluginValues(values);
+  return ["plugin", tag, ...Object.keys(sent).sort().map((name) => `${name}=${sent[name]}`)].join("\u0000");
 }
 
 /** Does the picker list a HuggingFace lookup (rather than browse the editor's files). */
@@ -65,7 +95,7 @@ export function hfDataset(values: Record<string, Json | undefined>): HfDataset {
 }
 
 /** The question a lookup asks the server, as one key — what its list is cached under; `undefined` while it has none to ask. */
-export function lookupKey(picker: LookupPicker, dataset: HfDataset): string | undefined {
+export function lookupKey(picker: Exclude<LookupPicker, typeof PLUGIN_LIST>, dataset: HfDataset): string | undefined {
   if (picker === "hf_dataset") return "datasets";
   if (dataset.path === "") return undefined;
   if (picker === "hf_split") return `splits\u0000${dataset.path}\u0000${dataset.name}`;

@@ -143,7 +143,15 @@ export interface SavedMessage {
   path: string;
 }
 
-export type PageMessage = StateMessage | SavedMessage;
+/** The answer to a host's `commit`: every field the person was typing in is written (and, on a settings-only page,
+ * saved) — the host may read the files now. */
+export interface CommittedMessage {
+  source: typeof MESSAGE_SOURCE;
+  type: "committed";
+  graph: string;
+}
+
+export type PageMessage = StateMessage | SavedMessage | CommittedMessage;
 
 export const stateMessage = (graph: string, dirty: boolean, unsaved: string[], tab: SideTab): StateMessage => ({
   source: MESSAGE_SOURCE,
@@ -156,6 +164,8 @@ export const stateMessage = (graph: string, dirty: boolean, unsaved: string[], t
 
 export const savedMessage = (graph: string, path: string): SavedMessage => ({ source: MESSAGE_SOURCE, type: "saved", graph, path });
 
+export const committedMessage = (graph: string): CommittedMessage => ({ source: MESSAGE_SOURCE, type: "committed", graph });
+
 /** A command a host sends the page. */
 export interface OpenCommand {
   type: "open";
@@ -164,7 +174,15 @@ export interface OpenCommand {
   level?: string;
 }
 
-export type HostCommand = OpenCommand;
+/**
+ * A host about to READ what the page writes (a settings panel's run button): commit the field the person is typing in
+ * — a field is otherwise written only when it is left — and answer `committed` once every write is done.
+ */
+export interface CommitCommand {
+  type: "commit";
+}
+
+export type HostCommand = OpenCommand | CommitCommand;
 
 /**
  * The command in a message posted to the page, or `undefined` for anything else — another sender's message, a typo'd
@@ -172,6 +190,7 @@ export type HostCommand = OpenCommand;
  * parent, same origin) before it acts.
  */
 export function parseHostCommand(data: unknown): HostCommand | undefined {
+  if (isObject(data) && data.target === MESSAGE_SOURCE && data.type === "commit") return { type: "commit" };
   if (!isObject(data) || data.target !== MESSAGE_SOURCE || data.type !== "open") return undefined;
   if (typeof data.graph !== "string" || data.graph.trim() === "") return undefined;
   const command: OpenCommand = { type: "open", graph: data.graph.trim() };

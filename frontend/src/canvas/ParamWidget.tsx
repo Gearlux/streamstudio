@@ -10,14 +10,16 @@
  *
  * A fragment the server marked with a `picker` (`pickers.ts`) adds the ComfyUI editor's chooser beside the field: a
  * `directory` or `file` field a `…` button opening the editor's file browser (`data-browse`), a HuggingFace source's
- * dataset, column and split fields a list of what the editor's machine knows (`data-picker`), and its
- * `metadata_features` an "add column" list. A pick commits like a typed value; the field stays free text.
+ * dataset, column and split fields a list of what the editor's machine knows (`data-picker`), its
+ * `metadata_features` an "add column" list, and a producer's own tag that an installed plugin lists (`lookup: true`) the
+ * plugin's list, asked with the node's current values (`data-picker="plugin"`). A pick commits like a typed value; the
+ * field stays free text.
  *
  * A change commits on blur (Enter blurs); `onCommit` answers whether it was taken, and a refusal reverts the widget to
  * `param.value`, which is the truth the caller holds (the model's value, or a trial value).
  */
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
-import { errorMessage, hfDatasets, hfFeatures, hfSplits, type Listed } from "../api";
+import { errorMessage, hfDatasets, hfFeatures, hfSplits, pluginLookup, type Listed } from "../api";
 import { useEditor } from "../context";
 import type { Json, Param } from "../model";
 import {
@@ -32,6 +34,9 @@ import {
   pairValue,
   parseMetadata,
   pickerFor,
+  pluginLookupKey,
+  pluginTag,
+  pluginValues,
   rangePair,
   withColumn,
   type LookupPicker as LookupKind,
@@ -154,7 +159,14 @@ export function ParamWidget({ param, schema, onCommit, values = NO_VALUES }: Par
       <span className="picked" data-picked={picker}>
         {field}
         {isLookup(picker) ? (
-          <LookupPicker picker={picker} param={param.name} values={values} label={LOOKUP_LABELS[picker]} onPick={pick} />
+          <LookupPicker
+            picker={picker}
+            tag={pluginTag(schema)}
+            param={param.name}
+            values={values}
+            label={LOOKUP_LABELS[picker]}
+            onPick={pick}
+          />
         ) : (
           <BrowseButton picker={picker} param={param.name} draft={draft} onPick={pick} />
         )}
@@ -175,6 +187,7 @@ const LOOKUP_LABELS: Record<LookupKind, string> = {
   hf_feature: "columns…",
   hf_split: "splits…",
   hf_metadata: "add column…",
+  plugin: "list…",
 };
 
 /** What a lookup about a dataset says while the node names none. */
@@ -183,6 +196,7 @@ const UNNAMED: Record<LookupKind, string> = {
   hf_feature: "name a dataset first — its columns are listed here",
   hf_split: "name a dataset first — its splits are listed here",
   hf_metadata: "name a dataset first — its columns are listed here",
+  plugin: "",
 };
 
 /** What a lookup says when the editor's machine knows nothing to offer. */
@@ -191,6 +205,7 @@ const NOTHING_FOUND: Record<LookupKind, string> = {
   hf_feature: "the editor's machine knows no columns of this dataset (not cached, or not reachable)",
   hf_split: "the editor's machine knows no splits of this dataset (not cached, or not reachable)",
   hf_metadata: "the editor's machine knows no columns of this dataset (not cached, or not reachable)",
+  plugin: "the editor's machine has nothing to list here",
 };
 
 /** The editor's file browser for a `directory` or `file` field, starting where the field points (`pickers.browseStart`). */
@@ -220,7 +235,8 @@ function BrowseButton({
 }
 
 /** What the server is asked for a lookup's list. */
-function fetchFor(picker: LookupKind, values: Record<string, Json | undefined>): Promise<Listed> {
+function fetchFor(picker: LookupKind, values: Record<string, Json | undefined>, tag: string): Promise<Listed> {
+  if (picker === "plugin") return pluginLookup(tag, pluginValues(values));
   const dataset = hfDataset(values);
   if (picker === "hf_dataset") return hfDatasets();
   if (picker === "hf_split") return hfSplits(dataset.path, dataset.name);
@@ -229,6 +245,8 @@ function fetchFor(picker: LookupKind, values: Record<string, Json | undefined>):
 
 interface LookupPickerProps {
   picker: LookupKind;
+  /** A plugin list's tag (`pickers.pluginTag`); empty for the HuggingFace lists. */
+  tag?: string;
   param: string;
   values: Record<string, Json | undefined>;
   label: string;
@@ -248,8 +266,8 @@ type LookupState = "unnamed" | "idle" | "loading" | "ready" | "failed";
  * a list that failed asks again the next time the person reaches for it.
  * `data-picker-state` is where it is (`LookupState`), `data-picker-count` how many entries it offers.
  */
-function LookupPicker({ picker, param, values, label, choices, onPick }: LookupPickerProps) {
-  const key = lookupKey(picker, hfDataset(values));
+function LookupPicker({ picker, tag = "", param, values, label, choices, onPick }: LookupPickerProps) {
+  const key = picker === "plugin" ? pluginLookupKey(tag, values) : lookupKey(picker, hfDataset(values));
   const [asked, setAsked] = useState(false);
   /** Bumped when the person reaches for a list whose last lookup FAILED: the effect asks the editor again. */
   const [attempt, setAttempt] = useState(0);
@@ -262,7 +280,7 @@ function LookupPicker({ picker, param, values, label, choices, onPick }: LookupP
   useEffect(() => {
     if (!asked || key === undefined) return;
     let live = true;
-    cachedLookup(key, () => fetchFor(picker, values)).then(
+    cachedLookup(key, () => fetchFor(picker, values, tag)).then(
       (answer) => live && setListed({ key, names: answer.names, reason: answer.reason, error: null }),
       (exc: unknown) => live && setListed({ key, names: [], reason: "", error: errorMessage(exc) }),
     );

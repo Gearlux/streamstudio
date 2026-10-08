@@ -100,7 +100,7 @@ from recordstream.ops.contract import ChainContractError
 import streamstudio
 from streamstudio import catalogue as catalogue_module
 from streamstudio import document as document_module
-from streamstudio import layout
+from streamstudio import layout, lookups
 from streamstudio import page as page_module
 from streamstudio import palette
 from streamstudio._yamltext import YamlText
@@ -1493,6 +1493,12 @@ class Studio:
         when they cannot be read."""
         return {"splits": streamstudio.list_hf_dataset_splits(path, name=name) if path else []}
 
+    @staticmethod
+    def lookup(tag: str, values: Mapping[str, str]) -> Dict[str, Any]:
+        """``{names, reason}``: the list an installed plugin supplies for the picker ``tag``, asked with the node's
+        current ``values`` (:func:`streamstudio.lookups.answer` — never raises; an empty list says why)."""
+        return lookups.answer(tag, values)
+
     # -- runs --------------------------------------------------------------------------------
 
     def run(self, run_id: str) -> Run:
@@ -1923,6 +1929,10 @@ def editor_blueprint(
     @blueprint.get("/api/hf/splits")
     def hf_splits() -> Response:
         return jsonify(_studio().hf_splits(request.args.get("path", ""), name=request.args.get("name") or None))
+
+    @blueprint.get("/api/lookups/<tag>")
+    def lookup(tag: str) -> Response:
+        return jsonify(_studio().lookup(tag, {key: str(value) for key, value in request.args.items()}))
 
     @blueprint.get("/api/workspace")
     def workspace() -> Response:

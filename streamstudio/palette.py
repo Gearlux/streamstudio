@@ -75,6 +75,8 @@ from recordstream.flow import FlowGraph
 from recordstream.items import NDArrayItem, item_types
 from recordstream.ops.contract import ANY_TYPE, GraphContract
 
+from streamstudio import lookups
+
 #: A socket's type: a registered item class name (``Image``, ``Spectrogram``), one of the graph words
 #: (``Record``, ``Stream``, ``Source``, ``Op``, ``Sink``), a JSON-schema scalar for a declared value
 #: (``number``, ``integer``, ``string``, ``boolean``, ``object``, ``List[str]``) or the ``*`` wildcard.
@@ -348,14 +350,20 @@ def picker_of(target: Callable[..., Any], name: str, annotation: Any) -> Optiona
 
 
 def _mark_pickers(target: Callable[..., Any], properties: Dict[str, Any]) -> Dict[str, Any]:  # JSON-schema properties
-    """``properties`` with ``picker`` added to the fragment of every parameter :func:`picker_of` gives one."""
+    """``properties`` with ``picker`` added to the fragment of every parameter :func:`picker_of` gives one — and
+    ``lookup: true`` beside a producer's own tag that an installed plugin supplies a list for
+    (:mod:`streamstudio.lookups`): the page draws that list, where a tag it does not know otherwise stays a plain
+    field."""
     for slot in slots(target):
         fragment = properties.get(slot.name)
         if not isinstance(fragment, dict):
             continue
         picker = picker_of(target, slot.name, slot.annotation)
         if picker is not None:
-            properties[slot.name] = {**fragment, "picker": picker}
+            marked = {**fragment, "picker": picker}
+            if picker not in PICKER_KINDS and lookups.lists(picker):
+                marked["lookup"] = True
+            properties[slot.name] = marked
     return properties
 
 

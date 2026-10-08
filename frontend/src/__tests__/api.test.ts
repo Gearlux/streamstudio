@@ -12,6 +12,7 @@ import {
   hfDatasets,
   hfFeatures,
   hfSplits,
+  pluginLookup,
   joinSession,
   getApp,
   listFiles,
@@ -286,6 +287,19 @@ describe("the HuggingFace lookups — asked of the editor's machine (DESIGN5 ite
     expect(await hfDatasets()).toEqual({ names: [], reason: "huggingface_hub is not installed" });
     stub({ features: [1, "label", null] });
     expect(await hfFeatures("x")).toEqual({ names: ["label"], reason: "" });
+  });
+});
+
+describe("a plugin's list — asked of the editor's machine with the node's values", () => {
+  it("GET api/lookups/<tag> names the values in the query, an empty one left out, and keeps the reason", async () => {
+    const sent = stub({ names: ["1.0", "2.0"], reason: "" });
+    expect(await pluginLookup("SHOP_VERSION", { dataset: "fruit", project: "" })).toEqual({
+      names: ["1.0", "2.0"],
+      reason: "",
+    });
+    expect(sent[0].path).toBe("api/lookups/SHOP_VERSION?dataset=fruit");
+    stub({ names: [], reason: "TimeoutError: the shop did not answer" });
+    expect(await pluginLookup("SHOP_DATASET", {})).toEqual({ names: [], reason: "TimeoutError: the shop did not answer" });
   });
 });
 
