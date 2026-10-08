@@ -8,6 +8,7 @@ import {
   hasOwnSource,
   hostCardTitle,
   hostOf,
+  committedMessage,
   parseHostCommand,
   filledLines,
   ranOn,
@@ -163,6 +164,18 @@ describe("the panel's messages — posted to the host", () => {
       graph: "view_bte",
       path: "/w/state/view_bte.yaml",
     });
+  });
+});
+
+describe("commit — a host about to read what the page writes", () => {
+  it("is a command of its own, answered `committed` naming the graph shown", () => {
+    expect(parseHostCommand({ target: "streamstudio", type: "commit" })).toEqual({ type: "commit" });
+    expect(committedMessage("tool_x")).toEqual({ source: "streamstudio", type: "committed", graph: "tool_x" });
+  });
+
+  it("CON: from anyone but a host, it is no command", () => {
+    expect(parseHostCommand({ source: "streamstudio", type: "commit" })).toBeUndefined();
+    expect(parseHostCommand({ target: "other", type: "commit" })).toBeUndefined();
   });
 });
 

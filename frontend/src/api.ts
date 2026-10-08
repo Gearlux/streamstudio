@@ -534,6 +534,13 @@ export const hfFeatures = async (path: string, name = "", split = ""): Promise<L
 export const hfSplits = async (path: string, name = ""): Promise<Listed> =>
   listed(await call<unknown>("GET", `api/hf/splits${query({ path, name })}`), "splits");
 
+/**
+ * `GET api/lookups/<tag>?<the node's values>` → `{names, reason}`: the list an installed plugin supplies for its own
+ * picker tag, asked with the node's current values (an empty value is left out); never an error — an empty list says why.
+ */
+export const pluginLookup = async (tag: string, values: Record<string, string>): Promise<Listed> =>
+  listed(await call<unknown>("GET", `api/lookups/${encodeURIComponent(tag)}${query(values)}`), "names");
+
 // ---------------------------------------------------------------------------------------------------
 // runs
 // ---------------------------------------------------------------------------------------------------

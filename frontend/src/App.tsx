@@ -139,6 +139,7 @@ import { Timeline, type TimelineEntry } from "./history";
 import {
   hasOwnSource,
   hostOf,
+  committedMessage,
   parseHostCommand,
   runRecord,
   savedMessage,
@@ -822,12 +823,31 @@ function Editor() {
   );
   const openAskedRef = useRef(openAsked);
   openAskedRef.current = openAsked;
+
+  /** The parameter writes on their way — `commitParam` adds each; a host's `commit` waits for them. */
+  const writes = useRef(new Set<Promise<boolean>>());
+
+  /**
+   * The host asks the page to commit (`{type: "commit"}` — a settings panel's run button about to read the settings
+   * file): the field being typed in is left, which writes it (and on a settings-only page saves it), and once every
+   * write on its way is done the page answers `committed`. Measured before: a run pressed while a field still held
+   * its typed value read the settings file BEFORE the field's save landed, and ran with the old value.
+   */
+  const commitAsked = useCallback(async () => {
+    const typing = document.activeElement;
+    if (typing instanceof HTMLElement && typing !== document.body) typing.blur();
+    while (writes.current.size > 0) await Promise.allSettled([...writes.current]);
+    postToHost(committedMessage(graphRef.current?.name ?? ""));
+  }, [postToHost]);
+  const commitAskedRef = useRef(commitAsked);
+  commitAskedRef.current = commitAsked;
   useEffect(() => {
     if (!embed) return;
     const onMessage = (event: MessageEvent) => {
       if (event.source !== window.parent || event.origin !== window.location.origin) return; // its own host only
       const command = parseHostCommand(event.data);
-      if (command !== undefined) void openAskedRef.current(command);
+      if (command?.type === "commit") void commitAskedRef.current();
+      else if (command !== undefined) void openAskedRef.current(command);
     };
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
@@ -1405,10 +1425,16 @@ function Editor() {
    * the server refuses saves nothing.
    */
   const commitParam = useCallback(
-    async (node: string, param: string, value: Json): Promise<boolean> => {
-      const done = await setParam(node, param, value);
-      if (done && settingsOnly) await saveSettingsAlone();
-      return done;
+    (node: string, param: string, value: Json): Promise<boolean> => {
+      const writing = (async () => {
+        const done = await setParam(node, param, value);
+        if (done && settingsOnly) await saveSettingsAlone();
+        return done;
+      })();
+      // a host's `commit` waits for every write on its way (`commitAsked`)
+      writes.current.add(writing);
+      void writing.finally(() => writes.current.delete(writing));
+      return writing;
     },
     [saveSettingsAlone, setParam, settingsOnly],
   );

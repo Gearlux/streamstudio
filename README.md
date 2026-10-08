@@ -1191,11 +1191,18 @@ listens to its own parent window only:
     // {source: "streamstudio", type: "state", graph: "view_bte", dirty: true, unsaved: ["view_bte"], tab: "settings"}
     // {source: "streamstudio", type: "saved", graph: "view_bte", path: "/w/state/view_bte.yaml"}
     // {source: "streamstudio", type: "unavailable"}   — from the page served INSTEAD of the editor
+    // {source: "streamstudio", type: "committed", graph: "view_bte"}   — the answer to a `commit`
   });
   // what the host asks: show another graph (and tab) WITHOUT reloading — a reload asks "Leave site?" when unsaved
   studio.contentWindow.postMessage({target: "streamstudio", type: "open", graph: "view_fft", tab: "run"}, location.origin);
+  // …or, about to READ what the page writes (a run button beside a settings panel): write the field being typed in
+  studio.contentWindow.postMessage({target: "streamstudio", type: "commit"}, location.origin);
 </script>
 ```
+
+A field is written when it is LEFT, so a host button pressed while a field still holds its typed value would read the
+file before that write lands. `commit` leaves the field (writing it — and, on a `?only=settings` page, saving it) and
+the page answers `committed` once every write on its way is done: the host reads the files then.
 
 `unsaved` lists every graph holding unsaved edits — what closing the panel would leave unsaved (the edits stay in the
 editor; `studio_of(app).stash()` keeps them over the host's stop). `unavailable` is posted by the page `/` answers
@@ -1396,6 +1403,7 @@ widgets followed, read off the class:
 | … `split` | `hf_split` — `GET /api/hf/splits?path=<its dataset>` |
 | … `metadata_features` | `hf_metadata` — the same columns, plus `*` (every other column) |
 | a parameter a producer stamps (`__taidal_widget_params__ = {"output_dir": "PLATFORM_DATASET_ID"}`) | the stamp, whatever the rules above say |
+| … a stamp an installed [plugin lists](#a-plugins-lists-beside-a-field) | the stamp and `lookup: true` — the plugin's list, `GET /api/lookups/<tag>?<the node's values>` |
 
 A picker fills the field; the field stays editable. The HuggingFace lookups never fail a request: no dataset, or
 one that cannot be read, answers `[]` (the datasets list says why).
@@ -2452,6 +2460,30 @@ bridge: `__taidal_widget_params__ = {"<param>": "<TAG>"}` renders that construct
 free-text STRING carrying `taidal_widget="<TAG>"`, and your own `WEB_DIRECTORY` JS matches the tag
 (`config[1].taidal_widget === "<TAG>"`) and adds the picker. The tag string is opaque to
 StreamStudio — its meaning, its route, and its JS all live in your package.
+
+### A plugin's lists beside a field
+
+The canvas editor (the settings form, a card) draws a stamped field as a plain text field — unless a plugin supplies a
+LIST for its tag. Declare `LOOKUPS` beside `ROUTES` in the same plugin module:
+
+```python
+# my_plugin/studio/__init__.py
+from typing import List, Mapping, Tuple
+
+def shop_datasets(values: Mapping[str, str]) -> Tuple[List[str], str]:
+    """The node's current values in (`{"project": "store", …}`), the names and why there are none out."""
+    names = ask_the_shop(project=values.get("project", ""))
+    return names, "" if names else "the shop has no datasets"
+
+LOOKUPS = {"SHOP_DATASET": shop_datasets}   # a stamp: __taidal_widget_params__ = {"dataset": "SHOP_DATASET"}
+```
+
+The form marks the field `lookup: true` beside its `picker` tag, and the page puts a `list…` beside it, asked
+(`GET /api/lookups/SHOP_DATASET?project=store&dataset=…`) when the person points at it — with the node's current text,
+number and switch values, so a list can follow the field beside it (the versions of the dataset named there): a changed
+field asks again. A list never fails a request: a tag no plugin lists, a function that raises and one that takes longer
+than 20 s (`streamstudio.lookups.TIMEOUT_S`) answer no names and say why (`{"names": [], "reason": "ConnectionError:
+…"}`). The plugins' lists are read once per process.
 
 A broken plugin is skipped with a warning naming it; the editor and the other plugins keep working.
 Like node discovery, the group is read from installed metadata — reinstall your editable after

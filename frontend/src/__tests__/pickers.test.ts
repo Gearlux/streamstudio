@@ -19,6 +19,9 @@ import {
   pairValue,
   parseMetadata,
   pickerFor,
+  pluginLookupKey,
+  pluginTag,
+  pluginValues,
   rangePair,
   withColumn,
 } from "../pickers";
@@ -39,6 +42,19 @@ describe("pickerFor — the picker the server marked the field with (GET …/for
     expect(pickerFor({ type: "string" })).toBeUndefined();
     expect(pickerFor({ type: "string", picker: "PLATFORM_DATASET_ID" })).toBeUndefined();
     expect(pickerFor({ type: "string", picker: 3 })).toBeUndefined();
+  });
+
+  it("a producer's own tag a plugin lists (`lookup: true`) is the plugin list, its tag kept", () => {
+    const schema = { type: "string", picker: "SHOP_DATASET", lookup: true };
+    expect(pickerFor(schema)).toBe("plugin");
+    expect(pluginTag(schema)).toBe("SHOP_DATASET");
+    expect(isLookup("plugin")).toBe(true);
+  });
+
+  it("CON: `lookup` beside a picker the page draws itself changes nothing; no tag without a plugin list", () => {
+    expect(pickerFor({ type: "string", picker: "directory", lookup: true })).toBe("directory");
+    expect(pluginTag({ type: "string", picker: "directory", lookup: true })).toBe("");
+    expect(pluginTag({ type: "string", picker: "PLATFORM_DATASET_ID" })).toBe("");
   });
 
   it("the lookups are the HuggingFace ones; the two browsers are not", () => {
@@ -189,5 +205,22 @@ describe("followPair — a (min, max) pair's two boxes when the value under them
   it("CON: a box nobody changed takes the new value — an undo, the other surface, a host's switch", () => {
     expect(followPair(["111000", "761000"], ["111000", "761000"], ["100000", "750000"])).toEqual(["100000", "750000"]);
     expect(followPair(["111000", "750000"], ["100000", "750000"], ["111000", "750000"])).toEqual(["111000", "750000"]);
+  });
+});
+
+describe("a plugin list's question — the tag and the node's values", () => {
+  it("text, numbers and switches are sent as text; a container is not", () => {
+    expect(pluginValues({ dataset: "bte", count: 3, strict: false, tags: ["a"], gone: undefined, none: null })).toEqual({
+      dataset: "bte",
+      count: "3",
+      strict: "false",
+    });
+  });
+
+  it("a changed field is another question; the order of the fields is not", () => {
+    const one = pluginLookupKey("SHOP_VERSION", { project: "store", dataset: "bte" });
+    expect(pluginLookupKey("SHOP_VERSION", { dataset: "bte", project: "store" })).toBe(one);
+    expect(pluginLookupKey("SHOP_VERSION", { project: "store", dataset: "lte" })).not.toBe(one);
+    expect(pluginLookupKey("SHOP_DATASET", { project: "store", dataset: "bte" })).not.toBe(one);
   });
 });

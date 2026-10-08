@@ -4448,6 +4448,31 @@ class TestTheHostHearsAndFollows:
         assert hosted.host.asked == [("pane", moved / "pane.yaml")]
         assert opened.errors == []
 
+    def test_commit_writes_the_field_being_typed_in_and_answers_committed(self, browser: Any, hosted: Hosted) -> None:
+        """A host about to read what the page writes (a settings panel's run) posts ``commit``: the field still being
+        typed in is written, and ``committed`` comes only after that write — never before it."""
+        page = browser.new_page(viewport={"width": 1400, "height": 900})
+        errors: List[str] = []
+        page.on("pageerror", lambda exc: errors.append(f"pageerror: {exc}"))
+        page.on("console", lambda msg: errors.append(f"console.error: {msg.text}") if msg.type == "error" else None)
+        page.goto(hosted.url)
+        page.wait_for_function("() => window.received.some(m => m.type === 'state' && m.graph === 'pane')")
+        frame = page.frame_locator("#studio")
+        frame.locator('.canvas[data-graph="pane"][data-initialized="true"]').wait_for()
+        frame.locator(f'{node_root("gain")} input[data-param="gain"]').fill("7")  # typed, NOT left
+        page.evaluate(
+            "document.querySelector('#studio').contentWindow.postMessage("
+            "{target: 'streamstudio', type: 'commit'}, location.origin)"
+        )
+        page.wait_for_function("() => window.received.some(m => m.type === 'committed')")
+        committed = page.evaluate("window.received.find(m => m.type === 'committed')")
+        assert committed == {"source": "streamstudio", "type": "committed", "graph": "pane"}
+        # the editor held the typed value when it answered: a Save asked of it NOW writes it
+        saved = hosted.app.test_client().post(f"{STUDIO}/api/graphs/pane/save", json={})
+        assert saved.status_code == 200, saved.get_json()
+        assert (hosted.folder / "pane.settings.yaml").read_text() == "flow.gain.op.gain: 7\n"
+        assert errors == []
+
     def test_the_hosts_panel_hears_state_and_saved_and_opens_a_graph_by_command(
         self, browser: Any, hosted: Hosted
     ) -> None:

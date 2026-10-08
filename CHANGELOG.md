@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **A plugin's lists beside a field.** A `streamstudio.plugins` module may declare `LOOKUPS = {"<TAG>": fn}`; a field a
+  producer stamps with that tag gets a `list…` beside it in the canvas editor, asked of `GET /api/lookups/<tag>` with
+  the node's current values (`fn(values) -> (names, reason)`), never failing a request (20 s at most).
+- **`commit`, a host's command:** the page writes the field being typed in (on a settings-only page, saves it) and
+  answers `{type: "committed", graph}` once every write is done — what a host reads before it runs what the page wrote.
+
 ### Changed
 
 - **Set source… keeps the keyboard while a picked class's settings load.** The dialog's box holds the focus from the

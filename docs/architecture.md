@@ -2140,3 +2140,45 @@ card and wire together or nothing; the move-out naming rule; the root stays last
 the catalogue's; the host card and the root are never an anchor. Pins: `tests/test_add_node.py`,
 `tests/test_app.py::TestAddingACard`, `frontend/src/__tests__/{cards,steps}.test.ts`,
 `tests/test_canvas.py::TestACardOfItsOwn`.
+
+## A plugin supplies the list beside a field, and a host asks the page to commit before it reads (`streamstudio.lookups`, `GET /api/lookups/<tag>`, the `commit` command, 2026-10-08)
+
+**Context.** The plugin seam (first record) lets a producer stamp a field with a tag of its own and ship a ComfyUI JS
+picker for it. The canvas editor has no plugin JS: a tag it did not know was drawn as a plain text field, so a field
+whose valid values live in a remote service (a dataset on a platform, the versions of that dataset) could only be
+typed. Separately, a host that runs something with a graph's settings (a run button beside its settings panel) read
+the settings file while the field the person had just typed in was still being written: a field writes when it is
+LEFT, and pressing the host's button leaves it — measured, the run read the old value.
+
+**Decision.** (1) A plugin module may declare `LOOKUPS = {tag: fn}`, `fn(values) -> (names, reason)`, read once per
+process with the same entry-point group as `ROUTES`. The palette marks a stamped field whose tag is listed `lookup:
+true` (the tag stays in `picker`), the page draws the same `LookupPicker` the HuggingFace lists use, and asks
+`GET /api/lookups/<tag>` with the node's current scalar values — the one input a dependent list needs (a version list
+needs the dataset named beside it). Python, not JS, because the canvas editor serves no plugin code; a list function
+is the whole of what a plugin needs to say. `answer` never raises and bounds a list at `TIMEOUT_S` on a daemon thread:
+a remote service may hang on a login. (2) A host's `commit` command: the page blurs the active field, waits for every
+parameter write on its way (`commitParam` registers each in `writes`), and posts `committed`. Rejected: a delay in the
+host (a guess at the round trip — the test that measured the race fails with any fixed wait under load), reading the
+page's `state.dirty` (the dirty state arrives only after the write's request returns, so the host saw "clean" first).
+
+**Consequences.** A dependent list re-asks when any field of its node changes (the cache key holds every value) — a
+list cheap to ask is assumed. The `committed` message joins the host contract (`state`, `saved`, `unavailable`); a host
+that never sends `commit` is unaffected. The lists are process-level state like the catalogue.
+
+**Example.**
+
+```python
+# a plugin module named by a `streamstudio.plugins` entry point
+LOOKUPS = {"SHOP_DATASET": lambda values: (shop.datasets(values.get("project", "")), "")}
+```
+
+```js
+// a host about to run what the settings panel wrote
+frame.contentWindow.postMessage({target: "streamstudio", type: "commit"}, location.origin);
+// … then, on {source: "streamstudio", type: "committed"}: read the settings file, run.
+```
+
+**What you may change.** The label, the timeout, which values are sent (keep every one the list may depend on in the
+cache key). What must hold: a list never fails a request; a tag no plugin lists stays a plain field; `committed` is
+never posted before the writes land. Pins: `tests/test_plugin_lookups.py`, `frontend/src/__tests__/{pickers,api,host}.test.ts`,
+`tests/test_canvas.py::TestTheHostHearsAndFollows::test_commit_writes_the_field_being_typed_in_and_answers_committed`.
