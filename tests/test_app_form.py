@@ -211,9 +211,9 @@ class TestTheShippedPanes:
     @pytest.mark.parametrize(
         "package, pane, entries, fields, all_fields",
         [
-            ("waivefront.analysis.annotation", "bte_view.yaml", 32, 30, 248),
+            ("waivefront.analysis.annotation", "bte_view.yaml", 32, 30, 249),
             ("waivefront.analysis.annotation", "clock_view.yaml", 12, 9, 50),
-            ("waivefront.analysis.annotation", "cell_view.yaml", 6, 6, 67),
+            ("waivefront.analysis.annotation", "cell_view.yaml", 9, 9, 77),
             ("waivefront.annotation", "write_annotations.yaml", 1, 1, 14),
         ],
     )

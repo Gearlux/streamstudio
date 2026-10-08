@@ -5,7 +5,7 @@
 import { describe, expect, it } from "vitest";
 import type { AppForm } from "../api";
 import type { Form, Model, ModelNode, Param } from "../model";
-import { fieldCount, settingsEmpty, settingsMode, settingsSections } from "../settings";
+import { fieldCount, offReason, settingsEmpty, settingsMode, settingsSections } from "../settings";
 
 const param = (name: string, value: Param["value"], type = "number"): Param => ({
   name,
@@ -161,5 +161,43 @@ describe("settingsEmpty — what the tab says when it lists no field", () => {
     expect(settingsEmpty(NOTHING, "all", 0, "inside prep")).toBe("No node inside prep has a parameter to set.");
     expect(settingsEmpty(APP, "app", 4, "of this graph")).toBe("");
     expect(settingsEmpty(null, "all", 3, "of this graph")).toBe("");
+  });
+});
+
+describe("offReason — a field the setting it depends on does not ask for is grayed out, never hidden", () => {
+  // a threshold detector's shape: the margin read by four rules, the level by one, the FFT size by one spectrogram
+  const MARGIN = { type: "number", applies_when: { rule: ["row_median", "noise_floor", "local_floor", "cfar"] } };
+  const LEVEL = { type: "number", applies_when: { rule: ["fixed"] } };
+  const FFT = { type: "integer", applies_when: { spectrogram: ["pane"] } };
+  const NODE = { rule: "row_median", spectrogram: "fast", margin_db: 15, level_dbm_hz: -150 };
+
+  it("PRO: a field the rule in force reads is live; CON: one it never reads says which rule it waits for", () => {
+    expect(offReason(MARGIN, NODE)).toBe("");
+    expect(offReason(LEVEL, NODE)).toBe("rule is row_median — read only while rule is fixed");
+    expect(offReason(FFT, NODE)).toBe("spectrogram is fast — read only while spectrogram is pane");
+    expect(offReason(MARGIN, { ...NODE, rule: "otsu" })).toBe(
+      "rule is otsu — read only while rule is row_median, noise_floor, local_floor or cfar",
+    );
+  });
+
+  it("the host's value wins over the node's: the pane runs the rule its knob picked, not the graph's", () => {
+    expect(offReason(LEVEL, NODE, { rule: "fixed" })).toBe("");
+    expect(offReason(MARGIN, NODE, { rule: "fixed" })).toBe(
+      "rule is fixed — read only while rule is row_median, noise_floor, local_floor or cfar",
+    );
+  });
+
+  it("a value compared as text (a host sends what its field holds); several conditions must all hold", () => {
+    expect(offReason({ applies_when: { connectivity: [8] } }, { connectivity: "8" })).toBe("");
+    const both = { applies_when: { rule: ["cfar"], spectrogram: ["pane"] } };
+    expect(offReason(both, { rule: "cfar", spectrogram: "pane" })).toBe("");
+    expect(offReason(both, { rule: "cfar", spectrogram: "fast" })).toBe("spectrogram is fast — read only while spectrogram is pane");
+  });
+
+  it("CON: no declaration, a malformed one, or a setting the node does not hold — the field stays live", () => {
+    expect(offReason({ type: "number" }, NODE)).toBe("");
+    expect(offReason({ applies_when: "fixed" }, NODE)).toBe("");
+    expect(offReason({ applies_when: { rule: "fixed" } }, NODE)).toBe("");
+    expect(offReason({ applies_when: { mode: ["a"] } }, NODE)).toBe("");
   });
 });

@@ -4683,6 +4683,25 @@ class TestTheHostsOpenKeepsEachEditInItsGraph:
         assert frame.locator(".app").get_attribute("data-dirty") == "false"
         assert shown.errors == []
 
+    def test_a_setting_the_host_saved_through_the_editor_is_shown_when_the_host_opens_it(
+        self, browser: Any, hosted: Hosted
+    ) -> None:
+        """A host saving a SETTING itself (a pane's knob) leaves the graph's text as it was — measured before: the
+        panel compared the text alone, so it kept showing the old value after the host's ``open``."""
+        shown = open_host_page(browser, hosted, "pane")
+        frame = shown.frame
+        studio = studio_of(hosted.app)
+        studio.document("pane").set_param("gain", "gain", 5)
+        studio.save("pane", only="settings")
+        assert (hosted.folder / "pane.settings.yaml").read_text() == "flow.gain.op.gain: 5\n"
+        host_opens(shown.page, "pane")
+        frame.wait_for_function(
+            "() => document.querySelector("
+            "'[data-node=\"gain\"]:not([data-socket]) input[data-param=\"gain\"]')?.value === '5'"
+        )
+        assert frame.locator(".app").get_attribute("data-dirty") == "false"
+        assert shown.errors == []
+
     def test_new_tells_the_host_which_file_it_wrote(self, browser: Any, hosted: Hosted) -> None:
         """New… writes a graph file in the host's folder: the host hears it, as it hears a Save. Measured before: no
         ``saved`` message and nothing on ``saved()``, so a host finding its panes through them never saw a new one."""

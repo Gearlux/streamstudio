@@ -2182,3 +2182,51 @@ frame.contentWindow.postMessage({target: "streamstudio", type: "commit"}, locati
 cache key). What must hold: a list never fails a request; a tag no plugin lists stays a plain field; `committed` is
 never posted before the writes land. Pins: `tests/test_plugin_lookups.py`, `frontend/src/__tests__/{pickers,api,host}.test.ts`,
 `tests/test_canvas.py::TestTheHostHearsAndFollows::test_commit_writes_the_field_being_typed_in_and_answers_committed`.
+
+## A field another parameter does not ask for is grayed, by the value the HOST runs (`settings.offReason`, the `values` command, 2026-10-08)
+
+**Context.** A class whose parameters belong to one choice among several (a detector's rule: a margin for most rules,
+an absolute level for one, CFAR cells for another) showed every field live in the settings form whatever the choice,
+so a person tuned a value the run never read (user request 2026-10-08: "setting the method must gray out the settings
+… if not applicable"). And a host may RUN a graph with values the graph does not spell — knobs on its own pane,
+applied by name and never written — so the graph's own value of the choice is not always the one that runs.
+
+**Decision.** (1) The dependency is DECLARED on the parameter, in its schema: `applies_when: {<parameter>: [values]}`,
+an `Annotated` pydantic `Field(json_schema_extra=…)` that `confluid.to_pydantic` already keeps — nothing new in the
+server, nothing new in confluid. The form grays the field (a `fieldset disabled`, so every input a widget draws goes
+with it) while the named parameter holds none of the values; its title says which value it waits for. (2) A host's
+third command, `values` (`{graph, values}`), says what it runs the graph with; the form compares the host's value
+first, the node's otherwise. Rejected: HIDING the field (switching back to the choice that reads it, the person no
+longer sees the value that returns); refusing a value set on a grayed field (it is a setting the next choice reads);
+a list of dependencies kept by the form or the host (it drifts from the signature, and every other form — an MCP
+schema — would need its own); an expression language in the declaration (a configuration utility, not a compiler —
+a list of values per parameter, all of them holding, is the whole grammar).
+
+**Consequences.** Any form that reads the schema can gray the same way; one that does not (an older client) shows the
+field live, which is what it did before. A malformed declaration grays nothing rather than taking a field away. The
+`values` message joins the host contract (`open`, `commit`); a host that never sends it gets the node's values. Values
+are compared as text, because a host sends what its own field holds.
+
+**Example.**
+
+```python
+class Detector:
+    def __init__(
+        self,
+        rule: Literal["fixed", "median"] = "median",
+        level: Annotated[float, Field(json_schema_extra={"applies_when": {"rule": ["fixed"]}})] = -150.0,
+    ) -> None: ...
+```
+
+```js
+// the host's pane runs rule "fixed" although the graph says "median": the form follows the pane
+frame.contentWindow.postMessage({target: "streamstudio", type: "values", graph: "view_scan",
+                                 values: {rule: "fixed"}}, location.origin);
+// offReason(levelSchema, {rule: "median"}, {rule: "fixed"}) === ""            — live
+// offReason(levelSchema, {rule: "median"})  === "rule is median — read only while rule is fixed"
+```
+
+**What you may change.** The wording of the reason, how a grayed field looks. What must hold: grayed is never hidden
+and never refused; the host's value wins over the node's; a declaration the form cannot read grays nothing; `values`
+writes nothing. Pins: `frontend/src/__tests__/settings.test.ts` (`offReason`), `frontend/src/__tests__/host.test.ts`
+(`values`), `tests/test_document.py::TestDerive::test_a_params_schema_keeps_which_values_of_another_param_read_it`.

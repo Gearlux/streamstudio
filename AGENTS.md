@@ -302,6 +302,16 @@ arch: "A host mounts the editor through three methods"; pins `tests/test_host.py
   on `?only=settings` saves it), waits for every write on its way (`writes`, filled by `commitParam`), and posts
   `committed` — a host READING what the page writes (a tool's run beside a settings panel) asks it first; never answer
   before the writes land. (`tests/test_canvas.py::TestTheHostHearsAndFollows::test_commit_writes_the_field_being_typed_in_and_answers_committed`)
+  **`values`** (2026-10-08) is the third: `{graph, values}`, what the host RUNS that graph with over its settings (a
+  pane's knobs, applied by name, never written) — the page keeps the last per graph and the settings form grays by it
+  (`settings.offReason`); it never writes, saves or marks anything dirty. A field whose schema carries
+  `applies_when: {param: [values]}` is grayed (a `fieldset disabled`, `data-param-off`, its title saying why) while
+  `param` — the host's value, else the node's, compared as text — holds none of them; never hidden, never refused; a
+  malformed declaration grays nothing. An `open` of the graph already shown re-presents it when its TEXT or its MODEL
+  changed — a host saving a setting through the editor (`Studio.document(...).set_param` + `Studio.save(only=
+  "settings")`) leaves the text as it was (`tests/test_canvas.py::TestTheHostHearsAndFollows::test_a_setting_the_host_saved_through_the_editor_is_shown_when_the_host_opens_it`).
+  (`frontend/src/__tests__/{settings,host}.test.ts`,
+  `tests/test_document.py::TestDerive::test_a_params_schema_keeps_which_values_of_another_param_read_it`)
   (`tests/test_canvas.py::TestMountedInAHost`, `::TestSetSourceInAHost`, `::TestTheHostHearsAndFollows`,
   `frontend/src/__tests__/{host,link,pickers,slots}.test.ts`) arch: "The page in a host's panel".
 - **`?only=settings`** (a host's settings sheet, `link.onlyFromSearch`) renders the settings form and nothing else —

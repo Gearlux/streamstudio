@@ -21,13 +21,17 @@
  *
  * `fixed` (the page opened with `?only=settings`, a host's settings sheet): the `app:` fields and nothing else — no
  * "all parameters" box, so the sheet never offers a value that would change the graph itself.
+ *
+ * A field whose schema says which values of another parameter read it (`applies_when`) is GRAYED while that parameter
+ * holds another — the host's value when it sends one (`hostValues`, what a pane runs), else the node's — and says why in
+ * its title (`settings.offReason`); hook `data-param-off`. It keeps its value and can still be read; it is never hidden.
  */
 import { useEffect, useState } from "react";
 import { errorMessage, getApp, type AppForm } from "../api";
 import { useEditor } from "../context";
-import type { Graph } from "../model";
+import type { Graph, Json } from "../model";
 import { shortClass } from "../model";
-import { fieldCount, settingsEmpty, settingsMode, settingsSections } from "../settings";
+import { fieldCount, offReason, settingsEmpty, settingsMode, settingsSections } from "../settings";
 import { ParamWidget, valuesOf } from "../canvas/ParamWidget";
 
 export interface SettingsFormProps {
@@ -38,9 +42,11 @@ export interface SettingsFormProps {
   onAll: (all: boolean) => void;
   /** The settings and nothing else: no "all parameters" box (`?only=settings`). */
   fixed?: boolean;
+  /** What the host runs this graph with over its settings, by parameter name (a pane's knobs) — grays by it. */
+  hostValues?: Record<string, Json>;
 }
 
-export function SettingsForm({ graph, level = "", all: allTicked, onAll, fixed = false }: SettingsFormProps) {
+export function SettingsForm({ graph, level = "", all: allTicked, onAll, fixed = false, hostValues }: SettingsFormProps) {
   const { form, setParam } = useEditor();
   /** The graph's `app:` answer (or why there is none); `undefined` until the first one arrives. */
   const [app, setApp] = useState<{ app: AppForm | null; error: string | null } | undefined>(undefined);
@@ -90,16 +96,27 @@ export function SettingsForm({ graph, level = "", all: allTicked, onAll, fixed =
             <h3>
               {node.name} <small>{shortClass(node.class_path)}</small>
             </h3>
-            {fields.map(({ name, param, schema }) => (
-              <label className="field" key={name} title={typeof schema.description === "string" ? schema.description : ""}>
-                <span>{name}</span>
-                {param ? (
-                  <ParamWidget param={param} schema={schema} values={values} onCommit={(value) => setParam(node.name, name, value)} />
-                ) : (
-                  <code className="ro">not in the model</code>
-                )}
-              </label>
-            ))}
+            {fields.map(({ name, param, schema }) => {
+              const off = offReason(schema, values, hostValues);
+              const description = typeof schema.description === "string" ? schema.description : "";
+              return (
+                <label
+                  className={off === "" ? "field" : "field off"}
+                  key={name}
+                  title={off === "" ? description : `${off}${description === "" ? "" : `\n${description}`}`}
+                  data-param-off={off === "" ? undefined : off}
+                >
+                  <span>{name}</span>
+                  {param ? (
+                    <fieldset className="field-widget" disabled={off !== ""}>
+                      <ParamWidget param={param} schema={schema} values={values} onCommit={(value) => setParam(node.name, name, value)} />
+                    </fieldset>
+                  ) : (
+                    <code className="ro">not in the model</code>
+                  )}
+                </label>
+              );
+            })}
           </section>
         );
       })}

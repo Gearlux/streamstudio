@@ -18,12 +18,16 @@
  *     {source: "streamstudio", type: "saved", graph, path}                         after a Save / Save As wrote it
  *
  * — so a host can warn before it closes a panel holding unsaved work, and re-run its panes the moment a graph is saved
- * — and takes ONE command from it:
+ * — and takes these commands from it:
  *
  *     {target: "streamstudio", type: "open", graph: "view_bte", tab?: "settings", level?: "prep"}
+ *     {target: "streamstudio", type: "commit"}
+ *     {target: "streamstudio", type: "values", graph: "view_detect", values: {rule: "cfar"}}
  *
- * which shows that graph (and tab) without reloading the page — a reload of a page holding unsaved work asks
- * "Leave site?" first.
+ * `open` shows that graph (and tab) without reloading the page — a reload of a page holding unsaved work asks
+ * "Leave site?" first. `commit` writes the field being typed in (`CommitCommand`). `values` says what the host RUNS
+ * the graph with over its settings — a pane's knobs, which the host applies by name and never writes — so the
+ * settings form grays out what that run does not read (`settings.offReason`): the knob's rule, not the graph's.
  *
  * When there is no page to show — not built, no Node at the server's start, a failed build — the server answers a
  * short page of its own instead, which posts `{source: "streamstudio", type: "unavailable"}` (`app._TELL_THE_HOST`):
@@ -182,7 +186,17 @@ export interface CommitCommand {
   type: "commit";
 }
 
-export type HostCommand = OpenCommand | CommitCommand;
+/**
+ * What the host runs `graph` with over its settings, by parameter name (a pane's knobs: `{rule: "cfar"}`) — the values
+ * it sent last stand until it sends others; `{}` says it overrides nothing.
+ */
+export interface ValuesCommand {
+  type: "values";
+  graph: string;
+  values: Record<string, Json>;
+}
+
+export type HostCommand = OpenCommand | CommitCommand | ValuesCommand;
 
 /**
  * The command in a message posted to the page, or `undefined` for anything else — another sender's message, a typo'd
@@ -191,6 +205,10 @@ export type HostCommand = OpenCommand | CommitCommand;
  */
 export function parseHostCommand(data: unknown): HostCommand | undefined {
   if (isObject(data) && data.target === MESSAGE_SOURCE && data.type === "commit") return { type: "commit" };
+  if (isObject(data) && data.target === MESSAGE_SOURCE && data.type === "values") {
+    if (typeof data.graph !== "string" || data.graph.trim() === "" || !isObject(data.values)) return undefined;
+    return { type: "values", graph: data.graph.trim(), values: data.values as Record<string, Json> };
+  }
   if (!isObject(data) || data.target !== MESSAGE_SOURCE || data.type !== "open") return undefined;
   if (typeof data.graph !== "string" || data.graph.trim() === "") return undefined;
   const command: OpenCommand = { type: "open", graph: data.graph.trim() };
