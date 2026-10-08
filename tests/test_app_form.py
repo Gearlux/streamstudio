@@ -10,19 +10,16 @@ opens on that short form and offers "all parameters"; ``GET …/app`` answers it
   (``file:line:col`` of the entry), never a silent omission;
 * the gate a branch sets (``requires``) is never a field — in the narrowed form or in ``GET …/form``.
 
-Measured on the shipped Bluetooth pane: 247 fields on 30 nodes in the full form, 30 in its ``app:`` form (32
-entries, two ranges written as ``__lo`` / ``__hi`` pairs).
+A domain's shipped panes are measured against these rules in that domain's own suite.
 """
 
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
 import pytest
-import yaml
 from confluid import configurable
 from recordstream import Record
 
-from streamstudio._yamltext import YamlText
 from streamstudio.app import create_app
 
 MOD = __name__
@@ -203,36 +200,3 @@ class TestTheAppForm:
 
     def test_an_unknown_graph_is_404(self, client: Any) -> None:
         assert client.get("/api/graphs/nosuch/app").status_code == 404
-
-
-class TestTheShippedPanes:
-    """The ``app:`` blocks shipped with the signal domain's panes, opened as they are."""
-
-    @pytest.mark.parametrize(
-        "package, pane, entries, fields, all_fields",
-        [
-            ("waivefront.analysis.annotation", "bte_view.yaml", 32, 30, 248),
-            ("waivefront.analysis.annotation", "clock_view.yaml", 12, 9, 50),
-            ("waivefront.analysis.annotation", "cell_view.yaml", 6, 6, 67),
-            ("waivefront.annotation", "write_annotations.yaml", 1, 1, 14),
-        ],
-    )
-    def test_each_pane_narrows_to_its_app_inputs_with_no_problem(
-        self, tmp_path: Path, package: str, pane: str, entries: int, fields: int, all_fields: int
-    ) -> None:
-        annotation = pytest.importorskip(package)
-
-        source = Path(annotation.__file__).with_name(pane)
-        (tmp_path / pane).write_text(source.read_text())
-        client = create_app(tmp_path).test_client()
-        name = pane[: -len(".yaml")]
-        body = _ok(client.get(f"/api/graphs/{name}/app"))
-        assert body["problems"] == []
-        declared = YamlText(source.read_text()).path("app", "inputs")
-        assert isinstance(declared, yaml.SequenceNode) and len(declared.value) == entries
-        assert len(body["fields"]) == fields
-        full = _ok(client.get(f"/api/graphs/{name}/form"))
-        gates = sum(
-            1 for node in _ok(client.get(f"/api/graphs/{name}"))["model"]["nodes"] if "requires" in node["params"]
-        )
-        assert sum(len(params) for params in full.values()) == all_fields - gates

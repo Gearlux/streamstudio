@@ -6,9 +6,9 @@ pane, 275 lines with 148 of them comments, comes back as 179 lines with 0 commen
 ``$DATA_ROOT`` baked in. So ``Document`` reads text, derives nodes/wires/problems from
 ``confluid.load(text, until="document")``, and writes back by patching the located line.
 
-Every test on a shipped waivefront document is gated on ``pytest.importorskip("waivefront")``;
-everything else runs on synthetic documents built from recordstream's own ops and the small
-classes defined in this module (spelled ``!class:<this module>.<Class>``).
+Every test runs on synthetic documents built from recordstream's own ops and the small classes
+defined in this module (spelled ``!class:<this module>.<Class>``). A domain's shipped graphs are
+pinned in that domain's own suite: it depends on this package, never the reverse.
 """
 
 import sys
@@ -312,6 +312,26 @@ outputs: mask
 # The shape that does NOT build (measured 2026-09-28 on the shipped Bluetooth pane).
 CONTRACT_FIRST_TEXT = _CONTRACT_ROOT + CONTRACT_FLOW_TEXT[: -len(_CONTRACT_ROOT)]
 
+# A graph whose `app:` block names one parameter as its SETTING — a pane's shape; three comment lines.
+SETTINGS_TEXT = f"""\
+# a pane with one setting
+flow:
+  size:
+    # the window's limits
+    op: !class:{MOD}.DocRefuse
+      max_band_hz: 6.0e6   # the setting the app block names
+      hint: a packet is at most 2 MHz wide
+  gain:
+    # reads the host's image
+    op: !class:{MOD}.DocGain {{gain: 2.0}}
+    from: size
+outputs: gain
+app:
+  inputs:
+    - [DocRefuse, max_band_hz]
+  outputs: [DocGain]
+"""
+
 # A contract-rooted SOURCE graph in the twins' shape: the root keyed `contract`, never after the slot.
 SOURCE_TEXT = f"""\
 stream: !class:recordstream.core.stream.Stream
@@ -406,17 +426,6 @@ def _line_of(text: str, needle: str) -> int:
         if needle in line:
             return number
     raise AssertionError(f"{needle!r} not in text")
-
-
-def _bte_path() -> Path:
-    annotation = pytest.importorskip("waivefront.analysis.annotation")
-    return Path(annotation.__file__).parent / "bte_view.yaml"
-
-
-def _shipped(name: str) -> Path:
-    """One of the signal domain's own shipped graphs (the selection, detection and plotting-pane documents)."""
-    annotation = pytest.importorskip("waivefront.annotation")
-    return Path(annotation.__file__).parent / name
 
 
 @pytest.fixture
@@ -649,247 +658,61 @@ class TestDerive:
         with pytest.raises(KeyError, match="decode.*count"):
             model.node("nope")
 
-    def test_the_bluetooth_pane_derives_31_nodes_and_59_wires(self) -> None:
-        """Measured 2026-09-30 on the shipped ``bte_view.yaml``: 29 steps plus the ``contract:`` root —
-        30 nodes — and 59 wires: 28 ``from:`` record wires, 10 gate wires (one per ``requires:``), 21 entry
-        wires (who produced what a node reads), and no host wire — the head node (``CollectKnownAccessCodes``)
-        reads its Signal by TYPE and declares nothing, and no step reads ``input`` or ``regions`` by name.
-        Since 2026-10-05 the root's two inputs — the host's two entries — are drawn on the HOST card, the
-        31st node, which no wire leaves. The day before it was 25 nodes and 49 wires (23 / 9 /
-        17): the pane then gained five steps — ``known``, ``channel``, ``overlap``, ``eye`` and ``edr`` —
-        one more gate (``classify.try_edr`` → ``edr``) and four more entry wires (``channel`` into
-        ``tune`` and ``limit``, ``inst_freq`` into ``eye``, ``burst`` into ``edr``).
-
-        This pins the waivefront file's declarations from here; a change there shows up here first.
-        """
-        path = _bte_path()
-        model = Document.open(path).model
-        assert len(model.nodes) == 31
-        assert len(model.wires) == 59
-        kinds: Dict[str, int] = {}
-        for wire in model.wires:
-            kinds[wire.kind] = kinds.get(wire.kind, 0) + 1
-        assert kinds == {"record": 28, "gate": 10, "entry": 21}
-        assert model.problems == []
-        gates = {(w.source, w.source_socket, w.target) for w in model.wires if w.kind == "gate"}
-        assert ("pick", "plain", "burst") in gates
-        assert ("classify", "ble", "ble") in gates
-        assert ("classify", "try_edr", "edr") in gates
-        root = model.node("contract")
-        assert root.kind == "contract"
-        assert root.outputs == []
-        host = model.nodes[-1]
-        assert (host.name, host.kind) == ("<host>", "host")
-        assert [(s.name, s.type, s.entry) for s in host.outputs] == [
-            ("input", "Signal", "input"),
-            ("regions", "Regions", "regions"),
-        ]
-
-    def test_the_selection_graph_derives_its_root_two_gates_and_no_problem(self) -> None:
-        """Measured 2026-10-01 on the shipped ``selection_stats.yaml`` — the graph the signal workspace runs
-        over a selection for its info panel, rooted like a pane since that day: six steps plus the
-        ``contract:`` root — 7 nodes — and 12 wires: 5 ``from:`` record wires, the two gate wires from the
-        floor-method chooser's outcomes to the floor node each one runs, and 5 entry wires; the document
-        reports no problem. Since 2026-10-05 the host's ``input`` and ``regions`` are drawn on the HOST card,
-        the 8th node — no step reads either by name, so no wire leaves it.
-
-        This pins the waivefront file's declarations from here; a change there shows up here first.
-        """
-        doc = Document.open(_shipped("selection_stats.yaml"))
-        model = doc.model
-        assert doc.check() == []
-        assert [node.name for node in model.nodes] == [
-            "contract",
-            "window",
-            "psd",
-            "method",
-            "mean",
-            "median",
-            "levels",
-            "<host>",
-        ]
-        kinds: Dict[str, int] = {}
-        for wire in model.wires:
-            kinds[wire.kind] = kinds.get(wire.kind, 0) + 1
-        assert kinds == {"record": 5, "gate": 2, "entry": 5}
-        assert _wires(model, "gate") == [("method", "mean", "mean", "record"), ("method", "median", "median", "record")]
-        root = model.node("contract")
-        assert root.kind == "contract"
-        assert root.outputs == []
-        assert [(s.name, s.type, s.entry) for s in model.node("<host>").outputs] == [
-            ("input", "Signal", "input"),
-            ("regions", "Regions", "regions"),
-        ]
-
-    def test_the_detection_model_derives_its_root_and_no_problem(self) -> None:
-        """Measured 2026-10-01 on the shipped ``threshold_detector_model.yaml`` — the detection workspace's
-        MODEL graph, rooted that day: the ``contract:`` root, seven steps, and the ``threshold`` step's
-        ``ConfigureOp`` members (its two floor ops and the ``Threshold`` it configures) — 11 nodes — and 9
-        wires: 6 ``from:`` record wires, the 2 list members and the configured target; the document reports no
-        problem. Since 2026-10-05 the host's ``input`` and ``target`` and the IQ ``signal`` the first step reads
-        are drawn on the HOST card, the 12th node — no step reads them by name, so no wire leaves it.
-
-        This pins the waivefront file's declarations from here; a change there shows up here first.
-        """
-        doc = Document.open(_shipped("threshold_detector_model.yaml"))
-        model = doc.model
-        assert doc.check() == []
-        assert [node.name for node in model.nodes] == [
-            "contract",
-            "spectrogram",
-            "magnitude",
-            "threshold",
-            "threshold.ops[0]",
-            "threshold.ops[1]",
-            "threshold.target",
-            "components",
-            "regions",
-            "prediction",
-            "narrowed",
-            "<host>",
-        ]
-        kinds: Dict[str, int] = {}
-        for wire in model.wires:
-            kinds[wire.kind] = kinds.get(wire.kind, 0) + 1
-        assert kinds == {"record": 6, "list": 2, "ref": 1}
-        root = model.node("contract")
-        assert root.kind == "contract"
-        assert root.outputs == []
-        assert [(s.name, s.type, s.entry) for s in model.node("<host>").outputs] == [
-            ("input", "Image", "input"),
-            ("target", "Boxes", "target"),
-            ("signal", "Signal", "signal"),
-        ]
-        # the graph hands back each record: no output slot to wire, one entry socket per record entry (read under its
-        # own name — nothing is wired into it, and an entry socket is never required)
-        assert [(s.name, s.type, s.required, s.entry) for s in root.inputs] == [
-            ("input", "Image", False, "input"),
-            ("target", "Boxes", False, "target"),
-        ]
-
-    def test_the_detection_models_root_is_what_its_chain_is_checked_against(self, tmp_path: Path) -> None:
-        """The root's entries are what the chain check starts from — shown on a COPY of the shipped model
-        whose ``threshold`` step is a plain ``Threshold``, because on the shipped file the check does not
-        run at all: a flow step whose settings hold markers (the ``ConfigureOp``) is never built, and one
-        unbuilt step skips the whole flow's check (measured 2026-10-01: a head step reading ``spectrogram``
-        is accepted there, rooted or not — tracked in this project's ``TASKS.md``).
-
-        PRO: a head step reading ``spectrogram``, which nothing before it produces, is refused, and the
-        refusal lists the root's three entries. CON: the same copy with the root cut off is fed by a
-        ``<host>`` that supplies anything, so the same step is accepted and the host grows a
-        ``spectrogram`` output.
-        """
-        source = _shipped("threshold_detector_model.yaml").read_text()
-        start, stop = source.index("  threshold:\n"), source.index("  components:\n")
-        plain = (
-            source[:start]
-            + "  threshold:\n    op: !class:recordstream.ops.numpy.Threshold\n      field: spectrogram\n"
-            + "    from: magnitude\n"
-            + source[stop:]
+    def test_the_roots_entries_are_what_the_chain_check_starts_from(self, tmp_path: Path) -> None:
+        """The root's entries are what the chain check starts from. PRO: a head step reading ``spectrogram``, which
+        nothing before it produces, is refused, and the refusal lists the root's entries. CON: the same chain with the
+        root cut off is fed by a ``<host>`` that supplies anything, so the same step is accepted and the host grows a
+        ``spectrogram`` output. (Measured first on a domain's detection model graph, 2026-10-01.)"""
+        chain = (
+            f"flow:\n  floor_first:\n    op: !class:{MOD}.DocNeedsSpectrogram {{}}\n"
+            f"  gain:\n    op: !class:{MOD}.DocGain {{gain: 2.0}}\n    from: floor_first\noutputs: gain\n"
         )
-        head = (
-            "flow:\n  floor_first:\n    op: !class:waivefront.processing.NoiseFloorEstimate {}\n"
-            "  spectrogram:\n    from: floor_first\n"
+        root = (
+            "contract: !class:recordstream.ops.contract.GraphContract\n"
+            "  name: doc model\n  inputs: {image: Image, target: Boxes}\n  outputs: {}\n"
         )
-        assert "flow:\n  spectrogram:\n" in plain
-        plain = plain.replace("flow:\n  spectrogram:\n", head, 1)
-
-        rooted = tmp_path / "model.yaml"
-        rooted.write_text(plain)
+        rooted = _write(tmp_path, chain + root, "model.yaml")
         problems = [problem.message for problem in Document.open(rooted).check()]
         assert len(problems) == 1
         assert problems[0].startswith(f"{rooted}:floor_first: ")
         assert (
-            "NoiseFloorEstimate needs the record entry 'spectrogram', which nothing before it produces — "
-            "the chain has input, signal, target at that point" in problems[0]
+            "DocNeedsSpectrogram needs the record entry 'spectrogram', which nothing before it produces — "
+            "the chain has image, target at that point" in problems[0]
         )
 
-        mark = "# The graph's ROOT"
-        assert mark in plain, "the shipped model carries its contract block (appended after its last entry)"
-        unrooted = tmp_path / "model_without_its_root.yaml"
-        unrooted.write_text(plain[: plain.index(mark)])
+        unrooted = _write(tmp_path, chain, "model_without_its_root.yaml")
         doc = Document.open(unrooted)
         assert doc.check() == []
-        assert [(s.name, s.type) for s in doc.model.node("<host>").outputs] == [("spectrogram", "Spectrogram")]
+        assert "spectrogram" in [s.name for s in doc.model.node("<host>").outputs]
 
-    def test_a_step_whose_entry_nothing_produces_is_refused_on_the_shipped_bluetooth_pane(self, tmp_path: Path) -> None:
-        """The PRO case the pane's ``contract:`` root exists for (2026-09-28): ``NoiseFloorEstimate``
-        reads ``spectrogram``, which no step of the Bluetooth pane writes and the host does not provide
-        (its inputs are ``input`` and ``regions``), so inserting it is REFUSED with recordstream's
-        located message and the text is left as it was. The CON case beside it: the same pane with the
-        root cut off is fed by a synthetic ``<host>`` that supplies anything, so the same insert is
-        ACCEPTED and the host grows a ``spectrogram`` output — measured 2026-09-27, before the root.
-        The entries the refusal lists at that point are the host's two plus ``known_codes``, which the
-        pane's head step ``known`` writes (since 2026-09-30). The rooted pane's host card (2026-10-05) holds
-        the contract's two inputs and never grows one.
-        """
-        source = _bte_path().read_text()
-        rooted = tmp_path / "bte_view.yaml"
-        rooted.write_text(source)
+    def test_a_step_whose_entry_nothing_produces_is_refused_where_a_root_declares_the_record(
+        self, tmp_path: Path
+    ) -> None:
+        """The PRO case a ``contract:`` root exists for: ``DocNeedsSpectrogram`` reads ``spectrogram``, which no step
+        writes and the host does not provide (the root's input is ``image``), so inserting it is REFUSED with
+        recordstream's located message, anchored at the step it follows, and the text is left as it was; the rooted
+        graph's host card holds the root's inputs and never grows one. CON: the same graph with the root cut off is fed
+        by a ``<host>`` that supplies anything, so the same insert is ACCEPTED and the host grows a ``spectrogram``
+        output. (Measured first on a domain's 29-step pane, 2026-09-27.)"""
+        rooted = _write(tmp_path, CONTRACT_FLOW_TEXT, "pane.yaml")
         doc = Document.open(rooted)
         step: Dict[str, Any] = dict(
-            name="floor_db",
-            after="floor",
-            class_path="waivefront.processing.NoiseFloorEstimate",
-            params={"percentile": 30},
+            name="floor_db", after="floor", class_path=f"{MOD}.DocNeedsSpectrogram", params={"percentile": 30}
         )
         with pytest.raises(ValueError) as refusal:
             doc.add_step(**step)
         message = str(refusal.value)
-        anchor = f"{rooted}:{_line_of(source, 'MeasureNoiseFloor')}:9"
+        anchor = f"{rooted}:{_line_of(CONTRACT_FLOW_TEXT, 'DocBackground')}:9"
         assert message.startswith(f"add_step 'floor_db' after 'floor' refused at {anchor}: {rooted}:floor_db: ")
-        assert (
-            "NoiseFloorEstimate needs the record entry 'spectrogram', which nothing before it produces — "
-            "the chain has input, known_codes, regions at that point" in message
-        )
-        assert doc.text == source
-        assert [s.name for s in doc.model.node("<host>").outputs] == ["input", "regions"]
+        assert "DocNeedsSpectrogram needs the record entry 'spectrogram', which nothing before it produces" in message
+        assert doc.text == CONTRACT_FLOW_TEXT
+        assert [s.name for s in doc.model.node("<host>").outputs] == ["image"]
 
-        mark = "# The graph's ROOT"
-        assert mark in source, "the shipped pane carries its contract block (appended after its last entry)"
-        unrooted = tmp_path / "bte_view_without_its_root.yaml"
-        unrooted.write_text(source[: source.index(mark)])
+        unrooted = _write(tmp_path, CONTRACT_FLOW_TEXT[: -len(_CONTRACT_ROOT)], "pane_without_its_root.yaml")
         doc = Document.open(unrooted)
         doc.add_step(**step)
-        host = doc.model.node("<host>")
-        assert [(s.name, s.type) for s in host.outputs] == [("spectrogram", "Spectrogram")]
+        assert "spectrogram" in [s.name for s in doc.model.node("<host>").outputs]
         assert doc.check() == []
-
-    def test_the_psd_twin_derives_a_stream_and_two_ops(self) -> None:
-        pytest.importorskip("waivefront.processing")  # registers the twin's registry-key classes
-        path = _shipped("psd_slice_view.yaml")
-        model = Document.open(path).model
-        # The twin's `contract:` root (2026-09-28) is its last entry, so it derives as the last node of the document;
-        # the host card that draws its two inputs (2026-10-05) follows it.
-        assert [node.name for node in model.nodes] == ["stream", "stream.ops[0]", "stream.ops[1]", "contract", "<host>"]
-        assert model.node("stream.ops[1]").class_path.endswith("PsdSlice")
-        assert _wires(model, "record") == [("stream.ops[0]", "record", "stream.ops[1]", "record")]
-        assert model.problems == []
-
-    def test_the_sink_graph_derives_five_nodes(self) -> None:
-        """``save_boxes_to_store.yaml``: a processor, its stream, the stream's two contracts, the sink.
-
-        Five wires, not the four measured yesterday: the scope (§5) draws a Stream's ops as a chain
-        of record wires, and yesterday's prototype did not draw that one — the count here includes it.
-        """
-        pytest.importorskip("waivefront.sinks")
-        path = _shipped("save_boxes_to_store.yaml")
-        model = Document.open(path).model
-        assert [node.name for node in model.nodes] == [
-            "processor",
-            "processor.stream",
-            "processor.stream.ops[0]",
-            "processor.stream.ops[1]",
-            "processor.sink",
-        ]
-        assert model.node("processor").kind == "runnable"
-        assert model.node("processor.sink").kind == "sink"
-        assert len(model.wires) == 5
-        assert _wires(model, "ref") == [
-            ("processor.stream", "stream", "processor", "stream"),
-            ("processor.sink", "sink", "processor", "sink"),
-        ]
-        assert _wires(model, "record") == [("processor.stream.ops[0]", "record", "processor.stream.ops[1]", "record")]
 
 
 # ------------------------------------------------------------------------------------------------
@@ -1462,23 +1285,21 @@ class TestSetParam:
             "hint": "a Bluetooth packet",
         }
 
-    def test_the_bluetooth_pane_keeps_its_259_comment_lines(self, tmp_path: Path) -> None:
-        """Measured on the shipped file (2026-10-01): 457 lines, 259 of them comments — the other clone's
-        grown chain (448 / 255 without it) plus this workspace's ``contract:`` root; ``set_param`` on
-        ``size.hint`` changes ONE line and every comment survives. ``size.max_band_hz`` is one of the pane's
-        SETTINGS (its ``app:`` block names it), so it goes to the settings file and the graph's text stays whole."""
-        source = _bte_path()
-        path = tmp_path / source.name
-        path.write_text(source.read_text())
+    def test_a_setting_goes_to_the_settings_file_and_a_parameter_patches_one_line(self, tmp_path: Path) -> None:
+        """A graph whose ``app:`` block names its settings (the shape of a domain's pane, measured first on one of 457
+        lines, 259 of them comments): ``set_param`` on a parameter the block does not name changes ONE line and every
+        comment survives; on one it names — a SETTING — the graph's text stays whole and the value goes to the
+        settings file."""
+        path = _write(tmp_path, SETTINGS_TEXT, "pane.yaml")
         doc = Document.open(path)
         before = doc.text
-        assert _comment_lines(before) == 259
+        comments = _comment_lines(before)
+        assert comments == 3
         doc.set_param("size", "hint", "a packet")
         after = doc.text
-        assert _comment_lines(after) == 259
+        assert _comment_lines(after) == comments
         differing = [(a, b) for a, b in zip(before.splitlines(), after.splitlines()) if a != b]
-        hint = "      hint: a Bluetooth packet is at most 2 MHz wide and 17 ms long"
-        assert differing == [(hint, "      hint: a packet")]
+        assert differing == [("      hint: a packet is at most 2 MHz wide", "      hint: a packet")]
         assert len(after.splitlines()) == len(before.splitlines())
         doc.set_param("size", "max_band_hz", 30.0e6)
         assert doc.text == after, "a setting leaves the graph's text as it was"
