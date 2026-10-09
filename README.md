@@ -1410,6 +1410,9 @@ POST …/locked/steps {…}   ->  400 {"error": "locked offers its settings only
 Without the line a graph is `editable`; another word is a located problem (`…:6:10: graph: frozen is not what a graph
 lets a person change — one of: editable, settings-only`) and the graph stays editable.
 
+The editor reads `inputs` and `graph` out of the block and nothing else: any other key there is the host's own (how a
+host lists the graph, say), and the editor's edits and saves leave its line as it is.
+
 #### The settings and nothing else — `?only=settings`
 
 A host that shows a graph's settings in a sheet of its own opens the page with `?only=settings` (beside `?embed=1`):
