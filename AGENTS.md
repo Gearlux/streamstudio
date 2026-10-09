@@ -46,6 +46,11 @@ Invariants:
 - **Sockets come from recordstream and confluid only** (`algorithm_spec`, an op's
   `consumes`/`produces`/`flags`/`reports`, `confluid.input_specs`/`output_specs`/`to_pydantic`, `GraphContract`, the
   `recordstream.items` registry) — never from `bridge`'s socket vocabulary.
+- **A value node's `object` output carries the scalar its class IS** (`bool`, `int`, `float`, `str`, in that order —
+  a bool is an int), else `object` (`palette._built_socket`, `document._socket_of_built`: one rule, two tables, change
+  both); so a number node (recordstream's `Quantity`) is wired into a number setting and saved `<param>: !ref:<P>`
+  (user pick 2026-10-09: any node whose result is a number). The output keeps the name `object`. (`tests/test_number_wires.py`)
+  arch: "A value node that IS a number offers a number".
 - Parameter help comes from the class's docstring `Args:`, choices from a `Literal`, bounds from an `Interval` mark —
   never restated in the editor. (`tests/test_palette.py::TestAlgorithm::test_interval_and_literal_marks_reach_the_schema`)
 - **A short class name resolves one entry point at a time** (`document._import_until`). Never call

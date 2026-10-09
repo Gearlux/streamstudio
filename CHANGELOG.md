@@ -8,6 +8,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **A number node feeds a number setting.** A value node whose class IS a number, a whole number, a text or a yes/no (a
+  `float` subclass such as recordstream's `Quantity`, `2.5 MSa/s` → 2500000.0) offers its built instance typed so, and
+  the canvas editor saves a wire from it into a setting of that type (`samplerate: !ref:rate`). Before, every value
+  node offered an `object`, and the wire was refused: `rate.object (object) cannot be wired into
+  resampler.samplerate (number): the types do not meet`.
+
 - **A plugin's lists beside a field.** A `streamstudio.plugins` module may declare `LOOKUPS = {"<TAG>": fn}`; a field a
   producer stamps with that tag gets a `list…` beside it in the canvas editor, asked of `GET /api/lookups/<tag>` with
   the node's current values (`fn(values) -> (names, reason)`), never failing a request (20 s at most).

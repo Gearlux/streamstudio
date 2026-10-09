@@ -307,6 +307,17 @@ def socket_type(annotation: Any) -> Optional[SocketType]:
     return OBJECT
 
 
+def _built_socket(target: Callable[..., Any]) -> SocketType:
+    """What a value node's ``object`` output carries: the scalar its class IS (a ``float`` subclass is a ``number``, and
+    meets a number setting — user pick 2026-10-09: any node whose result is a number), else ``object``. The document
+    model's ``_socket_of_built`` is the same rule."""
+    if inspect.isclass(target):
+        for scalar, word in _SCALAR_SOCKETS:  # bool before int: a bool IS an int
+            if issubclass(target, scalar):
+                return word
+    return OBJECT
+
+
 def _arms(annotation: Any) -> List[Any]:
     """The members of a union (``Optional`` / ``Union`` / ``X | Y``), each with ``Annotated`` taken off; ``[X]``
     for anything else."""
@@ -675,7 +686,7 @@ def describe(target: Callable[..., Any], *, settings: bool = True) -> NodeSpec:
             elif kind == "sink":
                 outputs = [_socket("sink", SINK, False, "this sink — what a processor's sink slot holds"), *outputs]
             elif kind == "value":
-                outputs = [*outputs, _socket("object", OBJECT, False, "the built object itself")]
+                outputs = [*outputs, _socket("object", _built_socket(target), False, "the built object itself")]
         return NodeSpec(
             kind=kind,
             params_schema=properties,

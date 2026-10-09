@@ -495,6 +495,23 @@ def _socket_of_class(cls: type) -> SocketType:
     )
 
 
+#: The scalar a value node's class may BE, in the order they are tried — ``bool`` before ``int``: a bool IS an int.
+_BUILT_SCALARS: Tuple[Tuple[type, SocketType], ...] = (
+    (bool, "boolean"),
+    (int, "integer"),
+    (float, "number"),
+    (str, "string"),
+)
+
+
+def _socket_of_built(cls: type) -> SocketType:
+    """What a value node's ``object`` output carries: the scalar its class IS — a ``float`` subclass (a number written
+    with its unit, ``recordstream.quantity.Quantity``) is a ``number``, and meets a number setting — else ``object``
+    (user pick 2026-10-09: any node whose result is a number feeds a number setting). The palette's
+    ``_built_socket`` is the same rule."""
+    return next((word for scalar, word in _BUILT_SCALARS if issubclass(cls, scalar)), OBJECT)
+
+
 def _socket_of_annotation(annotation: Any) -> SocketType:  # any annotation form
     """An annotation → socket type: a registered item by name, a scalar by its JSON word,
     ``List[str]`` by itself, a class by what it produces, anything else ``object``."""
@@ -895,7 +912,7 @@ def _describe(cls: type, kind: NodeKind, kwargs: Dict[str, Any], marker: Target)
     elif kind == "runnable":
         outputs = [Socket("runnable", OBJECT), *_output_sockets(cls)]
     else:  # value
-        outputs = [*_output_sockets(cls), Socket("object", OBJECT)]
+        outputs = [*_output_sockets(cls), Socket("object", _socket_of_built(cls))]
     return _Description(params, inputs, outputs, note, instance, declaration, error)
 
 
