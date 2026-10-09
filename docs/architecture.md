@@ -2230,3 +2230,36 @@ frame.contentWindow.postMessage({target: "streamstudio", type: "values", graph: 
 and never refused; the host's value wins over the node's; a declaration the form cannot read grays nothing; `values`
 writes nothing. Pins: `frontend/src/__tests__/settings.test.ts` (`offReason`), `frontend/src/__tests__/host.test.ts`
 (`values`), `tests/test_document.py::TestDerive::test_a_params_schema_keeps_which_values_of_another_param_read_it`.
+
+## A value node that IS a number offers a number (`palette._built_socket`, `document._socket_of_built`, 2026-10-09)
+
+**Context.** A setting a person types with its unit — a rate, `2.5 MSa/s` — is read by a node of its own (recordstream's
+`Quantity`, a `float` subclass) wired into the number setting, so a settings form shows the node's field where the
+setting was (user request 2026-10-09: "only the unit node exposes its settings, make this node generic"). Every
+parameter row already offered a handle a wire lands on, and `add_wire` already saved `<param>: !ref:<P>` into a
+parameter whose schema type the output meets. But a value node offered its instance as `object`, which meets no
+`number`: measured, `up_rate.object (object) cannot be wired into upsample_rate.samplerate (number): the types do not
+meet`.
+
+**Decision.** A value node's `object` output carries the scalar its class IS — `bool`, `int`, `float`, `str`, tried in
+that order (a bool is an int) — else `object`. Any node whose result is a number meets a number setting (user pick
+2026-10-09: any node, not the one unit node). The output keeps its name, so saved wires and sidecars are untouched;
+the meet rule is unchanged (an integer still meets a number, a number never an integer). The same rule is written in
+the palette (`_built_socket`) and the document model (`_socket_of_built`), which keep their own scalar tables.
+Rejected: a builder FUNCTION returning the number — `_resolve` answers classes only, so the model could neither draw
+nor set it (`up_rate: cannot resolve the class 'qty_probe.quantity_probe'`); a socket per number setting on every
+card — the parameter rows already take a wire.
+
+**Consequences.** A graph wires a written unit into any number setting with no change to the class it feeds. A value
+node whose class is no scalar offers an `object` as before.
+
+**Example.**
+
+```yaml
+rate: !class:recordstream.quantity.Quantity {value: 2.5 MSa/s, kind: rate}   # its output: object (number)
+taker: !class:my_pkg.Taker {rate: !ref:rate}                                   # a wire drawn on `rate` saves this
+```
+
+**What you may change.** Which scalars count, the output's doc. What must hold: the type follows what the instance IS,
+never a name or a category; the output keeps the name `object`. Pins: `tests/test_number_wires.py`.
+
