@@ -1516,9 +1516,10 @@ class Studio:
     # -- runs --------------------------------------------------------------------------------
 
     def run(self, run_id: str) -> Run:
-        if run_id not in self._runs:
-            raise KeyError(f"no run {run_id!r} (the runs are: {sorted(self._runs)})")
-        return self._runs[run_id]
+        with self.lock:
+            if run_id not in self._runs:
+                raise KeyError(f"no run {run_id!r} (the runs are: {sorted(self._runs)})")
+            return self._runs[run_id]
 
     def trace(self, name: str, record: int = 0, until: Optional[str] = None) -> Dict[str, Any]:
         """Run record ``#record`` of the graph's own source through its stream, pausing before ``until`` — or, for a
@@ -1526,26 +1527,35 @@ class Studio:
         apply). Without a host such a graph is refused in words."""
         if record < 0:
             raise ValueError(f"{name}.yaml: record must be 0 or more, got {record}")
-        document = self.document(name)
-        model = document.model
-        if not model.nodes and model.problems:
-            raise ValueError(model.problems[0].message)
-        stream_node = _fed_stream(model, f"{name}.yaml")
+        # The document is read and built in the editor's turn; drawing the record and the run happen outside it (they
+        # touch only the objects just built, and may take minutes — every other request would wait behind them).
+        with self.lock:
+            document = self.document(name)
+            model = document.model
+            if not model.nodes and model.problems:
+                raise ValueError(model.problems[0].message)
+            stream_node = _fed_stream(model, f"{name}.yaml")
+            if stream_node is None:
+                if self.host is None:
+                    raise ValueError(_no_source(f"{name}.yaml"))
+                graph, prefix = _host_graph(_built(document), document.model, f"{name}.yaml")
+                where = str(document.path) if not prefix else f"{document.path}:{prefix[:-1]}"
+                spelled = self._spelled(document.path)
+            else:
+                built = _built(document)
+                stream = _object_at(built, stream_node.name)
+                if not isinstance(stream, Stream) or stream.source is None:
+                    raise ValueError(_no_source(f"{name}.yaml"))
+                where = f"{document.path}:{stream_node.name}"
+            run_id = self._new_run_id()
         if stream_node is None:
-            if self.host is None:
-                raise ValueError(_no_source(f"{name}.yaml"))
-            return self._host_trace(name, document, until)
-        built = _built(document)
-        stream = _object_at(built, stream_node.name)
-        if not isinstance(stream, Stream) or stream.source is None:
-            raise ValueError(_no_source(f"{name}.yaml"))
+            return self._host_trace(name, run_id, graph, prefix, where, spelled, until)
         drawn = list(itertools.islice(iter(stream.source), record + 1))
         if not drawn:
             raise ValueError(self._empty_source(name, stream_node.name, stream.source, record))
         if len(drawn) <= record:
             raise ValueError(f"{name}.yaml: the source yields only {len(drawn)} records — there is no record #{record}")
-        where = f"{document.path}:{stream_node.name}"
-        run = Run(self._new_run_id(), name, record, Tracer(stream, where=where), f"{stream_node.name}.", where)
+        run = Run(run_id, name, record, Tracer(stream, where=where), f"{stream_node.name}.", where)
         return self._start(run, drawn[record], until)
 
     def _empty_source(self, name: str, stream: str, source: Any, record: int) -> str:  # source: any record source
@@ -1563,18 +1573,18 @@ class Studio:
             f"this graph is not handed to the editor; {remedy}"
         )
 
-    def _host_trace(self, name: str, document: Document, until: Optional[str]) -> Dict[str, Any]:
-        """Run the record the host supplies (:meth:`EditorHost.record`) through the graph as the editor holds it —
-        a ``flow:``'s steps, or the ops of its one ``Stream`` — with the host's fills set on the ops first
-        (:class:`HostRecord`); every node is named as the document names it, so a pause, a step and a rerun work as
-        for a graph's own record."""
+    def _host_trace(
+        self, name: str, run_id: str, graph: Any, prefix: str, where: str, spelled: Path, until: Optional[str]
+    ) -> Dict[str, Any]:  # graph: the built flow or Stream of the document, as `_host_graph` answers it
+        """Run the record the host supplies (:meth:`EditorHost.record`) through ``graph`` — built from the document
+        as the editor holds it (:meth:`trace`): a ``flow:``'s steps, or the ops of its one ``Stream`` — with the host's
+        fills set on the ops first (:class:`HostRecord`); every node is named as the document names it, so a pause, a
+        step and a rerun work as for a graph's own record. Runs outside the editor's turn: the host may take long."""
         assert self.host is not None
-        graph, prefix = _host_graph(_built(document), document.model, f"{name}.yaml")
-        where = str(document.path) if not prefix else f"{document.path}:{prefix[:-1]}"
-        supplied = _host_record(self.host, name, self._spelled(document.path), where)
+        supplied = _host_record(self.host, name, spelled, where)
         filled = _fill(_top_ops(graph, prefix), supplied.fills, where)
         tracer = Tracer(graph, where=where)
-        run = Run(self._new_run_id(), name, None, tracer, prefix, where, {"label": supplied.label, "filled": filled})
+        run = Run(run_id, name, None, tracer, prefix, where, {"label": supplied.label, "filled": filled})
         return self._start(run, dict(supplied.record), until)
 
     def _start(self, run: Run, record: Any, until: Optional[str]) -> Dict[str, Any]:  # record: what the source yields
@@ -1590,10 +1600,13 @@ class Studio:
         ) as exc:  # noqa: BLE001 — a node raised while running (recorded), or the engine refused the graph
             if "error" not in _statuses(tracer).values():
                 raise ValueError(f"{run.where}: {type(exc).__name__}: {exc}") from exc
-        self._runs[run.run_id] = run
+        with self.lock:
+            self._runs[run.run_id] = run
         return run.to_dict()
 
     def rerun(self, run_id: str, node: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Run the node again with ``params`` — the run's own objects, outside the editor's turn (:meth:`run` looks
+        the run up in it)."""
         run = self.run(run_id)
         run.rerun(node, params)
         return run.to_dict()
@@ -1738,6 +1751,16 @@ def _statuses(tracer: Tracer) -> Dict[str, str]:
 # ================================================================================================
 # the blueprint
 # ================================================================================================
+
+#: The editor routes that take no turn (:attr:`Studio.lock`): each waits on something outside the editor — the class
+#: catalogue's helper process (measured 2026-10-13: it hung on a stale lock of a package it imports, and every editor
+#: request waited behind it), a plugin's list (up to ``lookups.TIMEOUT_S``), the HuggingFace Hub — and reads none of
+#: its graphs or documents. A Run (``trace``, ``rerun``) takes the lock itself only while it reads the document and
+#: keeps the run (:meth:`Studio.trace`): a run may take minutes. A route that reads the graph list or a document never
+#: joins.
+TURN_FREE = frozenset(
+    {"palette_route", "class_route", "types", "lookup", "hf_datasets", "hf_features", "hf_splits", "trace", "rerun"}
+)
 
 
 def _studio() -> Studio:
@@ -1894,7 +1917,10 @@ def editor_blueprint(
     @blueprint.before_request
     def _take_turn() -> None:
         """Hold the editor (:attr:`Studio.lock`) for the whole request — registered FIRST, so no other hook reads the
-        editor before it; :func:`_end_turn` lets go. A threaded host serves its panel's requests and its own at once."""
+        editor before it; :func:`_end_turn` lets go. A threaded host serves its panel's requests and its own at once.
+        A request of :data:`TURN_FREE` takes none: it waits on something outside the editor."""
+        if request.endpoint in {f"{EXTENSION}.{endpoint}" for endpoint in TURN_FREE}:
+            return
         _studio().lock.acquire()
         g.streamstudio_turn = True
 

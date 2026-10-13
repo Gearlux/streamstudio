@@ -203,7 +203,11 @@ arch: "A host mounts the editor through three methods"; pins `tests/test_host.py
 - **One request at a time** (2026-10-13): every editor request holds `Studio.lock` (an `RLock`) — `_take_turn`, the
   blueprint's FIRST `before_request`, takes it and `_end_turn` (teardown) lets go, a refusal or a raise included;
   `stash()` takes it. A host that reads, changes and saves a document from its own route holds it across all three.
-  Never take it in `page_blueprint`, and never hold it while waiting on the page. (`tests/test_studio_threads.py`)
+  Never take it in `page_blueprint`, and never hold it while waiting on the page. A route that waits on something
+  OUTSIDE the editor and reads none of its graphs is in `app.TURN_FREE` (the catalogue, a class's settings, `types`,
+  plugin lists, the HuggingFace routes); `trace`/`rerun` are too, and `Studio.trace` takes the lock itself only to read
+  the document and to keep the run — never across the host's `record()` or the run. A new route that reads the graph
+  list or a document never joins `TURN_FREE`. (`tests/test_studio_threads.py`)
   arch: "One editor request at a time".
 - Importing `streamstudio.app` never changes the host's environment.
   (`tests/test_logflow_colorize_default.py::test_a_host_mounting_the_editor_keeps_its_environment_and_its_colors`)

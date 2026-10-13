@@ -1175,7 +1175,10 @@ The Run asked the host for its record and set its fill on `mask` (`Threshold` ha
   ([Unsaved work survives a stop](#unsaved-work-survives-a-stop)); the next mount over that folder offers it, and
   the page asks the same question as the standalone editor.
 - **One request at a time:** the panel's requests and the host's own reach the editor from the threads of one server,
-  so every editor request holds `studio_of(app).lock` from start to answer, and `stash()` takes it too. A route of the
+  so every editor request holds `studio_of(app).lock` from start to answer, and `stash()` takes it too. A request that
+  waits on something outside the editor takes no turn — the class catalogue and a class's settings (a helper process
+  that imports every installed package), a plugin's list, the HuggingFace lookups — and a Run holds it only while it
+  reads the graph: a catalogue that hangs leaves the panel, its saves and the host's own requests working. A route of the
   host's own that reads, changes and saves a document holds it across all three — without it, such a route racing the
   panel's load died with `RuntimeError: dictionary changed size during iteration`:
 
