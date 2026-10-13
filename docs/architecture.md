@@ -2263,3 +2263,43 @@ taker: !class:my_pkg.Taker {rate: !ref:rate}                                   #
 **What you may change.** Which scalars count, the output's doc. What must hold: the type follows what the instance IS,
 never a name or a category; the output keeps the name `object`. Pins: `tests/test_number_wires.py`.
 
+
+## One editor request at a time (`Studio.lock`, `_take_turn`/`_end_turn`, 2026-10-13)
+
+**Context.** A host serves the editor's panel and its own routes from ONE threaded server, and both reach the one
+`Studio`: its graph list (`_paths`, `_shipped`) and its open documents (`_documents`) are plain dicts every request
+reads and rebuilds. Nothing made two requests take turns. Measured on a host's page test (a remembered tool setting
+picked while the settings panel was still loading): about one run in fifteen died in the editor's own scan,
+`RuntimeError: dictionary changed size during iteration` at `Studio._scan`, the panel's `GET /api/graphs` rebuilding the
+list on another thread. A host's read-change-save (`document()`, `set_param`, `save(only="settings")`) can also be cut
+in two by the panel's own save.
+
+**Decision.** One reentrant lock per editor, `Studio.lock`. Every editor request holds it from its first hook to its
+teardown: `_take_turn` is the blueprint's FIRST `before_request`, so no other hook reads the editor before it, and
+`_end_turn` lets go in `teardown_request` — which runs for a refusal (another session's `409`) and a raise alike, and
+only for a request whose turn was taken (`g.streamstudio_turn`). `stash()` takes it, so a stop keeps what a request in
+flight leaves. A host holds the same lock across a read-change-save of its own. Reentrant because a request's save
+tells the host (`saved`), which may ask the editor again on the same thread. Rejected: a lock inside `_scan` and
+`document()` only — the crash goes, but a host's read-change-save and the panel's save still interleave; a lock per
+document — the graph list is shared by all of them, and the ordering between two locks is one more thing to get wrong.
+
+**Consequences.** Editor requests are served one after another, a long Run (`trace`) included: a request arriving
+meanwhile waits for it. The lock order is always the editor's first, then whatever the host takes inside `saved` or
+`folder` — a host never calls into the editor while holding a lock of its own that those callbacks take. The page
+blueprint (static files) takes no lock.
+
+**Example.**
+
+```python
+from streamstudio.app import studio_of
+
+studio = studio_of(app)
+with studio.lock:                       # the panel's request, if one is being served, finishes first
+    document = studio.document("tool_move")
+    document.set_param("mover", "folder", "/data/tier2")
+    studio.save("tool_move", only="settings")
+```
+
+**What you may change.** Where the turn is taken (a decorator per route instead of the hooks), the lock's kind if a
+reentrant call goes away. What must hold: no editor request reads the editor without the lock; a refusal and a raise let
+go of it; a host's read-change-save is one turn. Pins: `tests/test_studio_threads.py`.

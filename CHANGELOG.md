@@ -172,6 +172,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **A host's own request no longer races the editor's.** A host serving its panel and its own routes from one threaded
+  server could reach the editor twice at once; a settings pick landing while the panel loaded died with
+  `RuntimeError: dictionary changed size during iteration` (about one run in fifteen of a host's page test). Every
+  editor request now holds `studio_of(app).lock` until it is answered, `stash()` waits for it, and a host holds it
+  across a read-change-save of its own (`with studio_of(app).lock: …`).
 - **A graph opened for the first time no longer draws a card over another.** Within a column a card now starts
   below the card above it — 200 px below that card's top for a card up to 183 px tall (six rows; five on a subgraph
   card, whose bar of inner steps adds 26 px), further for a taller one (its height plus 17 px, on the canvas's 10-px

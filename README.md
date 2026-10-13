@@ -1174,6 +1174,18 @@ The Run asked the host for its record and set its fill on `mask` (`Threshold` ha
 - **`studio_of(app).stash()`** on the host's stop keeps the unsaved work in the host folder's recovery file
   ([Unsaved work survives a stop](#unsaved-work-survives-a-stop)); the next mount over that folder offers it, and
   the page asks the same question as the standalone editor.
+- **One request at a time:** the panel's requests and the host's own reach the editor from the threads of one server,
+  so every editor request holds `studio_of(app).lock` from start to answer, and `stash()` takes it too. A route of the
+  host's own that reads, changes and saves a document holds it across all three — without it, such a route racing the
+  panel's load died with `RuntimeError: dictionary changed size during iteration`:
+
+  ```python
+  studio = studio_of(app)
+  with studio.lock:                     # waits while the panel's request is served
+      document = studio.document("view_fft")
+      document.set_param("fft", "size", 4096)
+      studio.save("view_fft", only="settings")
+  ```
 
 #### The page in the host's panel
 
