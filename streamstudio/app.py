@@ -68,6 +68,7 @@ import os
 import re
 import secrets
 import sys
+import threading
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -90,7 +91,7 @@ from typing import (
 )
 
 import yaml
-from flask import Blueprint, Flask, Response, abort, current_app, jsonify, request, send_from_directory
+from flask import Blueprint, Flask, Response, abort, current_app, g, jsonify, request, send_from_directory
 from loggair import get_logger
 from recordstream.core.stream import Stream
 from recordstream.flow import FlowGraph, Tracer
@@ -659,6 +660,13 @@ class Studio:
         # (:data:`SESSION_HEADER`): a page of an earlier editor on this port — a tab left open across a restart — is
         # told so instead of editing a document it never saw.
         self.session = secrets.token_hex(8)
+        # Whose turn it is: every editor request holds it from its first hook to its teardown (editor_blueprint), and a
+        # host that reads, changes and saves a document from a route of its own holds it across all three. A host's
+        # page serves the editor's panel and the host's routes from a THREADED server, so two requests reach this one
+        # Studio at once — measured before 2026-10-13: a host's history pick racing the panel's load died in `_scan`,
+        # "dictionary changed size during iteration". Reentrant: a request's own `save` tells the host, which may ask
+        # the editor again on the same thread.
+        self.lock = threading.RLock()
         self._paths: Dict[str, Path] = {}
         self._documents: Dict[str, Document] = {}
         self._runs: Dict[str, Run] = {}
@@ -1165,7 +1173,13 @@ class Studio:
         one that cannot be read is moved aside first. The read-merge-write runs under the folder's lock
         (:func:`_folder_lock`), through a file of this stop's own (:func:`_writing_name`) renamed over the old one:
         two editors stopped at once keep both their work, and a stop cut short leaves no half-written file. A kill -9
-        or a crash cannot write it — there is no periodic autosave."""
+        or a crash cannot write it — there is no periodic autosave. Waits for a request being served (:attr:`lock`): it
+        keeps what that request leaves, never half of it."""
+        with self.lock:
+            return self._stash()
+
+    def _stash(self) -> List[str]:
+        """:meth:`stash`, run while :attr:`lock` is held."""
         self.follow()  # a host's folder that moved since the last request: keep the work where the host now is
         now = datetime.now().astimezone().isoformat(timespec="seconds")
         entries = [
@@ -1876,6 +1890,20 @@ def editor_blueprint(
         operations that touch the disk refuse in their own located words first; this catches what they do not."""
         where = f"{exc.filename}: " if exc.filename else ""
         return _error(f"{where}{exc.strerror or exc}", 400)
+
+    @blueprint.before_request
+    def _take_turn() -> None:
+        """Hold the editor (:attr:`Studio.lock`) for the whole request — registered FIRST, so no other hook reads the
+        editor before it; :func:`_end_turn` lets go. A threaded host serves its panel's requests and its own at once."""
+        _studio().lock.acquire()
+        g.streamstudio_turn = True
+
+    @blueprint.teardown_request
+    def _end_turn(exc: Optional[BaseException]) -> None:
+        """Let go of the editor after the answer — a refusal and a raise included (teardown runs for every request
+        whose turn :func:`_take_turn` took, and only for those)."""
+        if g.pop("streamstudio_turn", False):
+            _studio().lock.release()
 
     @blueprint.before_request
     def _same_session() -> Optional[Tuple[Response, int]]:

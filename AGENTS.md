@@ -200,6 +200,11 @@ arch: "A host mounts the editor through three methods"; pins `tests/test_host.py
   (`Studio._spelled`).
 - A document holding nothing unsaved is re-read when its file changed on disk; a dirty one never is.
 - The host's stop calls `studio_of(app).stash()`.
+- **One request at a time** (2026-10-13): every editor request holds `Studio.lock` (an `RLock`) — `_take_turn`, the
+  blueprint's FIRST `before_request`, takes it and `_end_turn` (teardown) lets go, a refusal or a raise included;
+  `stash()` takes it. A host that reads, changes and saves a document from its own route holds it across all three.
+  Never take it in `page_blueprint`, and never hold it while waiting on the page. (`tests/test_studio_threads.py`)
+  arch: "One editor request at a time".
 - Importing `streamstudio.app` never changes the host's environment.
   (`tests/test_logflow_colorize_default.py::test_a_host_mounting_the_editor_keeps_its_environment_and_its_colors`)
 
