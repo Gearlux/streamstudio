@@ -2283,8 +2283,17 @@ tells the host (`saved`), which may ask the editor again on the same thread. Rej
 `document()` only — the crash goes, but a host's read-change-save and the panel's save still interleave; a lock per
 document — the graph list is shared by all of them, and the ordering between two locks is one more thing to get wrong.
 
-**Consequences.** Editor requests are served one after another, a long Run (`trace`) included: a request arriving
-meanwhile waits for it. The lock order is always the editor's first, then whatever the host takes inside `saved` or
+**Update 2026-10-13 (same day) — a request that waits outside the editor takes no turn.** The catalogue's helper
+process imports every installed package; one of them waited forever on a stale torch extension lock, and
+`GET /api/palette` waited for the helper HOLDING the lock — every other editor request (the settings panel, a host's
+knob save, a tool run, a history pick) hung behind it, where before the lock they had kept working. So the routes that
+wait on something outside the editor and read none of its graphs — the catalogue, a class's settings, `types`, plugin
+lists, the HuggingFace routes — are `TURN_FREE` and take no turn; a Run (`trace`, `rerun`) is too, and `Studio.trace`
+takes the lock itself only to read and build the document and to keep the run, never across the host's `record()` or
+the run itself.
+
+**Consequences.** Editor requests that read the graph list or a document are served one after another; a Run's long
+part, the catalogue and the lookups run beside them. The lock order is always the editor's first, then whatever the host takes inside `saved` or
 `folder` — a host never calls into the editor while holding a lock of its own that those callbacks take. The page
 blueprint (static files) takes no lock.
 
@@ -2301,5 +2310,6 @@ with studio.lock:                       # the panel's request, if one is being s
 ```
 
 **What you may change.** Where the turn is taken (a decorator per route instead of the hooks), the lock's kind if a
-reentrant call goes away. What must hold: no editor request reads the editor without the lock; a refusal and a raise let
-go of it; a host's read-change-save is one turn. Pins: `tests/test_studio_threads.py`.
+reentrant call goes away, which waits are `TURN_FREE`. What must hold: no editor request reads the graph list or a
+document without the lock; nothing waits on a process, a plugin or the network while holding it; a refusal and a raise
+let go of it; a host's read-change-save is one turn. Pins: `tests/test_studio_threads.py`.

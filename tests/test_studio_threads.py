@@ -17,6 +17,9 @@ from typing import Any, Dict, List, Mapping, Tuple
 import pytest
 from test_host import PANE_TEXT, PREFIX, FakeHost, host_app
 
+import streamstudio
+import streamstudio.app as app_module
+from streamstudio import catalogue as catalogue_module
 from streamstudio.app import SESSION_HEADER, studio_of
 
 #: How long a test waits to see that a request does NOT get in: it either is let in (the test fails at once), or the
@@ -158,3 +161,167 @@ class TestTheLockIsLetGo:
             own = _thread("own", _request, app, answers, "/api/workspace")
             own.join(FINISH)
         assert answers == {"own": 200}
+
+
+#: How long a stalled call in the tests below stalls before it gives up — a request that waits behind it (the defect)
+#: finishes only after this, by which time the stalled request has finished too.
+STALL = 5.0
+
+
+class Stall:
+    """A stand-in for a slow call (the catalogue helper, a plugin's list, the host's record): it says it was entered,
+    then waits for :attr:`release` (at most :data:`STALL`) and answers ``value``."""
+
+    def __init__(self, value: Any) -> None:
+        self.value = value
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        self.entered.set()
+        self.release.wait(STALL)
+        return self.value
+
+
+def _while_stalled(app: Any, stall: Stall, method: str, url: str) -> Tuple[bool, Dict[str, int]]:
+    """Send ``method url`` and, while it stalls, ``GET /api/graphs``: answer whether the stalled request was STILL
+    running when the list was answered, and every status."""
+    answers: Dict[str, int] = {}
+
+    def stalled() -> None:
+        client = app.test_client()
+        answer = client.post(url, json={}) if method == "POST" else client.get(url)
+        answers["stalled"] = answer.status_code
+
+    slow = _thread("stalled", stalled)
+    assert stall.entered.wait(FINISH)
+    _thread("list", _request, app, answers).join(FINISH)
+    still_running = slow.is_alive()
+    stall.release.set()
+    slow.join(FINISH)
+    return still_running, answers
+
+
+def _trace(app: Any) -> int:
+    status: int = app.test_client().post(f"{PREFIX}/api/graphs/pane/trace", json={}).status_code
+    return status
+
+
+class TestALongWaitHoldsNoTurn:
+    """Measured 2026-10-13: the class catalogue's helper hung (a stale torch extension lock in a package it imports),
+    and while ``GET /api/palette`` waited for it holding the editor, a host's settings panel, its knob saves, its tool
+    runs and its history picks hung with it. A request that waits on something outside the editor takes no turn."""
+
+    def test_the_catalogue(self, folder: Path, dist: Path, monkeypatch: Any) -> None:
+        stall = Stall([])
+        monkeypatch.setattr(catalogue_module.CATALOGUE, "entries", stall)
+        still_running, answers = _while_stalled(host_app(FakeHost(folder), dist), stall, "GET", f"{PREFIX}/api/palette")
+        assert still_running, "the list waited for the catalogue"
+        assert answers == {"list": 200, "stalled": 200}
+
+    def test_a_classs_settings(self, folder: Path, dist: Path, monkeypatch: Any) -> None:
+        stall = Stall({})
+        monkeypatch.setattr(catalogue_module.CATALOGUE, "spec", stall)
+        url = f"{PREFIX}/api/palette/my_pkg.Thing"
+        still_running, answers = _while_stalled(host_app(FakeHost(folder), dist), stall, "GET", url)
+        assert still_running, "the list waited for a class's settings"
+        assert answers == {"list": 200, "stalled": 200}
+
+    def test_a_plugins_list(self, folder: Path, dist: Path, monkeypatch: Any) -> None:
+        stall = Stall({"names": [], "reason": "stalled"})
+        monkeypatch.setattr(app_module.lookups, "answer", stall)
+        url = f"{PREFIX}/api/lookups/SOME_TAG"
+        still_running, answers = _while_stalled(host_app(FakeHost(folder), dist), stall, "GET", url)
+        assert still_running, "the list waited for a plugin's list"
+        assert answers == {"list": 200, "stalled": 200}
+
+    def test_a_datasets_splits(self, folder: Path, dist: Path, monkeypatch: Any) -> None:
+        stall = Stall([])
+        monkeypatch.setattr(streamstudio, "list_hf_dataset_splits", stall)
+        url = f"{PREFIX}/api/hf/splits?path=some/dataset"
+        still_running, answers = _while_stalled(host_app(FakeHost(folder), dist), stall, "GET", url)
+        assert still_running, "the list waited for the Hub"
+        assert answers == {"list": 200, "stalled": 200}
+
+    def test_the_hosts_record_for_a_run(self, folder: Path, dist: Path, monkeypatch: Any) -> None:
+        host = FakeHost(folder)
+        stall = Stall(None)
+        real = host.record
+
+        def record(graph: str, path: Path) -> Any:
+            stall(graph, path)
+            return real(graph, path)
+
+        monkeypatch.setattr(host, "record", record)
+        url = f"{PREFIX}/api/graphs/pane/trace"
+        still_running, answers = _while_stalled(host_app(host, dist), stall, "POST", url)
+        assert still_running, "the list waited for the host's record"
+        assert answers == {"list": 200, "stalled": 200}
+
+    def test_a_run_itself(self, folder: Path, dist: Path, monkeypatch: Any) -> None:
+        stall = Stall(None)
+        real = app_module.Tracer.run
+
+        def run(tracer: Any, record: Any, **kwargs: Any) -> Any:
+            stall()
+            return real(tracer, record, **kwargs)
+
+        monkeypatch.setattr(app_module.Tracer, "run", run)
+        url = f"{PREFIX}/api/graphs/pane/trace"
+        still_running, answers = _while_stalled(host_app(FakeHost(folder), dist), stall, "POST", url)
+        assert still_running, "the list waited for the run"
+        assert answers == {"list": 200, "stalled": 200}
+
+    def test_a_rerun(self, folder: Path, dist: Path, monkeypatch: Any) -> None:
+        app = host_app(FakeHost(folder), dist)
+        run_id = app.test_client().post(f"{PREFIX}/api/graphs/pane/trace", json={}).get_json()["run"]
+        stall = Stall(None)
+        real = app_module.Run.rerun
+
+        def rerun(run: Any, node: str, params: Any) -> Any:
+            stall()
+            return real(run, node, params)
+
+        monkeypatch.setattr(app_module.Run, "rerun", rerun)
+        url = f"{PREFIX}/api/runs/{run_id}/rerun"
+
+        def stalled() -> None:
+            answer = app.test_client().post(url, json={"node": "gain", "params": {"gain": 3.0}})
+            answers["stalled"] = answer.status_code
+
+        answers: Dict[str, int] = {}
+        slow = _thread("stalled", stalled)
+        assert stall.entered.wait(FINISH)
+        _thread("list", _request, app, answers).join(FINISH)
+        still_running = slow.is_alive()
+        stall.release.set()
+        slow.join(FINISH)
+        assert still_running, "the list waited for the rerun"
+        assert answers == {"list": 200, "stalled": 200}
+
+    def test_CON_a_run_still_reads_the_document_in_its_turn(self, folder: Path, dist: Path) -> None:
+        app = host_app(FakeHost(folder), dist)
+        answers: Dict[str, int] = {}
+        with studio_of(app).lock:
+            run = _thread("run", lambda: answers.update(run=_trace(app)))
+            run.join(ABSENT)
+            assert run.is_alive() and not answers, "the run read the document while the editor was held"
+        run.join(FINISH)
+        assert answers == {"run": 200}
+
+    def test_CON_an_edit_still_takes_its_turn(self, folder: Path, dist: Path) -> None:
+        app = host_app(FakeHost(folder), dist)
+        answers: Dict[str, int] = {}
+        url = f"{PREFIX}/api/graphs/pane/param"
+        body = {"node": "gain", "param": "gain", "value": 3.0}
+        with studio_of(app).lock:
+            edit = _thread("edit", lambda: answers.update(edit=app.test_client().post(url, json=body).status_code))
+            edit.join(ABSENT)
+            assert edit.is_alive() and not answers, "the edit changed the document while the editor was held"
+        edit.join(FINISH)
+        assert answers == {"edit": 200}
+
+    def test_every_turn_free_name_is_a_route_of_the_editor(self, folder: Path, dist: Path) -> None:
+        """A route renamed without its entry here would take the turn again, silently."""
+        endpoints = {rule.endpoint for rule in host_app(FakeHost(folder), dist).url_map.iter_rules()}
+        assert {f"streamstudio.{name}" for name in app_module.TURN_FREE} <= endpoints
