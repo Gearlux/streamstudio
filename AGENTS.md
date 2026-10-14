@@ -6,19 +6,15 @@ rewrite's scope and decisions in [`docs/rewrite.md`](docs/rewrite.md) (§N), usa
 
 ## Current state
 
-A graph editor for recordstream pipelines written as confluid YAML. Two editors behind one CLI, mid-rewrite:
+A graph editor for recordstream pipelines written as confluid YAML (bare `streamstudio <folder>`, port 8190): a Flask
+app (`app.py`) with a React Flow page (`frontend/`) over the YAML document (`document.py`, `_yamltext.py`), the class
+catalogue (`palette.py`, `catalogue.py`), the layout sidecar (`layout.py`), a graph's settings file (`settings.py`),
+plugin lists (`lookups.py`) and the page build (`page.py`). A host app can mount it (`editor_blueprint(host=…)`).
 
-- **The canvas editor** (bare `streamstudio <folder>`, port 8190) — the future. A Flask app (`app.py`) with a React
-  Flow page (`frontend/`) over the YAML document (`document.py`, `_yamltext.py`), the class catalogue (`palette.py`),
-  the layout sidecar (`layout.py`) and the page build (`page.py`). A host app can mount it (`editor_blueprint(host=…)`).
-- **The ComfyUI editor** (`streamstudio --editor comfy`, port 8188) — `bridge.py`, `nodes.py`, `export.py`,
-  `graphio.py`, `custom_nodes.py`, `config.default.yaml`, `web/*.js` and the ComfyUI half of `__init__.py`. It is
-  deleted in phase 4 step 3, which the user has deferred. Until then its rules are live; they are all under the last
-  heading so the deletion removes one section.
-
-Landed: phases 0–3, 3b–3d, phase 4 steps 1 and 2 (a consuming workspace mounts the canvas editor and runs the YAML).
-Next: phase 4 step 3, then phase 5 (agent tools; root `TASKS.md`). Version `0.1.0a1`, not yet on PyPI (root
-`TASKS.md` "Publish streamstudio 0.1.0a1"); the repository is private.
+Landed: phases 0–4 (`docs/rewrite.md`); the ComfyUI editor was deleted 2026-10-14, before the first release (user
+decision) — no module, test, command or document of it remains. Next: phase 5 (agent tools; root `TASKS.md`). Version
+`0.1.0a1`, not yet on PyPI (root `TASKS.md` "Publish streamstudio 0.1.0a1"); the repository stays private (user
+decision 2026-10-14).
 
 Invariants:
 - **The YAML document is the only truth** (§0); the canvas is a drawing of it.
@@ -26,7 +22,6 @@ Invariants:
   class names; the contract refuses a slot named after a parameter of any class the graph uses. (recordstream
   `tests/test_graph_contract.py::TestTheClassVocabulary`, `::TestSlotNamesAreNotParameters`;
   `tests/test_document.py::TestDerive::test_a_contract_root_has_an_input_per_output_slot_and_the_delivered_wires`)
-- **Nothing new builds on the ComfyUI code**, and the canvas editor never reaches into it.
 
 ## The document
 
@@ -45,7 +40,7 @@ Invariants:
   operation, and its undo/redo re-keys the CURRENT positions back. (`tests/test_document.py::TestHistory`)
 - **Sockets come from recordstream and confluid only** (`algorithm_spec`, an op's
   `consumes`/`produces`/`flags`/`reports`, `confluid.input_specs`/`output_specs`/`to_pydantic`, `GraphContract`, the
-  `recordstream.items` registry) — never from `bridge`'s socket vocabulary.
+  `recordstream.items` registry).
 - **A value node's `object` output carries the scalar its class IS** (`bool`, `int`, `float`, `str`, in that order —
   a bool is an int), else `object` (`palette._built_socket`, `document._socket_of_built`: one rule, two tables, change
   both); so a number node (recordstream's `Quantity`) is wired into a number setting and saved `<param>: !ref:<P>`
@@ -137,9 +132,9 @@ Invariants:
   is (it stops a host loading the graph; next section). The page narrows to the
   `app:` fields — a graph without an `app:` block shows none and says so — until *all parameters* is ticked.
   (`tests/test_app_form.py`, `frontend/src/__tests__/settings.test.ts`)
-- **Pickers are derived in `palette.picker_of`** (a stamp, then the HuggingFace names, then file/folder names) —
-  never imported from `bridge`. The HuggingFace lookups are called through the package at call time so tests patch
-  them; no test touches the network. (`tests/test_pickers.py`)
+- **Pickers are derived in `palette.picker_of`** (a stamp, then the HuggingFace names, then file/folder names). The
+  HuggingFace lookups are called through the package at call time so tests patch them; no test touches the network.
+  (`tests/test_pickers.py`)
 - **A plugin's LIST beside a stamped field** (`lookups.py`, 2026-10-08): a `streamstudio.plugins` module's `LOOKUPS =
   {tag: fn(values) -> (names, reason)}`; the palette marks a stamped field whose tag a plugin lists `lookup: true`
   beside its `picker` (a built-in picker kind never), and `GET /api/lookups/<tag>` answers `lookups.answer` — NEVER an
@@ -151,10 +146,9 @@ Invariants:
   arch: "A plugin supplies the list beside a field".
 - `POST …/slot` replaces one slot's value as one edit; a list slot or a typed parameter is refused.
   (`tests/test_app_slot.py`)
-- The canvas modules import neither navigaitor, nor annotaide, nor ComfyUI. The canvas editor's tests use synthetic
-  documents only — a graph SHAPED like a domain's (`test_canvas.py`'s `PANE_SHAPED_TEXT`), never the domain's file; a
-  domain's shipped graphs are pinned in that domain's own suite. Only the ComfyUI editor's tests still read one, until
-  phase 4 step 3 deletes them (user ruling 2026-10-08).
+- The package imports neither navigaitor nor annotaide nor any domain package. Its tests use synthetic documents
+  only — a graph SHAPED like a domain's (`test_canvas.py`'s `PANE_SHAPED_TEXT`), never the domain's file; a domain's
+  shipped graphs are pinned in that domain's own suite (user ruling 2026-10-08).
 
 ## A graph's settings file (`settings.py`, user design 2026-10-05)
 
@@ -349,28 +343,29 @@ arch: "A host mounts the editor through three methods"; pins `tests/test_host.py
 
 ## The CLI
 
-- One CLI, two editors: `--editor canvas|comfy` (`EditorName`, `EDITOR_PORTS`). An option of the other editor is
-  refused by name, never ignored. Folders are resolved to absolute paths once, in the CLI; `restart` checks the folder
-  before it stops anything. Every command a message prints must parse back. A consumer that needs ComfyUI names
-  `--editor comfy`. (`tests/test_cli_editor.py`) arch: "One CLI serves two editors".
+- Three commands — `run` (the default), `stop`, `restart` — and one default port, `EDITOR_PORT` 8190. There is no
+  `--editor` and no second editor (deleted 2026-10-14): do not add a launcher, a converter command or a second
+  server to this CLI. Folders are resolved to absolute paths once, in the CLI; `restart` checks the folder before it
+  stops anything. Every command a message prints must parse back. No help text names the removed editor or the
+  workspace. (`tests/test_cli_editor.py::TestTheCommands`, `::TestWhatTheCliSaysAboutItself`)
 - `stop`/`restart` target the process LISTENING on the port (`_studio_process`), never the launcher and never a pid
   file; stop with `terminate()` plus a deterministic `wait`, never sleep-and-recheck. (`tests/test_cli_restart.py`)
   arch: "The studio is addressed by its PORT".
 - A taken port is refused BEFORE any work: the probe binds with `SO_REUSEADDR`, the address is printed bare with
-  `print()` (clickable), and the suggested `--port N+1` command parses back. `tests/test_cli.py` keeps its autouse
-  `_port_always_free` fixture. (`tests/test_cli_port.py`)
+  `print()` (clickable), and the suggested `--port N+1` command parses back. (`tests/test_cli_port.py`,
+  `tests/test_cli_editor.py::TestServingTheCanvas`)
 - The CLI is a liquifai app (`streamstudio.cli:app`, `strict_flags=True` — every command takes plain values, so a
-  flag that reaches nothing is an error). Do not restore argparse spellings: booleans are `--x-`, a repeatable option
-  is a list literal, `-c`/`-s`/`-d`/`-h` are liquifai's, the palette file flag is `--palette-config`. Command bodies
-  coerce the string values themselves (`_as_list` for a repeatable option), and a default that depends on the home
-  directory is computed in the body (`default_comfy_dir()`), never in the signature. (`tests/test_cli.py`)
+  flag that reaches nothing is an error, refused before anything runs or stops). Do not restore argparse spellings:
+  `-c`/`-s`/`-d`/`-h` are liquifai's, `-p` is `--port`. Command bodies coerce the string values themselves, and a
+  default that depends on the home directory is computed in the body (`app.default_templates_dir()`), never in the
+  signature. (`tests/test_cli_editor.py::TestTheCommands::test_an_option_no_command_has_is_refused_before_anything_is_served`)
 - `python -m streamstudio.cli` does not start from the workspace root (the `liquifai/` folder shadows the package);
   root `TASKS.md`.
 
 ## Packaging and discovery
 
-- **Never hand-define a node, op or visualizer here.** A missing op or rendering helper goes to recordstream or
-  waivefront; the editor shows what discovery finds.
+- **Never hand-define an op, a source or a visualizer here.** A missing one goes to recordstream or the domain package
+  that owns it; the editor shows what the installed packages declare.
 - Discovery reads INSTALLED entry-point metadata: after changing a `confluid.configurables` (or `streamstudio.*`)
   entry point, reinstall that editable (`uv pip install -e ./<pkg> --no-deps`, or `aisland setup`) — never
   `--reinstall`/`--force-reinstall`.
@@ -381,137 +376,14 @@ arch: "A host mounts the editor through three methods"; pins `tests/test_host.py
 - **No package that depends on streamstudio is one of its dependencies** — not even in an extra, not through another
   package (user ruling 2026-10-08: a domain depends on the editor, never the reverse). The walk reads INSTALLED
   metadata: reinstall a stale editable before trusting a pass. (`tests/test_dependencies.py`)
-- Every file under `web/`, every file of the built page `canvas/` (never a `.map`), `config.default.yaml` and
-  `py.typed` are in `package-data`; `MANIFEST.in` ships the CHANGELOG.
-  (`tests/test_packaging.py::test_every_web_asset_is_shipped`,
-  `::test_every_file_of_the_built_page_is_shipped_and_no_source_map`,
+- Every file of the built page `canvas/` (never a `.map`) and `py.typed` are in `package-data`; `MANIFEST.in` ships the
+  CHANGELOG. (`tests/test_packaging.py::test_every_file_of_the_built_page_is_shipped_and_no_source_map`,
   `::test_the_wheel_built_from_a_checkout_serves_the_page`, `::test_the_declared_package_data_files_exist`,
   `::test_the_changelog_is_shipped_in_the_sdist`)
 - The package speaks its own name only. (`tests/test_packaging.py::test_no_superseded_project_name_in_shipped_code`)
-
-## ComfyUI editor (removed in phase 4 step 3)
-
-Everything below goes with `bridge.py`, `nodes.py`, `export.py`, `graphio.py`, `web/` and `--editor comfy`. Nothing
-new builds on it. *(unpinned)* marks a rule whose tests went with `tests/test_bridge.py`, `test_nodes.py`,
-`test_export.py` and `test_graphio.py` (deleted 2026-07-23).
-
-**Shape and launch**
-- It is a ComfyUI custom-node extension, never a server, executor or frontend of its own: the CLI clones ComfyUI to
-  `~/.streamstudio/ComfyUI`, symlinks the package into `custom_nodes/`, and runs `main.py` under the active
-  interpreter.
-- The package root is lazy about this half: `import streamstudio.app` imports no ComfyUI module and no torch; the
-  mappings are made on first read (PEP 562) or at import inside ComfyUI. A test that patches a ComfyUI name reads
-  `streamstudio.NODE_CLASS_MAPPINGS` first. (`tests/test_lazy_package.py`) arch: "The package root is lazy".
-- `force_no_color()` runs only on the ComfyUI path — at the top of `__init__` when `server` is imported, at the start
-  of `_load_comfy()`, and again after node discovery; never unconditionally. Keep the E402 ignore in BOTH
-  `streamstudio/setup.cfg` and the root `.flake8`. (`tests/test_logflow_colorize_default.py`)
-- The launcher seeds custom nodes from three tiers, deduped declared → `STREAMSTUDIO_CUSTOM_NODES` → `--custom-node`;
-  it never updates an existing node; one node's clone or pip failure never blocks the launch; ComfyUI's own
-  requirements are synced on every run (`--install-` skips). `restart` re-runs `_run` whole. (`tests/test_cli.py`)
-- `--default-nodes-` and `--only-taidal-nodes` are read only through `hide_default_comfy_nodes()` /
-  `only_taidal_nodes()` / `node_root()`; the keep-list lives in the palette config file, not an env var.
-  (`tests/test_init_discovery.py::test_prune_default_comfy_nodes_spares_keep_list`,
-  `tests/test_cli.py::test_main_only_taidal_nodes_exports_both_envs`)
-- `web/empty_default_graph.js` swaps ComfyUI's Stable-Diffusion default graph for a blank one, by object identity.
-
-**Discovery**
-- Nodes come only from `confluid.configurables` entry points; a class becomes a node only if its category is in
-  `_NODE_CATEGORIES`, or it is a runnable or a role/`lazy` member. A missing node is fixed by tagging the class
-  upstream, never by special-casing the bridge.
-- A second pass reads each module's `__all__` (re-exported classes and registered builder functions).
-- Discovery is one-shot per process (the package is imported under two identities).
-  (`tests/test_init_discovery.py::test_discover_is_one_shot_per_process`)
-- A module that fails to scan is skipped at `debug`; a declared plugin that fails is a `warning`.
-  (`tests/test_init_discovery.py::test_discover_skips_failing_module_at_debug_level`, `tests/test_plugin_discovery.py`)
-- Plugins: a `streamstudio.plugins` entry point names a module with `ROUTES` and `WEB_DIRECTORY`, registered at import
-  time. Vendor integrations are plugins, never bridge special cases. arch: "The plugin seam".
-
-**Node shapes and keys**
-- Where a class carries a category that names its shape (`model`, `engine`), the CATEGORY decides; structural probes
-  only for untagged callables. The dispatch order in `create_comfy_node` is load-bearing.
-  (`tests/test_engine_source_nodes.py`, `tests/test_model_node.py`) arch: "Node-shape classification".
-- An op is the `@configurable(category="op")` tag with its `__call__` resolved through the MRO — never an annotation
-  sniff. *(unpinned)*
-- Node keys are `_node_key` (`Taidal_<package>_<category>[_<group>]_<callable>`), globally unique. Display names are
-  verbatim (`__taidal_display_name__` may override), `_`-prefixed callables are hidden, and the palette path groups
-  by role/task or category with a `[PKG]` label tag. *(unpinned)*
-
-**Parameters and coercion** *(unpinned)*
-- `_map_type` classifies the RESOLVED type structurally — never by substring. Stringized annotations are resolved
-  first. Only a 2-element or variadic numeric tuple is a `__lo`/`__hi` range.
-- A nested container rides a `RECORDSTREAM_VALUE` socket fed by a Value node; a document literal for it is imported
-  as a Value node. (`tests/test_value_literal.py`)
-- Every INT/FLOAT widget carries full-range `min`/`max` (the frontend clamps to `[0, 2048]` otherwise); an
-  `Interval` mark narrows it. A `Literal` is a combo enumerated from the annotation.
-- `Optional[X] = None` renders a blank "use the default" widget (a three-state combo for a bool, a blank first entry
-  for a `Literal`) — never a forced value. A nullable numeric is a blank STRING whose converted socket accepts a
-  numeric wire (`web/nullable_numeric_socket.js` plus the backend validator — both are required).
-- `_coerce_kwargs`: a `Union` with a bare `str`/`int` arm is never comma-split; `"()"` decodes to `()` (a `("()",)`
-  is truthy and silently overrode metadata); containers decode from JSON, Python literals, or comma strings.
-- Tooltips come from the docstring `Args:`; widget kinds from the `__taidal_widget_params__` stamp.
-  (`tests/test_model_node.py::test_stamped_widget_param_is_tagged`)
-- HuggingFace pickers are gated on the `HuggingFace*` class name; `split` there is free text, distinct from
-  `DatasetSplit.split`. A picker keyed off another widget refreshes in `onConfigure`; `hf_dataset_chooser.js` has no
-  such hook. (`tests/test_hf_choosers.py`)
-
-**Sockets**
-- Object sockets are role-qualified and task-agnostic (`RECORDSTREAM_OBJECT:<role>`); the object-node output side and
-  the runnable-slot input side agree on `_QUALIFIED_OBJECT_ROLES`. Retag is the visible escape hatch.
-- An object socket also claims its engine inside a comma union with the bare role: exclusion requires two claims.
-  The backend validator and `web/framework.js` apply the same predicate, and `_fallback_compatible` implements the
-  comma-union intersection. (`tests/test_framework_sockets.py`)
-- A wired-`Any` op parameter named after a strict slot role gets that role's socket. (`tests/test_value_node_wiring.py`)
-- The record socket stays the generic `RECORDSTREAM_RECORD`. Item types get derived `RECORDSTREAM_ITEM_<NAME>`
-  sockets and a generated `<Item> Type` family, built after discovery; outputs are APPENDED, never inserted (saved
-  canvases address outputs by position). (`tests/test_contract_pipeline.py::TestItemSocketTypes`, `::TestTheItemTypeNodeFamily`)
-- Optional sockets are marked by `web/optional_inputs.js`, cosmetically only.
-
-**Runnable, object, value and model nodes**
-- A runnable node runs on execute; it is dual-mode — a node whose output feeds a combinator's runnable slot is built,
-  not run (`_runnable_consumed_as_instance`). (`tests/test_runnable_workflow.py`)
-- Every declared `@output` is a static, wireable socket; a container output is a JSON `STRING`, a path-named output
-  a plain `STRING` (never a picker). There is no results panel.
-  (`tests/test_framework_sockets.py::test_a_container_output_is_still_a_json_string`,
-  `tests/test_model_node.py::test_path_named_output_is_string_socket`)
-- `run_runnable` restores autograd for a runnable declaring `__needs_autograd__` (`tests/test_run_runnable.py`); runs
-  on a worker thread so the interrupt button works; streams output live, stripping ANSI on the widget copy only;
-  drives ComfyUI's progress bar through `set_progress_callback`. All ComfyUI knowledge stays here. *(unpinned except
-  autograd)*
-- Object nodes have two outputs, `instance` and `class`; object-typed constructor params are input sockets, and a
-  list-of-objects param is a `<name>_N` family. *(unpinned)*
-- A no-arg `__call__` class is a value node; a bare-`Any` param on it is wired, and every value node APPENDS an
-  `object` output. A wire into a parameter is folded by building the producer with its own wires resolved.
-  (`tests/test_value_node_wiring.py`, `tests/test_contract_pipeline.py::TestWhatAWireBECOMESInTheDocument`)
-- A `category="model"` class is dispatched before the op check; a `__taidal_model_params__` param is a wired model
-  socket. (`tests/test_model_node.py`)
-- Adapter and viewer nodes in `nodes.py` are glue: the rendering and analysis math lives in recordstream/waivefront.
-
-**Export and import**
-- One compiler per artifact — `export.py` (the `flow:` document) and `graphio.py` (the whole graph) — each shared
-  verbatim by its route, its canvas menu and its CLI command; never fork one. The canvas compiles to `flow:` only;
-  do not reintroduce a linearizing export or context cells. (`tests/test_export_flow.py`)
-- An unregistered `Taidal_*` node refuses the export; a bare ComfyUI node still drops.
-  (`tests/test_missing_node_refusal.py`) arch: "An unregistered `Taidal_*` node is a refusal".
-- A decision is drawn as outcome sockets and `Join branches`, and folded by the one `export.fold_branches`; the
-  canvas never shows `requires`. (`tests/test_branches.py`) arch: "A decision is DRAWN as outcome sockets".
-- A flow document declares its own subgraph boundary — never infer one. (`tests/test_flow_subgraph.py`) arch: "A
-  subgraph boundary is DECLARED".
-- A template's App view is declared in its source `app:` block. arch: "The App view is declared in the source document".
-- *Extract as Op* (`Taidal_SubgraphOp`) compiles its record-ancestor cone from the hidden `PROMPT`; its `record`
-  input stays LAZY — pulling it would run a source-less op chain on `None`. *(lazy input unpinned; the compile:
-  `tests/test_flow_subgraph.py`)*
-- Compiling a subgraph to an op is a COMMAND (`taidal.compileToOp`), never a lifecycle hook; it reports, and is
-  re-runnable. The canvas keeps the shape the user drew (*Build Record*); `export.expand_record_builders` translates
-  it. (`tests/test_stream_op_extension.py`, `tests/test_record_builder.py`)
-- `--as_ pipeline` turns a contract document into a starting canvas with only the `Stream`'s `source` left open.
-  (`tests/test_contract_pipeline.py`)
-
-**Launching a graph (`web/open_graph.js`)**
-- One ComfyUI workflow document per graph (`workflows/taidal/<workspace>/<stem>.json`); the save mirror is
-  path-keyed, `<stem>.app.json` included. A graph already on screen is identified by its document path, never by
-  its node types. (`tests/test_open_graph_mirror.py`) arch: "A graph that is already open".
-- The timing rules in `open_graph.js` (`setup()` never awaits the load; wait on observable state, then verify) are
-  measured — do not simplify them. `taidal_view` sets the face on the workflow object and toggles only on a measured
-  mismatch. (`tests/test_open_graph_mirror.py::TestTheRequestedView`)
-- The preview nodes' record input is lazy and never pulled; a refusal is an image that says why.
-  (`tests/test_preview_nodes.py`) arch: "The App view's Run for a pane graph".
+- **One editor, no torch** (user decision 2026-10-14): no ComfyUI module, `web/` folder, custom-node entry point, or
+  torch/numpy dependency comes back; `import streamstudio.app` imports no torch.
+  (`tests/test_packaging.py::test_the_package_carries_one_editor_and_no_torch`, `tests/test_lazy_package.py`)
+- **The published text — README (the PyPI page), CHANGELOG (in the sdist) and the package description — names neither
+  the private workspace, nor a project that depends on this one, nor the removed editor** (user instruction
+  2026-10-14). (`tests/test_packaging.py::test_the_published_text_names_no_workspace_no_dependent_and_no_removed_editor`)

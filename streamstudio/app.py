@@ -1460,10 +1460,10 @@ class Studio:
     def app_form(self, name: str) -> Dict[str, Any]:
         """The graph's SETTINGS: the fields its ``app:`` block lists — ``{declared, graph, fields, form, problems}``.
 
-        ``app.inputs`` lists ``[Class, param]`` pairs (the ComfyUI editor's App view showed only those); the class is
+        ``app.inputs`` lists ``[Class, param]`` pairs; the class is
         the short or the dotted name of a node's class. ``fields`` is one ``{node, param, loc}`` per node of that
         class, in the block's order (``loc`` is the entry's ``file:line:col``); ``<param>__lo`` / ``<param>__hi`` —
-        the ComfyUI form's two halves of one range — name the ONE field ``<param>``. ``form`` holds those fields in
+        a range written as its two halves — name the ONE field ``<param>``. ``form`` holds those fields in
         :meth:`form`'s shape. An entry naming no node, no parameter of its class, or the gate (``requires``, never a
         field) is a located problem in words — the block is read from the text the editor holds — and so is one
         naming a class two nodes with no name share, which no setting can reach (``streamstudio.settings``): it gives

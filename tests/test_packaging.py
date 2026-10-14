@@ -1,20 +1,16 @@
 """What a built wheel must contain, and what PyPI must accept.
 
-This project's runtime is not only Python: ComfyUI loads the frontend extension from
-``WEB_DIRECTORY`` (``streamstudio/__init__.py``), so ``web/*.js`` is *code*, shipped
-through ``package-data``. An editable install reads it straight from the checkout,
-which is why its absence from the wheel is invisible during development and total in
-production — the package imports, registers its nodes, and has no UI.
+This project's runtime is not only Python: the canvas editor's page is a BUILT folder (``streamstudio/canvas``)
+shipped through ``package-data``. An editable install reads it straight from the checkout, which is why its absence
+from the wheel is invisible during development and total in production — the package imports and serves no page.
 
-The rules below were each written against a measured failure of this project's own
-build; none is a checklist item:
+The rules below were each written against a measured failure of this project's own build; none is a checklist item:
 
-* the wheel held 13 entries and none of the 30 ``web/*.js`` files;
-* ``pip install streamstudio`` into a torch-less environment raised
-  ``ModuleNotFoundError: No module named 'torch'`` from ``nodes.py``, because the
-  module-scope ``import torch`` was declared nowhere;
-* a ``torchsig @ git+https://...`` entry in an extra would have had the upload
-  refused by PyPI after every gate passed.
+* a wheel shipped without the files ``package-data`` had to name;
+* ``pip install streamstudio`` into a clean environment raised ``ModuleNotFoundError`` for a module-scope import
+  that was declared nowhere;
+* a ``torchsig @ git+https://...`` entry in an extra would have had the upload refused by PyPI after every gate
+  passed.
 """
 
 import ast
@@ -111,26 +107,22 @@ def test_no_requirement_is_a_direct_url() -> None:
     assert not direct, f"PyPI rejects direct-URL requirements: {direct}"
 
 
-def test_every_web_asset_is_shipped() -> None:
-    """Every file under ``streamstudio/web/`` matches a ``package-data`` pattern.
+#: The second editor the package no longer carries: its modules, its frontend folder, and what only it needed.
+_REMOVED_MODULES = ("bridge", "nodes", "export", "graphio", "custom_nodes")
 
-    ``web/`` has no ``__init__.py``, so ``packages.find`` skips it and ``package-data``
-    is the only thing that puts it in the wheel. The failure mode is silent and
-    complete: ComfyUI reads ``WEB_DIRECTORY`` off an installed package that has no
-    such directory, and every node renders with default widgets and no extension.
 
-    Stated as "every file is covered" rather than "``web/*.js`` is listed" so that
-    adding a ``.css`` or an icon beside the scripts fails here instead of shipping a
-    half-populated directory.
-    """
-    patterns = _package_data_patterns()
-    unshipped = [
-        str(path.relative_to(_PACKAGE))
-        for path in sorted(_PACKAGE.glob("web/*"))
-        if path.is_file() and not any(fnmatch(str(path.relative_to(_PACKAGE)), pattern) for pattern in patterns)
-    ]
-
-    assert not unshipped, f"web assets missing from package-data {patterns}: {unshipped}"
+def test_the_package_carries_one_editor_and_no_torch() -> None:
+    """The ComfyUI editor was deleted before the first release (user decision 2026-10-14): no module, no ``web/``
+    folder, no node-palette config, no custom-node entry point — and none of torch, numpy, which only it imported
+    (a clean ``pip install streamstudio`` was a 1.0 GB environment, 545 MB of it torch)."""
+    present = [name for name in _REMOVED_MODULES if (_PACKAGE / f"{name}.py").exists()]
+    assert not present, f"modules of the removed editor: {present}"
+    assert not (_PACKAGE / "web").exists() and not (_PACKAGE / "config.default.yaml").exists()
+    assert not [pattern for pattern in _package_data_patterns() if pattern.startswith("web/") or "config" in pattern]
+    assert not {"torch", "numpy"} & _declared_distributions()
+    with _PYPROJECT.open("rb") as fh:
+        entry_points = tomllib.load(fh)["project"].get("entry-points", {})
+    assert "streamstudio.custom_nodes" not in entry_points
 
 
 def test_every_file_of_the_built_page_is_shipped_and_no_source_map() -> None:
@@ -192,7 +184,7 @@ def test_the_wheel_built_from_a_checkout_serves_the_page(tmp_path: Path) -> None
     assert {"streamstudio/canvas/index.html", "streamstudio/canvas/.built-from"} <= set(carried), carried
     assert [name for name in carried if name not in names] == []
     assert [name for name in names if name.endswith(".map")] == []
-    assert [name for name in names if name.startswith("streamstudio/web/")], "the ComfyUI editor's JavaScript too"
+    assert [name for name in names if name.startswith("streamstudio/web/")] == []
 
 
 def test_the_declared_package_data_files_exist() -> None:
@@ -312,6 +304,22 @@ def test_the_changelog_is_shipped_in_the_sdist() -> None:
     missing = [name for name in ("CHANGELOG.md",) if name not in included]
 
     assert not missing, f"MANIFEST.in does not include: {missing}"
+
+
+@pytest.mark.parametrize("word", ["taidal", "waivefront", "comfy"])
+def test_the_published_text_names_no_workspace_no_dependent_and_no_removed_editor(word: str) -> None:
+    """The README is the PyPI page and the CHANGELOG ships in the sdist: neither names the private workspace this
+    package is developed in, a project that depends on it, or the editor deleted before the first release (user
+    decision 2026-10-14). The package's own description is held to the same rule."""
+    texts = {"README.md": _README.read_text(), "CHANGELOG.md": (_REPO / "CHANGELOG.md").read_text()}
+    texts["pyproject.toml description"] = str(_project()["description"])
+    found = [
+        f"{name}:{lineno}: {line.strip()[:80]}"
+        for name, text in texts.items()
+        for lineno, line in enumerate(text.splitlines(), start=1)
+        if word in line.lower()
+    ]
+    assert not found, f"{word!r} in the published text:\n" + "\n".join(found)
 
 
 def test_no_vendor_traces_in_the_repository() -> None:

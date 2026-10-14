@@ -51,8 +51,8 @@ _INPUTS = "inputs"
 _MODE = "graph"
 _FLOW = "flow"
 _OP = "op"
-#: ``<param>__lo`` / ``<param>__hi``: the ComfyUI form's two halves of one range field, which an ``app:`` block may
-#: still name — one field, ``<param>``.
+#: ``<param>__lo`` / ``<param>__hi``: a range field written as its two halves, which an ``app:`` block may name — one
+#: field, ``<param>``.
 _RANGE_HALVES = ("__lo", "__hi")
 
 

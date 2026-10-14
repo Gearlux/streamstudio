@@ -1,13 +1,11 @@
-"""``streamstudio stop`` / ``restart`` — find the studio by the port it holds, signal it, relaunch.
+"""``streamstudio stop`` — find the studio by the port it holds and signal it.
 
-Measured 2026-08-26 on a live studio, and the two facts that shape this:
+Two facts shape this:
 
-* **The launcher is not the server.** ``streamstudio run`` blocks in ``subprocess.run`` while the
-  process that actually holds the port is the ComfyUI it spawned — ``74841 streamstudio run`` ->
-  ``74870 python main.py --port 8189``. Signalling the launcher is the wrong target; the port owner
-  is the thing to stop, and the launcher then exits by itself when its child returns (verified).
-* **SIGTERM is enough.** The port went free **64 ms** after the signal, so the stop is a `terminate()`
-  plus a deterministic `wait()`, never a sleep-and-hope. `kill()` is the escalation for a process
+* **The port owner is the target, never a pid file.** Whatever started the server (a terminal, a host app, a
+  script), the process LISTENING on the port is the one to stop.
+* **SIGTERM is enough.** The port went free **64 ms** after the signal (measured 2026-08-26), so the stop is a
+  `terminate()` plus a deterministic `wait()`, never a sleep-and-hope. `kill()` is the escalation for a process
   that ignores SIGTERM, pinned below with a child that really does ignore it.
 
 The owner is located with a PER-PROCESS psutil scan: the whole-system ``psutil.net_connections()``
@@ -24,8 +22,8 @@ import socket
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Iterator, List, Tuple
-from unittest.mock import MagicMock, patch
+from typing import Iterator, Tuple
+from unittest.mock import patch
 
 import pytest
 
@@ -64,25 +62,6 @@ def _spawn_listener(port: int, *, ignore_sigterm: bool = False) -> subprocess.Po
 
 
 @pytest.fixture(autouse=True)
-def _a_home_of_its_own(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Every test here gets a temporary home, so a ``--background`` launch writes its per-port log
-    (``~/.streamstudio/logs/studio-<port>.log``) there. Measured before 2026-09-30: one run of this file left 3 empty
-    ``studio-<port>.log`` files in the person's real ``~/.streamstudio/logs`` (259 → 262; 262 had piled up). Scoped to
-    THIS file on purpose: the browser tests find headless chromium through the real home."""
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setenv("USERPROFILE", str(home))  # what Path.home() reads on Windows
-    return home
-
-
-def test_a_background_log_of_a_test_lands_in_the_tests_own_home(_a_home_of_its_own: Path) -> None:
-    """The guard for the fixture above: remove it and this fails, instead of the person's logs folder filling up."""
-    assert _a_home_of_its_own in cli.studio_log_path(8188).parents
-    assert Path("~").expanduser() == _a_home_of_its_own
-
-
-@pytest.fixture(autouse=True)
 def _short_question(monkeypatch: pytest.MonkeyPatch) -> None:
     """The listeners never answer the unsaved-work question: wait 0.2 s for that answer, not the 5 s a stop waits."""
     monkeypatch.setattr(cli, "ASK_TIMEOUT", 0.2)
@@ -96,19 +75,6 @@ def listener() -> Iterator[Tuple[int, subprocess.Popen]]:
     if proc.poll() is None:
         proc.kill()
         proc.wait(timeout=10)
-
-
-@pytest.fixture
-def comfy_dir(tmp_path: Path) -> Path:
-    comfy = tmp_path / "ComfyUI"
-    (comfy / "custom_nodes").mkdir(parents=True)
-    (comfy / "requirements.txt").write_text("torch\n")
-    return comfy
-
-
-def _launch_calls(run_mock: MagicMock) -> List[Any]:
-    """The ComfyUI launches among a mock's calls. ``Any`` because mock's call type is private."""
-    return [c for c in run_mock.call_args_list if "main.py" in list(c.args[0])]
 
 
 # --------------------------------------------------------------------------- #
@@ -228,199 +194,3 @@ def test_stop_command_never_launches_anything(
         cli.main()
     run_mock.assert_not_called()
     popen_mock.assert_not_called()
-
-
-# --------------------------------------------------------------------------- #
-# `streamstudio restart`
-# --------------------------------------------------------------------------- #
-
-
-def test_restart_stops_the_running_studio_then_launches(
-    comfy_dir: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """Stop first, then the full launch flow — the freed port is what lets `_run`'s probe pass."""
-    port = _free_port()
-    proc = _spawn_listener(port)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "streamstudio",
-            "--editor",
-            "comfy",
-            "--comfy-dir",
-            str(comfy_dir),
-            "--port",
-            str(port),
-            "--install-",
-            "restart",
-        ],
-    )
-    try:
-        with patch("subprocess.run") as run_mock:
-            cli.main()
-    finally:
-        if proc.poll() is None:  # pragma: no cover - only if the stop regressed
-            proc.kill()
-            proc.wait(timeout=10)
-    assert str(proc.pid) in capsys.readouterr().out
-    launches = _launch_calls(run_mock)
-    assert len(launches) == 1
-    assert list(launches[0].args[0]) == [sys.executable, "main.py", "--port", str(port)]
-
-
-def test_restart_with_nothing_running_still_launches(comfy_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """ "Restart" means "make it running" — an idle port is not an error."""
-    port = _free_port()
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "streamstudio",
-            "--editor",
-            "comfy",
-            "--comfy-dir",
-            str(comfy_dir),
-            "--port",
-            str(port),
-            "--install-",
-            "restart",
-        ],
-    )
-    with patch("subprocess.run") as run_mock:
-        cli.main()
-    assert len(_launch_calls(run_mock)) == 1
-
-
-# --------------------------------------------------------------------------- #
-# Foreground (default) vs --background
-# --------------------------------------------------------------------------- #
-
-
-def test_the_default_launch_blocks_in_the_foreground(comfy_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    port = _free_port()
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        ["streamstudio", "--editor", "comfy", "--comfy-dir", str(comfy_dir), "--port", str(port), "--install-"],
-    )
-    with patch("subprocess.run") as run_mock, patch("subprocess.Popen") as popen_mock:
-        cli.main()
-    assert len(_launch_calls(run_mock)) == 1  # subprocess.run == blocking
-    popen_mock.assert_not_called()
-
-
-def test_background_detaches_and_writes_a_per_port_log(
-    comfy_dir: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    port = _free_port()
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "streamstudio",
-            "--editor",
-            "comfy",
-            "--comfy-dir",
-            str(comfy_dir),
-            "--port",
-            str(port),
-            "--install-",
-            "--background",
-        ],
-    )
-    with patch("subprocess.run") as run_mock, patch("subprocess.Popen") as popen_mock:
-        cli.main()
-    assert _launch_calls(run_mock) == []  # never blocks
-    popen_mock.assert_called_once()
-    assert list(popen_mock.call_args.args[0]) == [sys.executable, "main.py", "--port", str(port)]
-    # Detached from this terminal's session, so it survives the shell that started it.
-    assert popen_mock.call_args.kwargs["start_new_session"] is True
-    out = capsys.readouterr().out
-    assert f"http://{cli.STUDIO_HOST}:{port}" in out
-    assert str(cli.studio_log_path(port)) in out
-
-
-def test_background_is_spelled_in_full(comfy_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """There is no ``--bg`` / ``-b`` alias any more.
-
-    The argparse CLI declared ``--background``/``--bg``/``-b``; liquifai derives every option from
-    the parameter NAME, so a parameter has exactly one spelling (in either hyphen or underscore
-    form). That is the trade the migration made in exchange for per-command help that cannot go
-    stale — and an unknown flag is now REFUSED rather than silently ignored, so a stale ``--bg``
-    in a script fails loudly instead of launching in the foreground.
-    """
-    from liquifai.exceptions import UnknownFlagError
-
-    port = _free_port()
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        ["streamstudio", "-d", "--editor", "comfy", "--comfy-dir", str(comfy_dir), "--port", str(port), "--bg", "run"],
-    )
-    with patch("subprocess.run"), patch("subprocess.Popen"):
-        with pytest.raises(UnknownFlagError) as exc:
-            cli.main()
-    assert "bg" in str(exc.value)
-
-
-def test_the_background_log_is_per_port_and_outside_the_working_directory() -> None:
-    """Two studios must not interleave, and a launcher must never write into the user's cwd."""
-    assert cli.studio_log_path(8188) != cli.studio_log_path(8189)
-    assert Path.cwd() not in cli.studio_log_path(8188).parents
-
-
-def test_the_short_spelling_reaches_background(comfy_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """``-b`` is DECLARED (``short={"b": "background"}``), not derived from the first letter.
-
-    Deriving would have shadowed liquifai's own single-dash globals — ``-c``/``-s``/``-d``/``-h``
-    are config/scope/debug/help — and ``comfy_dir``, ``declared_nodes`` and ``default_nodes`` all
-    start with a letter one of those owns.
-    """
-    port = _free_port()
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "streamstudio",
-            "--editor",
-            "comfy",
-            "--comfy-dir",
-            str(comfy_dir),
-            "-p",
-            str(port),
-            "--install-",
-            "-b",
-            "run",
-        ],
-    )
-    with patch("subprocess.run") as run_mock, patch("subprocess.Popen") as popen_mock:
-        cli.main()
-    assert _launch_calls(run_mock) == []  # -b took effect: detached, never blocking
-    popen_mock.assert_called_once()
-    assert list(popen_mock.call_args.args[0]) == [sys.executable, "main.py", "--port", str(port)]
-
-
-def test_the_short_spelling_works_after_the_command_too(comfy_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The placement that was refused outright before the migration."""
-    port = _free_port()
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "streamstudio",
-            "restart",
-            "--editor",
-            "comfy",
-            "--comfy-dir",
-            str(comfy_dir),
-            "-p",
-            str(port),
-            "--install-",
-            "-b",
-        ],
-    )
-    with patch("subprocess.run"), patch("subprocess.Popen") as popen_mock:
-        cli.main()
-    popen_mock.assert_called_once()
-    assert list(popen_mock.call_args.args[0]) == [sys.executable, "main.py", "--port", str(port)]

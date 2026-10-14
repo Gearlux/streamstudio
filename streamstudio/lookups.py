@@ -2,8 +2,8 @@
 
 A producer stamps one of its parameters with a tag of its own (``__taidal_widget_params__ = {"dataset":
 "SHOP_DATASET"}``, the stamp :func:`streamstudio.palette.picker_of` already reads). Until now the canvas page drew a
-tag it did not know as a plain field. A ``streamstudio.plugins`` module — the plugin seam the ComfyUI editor reads for
-``ROUTES`` and ``WEB_DIRECTORY`` — may now also declare::
+tag it did not know as a plain field. A module an installed package names in the ``streamstudio.plugins`` entry-point
+group may declare::
 
     LOOKUPS = {"SHOP_DATASET": list_shop_datasets}
 
@@ -31,7 +31,7 @@ Listed = Tuple[Sequence[str], str]
 #: A plugin's list function — the node's current values in, ``(names, reason)`` (or the bare names) out.
 LookupFn = Callable[[Mapping[str, str]], Union[Listed, Sequence[str]]]
 
-#: The entry-point group a plugin declares itself in — the one the ComfyUI editor reads for its routes.
+#: The entry-point group a plugin declares itself in.
 PLUGIN_GROUP = "streamstudio.plugins"
 #: The module attribute a plugin's lists are read from.
 LOOKUPS_ATTRIBUTE = "LOOKUPS"
