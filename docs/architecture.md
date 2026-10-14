@@ -1989,7 +1989,11 @@ person made stay in force on the edited copy.
   member) falls back to `<Class>.<param>` only while the class is that node's alone. Measured: a nested
   `flow: {first: {op: …}}` block is merged by confluid by MOVING the step to the end of the flow
   (`from: 'first' does not name an EARLIER step`), and a dotted index into a list is refused
-  (`a dotted write cannot index a list`) — so neither is a spelling.
+  (`a dotted write cannot index a list`) — so neither is a spelling. A parameter ONE node of the drawing alone has
+  may be written bare (`floor_db: -60.0`, 2026-10-14): that is confluid's own broadcast spelling, and measured on two
+  review graphs it built the one step with the value, whether the graph owns its flow or includes it — so the check
+  lets it through where it is exact (`Declared.bare`) and refuses it where two nodes share the parameter, naming the
+  full keys (`Declared.ambiguous`). Nothing is added to confluid.
 - **A line that is none of the graph's settings is refused where it is written.** Confluid by itself warns and ignores
   an unknown key: measured, a misspelt `line_dbb` loaded with a warning and the pane ran the graph's own value. The
   editor's check and `settings.load_graph` (what a host runs) refuse it at its `file:line:col`.

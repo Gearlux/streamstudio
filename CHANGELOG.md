@@ -8,6 +8,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **A setting by its bare parameter name.** A line `floor_db: -60.0` in a settings file is the setting of the one node
+  of the graph that has a `floor_db` parameter — confluid's own broadcast of a bare key reaches exactly that node, so
+  the settings face lets it through where it is exact, and the editor sets such a line in place. A parameter two or
+  more nodes have is refused bare, naming the full keys to write (`level is a parameter of 2 nodes (first, third) — a
+  bare line would set them all; write flow.first.op.level or flow.third.op.level`); a name that is none of the
+  graph's settings is refused as before, the message adding which parameters may be written bare.
 - **A number node feeds a number setting.** A value node whose class IS a number, a whole number, a text or a yes/no (a
   `float` subclass such as recordstream's `Quantity`, `2.5 MSa/s` → 2500000.0) offers its built instance typed so, and
   the canvas editor saves a wire from it into a setting of that type (`samplerate: !ref:rate`). Before, every value

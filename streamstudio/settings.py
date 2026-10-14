@@ -7,6 +7,9 @@ values they change go into ``<graph>.settings.yaml`` beside the graph — never 
     sink.output_dir: /data/out           # a top-level object, by its KEY
     AcfSlice.max_points: 512             # a node with no name (a member of an ops: list), by its CLASS —
                                          # only while that class is used by one node of the graph
+    floor_db: -60.0                      # a parameter ONE node of the graph alone has — bare, confluid's own
+                                         # spelling (its broadcast reaches that one node); a parameter two
+                                         # nodes share is refused naming the full keys to write
 
 The graph and its settings are loaded as ONE document by confluid's own ``include:`` rule — a held, never-written
 document ``include: [<graph>, <settings>]``, so a setting wins over what the graph spells, and every location names
@@ -101,6 +104,9 @@ class Declared(NamedTuple):
         unaddressable: A node's parameter the block names that NO setting can reach — two nodes with no name share its
             class, so a class line would set both — with why, in words.
         problems: ``(message, loc)`` of every entry that names nothing, and of a mode word the graph does not know.
+        bare: Parameter name → the setting's key, for every setting whose parameter ONE node of the graph alone has:
+            written bare (``floor_db: -60.0``), confluid's own broadcast of the key reaches exactly that node.
+        ambiguous: Parameter name → why a bare line is refused, for a declared parameter two or more nodes have.
     """
 
     declared: bool
@@ -108,6 +114,8 @@ class Declared(NamedTuple):
     fields: Tuple[SettingField, ...]
     unaddressable: Mapping[Tuple[str, str], str]
     problems: Tuple[Tuple[str, str], ...]
+    bare: Mapping[str, str] = {}
+    ambiguous: Mapping[str, str] = {}
 
     def field(self, node: str, param: str) -> Optional[SettingField]:
         """The setting of ``node.param``, or ``None`` when it is not one."""
@@ -273,7 +281,32 @@ def declared_settings(text: str, file: Path, nodes: Sequence[SettingNode], *, ga
             fields.append(SettingField(node.name, field_param, f"{head}.{field_param}", loc))
         if shared:
             problems.append((f"{loc}: the app input {spelled} names {shared[0]}", loc))
-    return Declared(True, mode, tuple(fields), unaddressable, tuple(problems))
+    # A parameter ONE node of the whole drawing has may be written bare: confluid broadcasts a bare key to every node
+    # with that parameter, so the bare line is exact only then; shared by two or more, the full keys are the spelling.
+    carriers: Dict[str, List[SettingNode]] = {}
+    for node in classed:
+        for param in node.params:
+            carriers.setdefault(param, []).append(node)
+    bare: Dict[str, str] = {}
+    ambiguous: Dict[str, str] = {}
+    for param, holders in carriers.items():
+        keyed = [field for field in fields if field.param == param]
+        named = [node for node in holders if (node.name, param) in unaddressable]
+        if not keyed and not named:
+            continue  # no app: entry names it: not a setting, bare or not
+        if len(holders) == 1:
+            bare[param] = keyed[0].key
+        else:
+            names = ", ".join(node.name for node in holders)
+            how = (
+                f"write {' or '.join(field.key for field in keyed)}"
+                if keyed
+                else "give them names (flow steps) to set each"
+            )
+            ambiguous[param] = (
+                f"{param} is a parameter of {len(holders)} nodes ({names}) — a bare line would set them all; {how}"
+            )
+    return Declared(True, mode, tuple(fields), unaddressable, tuple(problems), bare, ambiguous)
 
 
 def _first_leaf(node: yaml.Node, path: List[str]) -> Tuple[List[str], Optional[yaml.Node]]:
@@ -315,14 +348,20 @@ def read_settings(
     owners = {field.key.rsplit(".", 1)[0] for field in declared.fields}
     shared = {why.split(" ", 1)[0]: why for why in declared.unaddressable.values()}
     listed = ", ".join(sorted(by_key)) if by_key else "none — it has no app: block naming any"
+    if declared.bare:
+        listed += f" (a parameter one node alone has may be written bare: {', '.join(sorted(declared.bare))})"
     entries: List[Tuple[SettingField, Any]] = []
     problems: List[Tuple[str, str]] = []
 
     def take(key: str, key_node: yaml.Node, value: Any) -> None:  # value: what the line holds, any YAML value
         loc = _at(file, key_node)
         field = by_key.get(key)
+        if field is None and key in declared.bare:
+            field = by_key[declared.bare[key]]
         if field is not None:
             entries.append((field, value))
+        elif key in declared.ambiguous:
+            problems.append((f"{loc}: {declared.ambiguous[key]}", loc))
         elif key.count(".") == 1 and key.split(".")[0] in shared:
             problems.append((f"{loc}: {shared[key.split('.')[0]]}", loc))
         else:
@@ -360,7 +399,7 @@ def set_setting(text: str, field: SettingField, value: Any) -> str:  # value: a 
     yaml_text = YamlText(text)
     root = yaml_text.root if text.strip() else None
     if isinstance(root, yaml.MappingNode):
-        found = YamlText.pair(root, field.key)
+        found = YamlText.pair(root, field.key) or YamlText.pair(root, field.param)  # its full line, or its bare one
         if found is not None:
             return yaml_text.apply([yaml_text.replace_value_edit(found[0], found[1], spelled)])
         block = YamlText.pair(root, owner)
