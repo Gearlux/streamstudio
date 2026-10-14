@@ -1,21 +1,14 @@
-"""``streamstudio`` serves the NEW editor; ``streamstudio --editor comfy`` launches the old ComfyUI one.
+"""``streamstudio`` serves the canvas editor over a folder of graphs; ``stop`` and ``restart`` address it by port.
 
-The user's decision 3 (default taken)::
-
-    streamstudio                    -> the NEW editor (port 8190)
-    streamstudio --editor comfy     -> the OLD ComfyUI editor (port 8188)
-
-``--editor`` is a closed ``Literal`` on ``run`` (the default command), ``stop`` and ``restart``, and the
-port default FOLLOWS it — so ``streamstudio stop`` stops the canvas editor and ``streamstudio stop
---editor comfy`` the ComfyUI one. An option that belongs to the other editor is REFUSED naming it: the
-CLI is ``strict_flags`` because a flag that reaches nothing reached nothing at all, and a ``--comfy-dir``
-given to the canvas editor is exactly that. The ``editor`` verb is gone (pre-1.0: no alias).
+Three commands — ``run`` (the default), ``stop``, ``restart`` — and one default port, 8190. The CLI is
+``strict_flags``: a flag that names no parameter is refused before anything runs or stops, so an option of no
+command here (``--editor``, ``--comfy-dir``) is an error in liquifai's words, never silently ignored.
 
 Every serve is intercepted at ``streamstudio.app.create_app`` — its double holds a REAL ``Studio`` over the folder,
-so the recovery file's start line and the stash on the way out run for real — and every ComfyUI launch at
-``cli._run``, so nothing binds a port; the busy-port probe is exercised against a REAL listening socket. No test
-here asks a port what it holds unsaved (``cli._unsaved_work`` is replaced for the whole file): a bare ``stop``
-means port 8190, where the person's own editor may be running.
+so the recovery file's start line and the stash on the way out run for real — so nothing binds a port; the busy-port
+probe is exercised against a REAL listening socket. No test here asks a port what it holds unsaved
+(``cli._unsaved_work`` is replaced for the whole file): a bare ``stop`` means port 8190, where the person's own editor
+may be running.
 """
 
 import inspect
@@ -26,7 +19,7 @@ import socket
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, get_type_hints
+from typing import Any, Iterator, List
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -89,11 +82,10 @@ def _main(monkeypatch: pytest.MonkeyPatch, *argv: str) -> None:
 # ------------------------------------------------------------------------------------------------
 
 
-class TestTheSwitch:
-    def test_the_editor_is_a_closed_literal_and_the_verb_is_gone(self) -> None:
-        assert cli.EDITORS == ("canvas", "comfy")
-        assert "editor" not in cli.app._commands
-        assert cli.EDITOR_PORT == 8190 and cli.DEFAULT_PORT == 8188
+class TestTheCommands:
+    def test_the_commands_are_run_stop_and_restart_on_port_8190(self) -> None:
+        assert sorted(cli.app._commands) == ["restart", "run", "stop"]
+        assert cli.EDITOR_PORT == 8190
 
     @pytest.mark.parametrize("command", ["run", "stop", "restart"])
     def test_every_parameter_is_documented_for_the_help_liquifai_renders(self, command: str) -> None:
@@ -108,11 +100,10 @@ class TestTheSwitch:
         self, graph_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.chdir(graph_dir)
-        with _serving(graph_dir) as create_app_mock, patch.object(cli, "_run") as run_mock:
+        with _serving(graph_dir) as create_app_mock:
             _main(monkeypatch)
         create_app_mock.assert_called_once_with(Path.cwd(), templates_dir=None)
         create_app_mock.return_value.run.assert_called_once_with(host=cli.STUDIO_HOST, port=cli.EDITOR_PORT)
-        run_mock.assert_not_called()
 
     @pytest.mark.usefixtures("free")
     @pytest.mark.parametrize("command", [[], ["run"]])
@@ -125,99 +116,27 @@ class TestTheSwitch:
         create_app_mock.assert_called_once_with(graph_dir, templates_dir=templates)
         create_app_mock.return_value.run.assert_called_once_with(host=cli.STUDIO_HOST, port=9123)
 
-    @pytest.mark.usefixtures("free")
-    def test_editor_comfy_launches_comfyui_on_8188_with_its_own_defaults(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        with patch.object(cli, "_run") as run_mock, patch("streamstudio.app.create_app") as create_app_mock:
-            _main(monkeypatch, "--editor", "comfy")
-        create_app_mock.assert_not_called()
-        run_mock.assert_called_once_with(
-            comfy_dir=None,
-            port=cli.DEFAULT_PORT,
-            background=False,
-            default_nodes=True,
-            only_taidal_nodes=False,
-            palette_config=None,
-            install=True,
-            manager=True,
-            declared_nodes=True,
-            custom_node=None,
-        )
-
-    @pytest.mark.usefixtures("free")
-    def test_the_comfy_options_reach_the_comfy_launch(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        with patch.object(cli, "_run") as run_mock:
-            _main(
-                monkeypatch,
-                "--editor",
-                "comfy",
-                "--comfy-dir",
-                str(tmp_path),
-                "-p",
-                "9001",
-                "-b",
-                "--install-",
-                "--manager-",
-                "--custom-node",
-                "https://example.invalid/x.git",
-            )
-        kwargs = run_mock.call_args.kwargs
-        assert kwargs["comfy_dir"] == str(tmp_path) and kwargs["port"] == 9001
-        assert (kwargs["background"], kwargs["install"], kwargs["manager"]) == (True, False, False)
-        assert kwargs["custom_node"] == "https://example.invalid/x.git"
-
-    def test_an_unknown_editor_is_refused_naming_the_two(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        with patch("streamstudio.app.create_app") as create_app_mock, patch.object(cli, "_run") as run_mock:
-            with pytest.raises(SystemExit) as exit_info:
-                _main(monkeypatch, "--editor", "litegraph")
-        assert str(exit_info.value) == "--editor must be canvas or comfy — got 'litegraph'"
-        create_app_mock.assert_not_called()
-        run_mock.assert_not_called()
-
-
-# ------------------------------------------------------------------------------------------------
-# an option of the other editor is refused, naming it
-# ------------------------------------------------------------------------------------------------
-
-
-class TestOptionsOfTheOtherEditor:
     @pytest.mark.parametrize(
-        "argv, message",
+        "argv, option",
         [
-            (["--comfy-dir", "/x"], "--comfy-dir only applies to --editor comfy"),
-            (["-b"], "--background only applies to --editor comfy"),
-            (["--install-"], "--install only applies to --editor comfy"),
-            (["--default-nodes-"], "--default-nodes only applies to --editor comfy"),
-            (["--only-taidal-nodes"], "--only-taidal-nodes only applies to --editor comfy"),
-            (["--palette-config", "/p.yaml"], "--palette-config only applies to --editor comfy"),
-            (["--declared-nodes-"], "--declared-nodes only applies to --editor comfy"),
-            (["--custom-node", "u"], "--custom-node only applies to --editor comfy"),
-            (["--comfy-dir", "/x", "--manager-"], "--comfy-dir, --manager only apply to --editor comfy"),
+            (["--editor", "comfy"], "editor"),
+            (["--comfy-dir", "/x"], "comfy-dir"),
+            (["--custom-node", "https://example.invalid/x.git"], "custom-node"),
+            (["--background"], "background"),
         ],
     )
-    def test_a_comfy_option_given_to_the_canvas_editor(
-        self, monkeypatch: pytest.MonkeyPatch, argv: List[str], message: str
+    def test_an_option_no_command_has_is_refused_before_anything_is_served(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], argv: List[str], option: str
     ) -> None:
+        """``strict_flags``: the option reaches nothing, so it is an error — the editor is never started on it."""
         with patch("streamstudio.app.create_app") as create_app_mock:
             with pytest.raises(SystemExit) as exit_info:
                 _main(monkeypatch, *argv)
-        assert str(exit_info.value) == message
+        assert exit_info.value.code == 1
+        captured = capsys.readouterr()
+        said = " ".join((captured.out + captured.err).split())
+        assert f"unknown option '{option.replace('-', '_')}'" in said or f"unknown option '{option}'" in said, said
         create_app_mock.assert_not_called()
-
-    @pytest.mark.parametrize(
-        "argv, message",
-        [
-            (["--templates-dir", "/t"], "--templates-dir only applies to --editor canvas"),
-            (["/some/graphs"], "a graph directory (/some/graphs) only applies to --editor canvas"),
-        ],
-    )
-    def test_a_canvas_option_given_to_the_comfy_editor(
-        self, monkeypatch: pytest.MonkeyPatch, argv: List[str], message: str
-    ) -> None:
-        with patch.object(cli, "_run") as run_mock:
-            with pytest.raises(SystemExit) as exit_info:
-                _main(monkeypatch, *argv, "--editor", "comfy")
-        assert str(exit_info.value) == message
-        run_mock.assert_not_called()
 
 
 # ------------------------------------------------------------------------------------------------
@@ -312,12 +231,11 @@ class TestStopAndRestart:
         "argv, port",
         [
             (["stop"], cli.EDITOR_PORT),
-            (["stop", "--editor", "comfy"], cli.DEFAULT_PORT),
-            (["stop", "--editor", "comfy", "-p", "9002"], 9002),
+            (["stop", "-p", "9002"], 9002),
             (["--port", "9003", "stop"], 9003),
         ],
     )
-    def test_stop_defaults_to_the_editors_port(
+    def test_stop_defaults_to_the_editors_port_and_asks_it_first(
         self, monkeypatch: pytest.MonkeyPatch, argv: List[str], port: int
     ) -> None:
         asked: List[int] = []
@@ -325,12 +243,12 @@ class TestStopAndRestart:
         with patch.object(cli, "_stop_studio", return_value=None) as stop_mock:
             _main(monkeypatch, *argv)
         stop_mock.assert_called_once_with(port)
-        assert asked == ([] if "comfy" in argv else [port])  # a ComfyUI editor is never asked
+        assert asked == [port]
 
-    def test_stop_refuses_an_unknown_editor(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_stop_refuses_an_option_it_does_not_have_and_stops_nothing(self, monkeypatch: pytest.MonkeyPatch) -> None:
         with patch.object(cli, "_stop_studio") as stop_mock:
             with pytest.raises(SystemExit):
-                _main(monkeypatch, "stop", "--editor", "nope")
+                _main(monkeypatch, "stop", "--editor", "comfy")
         stop_mock.assert_not_called()
 
     @pytest.mark.usefixtures("free")
@@ -351,14 +269,6 @@ class TestStopAndRestart:
                 _main(monkeypatch, "restart", str(graph_dir))
         assert calls == [f"stop {cli.EDITOR_PORT}", "serve"]
         create_app_mock.assert_called_once_with(graph_dir, templates_dir=None)
-
-    @pytest.mark.usefixtures("free")
-    def test_restart_of_comfy_stops_8188_then_launches_comfyui(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        with patch.object(cli, "_stop_studio", return_value=None) as stop_mock, patch.object(cli, "_run") as run_mock:
-            _main(monkeypatch, "restart", "--editor", "comfy", "--install-")
-        stop_mock.assert_called_once_with(cli.DEFAULT_PORT)
-        assert run_mock.call_args.kwargs["port"] == cli.DEFAULT_PORT
-        assert run_mock.call_args.kwargs["install"] is False
 
     def test_restart_checks_the_folder_before_stopping_anything(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -405,25 +315,28 @@ class TestStopAndRestart:
             _main(monkeypatch, "restart", str(graph_dir), "--port", "9007")
         create_app_mock.assert_called_once_with(graph_dir, templates_dir=None)
 
-    def test_restart_refuses_an_option_of_the_other_editor_before_stopping_anything(
+    def test_restart_refuses_an_option_it_does_not_have_before_stopping_anything(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        with patch.object(cli, "_stop_studio") as stop_mock:
+        with patch.object(cli, "_stop_studio") as stop_mock, patch("streamstudio.app.create_app") as create_app_mock:
             with pytest.raises(SystemExit) as exit_info:
                 _main(monkeypatch, "restart", "--comfy-dir", "/x")
-        assert str(exit_info.value) == "--comfy-dir only applies to --editor comfy"
+        assert exit_info.value.code == 1
         stop_mock.assert_not_called()
+        create_app_mock.assert_not_called()
 
 
 class TestWhatTheCliSaysAboutItself:
-    def test_the_description_names_the_canvas_default_and_the_comfy_switch(self) -> None:
-        """Measured before: ``streamstudio --help`` opened with "StreamStudio — ComfyUI with the Taidal nodes."."""
-        assert cli.app.description.startswith("StreamStudio — the canvas graph editor (default, port 8190)")
-        assert "--editor comfy" in cli.app.description
+    def test_the_description_names_the_editor_and_its_port(self) -> None:
+        expected = "StreamStudio — a graph editor for YAML pipelines, over a folder of graphs (port 8190)."
+        assert cli.app.description == expected
 
-    def test_the_default_ports_are_keyed_by_the_closed_editor_name(self) -> None:
-        assert get_type_hints(cli)["EDITOR_PORTS"] == Dict[cli.EditorName, int]
-        assert set(cli.EDITOR_PORTS) == set(cli.EDITORS)
+    @pytest.mark.parametrize("word", ["comfy", "taidal"])
+    def test_no_help_text_names_a_removed_editor_or_the_workspace(self, word: str) -> None:
+        """What ``streamstudio --help`` and each command's help render: the app's description, the module docstring
+        and every command's docstring."""
+        texts = [cli.app.description, cli.__doc__ or ""] + [func.__doc__ or "" for func in cli.app._commands.values()]
+        assert not [text for text in texts if word in text.lower()]
 
 
 # ------------------------------------------------------------------------------------------------

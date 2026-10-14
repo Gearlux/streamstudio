@@ -65,7 +65,7 @@ FRONTEND = Path(__file__).resolve().parent.parent / "frontend"
 #: Where a build of the page lands, relative to the page's source folder — ``build.outDir`` in
 #: ``frontend/vite.config.ts`` says the same (``tests/test_committed_page.py`` holds the two together). It is a folder
 #: INSIDE the package, so the built page is committed with it and ``package-data`` carries it into every install. Named
-#: ``canvas``: not ``page`` (this module), not ``web`` (the ComfyUI editor's JavaScript), not ``static`` (Flask serves
+#: ``canvas``: not ``page`` (this module), not ``static`` (Flask serves
 #: a ``static`` folder beside ``app.py`` at ``/static/``), not ``dist``/``build`` (the repository ignores those).
 OUT_DIR = "../streamstudio/canvas"
 

@@ -57,8 +57,8 @@ def test_the_committed_editor_page_was_built_from_its_current_source() -> None:
 
 
 def test_the_page_is_built_into_a_folder_inside_the_package() -> None:
-    """``streamstudio/canvas``: not ``page`` (``streamstudio/page.py`` is the module that checks it), not ``web`` (the
-    ComfyUI editor's JavaScript), not ``static`` (Flask serves a ``static`` folder beside ``app.py`` by default), and
+    """``streamstudio/canvas``: not ``page`` (``streamstudio/page.py`` is the module that checks it), not ``static``
+    (Flask serves a ``static`` folder beside ``app.py`` by default), and
     not ``dist``/``build`` (this repository's ``.gitignore`` drops every folder of those names — they are Python's)."""
     assert page.built_folder() == PACKAGE / "canvas"
     assert page.OUT_DIR == "../streamstudio/canvas"

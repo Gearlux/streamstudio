@@ -5,151 +5,19 @@ user docs. Each record: Context → Decision → Consequences → Example → Wh
 User-facing usage lives in the README; agent-facing rules in `AGENTS.md` — this file answers
 "why does this mechanism exist?".
 
-## The plugin seam: `streamstudio.plugins` + the widget-kind stamp (2026-08-25)
-
-**Context.** StreamStudio is built to ship as a generic package (it is not on PyPI yet), but some node
-producers integrate with private, vendor-specific platforms — a dataset picker backed by a
-credentialed platform API, for example.
-Such an integration needs three things a plain node cannot carry: a backend route on the editor's
-server, a frontend JS extension, and a per-param widget tag telling that JS which field to
-decorate. All three used to be hard-coded here (a guarded vendor import, an inline route, a
-shipped JS file, and a class-NAME gate in `_widget_for`) — publishable code carrying vendor
-knowledge, and a bridge that grew a special case per integration.
-
-**Decision.** Three seams, none naming any consumer:
-
-1. **Widget kinds are a class stamp, not a bridge rule.** `__taidal_widget_params__: Mapping[str,
-   str]` (param name → opaque tag) joins the existing cross-package stamp protocol
-   (`__taidal_display_name__`, `__taidal_op_params__`, `__taidal_op_list_params__`,
-   `__taidal_model_params__`). `_widget_for` reads it via `getattr` FIRST — before the
-   HuggingFace name conventions and before `_map_type`'s path-name rule — and emits a free-text
-   STRING carrying `taidal_widget=<tag>`. No registry: the tag flows verbatim to the frontend,
-   and only the producer's own JS attaches meaning to it.
-2. **Routes and web assets ride a `streamstudio.plugins` entry point** whose value is a module.
-   `ROUTES` (an aiohttp `RouteTableDef`) is merged onto `server.PromptServer.instance.routes` by
-   re-registering each RouteDef with first-wins per-(method, path) dedup — aiohttp has no public
-   table append. `WEB_DIRECTORY` is inserted into ComfyUI's `nodes.EXTENSION_WEB_DIRS` under the
-   plugin's *distribution* name; ComfyUI's `/extensions` listing globs that dict per request and
-   its static routes are added at server start-up, *after* custom nodes (and therefore this
-   package, and therefore plugin discovery) have loaded — which is what makes import-time
-   registration timing-safe, and what serves plugin JS at the same URL depth
-   (`/extensions/<dist>/…`) as any extension, keeping relative `../../scripts/*.js` imports valid.
-3. **Failure isolation is per entry, at warning level** — deliberately louder than the
-   debug-level `confluid.configurables` scan, because a declared plugin is an explicit opt-in and
-   its failure is actionable, while most configurable modules legitimately aren't node modules.
-
-Rejected alternatives: a `taidal_widget` kind *registry* (nothing consumes kinds centrally — a
-registry would be bookkeeping with no reader); making each plugin its own ComfyUI custom-node
-package (requires launcher symlinking and a second discovery mechanism when entry points already
-exist); serving plugin JS from a streamstudio-owned route (breaks the relative-import depth that
-`EXTENSION_WEB_DIRS` preserves for free).
-
-**Consequences.** This package carries zero vendor knowledge and every future platform
-integration is a plugin, not a bridge special-case. The behavior change is deliberate: a class
-whose *name* merely resembles a convention gets no picker any more — only a stamp triggers one.
-Plugins depend on two ComfyUI internals (`PromptServer.instance.routes` before `add_routes()`,
-and the `EXTENSION_WEB_DIRS` dict) that the existing route registration already relied on; if
-ComfyUI moves them, the registrars in `streamstudio/__init__.py` are the single place to adapt.
-
-**Example.** A producer stamps a param and ships the picker beside it:
-
-```python
-@configurable(category="value")
-class PlatformDataset:
-    __taidal_widget_params__ = {"name": "PLATFORM_DATASET_ID"}
-    def __init__(self, name: str = ""): ...
-# _widget_for(name) → ("STRING", {"default": "", "taidal_widget": "PLATFORM_DATASET_ID"})
-```
-
-```toml
-[project.entry-points."streamstudio.plugins"]
-my-plugin = "my_plugin.studio"        # module with ROUTES + WEB_DIRECTORY (see README → Plugins)
-```
-
-**What you may change.** Add module attributes to the plugin contract (keep them optional and
-getattr-read); tighten dedup logging; extend the stamp's value type if a widget ever needs more
-than a tag (do it on the stamp, not with a name rule). Do not reintroduce name-based widget
-gates, per-vendor branches in `_widget_for`, or a second discovery mechanism beside the
-entry-point group.
-
-## Node-shape classification: the category tag outranks the structural probe (2026-08-26)
-
-**Context.** `create_comfy_node` must decide which of the seven node shapes a discovered callable
-becomes. Most of that decision is structural — does the class implement a no-arg `run()`, does its
-`__call__` take a record, does its iteration yield records — which is deliberate: a producer should
-not have to learn a bridge vocabulary to get a sensible node. But structural probes read
-annotations, and an annotation is a promise about a *value*, not a statement about a *role*.
-
-The two collide at the stream engines. A leaf source materialises its own data, so it can honestly
-annotate `__iter__ -> Iterator[Record]`. An engine wraps a source that is duck-typed on purpose —
-"any iterable" — so the only honest annotation it can carry is `Iterator[Any]`. The source probe
-therefore split three siblings that are the same kind of thing: the one whose sub-streams are
-themselves engines kept the `Record` annotation and built a source node; the two that accept an
-arbitrary iterable fell through to the generic builder, where a `source` parameter becomes a text
-widget and the node returns a bare `STRING`.
-
-That failure is silent and total at the canvas. ComfyUI connects two sockets only when their type
-strings are EQUAL, so a source's `RECORDSTREAM_SOURCE` output had nothing to dock into on the engine
-node: dragging the wire simply did nothing, with no error in the log, no failed validation, and no
-diagnostic to grep for. Nothing downstream could detect it either — the graph was well-formed, it
-just could not be drawn.
-
-**Decision.** Where a class carries a `@configurable` category that names its canvas shape, the
-CATEGORY decides and the structural probe is not consulted. `category="model"` already worked this
-way (a model's `__call__` takes a record, so the op probe would otherwise claim it); `category="engine"`
-now does the same for the source probe, via `_is_engine_class`. Structural probes remain the rule for
-UNtagged callables, which is most of the palette.
-
-The producer keeps its honest annotations. The bridge stops inferring a role from a type.
-
-**Consequences.**
-
-- An engine is a source node by definition, not by annotation: its `source` param rides a
-  `RECORDSTREAM_SOURCE` socket, an `ops` param seeds the dynamic `op_N` `RECORDSTREAM_OP` family, and
-  it returns `RECORDSTREAM_SOURCE` — so engines chain into each other and into runnables.
-- A producer cannot lose its node shape by refining a type hint. This is the property the probe
-  lacked, and the reason the regression survived a rename, a data-model migration, and a package
-  split without anyone noticing.
-- The tag is now load-bearing, so an untagged engine-like class is invisible as one. That is the
-  intended trade: the registration allowlist is already category-driven, so a class with no category
-  is not a palette node at all.
-- A structural probe that contradicts a tag is a bug in the probe, not a tie to break at the call
-  site. Do not add a "probe wins when it is more specific" rule.
-
-**Example.**
-
-```python
-@configurable(category="engine")
-class Stream:
-    def __init__(self, source: Optional[Iterable[Any]] = None, ops: Optional[List[Any]] = None): ...
-    def __iter__(self) -> Iterator[Any]: ...      # honest: the source is duck-typed
-
-# probe:  _is_source(Stream) is False           -> generic node, `source` a STRING widget
-# tag:    marks(Stream).category == "engine"    -> source node:
-#   optional: {"source": "RECORDSTREAM_SOURCE", "op_0": "RECORDSTREAM_OP"}
-#   RETURN_TYPES: ("RECORDSTREAM_SOURCE",)   RETURN_NAMES: ("source",)
-```
-
-**What you may change.** Give another category the same treatment when its structural probe cannot
-answer honestly — add a `_is_<category>_class` predicate beside the existing ones and place it in the
-documented dispatch order. Do not widen the structural probes to cover a tagged class (accepting
-`Iterator[Any]` as record-yielding would sweep in every unrelated iterable), and do not change a
-producer's annotations to satisfy this bridge — the annotation belongs to the producer's own type
-contract, and bending it to move a socket is how the two got coupled in the first place.
-
 ## The studio is addressed by its PORT, not by a pid file (2026-08-26)
 
 **Context.** `stop` and `restart` need to find a running studio. The obvious mechanism is a pid file
 written at launch and removed at exit, and it is what most single-process servers do.
 
-It does not fit here, for a reason specific to this launcher: the process that holds the port is not
-the process the launcher is. `run` blocks in `subprocess.run` while the server is the ComfyUI it
-spawned — a grandchild by the time the shell is counted — so a naive pid file records the launcher,
-and signalling it does not free the port. Recording the child's pid instead means restructuring the
-launch to `Popen` and keeping a file in sync with a process that can be killed, crash, or be
-restarted by a third party. Worse, a pid file only ever knows about studios THIS launcher started:
-an editor's launch button spawns one detached, and a developer may simply run `python main.py`. Those
-are exactly the studios a user reaches for `restart` to deal with.
+It does not fit here: the process that holds the port is not always the process anything recorded. A
+studio is started from a terminal, by a host app, or by a script, and a wrapper (a shell, a process
+manager) may stand between the one that wrote a pid file and the server that holds the port — so a
+pid file records whichever of them wrote it, and signalling that one does not free the port. Keeping
+a file in sync with a process that can be killed, crash, or be restarted by a third party is state
+that goes stale. Worse, a pid file only ever knows about studios THIS launcher started: a studio a
+host app spawned detached, or one a developer ran by hand, is exactly what a person reaches for
+`restart` to deal with.
 
 **Decision.** The port IS the identity. `_studio_process(port)` scans processes for the one listening
 on `127.0.0.1:<port>` and that process is the studio, whatever spawned it and whatever its ancestry.
@@ -161,10 +29,9 @@ iterating processes and asking each for its own connections does not.
 
 **Consequences.**
 
-- `stop` / `restart` work on any studio on that port — this launcher's, an editor's, a hand-run one.
+- `stop` / `restart` work on any studio on that port — this launcher's, a host app's, a hand-run one.
 - No pid file, no lock file, no cleanup path, and no stale-state failure mode to reason about.
-- `psutil` becomes a hard dependency. It is already ComfyUI's own, so the practical cost is zero in
-  any environment that can run a studio, but the declaration is not optional.
+- `psutil` is a hard dependency (imported at module scope by `cli.py`, declared in `pyproject.toml`).
 - The scan is O(processes) and touches every process the user owns. That is fine for a command a
   human types; it would not be fine on a hot path, so do not reuse it as one.
 - Two studios on two ports are independent, which falls out for free: every command takes `--port`.
@@ -172,7 +39,7 @@ iterating processes and asking each for its own connections does not.
 **Example.**
 
 ```python
-proc = _studio_process(8188)          # the LISTENER, not the launcher that spawned it
+proc = _studio_process(8190)          # the LISTENER, whatever started it
 proc.terminate()                      # port measured free 64 ms later
 proc.wait(timeout=grace)              # deterministic; kill() only if it ignores SIGTERM
 ```
@@ -184,325 +51,16 @@ staleness and the this-launcher-only blindness this avoids. Do not reach for the
 `net_connections()`; it is privileged, and the failure is a permission error rather than an empty
 result.
 
-## A subgraph boundary is DECLARED by the document, not inferred from it (2026-08-26)
-
-**Context.** Packaging an imported document as a reusable subgraph needs two things the flat graph
-does not carry: which sockets cross the boundary, and in which direction. The first implementation
-inferred both. Inputs came from unresolved `!ref:NAME` markers — a dangling reference reads as "this
-is supplied from outside" — and outputs from the pipeline roots, the nodes nothing else consumes.
-
-Inference failed in both directions. The input rule is unreachable: the importer resolves the
-document before the builder sees it, and resolution is precisely what rejects an unresolved
-reference, so the marker the rule looks for can never survive to be read. The output rule is a guess
-that happens to be right for a straight chain and silently wrong for anything else, and it cannot
-express an output that is *declared but not yet connected* — the case that matters most, because an
-empty boundary socket is the affordance telling a user where to connect.
-
-Meanwhile a `flow:` document states its boundary outright and always has. Its head step has no `from:`,
-so nothing feeds that step's record — that is the input. Its `outputs:` key names the step whose
-record leaves — that is the output. Nothing needs deriving.
-
-**Decision.** Where the document declares its boundary, read the declaration. The flow path builds
-its slots from the head step and `outputs:`; the older inference stays only for whole-config
-documents, which declare nothing.
-
-Slots are emitted whether or not anything is wired to them. A boundary that appears only once it is
-connected is invisible exactly when a user needs to see it.
-
-The importer additionally places the op terminator on the final step and promotes its output, so the
-instance carries an op connector. This is not boundary inference — it is the same "make the
-affordance exist" rule: the capability was already there, reachable only by knowing which node to add.
-
-**Consequences.**
-
-- A blueprint's boundary is a property of its source document, so it is stable and reviewable. Two
-  imports of the same document produce the same sockets.
-- The two wrap modes share one envelope and one slot builder; only the slot LISTS differ. A third
-  mode supplies lists, it does not copy the envelope.
-- Taps ride alongside the spine for free. The terminator compiles its record *ancestor* cone, and a
-  tap is a descendant of a spine step rather than an ancestor of the terminator, so it is outside the
-  cone without any rule about taps existing anywhere. Only a fork that re-merges *inside* the cone is
-  refused, and it names the step it refused at.
-- A tap cannot be carried in the document, because a document expressing one is branchy and the flow
-  importer replays a sequence. That limit belongs to the importer, not to this boundary rule.
-
-**Example.**
-
-```yaml
-flow:
-  image: {op: !class:...RecordContract {name: image, fields: {image: Image}}}   # head: nothing feeds it
-  class: {from: image, op: !class:...RecordContract {name: class, fields: {class: Label}}}
-outputs: class                                                                  # the record that leaves
-```
-
-```
-instance in : [('record', 'RECORDSTREAM_RECORD', None)]        # declared, unconnected, visible
-instance out: [('record', 'RECORDSTREAM_RECORD', []),
-               ('op',     'RECORDSTREAM_OP',     [])]          # terminator placed + promoted
-```
-
-**What you may change.** Read further declarations the flow grammar grows (a multi-output `outputs:`
-would become several record slots). Do not reintroduce inference on this path, and do not "fix" the
-`!ref:` rule by loosening resolution globally — settling exists to catch a genuine typo in a
-reference, and turning it off to make one branch reachable would trade a located load error for a
-silent, mysterious boundary socket.
-
-## The App view is declared in the source document, not pasted into the generated one (`app:`, 2026-09-05)
-
-**Context.** ComfyUI's App view turns a workflow into a FORM: `extra.linearMode` plus
-`extra.linearData` naming `[[node id, widget name], …]` inputs and the output nodes the Run button
-drives. It is how a template exposes one parameter without the user ever seeing nodes.
-
-The importer wrote `"extra": {}` unconditionally. So a template that wanted an app view had the block
-added AFTER generation, and the file's own regenerate header carried a step saying so — which is the
-hand-edit-the-generated-artifact trap the template-first rule exists to prevent. Measured on the
-shipped detection sink before this change:
-
-```
-SHIPPED    : extra = {"linearMode": true, "linearData": {"inputs": [[5, "store"]], "outputs": ["1"]}}
-REGENERATED: extra = {}
-```
-
-**Decision.** A source document declares its App view in an `app:` block, and the importer emits the
-`extra` from it. Nodes are addressed by CLASS NAME, which is the only spelling that reads the same in
-both document shapes a template can have — a `flow:` step graph keys its ops by step name, a
-whole-graph config nests them under arbitrary keys — and unlike a node id it survives regeneration.
-
-An unusable declaration is REFUSED at import: a class no node carries, a class on two nodes, a widget
-the class does not have, a wired socket named as a field. That is the point rather than a nicety,
-because the frontend fails SILENTLY — `pruneLinearData` drops an entry whose node does not resolve and
-the App-view renderer drops one whose widget does not, so a wrong name yields an empty form with no
-error anywhere.
-
-`app:` on a `--as_ subgraph` import is refused too. Subgraph packaging moves every node inside
-`definitions.subgraphs[]`, and `resolveNodeWidget` renders a subgraph-internal widget only once it has
-been PROMOTED onto the instance node — so ids that point inside a definition are skipped and the form
-comes up empty. A template wanting an App view imports flat.
-
-**Consequences.** Regenerating a declaring template reproduces its app view; the shipped detection
-sink's JSON is byte-identical before and after, and its header lost the manual step. A template's App
-view is now readable in its source rather than only in the generated artifact. The cost is that a
-class appearing twice on one canvas cannot be addressed at all — deliberately, because a class name
-cannot say which one and guessing would ship the wrong field.
-
-**Example.**
-
-```yaml
-app:
-  inputs:
-    - [ClassifyBluetooth, envelope_spread_db]
-    - [ClassifyBluetooth, ble_index]
-  outputs: [BluetoothVerdict]
-```
-
-```
-AppViewError: app: MeasureSymbolClock.windows_hz is a wired socket, not a widget — an App view
-shows fields, so expose one of: max_points, inst_freq, output, findings
-```
-
-**What you may change.** The block's keys, and which failures are refused. What must hold: the
-declaration lives in the SOURCE so regeneration preserves it, nodes are addressed by something stable
-across a regeneration, an ambiguous or unrenderable declaration is refused rather than emitted, and
-the subgraph combination stays refused until promoted widgets are emitted with it.
-
-## An unregistered `Taidal_*` node is a refusal, not a comment (`graphio.workflow_to_yaml`, 2026-09-06)
-
-**Context.** The exporter is deliberately forgiving: a canvas holds viewers, primitives and
-canvas-only adapters that have no Confluid form, and failing on them would make export
-useless. So every node the registry did not know was listed in a leading comment block and
-skipped. That reasoning is sound for a node that is genuinely not ours — and wrong for one
-that is. The node registry is a SNAPSHOT taken when the server starts, so a canvas naming an
-op added since converts to a shortened chain that looks like a valid document. Measured: an
-editor six minutes older than a new op turned a twelve-node chain into one node, and the
-failure surfaced three layers downstream as "no record chain to run".
-
-**Decision.** Split the branch on the node KEY. `bridge._node_key` mints every discovered
-node as `Taidal_<package>_<category>[_<group>]_<Class>`, so the prefix is a reliable statement
-that the canvas thought this was one of ours. An unregistered name carrying it means the
-INSTALLATION is out of step with the canvas; an unregistered bare name is a real ComfyUI
-node. The first raises, naming every missing node and the remedy; the second still drops.
-
-The refusal is deliberately narrow, and the boundary is registration rather than the prefix:
-the hand-written adapters (`Taidal_SubgraphOp`, `Taidal_MixRecords`, `Taidal_Value`,
-`Taidal_Math`) carry the prefix and ARE registered, so they never reach it — which matters,
-because every shipped subgraph canvas contains one.
-
-**Consequences.** A stale server now says so in the first message a reader sees, at the layer
-that knows why. The CLI export fails where it used to write a partial YAML, which is the
-intended trade: a partial chain is not the canvas. No opt-out flag exists — one would be a
-second spelling for "give me the wrong answer", and the message already names the fix. A
-canvas that genuinely outlives an op (the package was removed) also refuses, and the message
-says that case out loud rather than pretending a restart will help.
-
-**Example.**
-
-```python
-from streamstudio.graphio import workflow_to_yaml
-from streamstudio.export import UnsupportedTopologyError
-
-stale = {k: v for k, v in NODE_CLASS_MAPPINGS.items() if "measure" not in k}
-try:
-    workflow_to_yaml(canvas, stale)
-except UnsupportedTopologyError as refusal:
-    print(refusal)
-# this StreamStudio does not register 11 node(s) the canvas names: node 2
-# (Taidal_waivefront_op_measure_TuneToBand), … Restart it (`streamstudio restart --editor comfy`) …
-```
-
-**What you may change.** The wording, and which reasons are listed together. What must hold:
-an unregistered `Taidal_*` node never reaches the output document, a registered adapter never
-raises, and a bare ComfyUI node still drops with its comment.
-
-## The App view's Run for a pane graph is answered by the workspace, not the editor (`Preview on Selection`, 2026-09-06)
-
-**Context.** A pane graph is a chain of ops with no source: the workspace that shows the pane
-feeds the record and fills the time and frequency window by shape. Its App view is a form of the
-thresholds, which is what makes it tunable without seeing nodes, but the App's Run button queues
-the canvas through ComfyUI, where nothing feeds the head op, and the output panel lists media
-outputs only. Without an output node the form is blind: the effect of a change is visible only
-after a save, in the workspace.
-
-**Decision.** Two hand-written output nodes, placed by the importer when the source document's
-`app:` block says `preview: true`. `Preview on Selection` reads the chain feeding it off the hidden
-prompt, converts it with the SAME converter the workspace applies to the saved canvas (so the
-form's unsaved values are in the document), and posts it to the workspace, which runs it over the
-record and window its page currently shows and answers the pane's payload; the node renders the
-payload as one PNG. `Selection` shows that window as the workspace renders it. The editor knows the
-workspace by three routes and an address the launcher hands over, nothing else.
-
-**Consequences.** Run previews without saving, on exactly what the analyst is looking at. The
-editor never executes the ops (the preview's record input is lazy), so a canvas without a source
-runs nowhere but where the record is. The chain must convert to the same document the pane runs,
-which is why the display nodes are canvas-only adapters the converter skips. A refusal is an image
-that says why. The workspace must be running with a record selected; the nodes carry its address
-as a widget rather than discovering it, so two workspaces cannot be confused.
-
-**Example.**
-
-```yaml
-app:
-  inputs: [[ClassifyBluetooth, ble_index]]
-  outputs: [BluetoothVerdict]
-  preview: true
-```
-
-```text
-GET  /api/state                                   -> {record: "files#0", window: {x0, x1, y0, y1}}
-POST /api/preview {document: <converted canvas>}  -> {record, window, payload: {note, cycle_hz, power_db, steps}}
-```
-
-**What you may change.** The renderer (any function from payload to image); the placement of the
-two nodes; the default address. Not the protocol's meaning (state, preview, thumbnail) without
-changing the workspace that serves it in the same change, and not the lazy record input: pulling
-it would execute a sourceless chain in the editor.
-
-## A decision is DRAWN as outcome sockets and a join, and RUN as a gated chain (`fold_branches`, 2026-09-06)
-
-**Context.** The Bluetooth probe became a chain of nodes with three gated decoders, each carrying
-`requires: <flag>` in the flow document. Imported, that is a straight row of twelve nodes with a
-text box on each decoder — the user's reaction: *"I thought we made a decision to support a real
-DAG graph … `requires` is a technical implementation and not something I should worry about …
-the graph is the truth and should visually represent what is executed with branches and test."*
-The record engine, meanwhile, runs the chain on purpose: the branches are exclusive, so a gated
-node that passes the record through costs one flag check, and nothing is computed just in case.
-
-**Decision.** Two spellings of one thing, meeting in exactly one function. On the CANVAS a test
-node (an op declaring `flags`) has one record output per outcome; a branch hangs off an outcome;
-branches rejoin in `Join branches`; the gate is neither widget nor socket. In the DOCUMENT the
-chain stays linear and gated (`requires:`), unchanged. `export.fold_branches` turns the drawing
-into the chain for both exporters (members gated by their branch's outcome unless already gated
-— a nested decision keeps its own — branches in the test node's outcome order, the join dropped,
-innermost decisions first); `graphio.flow_yaml_to_workflow` draws the chain back (a gate names
-an earlier step's outcome; an ungated step closes the open decisions through one join). A
-straight exported chain is also run through the engine's `check_chain`, so a wire that skips a
-producer is refused where it is drawn.
-
-**Consequences.** The canvas shows the fork and its condition as wires, with no domain word in
-the editor; the runtime and the shipped `bte_view.yaml` are untouched; a decision added to any
-future test node needs no editor change. The costs: a canvas saved before this carries a widget
-value that no longer exists (positional shift on its next save — regenerate or merge templates);
-canvas EXECUTION of a nested decision's untaken outcome leaves the outer join empty where the
-chain would still run the continuation (the canvas preview is not the runtime); the join takes
-six branches.
-
-**Example.**
-
-```
-ClassifyBluetooth ├ ble ─▶ DecodeBleAdvertising ─┐
-                  ├ bredr ─▶ DecodeClassic… ─────┼─▶ Join branches ─▶ BluetoothVerdict
-                  └ try_weak ─▶ CorrelateAccess… ┘
-```
-
-```yaml
-# what fold_branches exports — and what flow_yaml_to_workflow draws the picture back from
-ble:     {op: !class:…DecodeBleAdvertising {requires: ble},          from: classify}
-classic: {op: !class:…DecodeClassicAccessCode {requires: bredr},     from: ble}
-weak:    {op: !class:…CorrelateAccessAddress {requires: try_weak},   from: classic}
-verdict: {op: !class:…BluetoothVerdict {},                           from: weak}
-```
-
-**What you may change.** How branches are laid out, how many inputs the join offers, what the
-refusals say. What must hold: the document form stays the gated linear chain (the engine's
-runtime), the canvas never shows the gate, a nested decision keeps its own gate, and both
-exporters fold through the one function.
-
-
-## A graph that is already open is identified by its DOCUMENT, never by its node types (`open_graph.js`, 2026-09-11)
-
-**Context.** Opening a graph is idempotent by design: the extension re-uses the canvas when it
-already holds the graph it was asked for, rather than stacking a duplicate workflow tab. The
-test for "already holds it" was the sorted list of TOP-LEVEL node types. That test was already
-weak and became worthless once graphs were drawn as subgraphs: the top level of such a document
-is `Stream` plus one subgraph id, and subgraph ids are shared between panes of one workspace
-AND between workspaces that seeded from the same template. Measured on a user's machine across
-four annotation workspaces: SIXTEEN different graphs — every pane of every workspace — carried
-one identical node-type list, and the six model graphs of three workspaces carried another.
-
-With one editor serving three annotation servers at once, the consequence was constant: the
-second open of any graph was skipped as "already shown", the canvas kept the PREVIOUS
-workspace's document, and the user was looking at another server's graph. The preview nodes
-went with it — the step that re-points them at the server that launched the open sat after the
-skip, so they kept asking the previous one for "the selected record". The user's report was
-*"since 3 annotaide servers are running, streamstudio connects to the wrong ones"*, and the
-damage is not only what you see: edit the graph you were handed and save, and the mirror writes
-it into the OTHER workspace's file.
-
-**Decision.** The identity is the ComfyUI document path — `workflows/taidal/<workspace>/<stem>.json`,
-which `workflowPathFor` already builds and the store already reports as `activeWorkflow.path`.
-`activeWorkflowPath()` reads it; `holdsOurGraph(want, wantPath)` prefers it and falls back to the
-node-type fingerprint only when no document is named (a canvas-only load, where the fingerprint
-is all there is). Both the skip test and `settleOpen`'s verification use it. The preview re-point
-now also runs on the skip path — that path is precisely the case where the canvas came from
-another server — and it walks into subgraphs, where a graph drawn as one keeps its preview nodes.
-
-**Consequences.** Two graphs that differ only in their workspace are told apart, which the node
-types cannot do. A canvas-only fallback behaves exactly as before. A skipped open costs one
-extra walk of the graph's nodes to re-point the previews, which is the point of the skip path
-existing at all.
-
-**Example.**
-
-```js
-// both workspaces' `view_fft` graphs: `Stream` + the SAME subgraph id
-fingerprint() === want                                  // true for BOTH — the old test
-holdsOurGraph(want, "workflows/taidal/alpha.workspace/view_fft.json")   // true  — it is on screen
-holdsOurGraph(want, "workflows/taidal/beta.workspace/view_fft.json")    // false — open it
-```
-
-**What you may change.** How the document path is spelled (it comes from one function), and the
-fallback. What must hold: the node types never decide it while a document is named; the preview
-nodes are re-pointed on EVERY path that concludes the canvas shows the asked-for graph. Pins:
-`tests/test_open_graph_mirror.py::TestTheAlreadyOpenCheckIsTheDOCUMENT`,
-`tests/test_preview_nodes.py::TestTheOpenerPointsTheNodesAtTheLaunchingWorkspace`.
-
+**Update, 2026-10-14.** The decision is unchanged by the removal of the second editor, whose launcher started its
+server as a child: the owner of the port is the target, whatever started it.
 
 ## The graph document is the truth; the canvas is derived and edits are located text patches (`streamstudio.document`, 2026-09-28)
 
-**Context.** The ComfyUI extension kept TWO documents of every graph: the canvas (`workflow.json`)
+**Context.** An earlier editor, removed before the first release, kept TWO documents of every graph: a canvas file
 and the confluid YAML a converter produced from it, re-checked on every start. Three things went
 wrong, each measured before the rewrite was scoped (`docs/rewrite.md` §2.1, §6, §9):
 
-- **A canvas stores a node's values by POSITION.** `widgets_values = [25000000.0, 0.025, 'a Bluetooth
+- **A canvas file stores a node's values by POSITION.** `widgets_values = [25000000.0, 0.025, 'a Bluetooth
   packet …']` carries no names, so when `Refuse(max_band_hz, max_duration_s, hint)` gained `note` as its
   FIRST parameter every saved canvas re-opened one slot off — `{'note': 25000000.0, 'max_band_hz': 0.025,
   'max_duration_s': 'a Bluetooth packet …'}`, the hint lost — while the YAML, keyed by name, shifted nothing.
@@ -745,19 +303,19 @@ the document; the server stores them as sent and interprets them only to follow 
 `tests/test_layout.py::TestGroups`, `tests/test_app.py::TestGroups`, `tests/test_canvas.py::TestGroups`,
 `frontend/src/__tests__/groups.test.ts`.
 
-## The canvas is a React Flow page over the document routes; every ComfyUI-era behaviour is rebuilt on the document, not on a second model (`frontend/`, 2026-09-28)
+## The canvas is a React Flow page over the document routes, and every editor behaviour is a route call on the document, not a second model (`frontend/`, 2026-09-28)
 
-**Context.** The ComfyUI canvas was a second model of every graph: LiteGraph's own JSON (`workflow.json`, values by
-position), kept in step with the YAML by converters in both directions (the record "The graph document is the truth"
-above lists what that cost). Retiring it needed a canvas that brings the behaviours people used there — typed sockets
-refused while dragging, widgets on the node, a search palette on double-click and on a dropped wire, groups, undo/redo,
-pan/zoom/minimap/snap/multi-select/copy-paste, auto-layout, titles and colours, JSON in and out — WITHOUT bringing a
-document model of its own. Fourteen libraries were measured on 2026-09-27 (licence, release and commit activity,
-framework, and those nine behaviours one by one, `docs/rewrite.md` §2.3). The ones with the most behaviours built in
-are the ones that carry a model:
+**Context.** A canvas library that keeps a graph model of its own — a JSON of its own, values by position — is a
+second copy of every graph, to be kept in step with the YAML by converters in both directions (the record "The graph
+document is the truth" above lists what that cost). The canvas needs the behaviours a node-graph editor is expected to
+have — typed sockets refused while dragging, widgets on the node, a search palette on double-click and on a dropped
+wire, groups, undo/redo, pan/zoom/minimap/snap/multi-select/copy-paste, auto-layout, titles and colours, JSON in and
+out — WITHOUT bringing a document model of its own. Fourteen libraries were measured on 2026-09-27 (licence, release
+and commit activity, framework, and those nine behaviours one by one, `docs/rewrite.md` §2.3). The ones with the most
+behaviours built in are the ones that carry a model:
 
-- **litegraph** has 8 of the 9 (it IS ComfyUI's base), but its last commit is 2024-01-08, and the ComfyUI fork is
-  archived and npm-deprecated ("Package no longer supported").
+- **litegraph** has 8 of the 9, but its last commit is 2024-01-08, and its fork is archived and npm-deprecated
+  ("Package no longer supported").
 - **Rete v2** keeps its own editor state across 11 separately versioned packages; four were last released 2024-08-30.
 - **Baklava** has native subgraphs, but is Vue-only in a React toolchain; **reaflow** lets ELK own every position, so
   the sidecar could not.
@@ -766,8 +324,7 @@ are the ones that carry a model:
 the choice, React 18 — the vite toolchain the workspace's other frontend already builds with). It is a diagram
 toolkit, not an editor: it draws two plain arrays, `nodes` and `edges`, and calls back on every gesture; there is no
 model inside it to keep in step. The page REDRAWS those arrays from the model the server answers after every document
-edit (`modelToFlow`, node id = the document's node name), and each ComfyUI-era behaviour is rebuilt as a route call on
-the document:
+edit (`modelToFlow`, node id = the document's node name), and each behaviour is a route call on the document:
 
 | behaviour | the prototype (2026-09-27, a document of its own) | the page (2026-09-28, the document) |
 | --- | --- | --- |
@@ -813,12 +370,15 @@ subgraph landed as the subgraph node, whose inside the canvas opens in place. A 
 deleted from, a `Stream`'s `ops:` list from the palette; paste and Convert selection to subgraph do insert members.
 The suites: 82 browser tests, 203 unit tests.
 
+**Update, 2026-10-14.** This page is the package's only editor. The record's subject is unchanged: no serializer, no
+page-side text history, no wire or step the page invents without a route.
+
 ## Changes stay in the editor until Save, and Save refuses to overwrite a file changed on disk (`Document.save`, `POST /api/graphs/<name>/save`, 2026-09-29)
 
 **Context.** Phases 2 and 3 saved every accepted edit at once: `POST …/param` wrote the file before it answered.
 Two things the menu scope asked for cannot live with that: Move to its own file… makes a steps file you have not
 asked to write yet, and Revert needs a saved state to go back to. And a file can change under the editor — a teammate, a `git pull`, an agent —
-which an editor that writes on every change overwrites without a word. The user took the ComfyUI default (the menu
+which an editor that writes on every change overwrites without a word. The user chose (the menu
 scope's decision 1): changes stay in the editor until Save, and ● says so.
 
 **Decision.** Every editing route changes the in-memory `Document`, and `dirty` says whether any text differs
@@ -1054,7 +614,7 @@ same two-step subgraph (mask mean 0.2855 on a test image):
 - **`steps: {include: prep.steps.yaml}`** in two uses built two SEPARATE sets of op objects
   (`same inner op objects across uses: False`) and ran right (mask mean `0.2855`).
 
-The user's rule: "if a subgraph is needed twice (either copy it, use templates like comfyui or use the include
+The user's rule: "if a subgraph is needed twice (either copy it, use templates … or use the include
 construction)".
 
 **Decision.** Three ways, each a text operation: **copy** (the clipboard holds the step's own text; a subgraph
@@ -1129,48 +689,72 @@ POST /api/graphs/chain/paste {text: <that text>, after: prep}
 document text, never a page-side model; a paste is one edit and one undo entry. Pins: `tests/test_app_clipboard.py`,
 `tests/test_canvas.py::TestCopyPaste`, `tests/test_canvas.py::TestPasteRightAfterCopy`.
 
-## One CLI serves two editors, chosen by `--editor canvas|comfy` (`streamstudio.cli`, 2026-09-29)
+## The CLI serves one editor and refuses an option that reaches nothing (`streamstudio.cli`, 2026-10-14)
 
-**Context.** Until the rewrite's phase 4 there are two editors: the canvas editor, and the ComfyUI extension that a
-consuming annotation workspace still launches. During phases 2 and 3 the canvas editor had a command of its own
-while bare `streamstudio` launched ComfyUI. With the menu scope the canvas editor became the one a person starts,
-so the default had to move (the menu scope's decision 3). Each editor has options the other does not (ComfyUI:
-`--comfy-dir`, `-b`, the palette flags; the canvas editor: a graph folder, `--templates-dir`) and its own port.
+**Context.** `streamstudio` is a liquifai app with three commands: `run` (the default — bare `streamstudio`), `stop` and
+`restart`. It once launched two editors, chosen by an option; a second, older editor was removed before the first
+release, and with it that option. What is left is a launcher, and a launcher has a failure a configuration-driven
+command does not: it materializes nothing, so liquifai's usual leniency — a key that matches no parameter is carried on
+as configuration, and a warning speaks only when something was materialized from it — would make a mistyped option
+indistinguishable from one that worked (`--templates-dri /x` would start the editor on the default templates folder and
+say nothing). Three faults of the same family were measured while the CLI took its shape: a folder given relative was
+handed to the editor as written (`streamstudio graphs` listed `graphs/chain.yaml` while the file browser looked in
+`graphs/graphs`; `streamstudio .` opened both dialogs on `/`, where Save As would have written to the filesystem root);
+and the busy-port hint suggested `streamstudio --port 8195`, which served the CURRENT directory with the default
+templates folder, not the one the person had asked for.
 
-**Decision.** `run` (the default command) takes `--editor`, a closed `Literal["canvas", "comfy"]`, default
-`canvas`; `stop` and `restart` take it too, and every port default follows it (`EDITOR_PORTS`: 8190 / 8188). An
-option that belongs to the other editor is refused by name before anything starts — never ignored, since an ignored
-`--comfy-dir` would start the wrong editor without a word. The canvas folders are resolved to absolute paths once,
-in the CLI, before any work (and before `restart` stops anything). The busy-port hint prints the SAME editor,
-folder and templates folder one port up, in the order the CLI parses. The earlier command has no alias (pre-1.0).
+**Decision.** (1) The app is declared with `strict_flags=True`: every command takes PLAIN values, there is no
+configuration document for an override to fall through to, so an option that names no parameter of the command is an
+error that names it (and the nearest declared parameter, when there is one) before anything starts. (2) The folders are
+resolved to absolute paths ONCE, in `_canvas_folders`, before any work — and before `restart` stops anything, so a
+folder that is not there is refused naming it while the running editor is still running. liquifai binds CLI values
+verbatim as strings, so they are coerced there; every graph path the editor then answers is absolute, and a path from
+`GET /api/graphs` can be sent back. (3) Every command a message prints must parse back: the busy-port hint
+(`_report_port_in_use`) prints the SAME folder and templates folder one port up, absolute, shell-quoted (`shlex.join`),
+the folder first because liquifai binds positionals up to the first flag; the address is printed bare with `print()` on
+a line of its own, so a terminal linkifies it. (4) A taken port is refused before any work, and asked again after the
+page was built (a build takes seconds, and another start may take the port meanwhile). (5) `stop` and `restart` default
+to the editor's port, 8190 (`EDITOR_PORT`), and find the server by that port ("The studio is addressed by its PORT");
+the way out of a start keeps the person's unsaved work ("Unsaved work is kept in a hidden file of the served folder").
 
-**Consequences.** Measured:
+Rejected: a lenient mode that warns (the warning is the thing a launcher cannot raise, having materialized nothing);
+argparse's spellings (liquifai's `strict_flags` gives the same refusal with its own boolean and list spellings).
+
+**Consequences.** Measured 2026-10-14, each output beside the command that produced it:
 
 ```
-$ streamstudio --comfy-dir /path/to/ComfyUI    →  --comfy-dir only applies to --editor comfy
-$ streamstudio restart -b                      →  --background only applies to --editor comfy
-$ streamstudio graphs          (8190 taken)    →  … run StreamStudio elsewhere:  streamstudio /abs/graphs --port 8191
-$ streamstudio restart grpahs                  →  Graph directory not found: /abs/grpahs      (nothing was stopped)
+$ streamstudio graphs --templates-dri x
+Error: streamstudio: unknown option 'templates_dri' — it names no parameter of
+the 'run' command and no key in the configuration. Did you mean 'templates_dir'?
+Declared parameters: graph_dir, port, templates_dir.                              (exit 1, nothing served)
+
+$ streamstudio graphs --port 18197                     (a program already listens on 18197)
+Port 18197 is already in use — StreamStudio may already be running there.
+
+    Open it:  http://127.0.0.1:18197
+
+If that is a different program, run StreamStudio elsewhere:  streamstudio /abs/graphs --port 18198
+
+$ streamstudio restart grpahs --port 18198
+Graph directory not found: /abs/grpahs                                            (nothing was stopped)
 ```
 
-A consumer that needs ComfyUI names it (`python -m streamstudio.cli run --editor comfy`). Every remedy a message
-prints names the editor: the ComfyUI export refusal says `streamstudio restart --editor comfy`, because a bare
-restart would restart the canvas editor on 8190 — its unsaved work going to the recovery file — and leave the stale
-ComfyUI registry running. Before the folders were resolved, `streamstudio graphs` listed `graphs/chain.yaml` and the file browser
-looked in `graphs/graphs`; `streamstudio .` opened both dialogs on `/`, where Save As would have written to the
-filesystem root.
+The cost: a start script that spells an option the command does not declare fails at once — which is the point.
 
 **Example.**
 
 ```python
-from streamstudio.cli import EDITOR_PORTS
-EDITOR_PORTS                                   # {'canvas': 8190, 'comfy': 8188}
+from streamstudio import cli
+
+sorted(cli.app._commands)        # ['restart', 'run', 'stop']  — liquifai's registry of the three commands
+cli.EDITOR_PORT                  # 8190                        — the port all three default to
 ```
 
-**What you may change.** The ports, the option spellings, the layout of the hint. What must hold: one closed set of
-editors; an option is never silently dropped; every command a message prints is one the CLI accepts (pinned by
-parsing it back); phase 4 removes `comfy` together with the ComfyUI code. Pins: `tests/test_cli_editor.py`,
-`tests/test_missing_node_refusal.py`.
+**What you may change.** The port, the option spellings, the layout of the busy-port hint, the wording of the
+refusals. What must hold: an option no command declares is refused, never ignored; the folders are resolved once,
+before any work, and `restart` checks its folder before it stops anything; every command a message prints is one the
+CLI accepts (pinned by parsing it back). Pins: `tests/test_cli_editor.py::TestTheCommands`, `::TestServingTheCanvas`,
+`::TestStopAndRestart`, `tests/test_cli_port.py`.
 
 ## Unsaved work is kept in a hidden file of the served folder when the editor stops, and the PAGE asks what to do with it (`Studio.stash`, `GET /api/workspace`, 2026-09-29)
 
@@ -1203,8 +787,8 @@ never be lost.
   CLI prints one line; the page asks before it opens any graph, because opening one reads the file on disk and the
   next edit would fork from the saved text. The answers are routes of `Studio`, so an agent's tool can answer the
   same question.
-- **What is never lost.** A file nobody answered yet is merged into, never overwritten: a second stop (two editors
-  on one folder, a restart before anyone answered) keeps the earlier graphs, and one file kept twice is two
+- **What is never lost.** A file nobody answered yet is merged into, never overwritten: a second stop (two editor
+  processes on one folder, a restart before anyone answered) keeps the earlier graphs, and one file kept twice is two
   entries. A file the editor cannot read is moved aside, never deleted. Restore opens a kept version BESIDE a graph
   that holds other unsaved changes (`demo~2`). The write goes through a temporary file of its own, renamed over the
   real one under a `flock` on the folder, so two stops at once, or a stop cut short, leave a whole file. A browser
@@ -1221,7 +805,7 @@ after:   $ streamstudio stop --port 8196
          Unsaved work from the last session (29 Sep 20:06): demo.yaml — the page asks whether to restore it.
 ```
 
-- Two editors on one folder, stopped at once: before, work was lost in 4 of 4 trials and one file was not JSON;
+- Two editor processes on one folder, stopped at once: before, work was lost in 4 of 4 trials and one file was not JSON;
   after, both editors' graphs were kept in 4 of 4.
 - A tab left open across a restart: before, its next edit went to the new editor's document, read from disk, and
   the kept value (0.8) was gone for good; after, the edit is refused (`409`, nothing changed) and the tab asks the
@@ -1312,13 +896,13 @@ so `saved` gets exactly those; a host failing on the news never turns a written 
 
 Rejected — the two larger alternatives first:
 
-- **A second editor in the consuming workspace** (it keeps the ComfyUI canvases, or grows its own form, run and save
-  over the same YAML). Two editors over one document is two answers to "what does this graph run": the measurement
-  that started this phase was exactly that — an edit saved in the canvas editor (`fft_size` 1024 → 2048) was not what
-  the pane ran (it read the JSON copy the other editor wrote, its cache keyed on that file's time) and was thrown away
-  at the next start when the copy check rebuilt the YAML from the JSON. A second editor also brings back what the
-  rewrite removes: a second process, a JSON copy and a converter between them. One editor mounted where the person
-  works keeps one document, one save and one undo history.
+- **A second editor in the consuming workspace** (an editor of its own, with a copy of each document in a format of its
+  own, or a form, run and save grown over the same YAML). Two editors over one document is two answers to "what does
+  this graph run": the measurement that started this phase was exactly that — an edit saved in the canvas editor
+  (`fft_size` 1024 → 2048) was not what the pane ran (it read the JSON copy the other editor wrote, its cache keyed on
+  that file's time) and was thrown away at the next start when the copy check rebuilt the YAML from the JSON. A second
+  editor also brings back what the rewrite removes: a second process, a JSON copy and a converter between them. One
+  editor mounted where the person works keeps one document, one save and one undo history.
 - **An iframe-only bridge** (the page asks the host's PAGE for the record and the folder through `postMessage`, and
   tells it of a Save the same way; no server-side host). The record a pane runs is a server-side object — a capture's
   samples as a numpy array, the regions drawn on it — so every Run would serialise it into the browser and back into the
@@ -1382,44 +966,18 @@ app.register_blueprint(editor_blueprint(host=Host()), url_prefix="/studio")
 templates); the editor lists and opens them while the folder holds no file of their name, and writes the copy only on
 the first Save of a change to the graph itself. The record "A graph's settings live in a file of their own" has why.
 
+**Update 2026-10-14 — mounting costs an import and nothing else.** `import streamstudio.app` takes about 0.2 s and
+loads no torch (measured: 0.20–0.22 s in three fresh processes, `import streamstudio.cli` 0.10 s); the package root
+answers `__version__` and the HuggingFace lookups the pickers call, registers nothing, and never changes the host's
+environment (no `NO_COLOR`, no colour setting). A host that mounts the editor pays for it only when it serves one. Pins:
+`tests/test_lazy_package.py`,
+`tests/test_logflow_colorize_default.py::test_a_host_mounting_the_editor_keeps_its_environment_and_its_colors`.
+
 **What you may change.** What a host adds beyond the four methods, how a run labels the record, the fill rule's
 reach (into subgraphs, once the tracer exposes their ops). What must hold: the editor never caches the host's folder
 across requests; a moved folder keeps the held documents' edits and history; a host's record runs the held texts,
 never the files; `saved` hears only of document files actually written, every path spelled one way; a clean
 document never shows an older text than its file. Pins: `tests/test_host.py`.
-
-## The package root is lazy about the ComfyUI half (`streamstudio.__init__.__getattr__`, `_load_comfy`, 2026-10-01)
-
-**Context.** `streamstudio/__init__.py` is both the package of the canvas editor and the ComfyUI editor's custom-node
-entry point, and it ran the ComfyUI node discovery at import. A host app mounting the canvas editor imports
-`streamstudio.app` and paid for the other editor: measured 6.2–8.0 s, torch and 432 ComfyUI node classes loaded, for
-an editor it never starts; every `streamstudio` command paid the same before it could print a refusal.
-
-**Decision.** The ComfyUI names — `NODE_CLASS_MAPPINGS`, `NODE_DISPLAY_NAME_MAPPINGS` and the functions the routes
-and the discovery call — are made on first READ by a module `__getattr__` (PEP 562), which ComfyUI's loader reaches
-through its own `getattr`/`hasattr`; and at import when the package is loaded INSIDE ComfyUI, told by its `server`
-module already being imported (its `main.py` imports `server` before it loads any custom node), because the
-`/taidal/*` routes must be on the server's table while it loads them. The names are bound at module level only for
-the type checkers (`if TYPE_CHECKING:`): a run-time binding would stop `__getattr__` from firing.
-
-**Consequences.** `import streamstudio.app` is 0.19–0.20 s with no torch; `import streamstudio.cli` 0.09 s. The first
-read of the mappings pays the discovery once (6.2 s, the same 432 classes). A test that patches a ComfyUI name or
-resets the discovery cache reads the mappings first, so the half is made before the patch. The half is deleted with
-the ComfyUI editor in phase 4; `WEB_DIRECTORY` and the HuggingFace lookups (which the canvas editor's pickers call)
-stay plain attributes. The ComfyUI half's colourless console moved with it: `force_no_color()` runs at import only
-inside ComfyUI and when the half is made — measured before, `import streamstudio.app` set `NO_COLOR=1` in a host's
-own process and in every child it started.
-
-**Example.**
-
-```
-python -c "import streamstudio.app, sys; print('torch' in sys.modules)"            -> False   (0.2 s)
-python -c "import streamstudio; print(len(streamstudio.NODE_CLASS_MAPPINGS))"      -> 432     (the discovery, once)
-```
-
-**What you may change.** Which names are lazy. What must hold: nothing a canvas-editor import reaches imports a
-ComfyUI module or torch; inside ComfyUI the half is made at import. Pins: `tests/test_lazy_package.py`,
-`tests/test_init_discovery.py` (the routes registered at import with a `server` present).
 
 ## The page in a host's panel speaks through its link and three messages (`?embed=1`, `frontend/src/host.ts`, `link.ts`, 2026-10-01)
 
@@ -1496,7 +1054,7 @@ one graph lands in another. Pins:
 once the module defining it has been imported. On a miss the editor imported EVERY `confluid.configurables` entry
 point (`confluid.load_configurables`) — 127 of them on the development machine, torch, transformers and every
 training and detection backend among them. Measured 2026-10-02, the editor mounted in a host app over a sink graph
-naming one class from `waivefront.sinks`: the first `GET /studio/api/graphs` took 13.9 s on a cold disk cache, 6.0 s
+naming one class from a signal domain's sinks module: the first `GET /studio/api/graphs` took 13.9 s on a cold disk cache, 6.0 s
 on a warm one, all of it that import. Second, the page asked `GET api/palette` as it opened — the whole catalogue,
 which runs the same full import in another request thread. The two contend for the import locks: with only the
 lookup narrowed, the first graph list still took 7.2 s in one run of two while the catalogue was being built beside
@@ -1533,19 +1091,19 @@ beside it).
 editor started on its own, whose graphs name a class in a package nothing has imported yet. Over the 21 shipped
 annotation panes the first graph list stays at 6.1 s (5.7 s before): `WindowSignal`'s package is not imported yet,
 so nothing ranks its entry points first, and the walk loads 85 entry points — every backend listed before them —
-until `waivefront-detection`, the 116th listed, registers it. **A short name two installed classes share** resolves to
+until the signal domain's detection package, the 116th listed, registers it. **A short name two installed classes share** resolves to
 the first one the walk imports, because the other is not imported yet: before, every entry point was imported first,
 so the name was ambiguous and resolved to nothing. With every package installed 18 short names are shared (measured
-2026-10-02, e.g. `FourierOp` in `waivefront.fourier` and `waivefront.fourier_torch`); no shipped graph spells one.
+2026-10-02, e.g. `FourierOp` in a signal domain's `fourier` and `fourier_torch` modules); no shipped graph spells one.
 Measured on `FourierOp` in a fresh process:
 
 ```
-first lookup:          <class 'waivefront.fourier.fourier.FourierOp'>
+first lookup:          <class 'domain.fourier.fourier.FourierOp'>
 after the catalogue:   None                     (the graph: cannot resolve the class 'FourierOp')
 a run (strict):        AmbiguousClassError 'FourierOp' is registered by 2 classes, so a bare lookup cannot choose …
 ```
 
-Walking on through the rest of the defining package (`waivefront.*`) would settle the 14 shared within one package
+Walking on through the rest of the defining package (`domain.*`) would settle the 14 shared within one package
 (4 are shared between two packages) and costs the sink lookup 0.12 s on a warm disk, 9.5 s on a cold one (the
 torchsig backend); not done — the shared name is a documented limit, and its dotted path is the spelling that works
 everywhere.
@@ -1562,7 +1120,7 @@ the process has already consumed part of the list.
 # a host app, its sink graph spelling !class:AnnotationUpdateSink, first GET /studio/api/graphs
 before:  confluid.load_configurables()          127 entry points imported      6.0 s
 after:   document._import_until("AnnotationUpdateSink")
-           waivefront-lte, recordstream-ops-predict, …, waivefront-sinks  ->  found after 15     1.1 s
+           domain-lte, recordstream-ops-predict, …, domain-sinks  ->  found after 15     1.1 s
 
 # the page
 before:  page open  ->  GET api/graphs, GET api/types, GET api/workspace, GET api/palette
@@ -1587,7 +1145,7 @@ out of step — and a machine that had never built it served the placeholder `Th
 once — cd streamstudio/frontend && npm install && npm run build — and reload`. A host app that mounts the editor showed
 the same stale page in its panel. And `page_blueprint` decided ONCE, when it was made, whether a page existed, so a
 page built while the server ran was never served. A packaged editor sidesteps all of this by shipping its page
-prebuilt inside a Python package (ComfyUI's frontend is a pip-installed wheel of built assets); a source checkout
+prebuilt inside a Python package; a source checkout
 cannot — the page in it is whatever the last build left.
 
 **Decision.** A server's START builds the page when what the build reads changed since the last build.
@@ -1690,9 +1248,9 @@ served the "not built and Node is not installed" page. The build is small — `i
 
 1. vite writes to `streamstudio/canvas` (`outDir: "../streamstudio/canvas"`, `emptyOutDir: true`; `page.OUT_DIR` says
    the same, `page.built_folder()` derives the folder from the page's source folder). The name collides with
-   nothing: not `page` (the module `streamstudio/page.py`), not `web` (the ComfyUI editor's JavaScript, which the
-   release smoke test asserts), not `static` (Flask serves a `static` folder beside `app.py` at `/static/`), not
-   `dist`/`build` (the repository's `.gitignore` drops every folder of those names — they are Python's build output).
+   nothing: not `page` (the module `streamstudio/page.py`), not `static` (Flask serves a `static` folder beside
+   `app.py` at `/static/`), not `dist`/`build` (the repository's `.gitignore` drops every folder of those names —
+   they are Python's build output).
 2. The build record `.built-from` — the fingerprint of the source, `page.fingerprint` — is committed with the build.
    A checkout whose committed page matches its source is `current`: it starts silently and needs no Node. A checkout
    whose page source changed rebuilds at its start as before (Node needed — that is the person editing the page). An
@@ -2141,34 +1699,62 @@ the catalogue's; the host card and the root are never an anchor. Pins: `tests/te
 `tests/test_app.py::TestAddingACard`, `frontend/src/__tests__/{cards,steps}.test.ts`,
 `tests/test_canvas.py::TestACardOfItsOwn`.
 
-## A plugin supplies the list beside a field, and a host asks the page to commit before it reads (`streamstudio.lookups`, `GET /api/lookups/<tag>`, the `commit` command, 2026-10-08)
+## A plugin supplies the list beside a field, and a host asks the page to commit before it reads (`streamstudio.lookups`, the widget-kind stamp, `GET /api/lookups/<tag>`, the `commit` command, 2026-10-08)
 
-**Context.** The plugin seam (first record) lets a producer stamp a field with a tag of its own and ship a ComfyUI JS
-picker for it. The canvas editor has no plugin JS: a tag it did not know was drawn as a plain text field, so a field
-whose valid values live in a remote service (a dataset on a platform, the versions of that dataset) could only be
-typed. Separately, a host that runs something with a graph's settings (a run button beside its settings panel) read
-the settings file while the field the person had just typed in was still being written: a field writes when it is
-LEFT, and pressing the host's button leaves it — measured, the run read the old value.
+**Context.** Some producers integrate with a vendor-specific platform — a dataset picker backed by a credentialed
+platform API, for example. The editor is a generic package and carries none of that knowledge, yet the integration
+needs two things of it: a per-parameter tag saying which field to decorate, and a place for the integration's code to
+be found. With nothing behind the tag, a field whose valid values live in a remote service (a dataset on a platform,
+the versions of that dataset) could only be typed: a tag the editor did not know was drawn as a plain text field.
+Separately, a host that runs something with a graph's settings (a run button beside its settings panel) read the
+settings file while the field the person had just typed in was still being written: a field writes when it is LEFT, and
+pressing the host's button leaves it — measured, the run read the old value.
 
-**Decision.** (1) A plugin module may declare `LOOKUPS = {tag: fn}`, `fn(values) -> (names, reason)`, read once per
-process with the same entry-point group as `ROUTES`. The palette marks a stamped field whose tag is listed `lookup:
-true` (the tag stays in `picker`), the page draws the same `LookupPicker` the HuggingFace lists use, and asks
-`GET /api/lookups/<tag>` with the node's current scalar values — the one input a dependent list needs (a version list
-needs the dataset named beside it). Python, not JS, because the canvas editor serves no plugin code; a list function
-is the whole of what a plugin needs to say. `answer` never raises and bounds a list at `TIMEOUT_S` on a daemon thread:
-a remote service may hang on a login. (2) A host's `commit` command: the page blurs the active field, waits for every
-parameter write on its way (`commitParam` registers each in `writes`), and posts `committed`. Rejected: a delay in the
-host (a guess at the round trip — the test that measured the race fails with any fixed wait under load), reading the
-page's `state.dirty` (the dirty state arrives only after the write's request returns, so the host saw "clean" first).
+**Decision.** (1) *The seam.* A producer stamps a class with `__taidal_widget_params__: Mapping[str, str]` (parameter
+name → opaque tag). `palette.picker_of` reads it FIRST — before the HuggingFace conventions and the file/folder name
+rules — and the form schema carries the tag verbatim as `picker`: there is no registry of tags, and the page draws the
+pickers it knows and a plain field for any other. A plugin is a module an installed package names in the
+`streamstudio.plugins` entry-point group; one that fails to import is skipped with a `warning` — louder than the
+debug-level scan of `confluid.configurables`, because a declared plugin is an explicit opt-in and its failure is
+actionable. (2) *The list.* A plugin module may declare `LOOKUPS = {tag: fn}`, `fn(values) -> (names, reason)`, read
+once per process. The palette marks a stamped field whose tag is listed `lookup: true` (the tag stays in `picker`), the
+page draws the same `LookupPicker` the HuggingFace lists use, and asks `GET /api/lookups/<tag>` with the node's current
+scalar values — the one input a dependent list needs (a version list needs the dataset named beside it). Python, not
+JS, because the editor serves no plugin code; a list function is the whole of what a plugin needs to say. `answer`
+never raises and bounds a list at `TIMEOUT_S` on a daemon thread: a remote service may hang on a login. (3) *Commit.* A
+host's `commit` command: the page blurs the active field, waits for every parameter write on its way (`commitParam`
+registers each in `writes`), and posts `committed`.
 
-**Consequences.** A dependent list re-asks when any field of its node changes (the cache key holds every value) — a
-list cheap to ask is assumed. The `committed` message joins the host contract (`state`, `saved`, `unavailable`); a host
-that never sends `commit` is unaffected. The lists are process-level state like the catalogue.
+Rejected: a registry of tag kinds (nothing consumes kinds centrally — it would be bookkeeping with no reader); a
+class-NAME gate for a vendor's picker (the editor would carry the vendor's name, and a class whose name merely
+resembles a convention would get a picker it never asked for — only a stamp triggers one); a delay in the host (a guess
+at the round trip — the test that measured the race fails with any fixed wait under load); reading the page's
+`state.dirty` (the dirty state arrives only after the write's request returns, so the host saw "clean" first).
+
+**Consequences.** This package carries no vendor knowledge, and every platform integration is a plugin, not a special
+case. A dependent list re-asks when any field of its node changes (the cache key holds every value) — a list cheap to
+ask is assumed. The `committed` message joins the host contract (`state`, `saved`, `unavailable`); a host that never
+sends `commit` is unaffected. The lists are process-level state like the catalogue.
 
 **Example.**
 
 ```python
-# a plugin module named by a `streamstudio.plugins` entry point
+# the producer stamps the parameter with a tag of its own
+@configurable(category="value")
+class ShopDataset:
+    __taidal_widget_params__ = {"name": "SHOP_DATASET"}
+    def __init__(self, name: str = "", project: str = ""): ...
+# palette.picker_of(ShopDataset, "name", str)  ->  "SHOP_DATASET"
+```
+
+```toml
+# the plugin package's pyproject.toml
+[project.entry-points."streamstudio.plugins"]
+my-plugin = "my_plugin.studio"          # a module with LOOKUPS
+```
+
+```python
+# my_plugin/studio.py — the form marks `name` lookup: true because this table lists its tag
 LOOKUPS = {"SHOP_DATASET": lambda values: (shop.datasets(values.get("project", "")), "")}
 ```
 
@@ -2179,9 +1765,16 @@ frame.contentWindow.postMessage({target: "streamstudio", type: "commit"}, locati
 ```
 
 **What you may change.** The label, the timeout, which values are sent (keep every one the list may depend on in the
-cache key). What must hold: a list never fails a request; a tag no plugin lists stays a plain field; `committed` is
-never posted before the writes land. Pins: `tests/test_plugin_lookups.py`, `frontend/src/__tests__/{pickers,api,host}.test.ts`,
+cache key); further optional, `getattr`-read attributes of the plugin contract; the stamp's value type if a field ever
+needs more than a tag (on the stamp, never with a name rule). What must hold: a list never fails a request; a tag no
+plugin lists stays a plain field; no vendor name, class-name gate or second discovery mechanism beside the entry-point
+group; `committed` is never posted before the writes land. Pins: `tests/test_plugin_lookups.py`,
+`tests/test_pickers.py::TestWhichParameterGetsWhichPicker::test_a_producers_stamp_wins`,
+`frontend/src/__tests__/{pickers,api,host}.test.ts`,
 `tests/test_canvas.py::TestTheHostHearsAndFollows::test_commit_writes_the_field_being_typed_in_and_answers_committed`.
+
+**Update, 2026-10-14.** The stamp and the entry-point group, first decided on 2026-08-25, are decided here: a plugin
+supplies lists, and nothing else is read from its module.
 
 ## A field another parameter does not ask for is grayed, by the value the HOST runs (`settings.offReason`, the `values` command, 2026-10-08)
 

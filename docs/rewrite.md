@@ -7,13 +7,13 @@ is approved, then the tests, then the code.*
 ## 0. What is already decided
 
 - streamstudio is rewritten as a **Flask app**; ComfyUI is dropped.
-- The canvas is **React Flow** (`@xyflow/react`), built with vite like `navigaitor/frontend`.
+- The canvas is **React Flow** (`@xyflow/react`), built with vite like the workspace's other frontend.
 - The **confluid YAML document is the only truth**; the canvas is a drawing of it.
 - An **engine executes and debugs** a graph: run one record through it, stop at a node,
   inspect what every node received and produced, rerun one node with new parameters.
 - Nodes are typed from the per-node `Input`/`Output` declarations (`recordstream.algorithm`)
   and the per-graph `GraphContract` (`recordstream.ops.contract`).
-- annotaide **mounts** the editor inside its own Flask app; streamstudio also serves it
+- the annotation workspace **mounts** the editor inside its own Flask app; streamstudio also serves it
   standalone.
 
 This document asks you **one** question (§6) and states every other default it takes.
@@ -22,7 +22,7 @@ This document asks you **one** question (§6) and states every other default it 
 
 | You do | Today | After |
 | --- | --- | --- |
-| press *set source…* in annotaide | a second server boots on port 8188, a waiting room shows for tens of seconds, a ComfyUI tab opens | the editor opens at once as a pane of annotaide, same address |
+| press *set source…* in the annotation workspace | a second server boots on port 8188, a waiting room shows for tens of seconds, a ComfyUI tab opens | the editor opens at once as a pane of the workspace, same address |
 | save the graph | `source.json` is written, a converter child turns it into `source.yaml`, every start re-checks the copy | the editor patches `source.yaml` in place; there is no `.json`, no converter, no re-check |
 | add a parameter to an op class | every saved canvas shifts its values onto the wrong parameters | nothing moves: values are stored by name |
 | install a new op | restart the editor, or the canvas converts wrongly | reload the page |
@@ -43,7 +43,7 @@ model = derive(doc)                               # nodes, typed sockets, wires,
 pos   = positions(model, path.with_suffix(".layout.yaml"))   # sidecar keyed by node NAME
 ```
 
-Measured on the shipped Bluetooth pane, `waivefront/annotation/bte_view.yaml` (275 lines,
+Measured on the signal domain's shipped Bluetooth pane, `annotation/bte_view.yaml` (275 lines,
 148 of them comments, 24 steps):
 
 ```
@@ -168,15 +168,15 @@ Three corrections the critic measured, folded into the scope:
   nodes in 4.7 ms.
 - A rerun rebuilds the node from its **current** values plus the change, through the
   constructor. Rebuilding from the constructor's captured kwargs drops what the host set
-  afterwards (annotaide fills the window that way); setting the attribute directly
+  afterwards (the annotation workspace fills the window that way); setting the attribute directly
   bypasses validation and leaves the live op poisoned. Measured both ways.
 - The tracer's constructor does no work; parsing and building happen on first use.
 
 ### 2.3 The canvas: React Flow
 
 Chosen after measuring fourteen libraries. React Flow 12.12: MIT, 13.5 million weekly
-downloads, 112 commits in the last 90 days, React 18, the toolchain navigaitor already
-builds with.
+downloads, 112 commits in the last 90 days, React 18, the toolchain the workspace's other
+frontend already builds with.
 
 | ready-made | we build |
 | --- | --- |
@@ -186,7 +186,7 @@ builds with.
 | load and save as plain JSON | undo/redo and copy/paste over the two arrays (about 150 lines) |
 | dagre layout from the free example | collapse to subgraph: a node pointing at an `include:` file |
 
-Proof: a 685-line prototype built with navigaitor's exact toolchain (React 18.3, vite 5.4,
+Proof: a 685-line prototype built with that frontend's exact toolchain (React 18.3, vite 5.4,
 TypeScript 5.9), one generic node component for all 400 catalogue classes, driven headlessly
 under playwright with real mouse drags. Zero console errors. Measured:
 
@@ -256,9 +256,9 @@ on (LangGraph has one shared state); one node can be rerun alone with its cached
 | project | new | deleted |
 | --- | --- | --- |
 | recordstream | `flow/trace.py` (the tracer, 797 lines) | nothing |
-| streamstudio | `app.py` (blueprint + `create_app`), `document.py` (derive, patch, history, sidecar), `palette.py` (registry → node specs), `layout.py`, `cli.py` (bare `streamstudio` standalone; `--editor comfy` for ComfyUI until phase 4's step 3, §6d), `frontend/` (vite + React Flow), tests | `bridge.py`, `graphio.py`, `export.py`, `nodes.py`, `web/*.js`, the ComfyUI clone and launch, 12,857 Python lines and 3,705 JS lines. The HuggingFace pickers and the directory chooser are ported as Flask routes. |
-| annotaide | mounts the blueprint; *set source…*, *graph*, *settings* open it in a pane | the resident converter, seeding through the CLI, the graph-copy re-check, the waiting room, tab naming: 743 lines and 30 rules |
-| navigaitor | registers the graph tools once and the per-node tools of any graph a session opens | nothing |
+| streamstudio | `app.py` (blueprint + `create_app`), `document.py` (derive, patch, history, sidecar), `palette.py` (registry → node specs), `layout.py`, `cli.py` (bare `streamstudio`, standalone), `frontend/` (vite + React Flow), tests | `bridge.py`, `graphio.py`, `export.py`, `nodes.py`, `web/*.js`, the ComfyUI clone and launch, 12,857 Python lines and 3,705 JS lines — deleted by phase 4's step 3, landed 2026-10-14 (§6d). The HuggingFace pickers and the directory chooser are ported as Flask routes. |
+| the annotation workspace | mounts the blueprint; *set source…*, *graph*, *settings* open it in a pane | the resident converter, seeding through the CLI, the graph-copy re-check, the waiting room, tab naming: 743 lines and 30 rules |
+| the MCP service | registers the graph tools once and the per-node tools of any graph a session opens | nothing |
 | the op author | writes the op class only | |
 
 Node naming is one scheme everywhere: a flow step is named by its key; a member of a list
@@ -268,7 +268,7 @@ is `stream.ops[1]`. The engine, the sidecar, the tools and the canvas all use it
 
 17 of the 27 shipped canvases exist only as ComfyUI JSON. All 17 convert with today's
 converter and all 17 load again, but none carries a graph contract, and the source and sink
-graphs annotaide draws are rooted in one. Phase 0 therefore converts each, wraps the
+graphs the annotation workspace draws are rooted in one. Phase 0 therefore converts each, wraps the
 source and sink graphs in their contract with the converted entries under `delivered:`,
 runs `check()` on every one, and keeps JSON and YAML side by side until the flip.
 
@@ -324,8 +324,9 @@ runs `check()` on every one, and keeps JSON and YAML side by side until the flip
 
 Taken while landing phase 2 (2026-09-28):
 
-- The standalone editor is bare `streamstudio <graph_dir>` on port 8190, and the ComfyUI editor is
-  `streamstudio --editor comfy` on 8188; the two servers coexist on one machine (§6a, decision 3).
+- The standalone editor is bare `streamstudio <graph_dir>` on port 8190, and the ComfyUI editor was
+  `streamstudio --editor comfy` on 8188; the two servers coexisted on one machine (§6a, decision 3) until the ComfyUI
+  editor was deleted (§6d, step 3).
 - The HuggingFace pickers and the directory chooser arrive in phase 3 as routes beside the page that
   calls them; phase 2 ships no route without a caller. **Not landed with phase 3** (2026-09-28): no node of the page
   called one yet, so the same rule kept them out. **Landed with phase 4a (2026-10-01)**: the routes
@@ -383,7 +384,7 @@ answer was "go with the defaults" — option A each time. All three landed on 20
 | --- | --- | --- | --- |
 | 1 | When does an edit reach the file? | **A** — changes stay in the editor until Save (B was: every edit written at once, as in phases 2-3) | `● demo.yaml` while unsaved; File ▸ Save writes; a file changed on disk is refused: `…/demo.yaml changed on disk since the editor read it — Revert to load it, or Save As to keep both` |
 | 2 | What do Open and Save As browse? | **A** — a file browser of the machine the editor runs on, starting in the graph folder (B was: a browser upload) | `GET /api/files`; folders first, then `.yaml` files |
-| 3 | Which editor does bare `streamstudio` start? | **A** — the canvas editor on 8190; `streamstudio --editor comfy` starts ComfyUI on 8188, and the consuming annotation workspace asks for ComfyUI by name until phase 4 | `streamstudio --comfy-dir /x` → `--comfy-dir only applies to --editor comfy` |
+| 3 | Which editor does bare `streamstudio` start? | **A** — the canvas editor on 8190; `streamstudio --editor comfy` starts ComfyUI on 8188, and the consuming annotation workspace asks for ComfyUI by name until phase 4 (the ComfyUI editor was deleted 2026-10-14, §6d step 3, and with it `--editor`) | `streamstudio --comfy-dir /x` → `unknown option 'comfy_dir'`, nothing served (measured 2026-10-14) |
 
 The menu bar (ComfyUI style, only entries that do something):
 
@@ -453,7 +454,7 @@ editor's terminal (SIGHUP) keeps the work since 2026-09-30 (the user's pick).
 
 ## 6d. Phase 4 — four decisions and three steps (decided 2026-10-01)
 
-The user, 2026-10-01: *"switch annotaide to the new streamstudio if not already done"*. It was not done: the
+The user, 2026-10-01: *"switch [the annotation workspace] to the new streamstudio if not already done"*. It was not done: the
 annotation workspace still opened the ComfyUI editor, and a survey measured why the switch could not be a URL
 change — an edit saved in the canvas editor (`fft_size` 1024 → 2048 in `view_fft.yaml`) was not what the pane ran
 (`PsdSlice.fft_size = 1024`; the pane read the JSON copy, its cache keyed on that file's time) and was thrown away at
@@ -462,7 +463,7 @@ the next start (`check_graph_copies(): rebuilt view_fft.yaml from view_fft.json`
 | # | the question | decided |
 | --- | --- | --- |
 | 1 | Where does the editor open? | **inside the workspace's own page**, as a panel — not a second browser tab |
-| 2 | The ComfyUI editor? | **kept for a while** — `streamstudio --editor comfy`, the converter and the ComfyUI node code stay; deleting them is step 3 |
+| 2 | The ComfyUI editor? | **kept for a while** — `streamstudio --editor comfy`, the converter and the ComfyUI node code stay; deleting them is step 3 (landed 2026-10-14, before the first PyPI release: the user decided to delete it without waiting) |
 | 3 | Workspaces saved with JSON graphs? | **converted once, now** — a folder's `<graph>.json` files become `<graph>.yaml` (the old converter, one last time) when the workspace opens it; the JSON is left untouched and nothing reads it afterwards |
 | 4 | The pickers? | **both now** — the folder/file chooser and the HuggingFace pickers |
 
@@ -494,8 +495,8 @@ and with its reason in `docs/architecture.md`:
 7. **Embedded mode** — `?embed=1`, the page under a prefix (`/studio/`), and its `state` / `saved` / `open` messages.
    README → "The page in the host's panel"; architecture → "The page in a host's panel speaks through its link and
    three messages".
-8. **Loading speed** — `import streamstudio.app` 6.2–8.0 s → 0.2 s, no torch. Architecture → "The package root is
-   lazy about the ComfyUI half".
+8. **Loading speed** — `import streamstudio.app` 6.2–8.0 s → 0.2 s, no torch (step 3 left the package root with no
+   second half to be lazy about). Architecture → "A host mounts the editor through three methods", its update of 2026-10-14.
 
 **Step 2 — the workspace runs the YAML and mounts the editor** (the annotation workspace and the signal domain's
 templates; landed 2026-10-01). The workspace implements the host — `folder()` its state folder, `record()` the selected record
@@ -504,18 +505,25 @@ mounts both blueprints under `/studio`, calls `studio_of(app).stash()` on its st
 and switches graphs with the `open` message. YAML is the truth: templates are YAML, the chain loaders run `flow:`
 documents as well as `stream:` ones, caches are keyed on the YAML's time. Deleted from the workspace: the converter
 calls, the resident converter child, the start-time copy check, the JSON watcher, seeding through
-`/taidal/import_yaml`, the preview nodes' address rewrite, the waiting room, the launch / stop / restart of the editor
+the converter's import route, the preview nodes' address rewrite, the waiting room, the launch / stop / restart of the editor
 process, the editor-address setting and the tab naming. The one-time conversion of decision 3 runs there, and the
 cell pane's step order is pinned so the switch changes no pane's answer (the truth set is run on the other computer).
 Open items from step 1 it meets: a files graph run in the panel on the workspace's own files, a host's fills inside a
 subgraph, and the panel's fixed side panel (`streamstudio/TASKS.md`).
 
-**Step 3 — the ComfyUI editor is deleted** (streamstudio; after the workspace has run on the canvas editor for a
-while, decision 2): `bridge.py`, `graphio.py`, `export.py`, `nodes.py`, `web/`, `--editor comfy`, the custom-node entry
-point, the ComfyUI half of `__init__.py` and the `torch` / `numpy` declarations only `nodes.py` needs, with the tests that
-import them; outside streamstudio, the signal domain's twenty-one `.json` canvases and the tests that convert them (its
-`templates()` hands out the YAML documents since step 2), and the annotation workspace's one-time conversion, which calls
-the converter (each project's `TASKS.md` lists what goes).
+**Step 3 — the ComfyUI editor is deleted (landed 2026-10-14).** The user decided to delete it before the package's first
+PyPI release, rather than after the workspace had run on the canvas editor for a while (decision 2). What went, in
+streamstudio: `bridge.py`, `graphio.py`, `export.py`, `nodes.py`, `custom_nodes.py`, `config.default.yaml` and `web/`;
+the ComfyUI clone and launch with `--editor`, `--comfy-dir`, `--custom-node`, `--background` and the other options only
+that editor read, and the converter commands (`import`, `export`, `export-workflow`, `convert-server`); the custom-node
+entry-point group; the ComfyUI half of `__init__.py` (the node mappings, the lazy `__getattr__`, `force_no_color`) and
+the `torch` / `numpy` declarations only `nodes.py` needed; the tests that imported any of it and the two examples. What
+is left: a CLI of three commands — `run` (the default), `stop`, `restart` — in which a removed option is an "unknown
+option" error (`strict_flags`); a package root that answers `__version__` and the HuggingFace lookups; and the
+`streamstudio.plugins` entry-point group, read for a plugin's `LOOKUPS` only (`ROUTES` and `WEB_DIRECTORY` are read by
+nothing). Outside streamstudio, in the same change: the domain packages' `.json` canvases and the tests that converted
+them (their `templates()` hand out the YAML documents since step 2), and the annotation workspace's one-time conversion,
+which called the converter (each project's `TASKS.md` lists what went).
 
 ## 7. Phases, tests first
 
@@ -532,10 +540,10 @@ Each phase ends with its gates green and the previous path still working.
 | 3d round 3, landed 2026-09-29 | §6c item 2: `tests/test_app_files.py::TestNew` (the file written at once, every refusal writing nothing, a file appearing between the check and the write never overwritten), `test_app_save.py::TestRevert` (back to the starter), `test_recovery.py` (an untouched New graph is not kept), `tests/test_canvas.py::TestNewAndOpen` (3 more browser tests), `frontend/src/__tests__/newgraph.test.ts` (9) | `document.py` (`Document.create`), `app.py` (`Studio.new_graph` writes; the recovery rows are changed files only); the page's New dialog (Name, Folder, Browse…, the path line, the refusal in place) | landed; see §9 |
 | 4a — phase 4 step 1: the editor gains what a host needs (§6d), landed 2026-10-01 | `tests/test_host.py` (27: a host app mounting both blueprints under `/studio`; the folder followed across a move and a copy; a host's record through a flow, a sourceless Stream and the shipped PSD slice pane; `saved`; the stop's stash), `test_app_form.py` (12), `test_app_slot.py` (13), `test_pickers.py` (13), `test_lazy_package.py` (3); the page: `tests/test_canvas.py` `TestMountedInAHost` / `TestSetSourceInAHost` / `TestTheHostHearsAndFollows` (14, a host app serving both blueprints under `/studio` in headless chromium), vitest `host`, `link`, `settings`, `pickers`, `slots` | `app.py` (`EditorHost`, `HostRecord`, `studio_of`, the `app` / `slot` / `hf` routes, `files?show=all`), `document.py` (`set_slot`, `moved`, `save` answers what it wrote), `_yamltext.py` (`set_marker`), `palette.py` (`picker_of`), the lazy `__init__.py`; the page's `?tab=` / `?embed=1`, the missing-graph panel, the host run, the `app:` settings, Set source…, the pickers, the host panel's messages | landed 2026-10-01 |
 | 4b — phase 4 step 2: the annotation workspace runs the YAML and mounts the editor (§6d), landed 2026-10-01 | its existing suite, with the converter and seeding pins deleted and the mount pinned; the one-time JSON → YAML conversion of a workspace folder; the cell pane's step order as it runs today | the host object, the mount at `/studio/` and the panel, the conversion, the deletions in the workspace; the signal domain's templates as YAML | landed 2026-10-01; its review fixes 2026-10-02 (see §9) |
-| 4c — phase 4 step 3: the ComfyUI editor is deleted (§6d) | the suites without the ComfyUI pins | `bridge.py`, `graphio.py`, `export.py`, `nodes.py`, `web/`, `--editor comfy`, the converter | after 4b has been used for a while (decision 2) |
-| 5 agent tools | the transcript of §2.4 as a test against the generated tools | navigaitor registration |
+| 4c — phase 4 step 3: the ComfyUI editor is deleted (§6d), landed 2026-10-14 | the suites without the ComfyUI pins | `bridge.py`, `graphio.py`, `export.py`, `nodes.py`, `custom_nodes.py`, `web/`, `--editor comfy`, the converter commands, `torch` / `numpy` | landed 2026-10-14, before the first PyPI release (user decision; decision 2 had waited for 4b to be used for a while) |
+| 5 agent tools | the transcript of §2.4 as a test against the generated tools | registration in the MCP service |
 
-Estimate: four to six weeks, by the comparables of annotaide's own web app (four weeks for
+Estimate: four to six weeks, by the comparables of the annotation workspace's own web app (four weeks for
 9.5k lines) and its pane shell (two weeks for 1.4k).
 
 ## 8. Out of scope
@@ -549,15 +557,15 @@ Landed on 2026-09-28 and 2026-09-29, nothing committed. Phase 0, phase 1, phase 
 are 3b — the menu scope (§6a) and subgraphs (§6b) — 3c, round 2 (§6c items 1, 3 and 4), and 3d, round 3 (§6c item
 2: New… writes the file at once). Phase 4 (the consuming workspace mounts the editor, §6d) began on 2026-10-01: its
 step 1 — the editor gains what a host needs (4a) — and step 2 — the workspace runs the YAML and mounts the editor
-(4b) — landed that day; next are step 3 — the ComfyUI editor deleted (4c), once the workspace has run on the canvas
-editor for a while — and phase 5 (agent tools); the root `TASKS.md` holds them.
+(4b) — landed that day. Step 3 — the ComfyUI editor deleted (4c) — landed on 2026-10-14, before the package's first
+PyPI release (user decision); next is phase 5 (agent tools), which the root `TASKS.md` holds.
 
 | project | what landed | gate |
 | --- | --- | --- |
 | recordstream | option A in `ops/contract.py` (`CLASS_VOCABULARY_SLOT = "classes"`, the collision refusal, a wired producer accepted); 62 contract tests; `docs/graph-contract.md`; `flow/trace.py` (the engine: check, run, step, resume, rerun_from, value, to_dict) with `docs/trace.md`, an architecture record and 39 passing tests | whole suite green; mypy clean |
-| annotaide | `classification.yaml` delivers `classes`; seven YAML twins under `workspaces/classification/` and `workspaces/detection/`, each rooted in a `contract:` entry; `tests/test_template_twins.py` pins each twin's `check()` outcome; the type-workspace mandate amended | `2056 passed`; mypy clean |
-| waivefront | ten YAML twins under `waivefront/annotation/`; `write_annotations.yaml` carries the `app:` block and round-trips it; `tests/test_template_twins.py` | `111 passed`; mypy clean in touched files |
-| waivefront, the panes rooted (2026-09-28) | every one of the 16 VIEW documents (8 hand-written sources + 8 converted twins) ends in a `contract:` root — `GraphContract(name="<pane> view", inputs={input: Signal, regions: Regions}, outputs={})`, the host's side declared — so `Document.add_step` of a node whose entry nothing produces is REFUSED (`bte_view.yaml:69:9: … NoiseFloorEstimate needs the record entry 'spectrogram', which nothing before it produces — the chain has input, regions at that point` as measured that day; since the pane gained its `known` head step it reads `bte_view.yaml:88:9: … the chain has input, known_codes, regions at that point`, measured 2026-09-30) where a synthetic `<host>` used to accept it; appended after the last entry because the pane's own `outputs: <step>` line broadcasts into `GraphContract.outputs` when the root comes first (measured: `confluid.load` fails); the old importer drops it and regenerates a byte-identical canvas on all 16 | waivefront `147 passed` (`test_template_twins.py` + `test_annotation_templates.py`), `mypy waivefront`: `Success: no issues found in 200 source files`; streamstudio `test_document.py` `59 passed`, `mypy streamstudio`: `Success: no issues found in 51 source files` |
+| the annotation workspace | `classification.yaml` delivers `classes`; seven YAML twins under `workspaces/classification/` and `workspaces/detection/`, each rooted in a `contract:` entry; `tests/test_template_twins.py` pins each twin's `check()` outcome; the type-workspace mandate amended | `2056 passed`; mypy clean |
+| the signal domain | ten YAML twins under its `annotation/`; `write_annotations.yaml` carries the `app:` block and round-trips it; `tests/test_template_twins.py` | `111 passed`; mypy clean in touched files |
+| the signal domain, the panes rooted (2026-09-28) | every one of the 16 VIEW documents (8 hand-written sources + 8 converted twins) ends in a `contract:` root — `GraphContract(name="<pane> view", inputs={input: Signal, regions: Regions}, outputs={})`, the host's side declared — so `Document.add_step` of a node whose entry nothing produces is REFUSED (`bte_view.yaml:69:9: … NoiseFloorEstimate needs the record entry 'spectrogram', which nothing before it produces — the chain has input, regions at that point` as measured that day; since the pane gained its `known` head step it reads `bte_view.yaml:88:9: … the chain has input, known_codes, regions at that point`, measured 2026-09-30) where a synthetic `<host>` used to accept it; appended after the last entry because the pane's own `outputs: <step>` line broadcasts into `GraphContract.outputs` when the root comes first (measured: `confluid.load` fails); the old importer drops it and regenerates a byte-identical canvas on all 16 | the signal domain `147 passed` (`test_template_twins.py` + `test_annotation_templates.py`), its `mypy`: `Success: no issues found in 200 source files`; streamstudio `test_document.py` `59 passed`, `mypy streamstudio`: `Success: no issues found in 51 source files` |
 | streamstudio | the ComfyUI contract canvas pins `classes` and the collision refusal; this page; the phases in the root `TASKS.md` | `93 passed`; mypy clean |
 | streamstudio, phase 2 | `document.py` (derive, located patches, undo ring, sidecar), `_yamltext.py` (the patcher over PyYAML's composed tree), `palette.py` (registry → node specs, `to_pydantic` widgets), `layout.py` (layered first layout + sidecar), `app.py` (`editor_blueprint` + `create_app`, `Studio` on `app.extensions`), the standalone command in `cli.py`; `pyproject.toml` declares `flask` and `pyyaml`; `tests/test_document.py` 58, `test_app.py` 47, `test_palette.py` 72, `test_layout.py` 28 | isort/black `left unchanged`; flake8 clean; `mypy streamstudio`: `Success: no issues found in 50 source files`; `pytest -q`: `730 passed, 1 skipped in 30.83s`; `test_packaging.py`: `12 passed`; red run before implementing (modules moved aside): `1 error in 6.04s` |
 | streamstudio, phase 3 part 1 | `frontend/` — `src/api.ts` (one function per route), `src/model.ts` (the model's JSON, `modelToFlow`, `compatible` over `GET /api/types`), `src/canvas/GenericNode.tsx` (the one node component), `src/canvas/Canvas.tsx` (React Flow, `isValidConnection`, positions on drag stop, proposals, the status bar), `src/App.tsx` (picker, sidebar text, toasts); `app.py` gains `GET /api/types` (`document.supertypes()`), `web_dist()`, `page_blueprint()`, `create_app(web_dist=)`; `pyproject.toml` declares `node` as a system dependency; the root `.gitignore` no longer ignores `frontend/`; `tests/test_canvas.py` 14 (playwright, real mouse drags), `frontend/src/__tests__/model.test.ts` 9, `test_app.py` 52 | `npm run build`: `338.47 kB │ gzip: 109.55 kB`, `built in 491ms`; `gzip -c dist/assets/*.js \| wc -c`: `109506`; `pytest -q tests/test_canvas.py`: `14 passed in 18.15s` (skipped `1 skipped in 7.76s` before the build — the red run); `npm test`: `9 passed`; `mypy streamstudio`: `Success: no issues found in 51 source files`; the standalone editor on port 8199 → `GET /` `200 text/html` serving the built page, its asset `200 338479 bytes` |
@@ -581,5 +589,5 @@ Two things measured while doing it, both recorded in the root `TASKS.md`:
   (`Stream.source`, `FilesSource.files`, `DatasetProcessor.sink`). Measured: a root named
   `source` beside a sourceless Stream makes `Stream.source` the contract object.
 - A converted twin spells its classes by registry key (`_target_: WindowSignal`), the hand-written
-  pane sources by dotted path (`!class:waivefront.processing.WindowSignal`); the registry form loads
+  pane sources by dotted path (`!class:<domain>.processing.WindowSignal`); the registry form loads
   only after the entry-point scan. The rewrite's own writer spells dotted paths.

@@ -21,7 +21,7 @@ declarations that already exist for other reasons, and each reading names its so
   ``Transform`` spelling) gets no entry socket: the palette records the types and marks the node
   ``tuple_form``, and the run shows the truth (``docs/rewrite.md`` §5);
 * the **picker** a parameter gets is read off its name, its annotation and its class
-  (:func:`picker_of` — the rules the ComfyUI nodes' widgets followed): a folder or a file for a path-named
+  (:func:`picker_of`): a folder or a file for a path-named
   parameter, the HuggingFace pickers on a ``HuggingFace*`` source, or what a producer stamps on its class;
 * what a constructor parameter can be **wired from** is read off its annotation alone
   (:func:`socket_type`): a registered item class names its own socket, a ``Stream`` is ``Stream``, an
@@ -330,7 +330,7 @@ def _arms(annotation: Any) -> List[Any]:
 
 def picker_of(target: Callable[..., Any], name: str, annotation: Any) -> Optional[str]:  # any annotation form
     """The picker the parameter ``name`` of ``target`` gets — a :data:`PickerKind`, a producer's stamped tag, or
-    ``None`` for a plain field. The ComfyUI nodes' rules, in their order:
+    ``None`` for a plain field. The rules, in their order:
 
     1. a ``__taidal_widget_params__`` stamp naming the parameter wins (``{"output_dir": "PLATFORM_DATASET_ID"}``);
     2. on a ``HuggingFace*`` class: ``path`` / ``repo_id`` → ``hf_dataset``, ``input_feature`` / ``target_feature`` →
