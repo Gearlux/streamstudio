@@ -50,6 +50,10 @@ mounted in a host Flask app's page.
   line naming nothing is refused at its `file:line:col`. `app: {graph: settings-only}` offers a graph's settings and
   refuses every other change.
 - A field whose schema says `applies_when: {<parameter>: [values]}` is grayed while that parameter holds another value.
+- A setting may be written by its bare parameter name (`floor_db: -60.0`) when exactly one node of the graph has that
+  parameter; a parameter two or more nodes have is refused bare, naming the full keys to write (`level is a
+  parameter of 2 nodes (first, third) — a bare line would set them all; write flow.first.op.level or
+  flow.third.op.level`).
 
 ### Mounted in a host app
 - `editor_blueprint(host=…)` with a host's `name` and `folder()`, `record()`, `saved()`, `shipped()`;

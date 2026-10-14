@@ -163,10 +163,15 @@ arch: "A graph's settings live in a file of their own"; pins `tests/test_graph_s
   `include: [<graph>, <settings>]` (`settings.composed`), loaded with `texts=`. Root ruling "A configuration utility,
   not a compiler": never a second precedence rule, a new spelling, or a walker into confluid for settings.
 - **A setting names its node:** a flow step `flow.<step>.op.<param>`, a top-level object `<key>.<param>`, any other
-  node `<Class>.<param>` only while that class is the node's alone (user pick). Everything else is REFUSED at its
-  `file:line:col` (`settings.read_settings`): a key that is none of the graph's settings, a class two unnamed nodes
-  share, a `flow:` block (confluid moves the step to the end of the flow). Never fall back to confluid's
-  warn-and-ignore. `settings.load_graph` is what a host runs: `SettingsError` for the settings file's problems only.
+  node `<Class>.<param>` only while that class is the node's alone (user pick); and a parameter ONE node of the whole
+  drawing has may be written BARE (`floor_db: -60.0`, user question 2026-10-14) — confluid's own broadcast of a bare
+  key reaches exactly that node (measured on two review graphs), so `Declared.bare` maps it to its field and the
+  editor sets a bare line in place. A declared parameter two or more nodes have is refused bare, naming the full keys
+  (`Declared.ambiguous`). Everything else is REFUSED at its `file:line:col` (`settings.read_settings`): a key that is
+  none of the graph's settings, a class two unnamed nodes share, a `flow:` block (confluid moves the step to the end of
+  the flow). Never fall back to confluid's warn-and-ignore. `settings.load_graph` is what a host runs: `SettingsError`
+  for the settings file's problems only.
+  (`tests/test_graph_settings.py::TestLoadingAGraphWithItsSettings::test_a_parameter_one_node_alone_has_may_be_written_bare`)
 - **`app: {graph: settings-only}`** refuses every change but a setting: `@_structural` on each structural `Document`
   method refuses FIRST (before its own checks); `_commit` / `replace_text` refuse any other change of the graph
   (`_refuse_locked`). A new structural method gets `@_structural`. `GET …/app` answers `graph`.

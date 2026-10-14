@@ -1338,6 +1338,11 @@ A setting names its node:
 | a `flow:` step — by its NAME, so two nodes of one class are set apart | `flow.second.op.level: 0.9` |
 | a top-level object — by its key | `sink.output_dir: /data/out` |
 | a node with no name (a member of an `ops:` list) — by its CLASS, while the class is used by that node alone | `AcfSlice.max_points: 512` (or the block `AcfSlice: {max_points: 512}`) |
+| a parameter that ONE node of the graph alone has — bare, confluid's own spelling (its broadcast reaches that one node) | `floor_db: -60.0` |
+
+A bare name two nodes share is refused naming the full keys to write (`level is a parameter of 2 nodes (first,
+third) — a bare line would set them all; write flow.first.op.level or flow.third.op.level`); a name that is none of
+the graph's settings is refused as before, the message adding which parameters may be written bare.
 
 The editor shows each setting on its node (the canvas and the settings tab read the same model); the text tab shows the
 graph itself. Undo takes a setting back like any edit. Save writes only the files that changed — the settings file
