@@ -33,7 +33,7 @@ from flask import Flask
 from recordstream import Image, Record
 
 from streamstudio.app import EditorHost, HostRecord, create_app, editor_blueprint
-from streamstudio.settings import SETTINGS_SUFFIX, SettingsError, load_graph, settings_path
+from streamstudio.settings import SETTINGS_SUFFIX, SettingField, SettingsError, load_graph, set_setting, settings_path
 
 MOD = __name__
 PREFIX = "/studio"
@@ -209,6 +209,14 @@ class TestTheSettingsFile:
 # ================================================================================================
 
 
+def test_the_editor_sets_a_bare_line_in_place() -> None:
+    """A settings file a person wrote with a bare name keeps that line when the editor sets the same field."""
+    field = SettingField("second", "floor_db", "flow.second.op.floor_db", "pane.yaml:12:5")
+    assert set_setting("# mine\nfloor_db: -60.0\n", field, -70.0) == "# mine\nfloor_db: -70.0\n"
+    assert set_setting("", field, -70.0) == "flow.second.op.floor_db: -70.0\n"
+    assert set_setting("flow.second.op.floor_db: -60.0\n", field, -70.0) == "flow.second.op.floor_db: -70.0\n"
+
+
 class TestLoadingAGraphWithItsSettings:
     def test_a_setting_names_a_flow_step_so_two_nodes_of_one_class_are_set_apart(self, tmp_path: Path) -> None:
         graph = _write(tmp_path, "pane.yaml", PANE_TEXT)
@@ -238,6 +246,37 @@ class TestLoadingAGraphWithItsSettings:
         message = str(refused.value)
         assert message.startswith(f"{settings}:1:1: "), message
         assert "SetKnobs" in message and "stream.ops[1]" in message and "stream.ops[2]" in message, message
+
+    def test_a_parameter_one_node_alone_has_may_be_written_bare(self, tmp_path: Path) -> None:
+        """PRO: ``floor_db`` is SetFloor's alone in the pane and in the chain — ``floor_db: -60.0`` is the setting
+        ``flow.second.op.floor_db`` (confluid's own bare-key broadcast reaches that one node; measured 2026-10-14 on
+        a review graph: ``overrides: {…}`` built the package step with it in both graphs). CON: ``level`` is a
+        parameter of two nodes — a bare line would set both — refused naming the full keys to write."""
+        graph = _write(tmp_path, "pane.yaml", PANE_TEXT)
+        settings = _write(tmp_path, "pane.settings.yaml", "floor_db: -60.0\n")
+        assert load_graph(graph, settings)["flow"]["second"]["op"].floor_db == -60.0
+        settings = _write(tmp_path, "pane.settings.yaml", "level: 0.9\n")
+        with pytest.raises(SettingsError) as refused:
+            load_graph(graph, settings)
+        assert str(refused.value) == (
+            f"{settings}:1:1: level is a parameter of 2 nodes (first, third) — a bare line would set them all; "
+            "write flow.first.op.level or flow.third.op.level"
+        )
+        chain = _write(tmp_path, "chain.yaml", CHAIN_TEXT)
+        settings = _write(tmp_path, "chain.settings.yaml", "floor_db: -60.0\n")
+        assert load_graph(chain, settings)["stream"].ops[0].floor_db == -60.0
+        settings = _write(tmp_path, "chain.settings.yaml", "level: 0.9\n")
+        with pytest.raises(SettingsError, match="level is a parameter of 2 nodes"):
+            load_graph(chain, settings)
+
+    def test_an_unknown_bare_name_is_refused_and_the_message_names_the_bare_spellings(self, tmp_path: Path) -> None:
+        graph = _write(tmp_path, "pane.yaml", PANE_TEXT)
+        settings = _write(tmp_path, "pane.settings.yaml", "other: 3\n")  # SetKnobs has it; no app: entry names it
+        with pytest.raises(SettingsError) as refused:
+            load_graph(graph, settings)
+        message = str(refused.value)
+        assert message.startswith(f"{settings}:1:1: other is not a setting of pane — its settings are: "), message
+        assert message.endswith(" (a parameter one node alone has may be written bare: floor_db)"), message
 
     def test_a_setting_that_is_none_of_the_graphs_settings_is_refused_where_it_is_written(self, tmp_path: Path) -> None:
         """PRO: ``other`` is a parameter of SetKnobs, but no ``app:`` entry names it; ``fourth`` names no node.
