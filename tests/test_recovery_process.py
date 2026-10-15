@@ -60,6 +60,45 @@ EDITOR_CLI = [
     "import runpy, streamstudio.app as app; app.ensure_page_built = lambda frontend=None: None; "
     "runpy.run_module('streamstudio.cli', run_name='__main__', alter_sys=True)",
 ]
+#: :data:`EDITOR_CLI` noting, in the file ``$EDITOR_TRACE``, every write to stdout and stderr, a write or flush that
+#: fails, each ``os.dup2`` (``cli._terminal_gone`` pointing fds 1 and 2 at /dev/null) and the start of ``atexit``. A
+#: write to a CLOSED terminal reaches no one, so the closed-terminal test prints this file when the editor exits with
+#: another code than 0: the one failure seen (exit 120 — Python's final flush failed — 2026-10-14 nightly, 1 run in 29)
+#: did not come back in 92 runs on 2026-10-15, idle or loaded, and the next one must name the write (``TASKS.md``).
+_TRACE_PRELUDE = """\
+import atexit, os, sys, threading, time
+_trace = open(os.environ["EDITOR_TRACE"], "a", buffering=1)
+def _note(text):
+    _trace.write(f"{time.monotonic():.6f} [{threading.current_thread().name}] {text}\\n")
+class _Tap:
+    def __init__(self, stream, name):
+        self._stream, self._name = stream, name
+    def write(self, text):
+        _note(f"{self._name}.write {text!r:.100}")
+        try:
+            return self._stream.write(text)
+        except Exception as exc:
+            _note(f"{self._name}.write failed: {exc!r}")
+            raise
+    def flush(self):
+        try:
+            return self._stream.flush()
+        except Exception as exc:
+            _note(f"{self._name}.flush failed: {exc!r}")
+            raise
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+sys.stdout, sys.stderr = _Tap(sys.stdout, "stdout"), _Tap(sys.stderr, "stderr")
+_dup2 = os.dup2
+def _traced_dup2(fd, fd2, *rest):
+    _note(f"os.dup2({fd}, {fd2})")
+    return _dup2(fd, fd2, *rest)
+os.dup2 = _traced_dup2
+atexit.register(lambda: _note(f"atexit, threads {[thread.name for thread in threading.enumerate()]}"))
+"""
+TRACED_EDITOR_CLI = [*EDITOR_CLI[:2], _TRACE_PRELUDE + EDITOR_CLI[2]]
+#: The line the closed-terminal test adds to the trace as it closes the terminal and sends SIGHUP.
+TERMINAL_CLOSED = "— the test closed the terminal and sent SIGHUP —"
 #: How long a start (imports, ~6 s measured) and a stop may take before the test fails instead of hanging.
 START_TIMEOUT = 180.0
 STOP_TIMEOUT = 60.0
@@ -330,16 +369,20 @@ def test_a_restart_with_no_folder_serves_the_folder_the_running_editor_served(
 def test_a_closed_terminal_window_keeps_the_work_although_nothing_can_be_printed(folder: Path, tmp_path: Path) -> None:
     """The editor runs in a terminal (a pseudo-terminal here) that is CLOSED before it stops: every line it prints
     after that fails (``EIO``), and the kept work must not depend on those lines. The terminal's side is closed first,
-    then SIGHUP is sent — what closing the window does."""
+    then SIGHUP is sent — what closing the window does. The editor notes what it writes in a trace
+    (:data:`TRACED_EDITOR_CLI`), printed when it exits with another code than 0."""
     port = _free_port()
+    trace = tmp_path / "editor-writes.txt"
     terminal, editor_side = pty.openpty()
     proc = subprocess.Popen(
-        [*EDITOR_CLI, "run", str(folder), "--port", str(port)] + ["--templates-dir", str(tmp_path / "templates")],
+        [*TRACED_EDITOR_CLI, "run", str(folder), "--port", str(port)]
+        + ["--templates-dir", str(tmp_path / "templates")],
         cwd=tmp_path,  # never the workspace root: its liquifai/ folder shadows the installed package
         stdin=editor_side,
         stdout=editor_side,
         stderr=editor_side,
         close_fds=True,
+        env={**os.environ, "EDITOR_TRACE": str(trace)},
     )
     os.close(editor_side)
     try:
@@ -359,10 +402,15 @@ def test_a_closed_terminal_window_keeps_the_work_although_nothing_can_be_printed
         )
         with urllib.request.urlopen(request, timeout=STOP_TIMEOUT) as response:
             assert json.loads(response.read())["dirty"] is True
+        with trace.open("a") as noted:
+            noted.write(f"{TERMINAL_CLOSED}\n")
         os.close(terminal)
         terminal = -1
         proc.send_signal(signal.SIGHUP)
-        assert proc.wait(timeout=STOP_TIMEOUT) == 0
+        code = proc.wait(timeout=STOP_TIMEOUT)
+        written = trace.read_text()
+        after_close = written[written.index(TERMINAL_CLOSED) :]
+        assert code == 0, f"the editor exited {code}; what it wrote from the moment the terminal closed:\n{after_close}"
         [entry] = _kept(folder)["graphs"]
         assert "low_level: 0.9" in entry["texts"][str((folder / "demo.yaml").resolve())]
         assert (folder / "demo.yaml").read_text() == FLOW_TEXT

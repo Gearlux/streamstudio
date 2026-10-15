@@ -8,7 +8,17 @@ workspace root `TASKS.md`. Completed items are not archived here — git history
   with `assert 120 == 0` (1 of 29 recorded runs, `aisland tests report streamstudio`). 120 is Python's exit code when
   its final flush at shutdown fails — the case `cli._terminal_gone` exists to prevent, so some write still reaches the
   closed terminal after it ran. The failed assertion is on the exit code only, so whether the work was kept that time
-  is not known. Reproduce it under load first (the test repeated beside a CPU hog), then find the write. @2026-10-14
+  is not known. NOT reproduced 2026-10-15 in 92 runs: 12 idle and 20 beside 16 busy processes (load ≈12) through a
+  harness that traced every stdout/stderr write, 60 of the real test with `--cov=streamstudio` beside 12 busy
+  processes — every one exit 0 (at 1 in 29, 92 clean runs had a 4 % chance). The trace of the exit path: SIGHUP →
+  stash → `Unsaved work … is kept` fails `EIO` → `_terminal_gone` (fds 1, 2 → /dev/null) → exit 0; a write to a pty
+  whose master is closed failed `EIO` 40 of 40 times; the request thread's access-log line lands 0.4 ms before the
+  close and, late, is flushed after `_terminal_gone`. No path found leaves a failed write pending at the final flush.
+  Since 2026-10-15 the test's child notes every write in a trace (`TRACED_EDITOR_CLI`) and a failing exit prints it
+  from the moment the terminal closed — shown on a copy where the redirect never happens: `exit 120`, then `atexit` and
+  `stdout.flush failed: OSError(5, 'Input/output error')`. When it fails again, read that output for the write. The
+  other lever, fds 1 and 2 to /dev/null at once on SIGHUP, is a behaviour change (a SIGHUP sent by hand to an editor
+  whose terminal is open would silence its last line) — decide with the user. @2026-10-15
 - [ ] **A SAVED `!ref:` into a parameter is drawn without its types meeting** @low @bug — measured 2026-10-09: `samplerate: !ref:up_rate` with `up_rate` a value node offering `object` derived with no problem and the wire drawn (`up_rate → upsample_rate.samplerate`), while drawing the same wire is refused (`up_rate.object (object) cannot be wired into upsample_rate.samplerate (number): the types do not meet`). The reference resolution (`_Builder.resolve_references`) does not apply `wire()`'s meet check. Decide with the user whether a saved mismatch becomes a problem. @2026-10-09
 - [ ] **A second Set source… after Escape did not open once in a full run** @low @test — measured 2026-10-05 at load ~105: `tests/test_canvas.py::TestTheCatalogueIsAskedForOnFirstNeed::test_nothing_asks_while_the_page_opens_and_the_first_surface_asks_once[set-source]` timed out at its SECOND `show` (`tests/test_canvas.py:1085` → `Locator.wait_for: Timeout 30000ms exceeded … waiting for locator("[data-dialog=\"set-slot\"]") to be visible`) after Escape had closed the first dialog; it passed alone, and the cause is not known yet. Reproduce it under load first (several full runs, or the test repeated beside a CPU hog) before changing anything. @2026-10-05
 - [ ] **Renaming or removing a node a setting names is refused instead of following it** @low @feature — measured 2026-10-05: with `pane.settings.yaml` holding `flow.first.op.level: 0.9`, `POST …/rename {node: first, new: head}` and `DELETE …/steps/first` answer `400 … pane.settings.yaml:1:1: flow.first.op.level is not a setting of pane …` (pinned by `tests/test_graph_settings.py::TestTheEditorHoldsTheSettings::test_a_node_a_setting_names_is_not_removed_or_renamed_from_under_it`). A rename could re-key the line (`flow.head.op.level`) in the same edit, and a removal drop it; decide with the user. @2026-10-05
