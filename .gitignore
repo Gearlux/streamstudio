@@ -31,6 +31,14 @@ lightning_logs/
 logs/
 checkpoints/
 runs/
-frontend/
 .vscode/
 /pyrightconfig.json
+
+# The streamstudio canvas editor's recovery file — what a stop (streamstudio stop / restart, Ctrl+C, a closed terminal) kept of the
+# unsaved work, written into the folder it served: `.streamstudio-workspace.json`, the `.broken.json` a discard
+# moved aside, and the `.writing.json` it is written through. Per machine and per session: never committed.
+.streamstudio-workspace*.json
+
+# The editor's built page, streamstudio/canvas, is COMMITTED (README "Building the canvas page") — but never a source
+# map: vite writes none (frontend/vite.config.ts), and one made by hand (`vite build --sourcemap`) stays local.
+/streamstudio/canvas/**/*.map

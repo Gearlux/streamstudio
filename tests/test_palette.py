@@ -10,11 +10,16 @@ can be wired INTO (a ``Stream``, an ``Iterable`` source, ``Any``). A class whose
 still listed, with the reason in ``problem`` — the palette never drops a class and never crashes on one.
 """
 
+import json
+import subprocess
+import sys
 import time
+from pathlib import Path
 from typing import Annotated, Any, Callable, Dict, Iterable, List, Literal, Mapping, Optional
 
 import pytest
 from annotated_types import Interval
+from confluid import configurable
 from recordstream.algorithm import Algorithm, Input, Output, Param
 from recordstream.core.stream import JointStream, Stream
 from recordstream.items import Image, Mask
@@ -28,6 +33,7 @@ from streamstudio.palette import (
     NodeSpec,
     describe,
     palette,
+    registered,
     slot_socket_type,
     socket_type,
     spec_for,
@@ -56,6 +62,17 @@ class Broken:
 
     def __init__(self, x: "NoSuchType" = None) -> None:  # type: ignore[name-defined]  # noqa: F821
         self.x = x
+
+
+@configurable(category="op", group="palette-test")
+class Decides:
+    """An op that raises one of two findings and writes a report — a classifier's shape."""
+
+    flags = ("wide", "narrow")
+    reports = "decide"  # one report name, as an op declares it
+
+    def __call__(self, record: Any) -> Any:
+        return record
 
 
 def make_widget(size: int = 3) -> object:
@@ -122,6 +139,13 @@ class TestKindsAndSockets:
         assert spec.consumes_types == [] and spec.produces_types == []
         assert spec.flags == [] and spec.reports == []
 
+    def test_an_op_with_flags_and_a_report_shows_one_record_outcome_per_flag_and_a_report_output(self) -> None:
+        spec = describe(Decides)
+        assert spec.flags == ["wide", "narrow"] and spec.reports == ["decide"]
+        outputs = sockets(spec, "outputs")
+        assert outputs["wide"] == "Record" and outputs["narrow"] == "Record"
+        assert outputs["report:decide"] == "object"
+
     def test_an_any_parameter_is_a_wildcard_input_socket_and_still_a_parameter(self) -> None:
         spec = describe(PutField)
         assert sockets(spec, "inputs") == {"record": "Record", "value": "*"}
@@ -142,7 +166,7 @@ class TestKindsAndSockets:
         spec = describe(GraphContract)
         assert spec.kind == "contract"
         assert spec.inputs == [] and spec.outputs == []
-        assert set(spec.params_schema) == {"name", "inputs", "outputs", "records", "delivered"}
+        assert set(spec.params_schema) == {"name", "inputs", "outputs", "records", "delivered", "optional"}
 
     def test_dataset_processor_is_a_runnable_wired_from_a_stream(self) -> None:
         spec = describe(DatasetProcessor)
@@ -273,17 +297,33 @@ class TestSocketRules:
         assert types_meet(source, target) is meets
 
 
+#: The cheap set, listed in a FRESH interpreter that imports what this module imports and nothing else. Inside a test
+#: run the registry holds every class the other test modules imported: measured 2026-10-06, 912 specs and 3.6 s of
+#: CPU, 7.4 s under coverage (a Jenkins failure) — against 62 specs and 0.05 s alone. Its own CPU time, so another
+#: process's load does not count either.
+_CHEAP_SET_PROBE = """
+import json, time
+import recordstream.core.stream, recordstream.ops.contract, recordstream.ops.numpy
+from streamstudio.palette import palette
+started = time.process_time()
+specs = palette(refresh=True, scan=False)
+print(json.dumps({"seconds": time.process_time() - started, "names": sorted({s.name for s in specs}),
+                  "count": len(specs), "sorted": specs == sorted(specs, key=lambda s: s.class_path)}))
+"""
+
+
 class TestPaletteAndLookup:
-    def test_the_registry_as_imported_is_the_cheap_set(self) -> None:
-        started = time.perf_counter()
-        specs = palette(refresh=True, scan=False)
-        elapsed = time.perf_counter() - started
-        names = {s.name for s in specs}
-        assert {"Scale", "Threshold", "ConnectedComponents", "Stream", "GraphContract"} <= names
-        assert len(specs) >= 50
-        assert specs == sorted(specs, key=lambda s: s.class_path)
-        print(f"\ncheap set: {len(specs)} specs in {elapsed * 1000:.0f} ms")
-        assert elapsed < 5.0
+    def test_the_registry_as_imported_is_the_cheap_set(self, tmp_path: Path) -> None:
+        done = subprocess.run(
+            [sys.executable, "-c", _CHEAP_SET_PROBE], capture_output=True, text=True, timeout=120, cwd=tmp_path
+        )
+        assert done.returncode == 0, done.stderr
+        listed = json.loads(done.stdout.strip().splitlines()[-1])
+        assert {"Scale", "Threshold", "ConnectedComponents", "Stream", "GraphContract"} <= set(listed["names"])
+        assert listed["count"] >= 50
+        assert listed["sorted"]
+        print(f"\ncheap set: {listed['count']} specs in {listed['seconds'] * 1000:.0f} ms")
+        assert listed["seconds"] < 5.0
 
     def test_the_cached_list_is_returned_by_identity(self) -> None:
         first = palette(scan=False)
@@ -310,26 +350,17 @@ class TestPaletteAndLookup:
 
 
 def test_the_full_scan_lists_every_installed_class() -> None:
-    pytest.importorskip("waivefront")
+    """The full scan (every ``confluid.configurables`` entry point imported) describes every class the registry then
+    holds, once, and caches the list; a class whose introspection fails is listed with its reason, never dropped."""
     started = time.perf_counter()
     specs = palette(refresh=True)
     elapsed = time.perf_counter() - started
     print(f"\nfull scan: {len(specs)} specs in {elapsed:.1f} s")
-    assert len(specs) >= 400
+    assert len(specs) == len(registered(scan=True))
     assert palette() is specs
-    by_name = {s.name: s for s in specs}
-    floor = by_name["NoiseFloorEstimate"]
-    assert floor.kind == "algorithm"
-    assert sockets(floor, "inputs") == {"record": "Record", "spectrogram": "Spectrogram"}
-    assert sockets(floor, "outputs") == {"record": "Record", "op": "Op", "noise_floor_db": "number"}
-    assert floor.params_schema["percentile"]["minimum"] == 0.0
-    # the registry holds a class whose constructor annotations do not resolve; it is listed, not dropped
-    broken = [s for s in specs if s.problem]
-    assert broken, "expected at least one class the introspection refuses"
-    assert all(s.kind == "op" and s.inputs == [] for s in broken)
-    # an op with flags and a report shows one record outcome per flag and a report output
-    classify = by_name["ClassifyBluetooth"]
-    outs = sockets(classify, "outputs")
-    assert outs["ble"] == "Record" and outs["try_weak"] == "Record" and outs["report:classify"] == "object"
-    assert classify.flags == ["fsk", "ble", "bredr", "try_weak", "try_classic", "try_frame"]
-    assert classify.reports == ["classify"]
+    by_path = {s.class_path: s for s in specs}
+    threshold = by_path["recordstream.ops.numpy.Threshold"]
+    assert threshold.kind == "op"
+    assert sockets(threshold, "outputs") == {"record": "Record", "op": "Op"}
+    assert threshold.params_schema["low_op"]["enum"] == [">", ">="]
+    assert all(s.kind == "op" and s.inputs == [] for s in specs if s.problem)

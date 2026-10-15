@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "streamstudio"
 version = "0.1.0a1"
-description = "Auto-generating ComfyUI nodes from RecordStream/HuggingFace operations."
+description = "A graph editor for recordstream pipelines written as confluid YAML."
 readme = "README.md"
 authors = [{ name = "Gert Behiels" }]
 license = "MIT"
@@ -28,34 +28,23 @@ dependencies = [
     # options every command carries — both absent from 0.2.0, and both used at MODULE
     # level, so an older liquifai is not a degraded CLI but an ImportError-equivalent:
     # `LiquifyApp.__init__() got an unexpected keyword argument 'strict_flags'` at
-    # import, taking every entry point with it (measured 2026-09-03, when the workspace
-    # resolved the PyPI 0.2.0 wheel). 0.3.0 is NOT on PyPI yet — until it is, this
-    # package needs liquifai from a checkout or from git.
+    # import, taking every entry point with it (measured 2026-09-03 against 0.2.0).
     "liquifai>=0.3.0",
     "loggair>=0.2.0",
-    # [pydantic] extra: bridge.py enumerates fields via confluid.to_pydantic.
-    "confluid[pydantic]>=0.3.0",
+    # [pydantic] extra: palette.py enumerates a class's fields via confluid.to_pydantic.
+    # The editor also needs `confluid.load(path, texts=)` (confluid 0.4.0) for EVERY graph: document.py
+    # hands confluid the graph's path and every text it holds instead of writing them to disk.
+    "confluid[pydantic]>=0.4.0",
     # The pre-release segment is REQUIRED, not cosmetic: under PEP 440 a plain `>=0.1.0`
     # excludes every pre-release of 0.1.0, so it would refuse the only recordstream that
     # exists and resolve to nothing. 0.1.0a2 is the first release carrying the op-chain
     # contract this package imports (RecordContract, check_chain, ChainContractError).
-    "recordstream>=0.1.0a2",
+    "recordstream>=0.1.0a3",
+    # Imported lazily by the HuggingFace pickers (streamstudio/__init__.py: a dataset's columns and splits).
     "datasets",
-    # PEP-593 range marks: the bridge reads Annotated[..., Interval/Ge/Le] into widget
-    # min/max. Already transitive via confluid[pydantic]->pydantic; declared because
-    # bridge.py imports it directly.
-    "annotated-types",
-    # Imported at MODULE scope by nodes.py, which __init__.py imports: the adapter nodes
-    # speak ComfyUI's tensor protocols (IMAGE `[1,H,W,3]`, MASK `[1,H,W]`) and read record
-    # payloads as arrays. Undeclared, `pip install streamstudio` produced a package that
-    # raised ModuleNotFoundError on import; ComfyUI itself cannot run without torch either.
-    "torch",
-    "numpy",
     # Imported at MODULE scope by cli.py: `stop` / `restart` locate the running studio by the port
     # it holds, and the only unprivileged way to do that is a per-process connection scan (the
-    # whole-system psutil.net_connections() raises AccessDenied on macOS). Already required by
-    # ComfyUI itself (its requirements.txt, synced on every launch), so this costs nothing in a
-    # working environment; declared because a `pip install streamstudio` must stand on its own.
+    # whole-system psutil.net_connections() raises AccessDenied on macOS).
     "psutil",
     # Imported at MODULE scope by document.py / _yamltext.py: the document model composes the YAML
     # text with PyYAML's own node tree (yaml.compose) to locate the line a marker came from, and
@@ -63,7 +52,7 @@ dependencies = [
     # a module-scope import is a hard dependency whatever else happens to install it.
     "pyyaml",
     # Imported at MODULE scope by app.py: the graph editor is a Flask blueprint (mounted by a consuming
-    # Flask app, or served standalone by `streamstudio editor`) — docs/rewrite.md.
+    # Flask app, or served standalone by bare `streamstudio`) — docs/rewrite.md.
     "flask",
 ]
 requires-python = ">=3.12"
@@ -74,21 +63,24 @@ dev = [
     # validates the metadata PyPI will re-validate on upload.
     "build>=1.0.0",
     "twine>=5.0.0",
+    # The build backend itself (= [build-system] requires): tests/test_packaging.py builds the wheel
+    # with `python -m build --wheel --no-isolation` to prove the committed editor page ships in it —
+    # no isolation, because an isolated build fetches these from the network, which tests never touch.
+    "setuptools>=77",
+    "wheel",
     "black>=24.0.0,<25.0.0",
     "isort>=5.13.0,<6.0.0",
     "flake8>=6.0.0,<8.0.0",
     "mypy>=1.0.0,<2.0.0",
+    # Type stubs for two DECLARED dependencies that ship none (pyyaml, psutil). This project's own CI
+    # runs `mypy .` from the project directory with the default error codes, so without them every
+    # `import yaml` / `import psutil` is an `import-untyped` error there (the workspace-root run hides
+    # it by disabling that code).
+    "types-PyYAML>=6.0.0",
+    "types-psutil",
     "pytest>=7.0.0,<9.0.0",
     "pytest-cov>=4.0.0,<7.0.0",
 ]
-
-# The signal-domain node set — a PLUGIN, never a requirement: every use of it in this
-# package is a guarded import with a working fallback (a viridis-only colormap list, a
-# placeholder IMAGE), and its nodes reach the palette through entry-point discovery, so
-# installing it by ANY means is what switches them on. The extra names it and nothing
-# more: PyPI rejects a requirement carrying a URL (warehouse refuses "direct dependency"),
-# so a git-pinned transitive cannot be restated here. See the README for how to obtain it.
-waivefront = ["waivefront"]
 
 [project.urls]
 Homepage = "https://github.com/Gearlux/streamstudio"
@@ -105,26 +97,37 @@ streamstudio = "streamstudio.cli:main"
 [project.entry-points."liquifai.apps"]
 streamstudio = "streamstudio.cli:app"
 
-# Custom-node repos the launcher installs into ComfyUI's custom_nodes/ on every launch
-# ("generally available" — no flags or env vars needed). ANY installed package may declare
-# this group; the target must resolve to a git-URL str or an iterable of them. streamstudio's
-# own declaration bundles ComfyUI-Manager (see streamstudio/custom_nodes.py). NOTE: editable
-# installs freeze entry-point metadata — after adding/renaming an entry point here, reinstall
-# (`uv pip install -e ./streamstudio`); editing the URL tuple in custom_nodes.py needs no reinstall.
-[project.entry-points."streamstudio.custom_nodes"]
-streamstudio = "streamstudio.custom_nodes:CUSTOM_NODE_URLS"
+# `node`/`npm` are for EDITING the canvas page: the built page is committed inside the package
+# (`streamstudio/canvas`, carried by package-data below), so a checkout and every install serve it without
+# Node. When the page's source (`frontend/`) changed since its committed build, a server's START rebuilds it
+# (`streamstudio.page.ensure_page_built`: `npm ci` when its libraries are missing, then `npm run build:page`
+# -> `streamstudio/canvas`) — and that rebuilt folder is committed with the source change. Without Node such a
+# start still starts, and it and the page at `/` say "the editor's page is out of date and Node is not
+# installed — run aisland setup". macOS: brew's `node` formula bundles npm; Linux: aisland fetches the
+# official Node LTS tarball into aisland/tools/ (its USERSPACE_TOOLS registry) and symlinks node/npm/npx
+# into aisland/bin/ — no sudo; `source project.bashrc` puts aisland/bin on PATH, which is where a start
+# looks for them.
+[tool.aisland.sys-dependencies]
+brew      = ["node"]
+userspace = ["node"]
 
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["streamstudio*"]
 
 [tool.setuptools.package-data]
-# `web/*.js` is CODE, not an asset: ComfyUI loads the frontend extension from the directory
-# named by `WEB_DIRECTORY` in streamstudio/__init__.py. `web/` has no __init__.py, so
-# packages.find skips it and this is the ONLY thing that puts it in the wheel — omitted, the
-# package installs, registers every node, and has no UI. `config.default.yaml` is the palette
-# fallback read at runtime by streamstudio.bridge; `py.typed` marks the package as typed.
-streamstudio = ["py.typed", "config.default.yaml", "web/*.js"]
+# `canvas/` is the editor's BUILT page (vite's output, committed; it has no __init__.py, so packages.find skips it
+# and this is the ONLY thing that puts it in the wheel — omitted, the package installs and serves no page), served at
+# `/` by streamstudio.app.web_dist(): its index.html, the js/css bundles, and `.built-from`, the record of the source
+# it was built from (streamstudio.page.STAMP). Source maps are never built or shipped (`*.map` matches none of these
+# patterns; tests/test_packaging.py). `py.typed` marks the package as typed.
+streamstudio = [
+    "py.typed",
+    "canvas/index.html",
+    "canvas/.built-from",
+    "canvas/assets/*.js",
+    "canvas/assets/*.css",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -135,3 +138,14 @@ line_length = 120
 
 [tool.black]
 line-length = 120
+
+# This project is type-checked TWICE with different configs. From the workspace root the shared
+# `mypy.ini` supplies these ignores, so a gap here is invisible there; this project's OWN CI runs
+# `mypy .` from the project directory, reads only the tables below, and is what a published package
+# must satisfy. Every third party that CI cannot resolve therefore needs an entry HERE, each one for
+# a stated reason — never a global `ignore_missing_imports`, never a disabled error code.
+
+# Declared dependency that ships neither a `py.typed` marker nor a stub package.
+[[tool.mypy.overrides]]
+module = ["datasets.*"]
+ignore_missing_imports = true

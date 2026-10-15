@@ -1,30 +1,31 @@
 """What a built wheel must contain, and what PyPI must accept.
 
-This project's runtime is not only Python: ComfyUI loads the frontend extension from
-``WEB_DIRECTORY`` (``streamstudio/__init__.py``), so ``web/*.js`` is *code*, shipped
-through ``package-data``. An editable install reads it straight from the checkout,
-which is why its absence from the wheel is invisible during development and total in
-production — the package imports, registers its nodes, and has no UI.
+This project's runtime is not only Python: the canvas editor's page is a BUILT folder (``streamstudio/canvas``)
+shipped through ``package-data``. An editable install reads it straight from the checkout, which is why its absence
+from the wheel is invisible during development and total in production — the package imports and serves no page.
 
-The rules below were each written against a measured failure of this project's own
-build; none is a checklist item:
+The rules below were each written against a measured failure of this project's own build; none is a checklist item:
 
-* the wheel held 13 entries and none of the 30 ``web/*.js`` files;
-* ``pip install streamstudio`` into a torch-less environment raised
-  ``ModuleNotFoundError: No module named 'torch'`` from ``nodes.py``, because the
-  module-scope ``import torch`` was declared nowhere;
-* a ``torchsig @ git+https://...`` entry in an extra would have had the upload
-  refused by PyPI after every gate passed.
+* a wheel shipped without the files ``package-data`` had to name;
+* ``pip install streamstudio`` into a clean environment raised ``ModuleNotFoundError`` for a module-scope import
+  that was declared nowhere;
+* a ``torchsig @ git+https://...`` entry in an extra would have had the upload refused by PyPI after every gate
+  passed.
 """
 
 import ast
 import re
+import shutil
 import subprocess
+import sys
 import tomllib
+import zipfile
 from fnmatch import fnmatch
 from importlib.metadata import packages_distributions
 from pathlib import Path
 from typing import Any, Dict, List, Set, cast
+
+import pytest
 
 _REPO = Path(__file__).resolve().parent.parent
 _PYPROJECT = _REPO / "pyproject.toml"
@@ -106,26 +107,84 @@ def test_no_requirement_is_a_direct_url() -> None:
     assert not direct, f"PyPI rejects direct-URL requirements: {direct}"
 
 
-def test_every_web_asset_is_shipped() -> None:
-    """Every file under ``streamstudio/web/`` matches a ``package-data`` pattern.
+#: The second editor the package no longer carries: its modules, its frontend folder, and what only it needed.
+_REMOVED_MODULES = ("bridge", "nodes", "export", "graphio", "custom_nodes")
 
-    ``web/`` has no ``__init__.py``, so ``packages.find`` skips it and ``package-data``
-    is the only thing that puts it in the wheel. The failure mode is silent and
-    complete: ComfyUI reads ``WEB_DIRECTORY`` off an installed package that has no
-    such directory, and every node renders with default widgets and no extension.
 
-    Stated as "every file is covered" rather than "``web/*.js`` is listed" so that
-    adding a ``.css`` or an icon beside the scripts fails here instead of shipping a
-    half-populated directory.
+def test_the_package_carries_one_editor_and_no_torch() -> None:
+    """The ComfyUI editor was deleted before the first release (user decision 2026-10-14): no module, no ``web/``
+    folder, no node-palette config, no custom-node entry point — and none of torch, numpy, which only it imported
+    (a clean ``pip install streamstudio`` was a 1.0 GB environment, 545 MB of it torch)."""
+    present = [name for name in _REMOVED_MODULES if (_PACKAGE / f"{name}.py").exists()]
+    assert not present, f"modules of the removed editor: {present}"
+    assert not (_PACKAGE / "web").exists() and not (_PACKAGE / "config.default.yaml").exists()
+    assert not [pattern for pattern in _package_data_patterns() if pattern.startswith("web/") or "config" in pattern]
+    assert not {"torch", "numpy"} & _declared_distributions()
+    with _PYPROJECT.open("rb") as fh:
+        entry_points = tomllib.load(fh)["project"].get("entry-points", {})
+    assert "streamstudio.custom_nodes" not in entry_points
+
+
+def test_every_file_of_the_built_page_is_shipped_and_no_source_map() -> None:
+    """Every file of the committed editor page (``streamstudio/canvas``) matches a ``package-data`` pattern, and no
+    pattern takes a source map.
+
+    The folder has no ``__init__.py`` either, so ``package-data`` is the only way into the wheel. Stated as "every file
+    is covered" so a build that starts writing a new kind of asset (a font, an image) fails here instead of shipping a
+    page whose ``index.html`` names a file the install does not have.
     """
     patterns = _package_data_patterns()
-    unshipped = [
-        str(path.relative_to(_PACKAGE))
-        for path in sorted(_PACKAGE.glob("web/*"))
-        if path.is_file() and not any(fnmatch(str(path.relative_to(_PACKAGE)), pattern) for pattern in patterns)
+    files = [
+        path.relative_to(_PACKAGE).as_posix() for path in sorted((_PACKAGE / "canvas").rglob("*")) if path.is_file()
     ]
+    assert "canvas/index.html" in files and "canvas/.built-from" in files, files
+    unshipped = [name for name in files if not name.endswith(".map") and not any(fnmatch(name, p) for p in patterns)]
+    assert not unshipped, f"built page files missing from package-data {patterns}: {unshipped}"
+    mapped = [p for p in patterns if fnmatch("canvas/assets/index-AbCd1234.js.map", p) or fnmatch("canvas/x.map", p)]
+    assert not mapped, f"package-data patterns that would ship a source map: {mapped}"
 
-    assert not unshipped, f"web assets missing from package-data {patterns}: {unshipped}"
+
+def test_the_wheel_built_from_a_checkout_serves_the_page(tmp_path: Path) -> None:
+    """Built from what a checkout CARRIES (the tracked files, plus new ones not ignored — ``git ls-files -co``), the
+    wheel holds the editor page — ``index.html``, its assets, the build record — and no source map, even when one lies
+    in the folder (a developer's ``vite build --sourcemap``). Measured before: the wheel held no page at all, and an
+    install answered ``/`` with ``The canvas page is not built``."""
+    inside = (
+        shutil.which("git")
+        and subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"], cwd=_REPO, capture_output=True, text=True
+        ).stdout.strip()
+    )
+    if inside != "true":
+        pytest.skip("not a git checkout: what a checkout carries is what git lists")
+    listed = (
+        subprocess.run(
+            ["git", "ls-files", "-co", "--exclude-standard", "-z"], cwd=_REPO, capture_output=True, check=True
+        )
+        .stdout.decode()
+        .split("\0")
+    )
+    checkout = tmp_path / "checkout"
+    for name in filter(None, listed):
+        if (_REPO / name).is_file():
+            (checkout / name).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(_REPO / name, checkout / name)
+    page = checkout / "streamstudio" / "canvas"
+    (page / "assets" / "index-AbCd1234.js.map").write_text("{}")  # what a build with source maps would leave
+    # No isolation: an isolated build would fetch the backend from the network (the [dev] extra declares it).
+    command = [sys.executable, "-m", "build", "--wheel", "--no-isolation", "--outdir", str(tmp_path / "wheel")]
+    built = subprocess.run([*command, str(checkout)], capture_output=True, text=True)
+    assert built.returncode == 0, built.stdout[-2000:] + built.stderr[-2000:]
+    names = zipfile.ZipFile(next((tmp_path / "wheel").glob("*.whl"))).namelist()
+    carried = sorted(
+        f"streamstudio/{path.relative_to(page.parent).as_posix()}"
+        for path in page.rglob("*")
+        if path.is_file() and path.suffix != ".map"
+    )
+    assert {"streamstudio/canvas/index.html", "streamstudio/canvas/.built-from"} <= set(carried), carried
+    assert [name for name in carried if name not in names] == []
+    assert [name for name in names if name.endswith(".map")] == []
+    assert [name for name in names if name.startswith("streamstudio/web/")] == []
 
 
 def test_the_declared_package_data_files_exist() -> None:
@@ -247,6 +306,31 @@ def test_the_changelog_is_shipped_in_the_sdist() -> None:
     assert not missing, f"MANIFEST.in does not include: {missing}"
 
 
+#: The user documentation: the README (the PyPI page), the CHANGELOG (in the sdist) and the topic pages the README
+#: links. ``docs/architecture.md`` and ``docs/rewrite.md`` are the project's own decision records, dated history.
+_USER_DOCS = (
+    "README.md",
+    "CHANGELOG.md",
+    *(f"docs/{page}.md" for page in ("editor", "settings", "hosting", "api", "development")),
+)
+
+
+@pytest.mark.parametrize("word", ["taidal", "aisland", "waivefront", "annotaide", "navigaitor", "comfy"])
+def test_the_published_text_names_no_workspace_no_dependent_and_no_removed_editor(word: str) -> None:
+    """The user documentation names neither the private workspace this package is developed in (nor its setup tool),
+    a project that depends on it, nor the editor deleted before the first release (user decisions 2026-10-14). The
+    package's own description is held to the same rule."""
+    texts = {name: (_REPO / name).read_text() for name in _USER_DOCS}
+    texts["pyproject.toml description"] = str(_project()["description"])
+    found = [
+        f"{name}:{lineno}: {line.strip()[:80]}"
+        for name, text in texts.items()
+        for lineno, line in enumerate(text.splitlines(), start=1)
+        if word in line.lower()
+    ]
+    assert not found, f"{word!r} in the published text:\n" + "\n".join(found)
+
+
 def test_no_vendor_traces_in_the_repository() -> None:
     """The whole repository is vendor-clean — the 0.1.0a release gate, kept as a pin.
 
@@ -273,37 +357,6 @@ def test_no_vendor_traces_in_the_repository() -> None:
             if tokens.search(line):
                 offenders.append(f"{name}:{lineno}: {line.strip()[:80]}")
     assert not offenders, "vendor tokens found:\n" + "\n".join(offenders)
-
-
-def test_the_readme_does_not_advertise_an_unresolvable_extra() -> None:
-    """An extra may exist; an install command a reader can copy must actually work.
-
-    The domain extra names a distribution that is on no index, so
-    ``pip install --pre "streamstudio[waivefront]"`` — which the README used to print as a
-    fenced, copyable command — resolves to *"your requirements are unsatisfiable"* and
-    installs NOTHING, streamstudio included. The extra is kept: it is the honest declaration
-    of an optional dependency, it costs nothing where the package is already present, and an
-    undeclared extra is silently ignored by installers anyway.
-
-    What is NOT kept is the instruction. Documenting a command that cannot succeed is worse
-    than documenting no command, because the reader blames their environment. The README
-    tells them to install the domain package by whatever means they have; the palette is
-    built from what the environment holds, so that is the whole truth.
-
-    Scoped to install commands in fenced blocks, so prose may still name the extra.
-    """
-    extras = set(_project().get("optional-dependencies", {}))
-    readme = _README.read_text()
-
-    advertised = [
-        line.strip()
-        for line in readme.splitlines()
-        if "pip install" in line
-        for extra in extras
-        if f"[{extra}]" in line and extra != "dev"
-    ]
-
-    assert not advertised, f"README shows an install command for an unresolvable extra: {advertised}"
 
 
 def test_no_superseded_project_name_in_shipped_code() -> None:

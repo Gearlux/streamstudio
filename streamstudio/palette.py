@@ -20,6 +20,9 @@ declarations that already exist for other reasons, and each reading names its so
   other op. An op that declares TYPES rather than entry names (``consumes = (Mask,)``, the
   ``Transform`` spelling) gets no entry socket: the palette records the types and marks the node
   ``tuple_form``, and the run shows the truth (``docs/rewrite.md`` §5);
+* the **picker** a parameter gets is read off its name, its annotation and its class
+  (:func:`picker_of`): a folder or a file for a path-named
+  parameter, the HuggingFace pickers on a ``HuggingFace*`` source, or what a producer stamps on its class;
 * what a constructor parameter can be **wired from** is read off its annotation alone
   (:func:`socket_type`): a registered item class names its own socket, a ``Stream`` is ``Stream``, an
   ``Iterable`` is a ``Source`` of records, ``Any`` meets anything, another class is an ``object``; a
@@ -31,9 +34,11 @@ A class whose introspection fails is still listed: kind ``op``, no sockets, and 
 ``problem``. The registry today holds one such class (a ``DataLoader`` whose constructor names an
 ``Iterable`` it never imported); dropping it would hide a real defect, and raising would empty the
 palette for everyone else.
-The full entry-point scan is the expensive part — measured 6.6 s for the imports of 124 entry points
-plus 0.7 s to describe every discovered class (a few hundred in this workspace) — so the palette is
-built once per process and ``palette(refresh=True)`` is the only thing that rebuilds it.
+The full entry-point scan is the expensive part — measured 2026-10-05 at load 23: 12 s for the imports of 134 entry
+points, 6 s to build the settings of 825 classes — so the palette is built once per process and
+``palette(refresh=True)`` is the only thing that rebuilds it. The editor's server never runs the scan itself: its
+catalogue is built by a helper process (:mod:`streamstudio.catalogue`), from :func:`registered` and :func:`describe`
+— the list without settings (:func:`listed`), then every class with them.
 
 This module reads recordstream and confluid only; the document, the app and the canvas build on it.
 """
@@ -43,7 +48,8 @@ import difflib
 import inspect
 import types
 import warnings
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+from pathlib import PurePath
 from typing import (
     Any,
     Callable,
@@ -68,6 +74,8 @@ from recordstream.core.stream import JointStream, Stream
 from recordstream.flow import FlowGraph
 from recordstream.items import NDArrayItem, item_types
 from recordstream.ops.contract import ANY_TYPE, GraphContract
+
+from streamstudio import lookups
 
 #: A socket's type: a registered item class name (``Image``, ``Spectrogram``), one of the graph words
 #: (``Record``, ``Stream``, ``Source``, ``Op``, ``Sink``), a JSON-schema scalar for a declared value
@@ -131,6 +139,33 @@ _SLOT_KIND_SOCKETS: Dict[str, SocketType] = {"float": NUMBER, "int": INTEGER, "s
 #: Containment beyond identity and item subclassing: a Stream is iterable, so it serves as a Source.
 _WIDER: Dict[SocketType, Tuple[SocketType, ...]] = {STREAM: (SOURCE,)}
 
+#: The pickers the canvas page renders — a parameter's JSON-schema fragment carries one as ``picker``
+#: (:func:`picker_of`): a folder chooser, a file chooser, and the HuggingFace lookups — the datasets this machine has
+#: cached, the columns and the splits of the dataset the node names, and the columns again for a list of them.
+PickerKind = Literal["directory", "file", "hf_dataset", "hf_feature", "hf_split", "hf_metadata"]
+PICKER_KINDS: Tuple[str, ...] = get_args(PickerKind)
+#: A parameter NAME holding one of these words is a path (a deliberate affordance on the name, not a type inference:
+#: a ``str`` named ``output_dir`` should get the chooser)…
+_PATH_WORDS = ("path", "dir", "root", "folder")
+#: … a folder for certain when it holds one of these — they beat a file word (``checkpoint_dir`` is a folder) …
+_FOLDER_WORDS = ("dir", "root", "folder")
+#: … and one file when it holds one of these and no folder word (``checkpoint_path``, ``log_file``).
+_FILE_WORDS = ("file", "checkpoint", "ckpt")
+#: The parameters of a HuggingFace dataset source (a class whose name starts ``HuggingFace``) that name a hub dataset,
+#: one of its columns, its split, a list of its columns — ``path`` is a hub id here, never a folder.
+_HF_CLASS_PREFIX = "HuggingFace"
+_HF_PICKERS: Dict[str, PickerKind] = {
+    "path": "hf_dataset",
+    "repo_id": "hf_dataset",
+    "input_feature": "hf_feature",
+    "target_feature": "hf_feature",
+    "split": "hf_split",
+    "metadata_features": "hf_metadata",
+}
+#: The class attribute a producing package stamps to name a parameter's picker itself (``{param: tag}``) — the tag is
+#: the producer's; the page renders the pickers it knows and a plain field for any other.
+_WIDGET_STAMP = "__taidal_widget_params__"
+
 
 class SocketDict(TypedDict):
     """One socket of a node spec — the JSON shape the canvas and the tools consume."""
@@ -151,7 +186,8 @@ class NodeSpec:
         category: The ``@configurable`` category, ``""`` when untagged.
         group: The ``@configurable`` group, ``""`` when untagged.
         kind: What the node is — see :data:`NodeKind`.
-        params_schema: The JSON-schema ``properties`` of the constructor, from ``confluid.to_pydantic``.
+        params_schema: The JSON-schema ``properties`` of the constructor, from ``confluid.to_pydantic`` — a
+            parameter that gets a picker carries it as ``picker`` (:func:`picker_of`).
         params_defs: The ``$defs`` those properties refer to (a nested config's schema), ``{}`` when none.
         inputs: What can be wired INTO the node, in declaration order.
         outputs: What the node offers, in declaration order.
@@ -271,6 +307,77 @@ def socket_type(annotation: Any) -> Optional[SocketType]:
     return OBJECT
 
 
+def _built_socket(target: Callable[..., Any]) -> SocketType:
+    """What a value node's ``object`` output carries: the scalar its class IS (a ``float`` subclass is a ``number``, and
+    meets a number setting — user pick 2026-10-09: any node whose result is a number), else ``object``. The document
+    model's ``_socket_of_built`` is the same rule."""
+    if inspect.isclass(target):
+        for scalar, word in _SCALAR_SOCKETS:  # bool before int: a bool IS an int
+            if issubclass(target, scalar):
+                return word
+    return OBJECT
+
+
+def _arms(annotation: Any) -> List[Any]:
+    """The members of a union (``Optional`` / ``Union`` / ``X | Y``), each with ``Annotated`` taken off; ``[X]``
+    for anything else."""
+    while hasattr(annotation, "__metadata__"):
+        annotation = annotation.__origin__
+    if _is_union(annotation):
+        return [arm for member in get_args(annotation) for arm in _arms(member)]
+    return [annotation]
+
+
+def picker_of(target: Callable[..., Any], name: str, annotation: Any) -> Optional[str]:  # any annotation form
+    """The picker the parameter ``name`` of ``target`` gets — a :data:`PickerKind`, a producer's stamped tag, or
+    ``None`` for a plain field. The rules, in their order:
+
+    1. a ``__taidal_widget_params__`` stamp naming the parameter wins (``{"output_dir": "PLATFORM_DATASET_ID"}``);
+    2. on a ``HuggingFace*`` class: ``path`` / ``repo_id`` → ``hf_dataset``, ``input_feature`` / ``target_feature`` →
+       ``hf_feature``, ``split`` → ``hf_split``, ``metadata_features`` → ``hf_metadata``;
+    3. a ``Literal`` gets none — its choices are already a list — nor does a bool / int / float parameter
+       (``checkpoint_strict``: a chooser would land on a switch);
+    4. a name holding ``file`` / ``checkpoint`` / ``ckpt`` and no folder word → ``file``; a name holding ``path`` /
+       ``dir`` / ``root`` / ``folder``, or a ``pathlib.Path`` annotation → ``directory``.
+    """
+    stamped = getattr(target, _WIDGET_STAMP, None)
+    if isinstance(stamped, dict) and name in stamped:
+        return str(stamped[name])
+    if inspect.isclass(target) and target.__name__.startswith(_HF_CLASS_PREFIX) and name in _HF_PICKERS:
+        return _HF_PICKERS[name]
+    arms = [arm for arm in _arms(annotation) if arm is not type(None)]
+    if any(get_origin(arm) is Literal for arm in arms):
+        return None
+    if any(arm in (bool, int, float) for arm in arms) and str not in arms:
+        return None
+    lowered = name.lower()
+    if any(word in lowered for word in _FILE_WORDS) and not any(word in lowered for word in _FOLDER_WORDS):
+        return "file"
+    if any(isinstance(arm, type) and issubclass(arm, PurePath) for arm in arms):
+        return "directory"
+    if any(word in lowered for word in _PATH_WORDS):
+        return "directory"
+    return None
+
+
+def _mark_pickers(target: Callable[..., Any], properties: Dict[str, Any]) -> Dict[str, Any]:  # JSON-schema properties
+    """``properties`` with ``picker`` added to the fragment of every parameter :func:`picker_of` gives one — and
+    ``lookup: true`` beside a producer's own tag that an installed plugin supplies a list for
+    (:mod:`streamstudio.lookups`): the page draws that list, where a tag it does not know otherwise stays a plain
+    field."""
+    for slot in slots(target):
+        fragment = properties.get(slot.name)
+        if not isinstance(fragment, dict):
+            continue
+        picker = picker_of(target, slot.name, slot.annotation)
+        if picker is not None:
+            marked = {**fragment, "picker": picker}
+            if picker not in PICKER_KINDS and lookups.lists(picker):
+                marked["lookup"] = True
+            properties[slot.name] = marked
+    return properties
+
+
 def value_socket_type(annotation: Any) -> SocketType:
     """The socket type of a DECLARED value — an Algorithm slot, an ``@output`` — which always has one.
 
@@ -371,7 +478,8 @@ def kind_of(target: Callable[..., Any]) -> NodeKind:
 # ----------------------------------------------------------------------------------------------
 # describing one class
 # ----------------------------------------------------------------------------------------------
-def _class_path(target: Any) -> str:
+def class_path_of(target: Any) -> str:
+    """How a document spells ``target``: ``module.QualName`` (``!class:<path>``), or its repr when it has neither."""
     module = getattr(target, "__module__", None)
     qualname = getattr(target, "__qualname__", None) or getattr(target, "__name__", None)
     return f"{module}.{qualname}" if module and qualname else repr(target)
@@ -483,9 +591,40 @@ def _op_out() -> SocketDict:
     return _socket("op", OP, False, "this node as an op — what a Stream's ops list holds")
 
 
-def describe(target: Callable[..., Any]) -> NodeSpec:
-    """The :class:`NodeSpec` of one class or builder function. Never raises: a failure is the spec's ``problem``."""
-    class_path = _class_path(target)
+def _check_settings(target: Callable[..., Any]) -> None:
+    """Raise what building the settings would raise, without building them — for the list, which leaves them out.
+
+    Building them (``confluid.to_pydantic``) refuses a constructor whose signature or annotations cannot be read —
+    torch's ``DataLoader`` names an ``Iterable`` it never imported — and that refusal is the class's ``problem``.
+    confluid makes that check first, cheaply (``inspect.signature`` and ``get_type_hints`` of the constructor); it is
+    repeated here, and only when it fails is ``to_pydantic`` called, so the problem is in confluid's own words.
+    Measured 2026-10-05 over 825 classes: 1.8 s with this check, 6.5 s with ``to_pydantic`` for every class (both at
+    load ~70). That the list and the full description agree is pinned over every installed class
+    (``tests/test_catalogue.py``).
+    """
+    if inspect.isclass(target):
+        function = target.__dict__.get("__init__") or target.__init__  # type: ignore[misc]  # mypy: no __init__ on type
+    else:
+        function = target
+    if function is object.__init__:
+        return
+    try:
+        inspect.signature(function)
+        get_type_hints(function, include_extras=True)
+    except (TypeError, ValueError, NameError):
+        to_pydantic(target)
+
+
+def describe(target: Callable[..., Any], *, settings: bool = True) -> NodeSpec:
+    """The :class:`NodeSpec` of one class or builder function. Never raises: a failure is the spec's ``problem``.
+
+    Args:
+        target: The class or builder function.
+        settings: Build the constructor's settings (``params_schema``, ``params_defs``). ``False`` leaves them empty —
+            what the catalogue's list carries (:func:`listed`): building them is most of a description's cost (6 s of
+            6.5 s for 825 classes, measured 2026-10-05), and a class's settings are asked for one class at a time.
+    """
+    class_path = class_path_of(target)
     tags = marks(target)
     common = dict(
         class_path=class_path,
@@ -496,7 +635,13 @@ def describe(target: Callable[..., Any]) -> NodeSpec:
     )
     try:
         kind = kind_of(target)
-        properties, defs = _schema(target)
+        properties: Dict[str, Any] = {}
+        defs: Dict[str, Any] = {}
+        if settings:
+            properties, defs = _schema(target)
+            properties = _mark_pickers(target, properties)
+        else:
+            _check_settings(target)
         wired = _wired_inputs(target)
         inputs: List[SocketDict] = []
         outputs: List[SocketDict] = []
@@ -541,7 +686,7 @@ def describe(target: Callable[..., Any]) -> NodeSpec:
             elif kind == "sink":
                 outputs = [_socket("sink", SINK, False, "this sink — what a processor's sink slot holds"), *outputs]
             elif kind == "value":
-                outputs = [*outputs, _socket("object", OBJECT, False, "the built object itself")]
+                outputs = [*outputs, _socket("object", _built_socket(target), False, "the built object itself")]
         return NodeSpec(
             kind=kind,
             params_schema=properties,
@@ -574,6 +719,30 @@ def _remember(spec: NodeSpec) -> None:
     _index.setdefault(spec.name, spec)
 
 
+#: The fields a catalogue LIST leaves out — a class's settings, asked for one class at a time (:func:`listed`).
+SETTINGS_FIELDS: Tuple[str, ...] = ("params_schema", "params_defs")
+
+
+def listed(spec: NodeSpec) -> Dict[str, Any]:
+    """``spec`` as the catalogue's list carries it: every field but the settings (:data:`SETTINGS_FIELDS`).
+
+    The list is what the page searches and draws entries from — names, kinds, sockets, descriptions; the settings are
+    94 % of the full catalogue's 11.6 MB (measured 2026-10-05) and are needed for the one class someone selects.
+    """
+    return {key: value for key, value in asdict(spec).items() if key not in SETTINGS_FIELDS}
+
+
+def registered(scan: bool = True) -> List[Callable[..., Any]]:
+    """Every class and builder function the registry holds, in registry-key order — after importing every
+    ``confluid.configurables`` entry point when ``scan`` (the expensive part of a catalogue: 12 s of 21 s measured
+    2026-10-05 at load 23)."""
+    if scan:
+        load_configurables()
+    registry = get_registry()
+    targets = (registry.get_class(key) for key in sorted(registry.list_classes()))
+    return [target for target in targets if target is not None]
+
+
 def palette(refresh: bool = False, *, scan: bool = True) -> List[NodeSpec]:
     """Every registered class as a :class:`NodeSpec`, sorted by class path; built once, cached per process.
 
@@ -587,14 +756,7 @@ def palette(refresh: bool = False, *, scan: bool = True) -> List[NodeSpec]:
     global _cache, _cache_scanned
     if _cache is not None and not refresh and (_cache_scanned or not scan):
         return _cache
-    if scan:
-        load_configurables()
-    registry = get_registry()
-    specs: List[NodeSpec] = []
-    for key in sorted(registry.list_classes()):
-        target = registry.get_class(key)
-        if target is not None:
-            specs.append(describe(target))
+    specs = [describe(target) for target in registered(scan=scan)]
     specs.sort(key=lambda spec: spec.class_path)
     _index.clear()
     for spec in specs:

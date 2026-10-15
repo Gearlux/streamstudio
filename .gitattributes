@@ -1,0 +1,5 @@
+# The editor's built page is committed (streamstudio/canvas — README "Building the canvas page"): minified bundles
+# rebuilt from frontend/, never edited or merged by hand. `binary` keeps them out of `git diff` and line-ending
+# conversion, and makes a merge of two page changes a conflict — resolved by building the page again (a start, or
+# `npm run build`) and committing what it writes. `linguist-generated` folds them in GitHub's reviews.
+streamstudio/canvas/** binary linguist-generated=true

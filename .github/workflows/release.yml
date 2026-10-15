@@ -59,36 +59,46 @@ jobs:
         /tmp/smoke/bin/pip install --quiet dist/*.whl
         cd /tmp
         /tmp/smoke/bin/python - <<'EOF'
+        import os
+        import tempfile
         from importlib.metadata import version
         from pathlib import Path
 
         import streamstudio
-
-        # The palette is generated at import from the `confluid.configurables` entry
-        # points, so a non-empty mapping proves discovery, the bridge and the data
-        # engine all survived the build. The two package-data checks are the failure
-        # this project actually shipped: a wheel that imports, registers every node,
-        # and has no UI because `web/*.js` never made it in.
-        assert streamstudio.NODE_CLASS_MAPPINGS, "no nodes registered from the built wheel"
-        assert streamstudio.WEB_DIRECTORY, "WEB_DIRECTORY is not set"
+        import streamstudio.app
 
         installed = Path(streamstudio.__file__).parent
-        assert list((installed / "web").glob("*.js")), f"no frontend extensions in {installed}"
-        assert (installed / "config.default.yaml").exists(), "palette config missing from the wheel"
+
+        # The editor's page is committed BUILT inside the package (streamstudio/canvas) and must ship: without it `/`
+        # answers "The canvas page is not built" on every install. Its record of the source it was built from ships
+        # with it; a source map never does.
+        canvas = installed.resolve() / "canvas"
+        assert streamstudio.app.web_dist() == canvas, (streamstudio.app.web_dist(), canvas)
+        assert (canvas / "index.html").exists(), f"no editor page in {canvas}"
+        assert list((canvas / "assets").glob("*.js")) and list((canvas / "assets").glob("*.css")), f"no page assets in {canvas}"
+        assert (canvas / ".built-from").exists(), "the editor page's build record is missing from the wheel"
+        assert not list(canvas.rglob("*.map")), "a source map shipped in the wheel"
         assert (installed / "py.typed").exists(), "py.typed missing from the wheel"
 
-        # `__version__` is the RELEASED number: read from the wheel's own metadata, which the
-        # tag guard above matched to pyproject.toml. Missing or typed-in-and-stale fails here,
-        # before anything reaches PyPI.
-        import os
+        # The editor itself, served from the wheel over a folder holding one graph: the page, the graph list and the
+        # graph's model — the whole install path a user takes, without binding a port.
+        folder = Path(tempfile.mkdtemp())
+        (folder / "demo.yaml").write_text("stream: !class:recordstream.Stream {}\n")
+        client = streamstudio.app.create_app(folder).test_client()
+        page = client.get("/")
+        assert page.status_code == 200 and b"<!doctype html>" in page.data.lower(), page.status_code
+        graphs = client.get("/api/graphs").get_json()
+        assert [graph["name"] for graph in graphs] == ["demo"], graphs
+        demo = client.get("/api/graphs/demo")
+        assert demo.status_code == 200 and demo.get_json()["model"]["nodes"], demo.get_json()
 
+        # `__version__` is the RELEASED number: read from the wheel's own metadata, which the tag guard above matched
+        # to pyproject.toml. Missing or typed-in-and-stale fails here, before anything reaches PyPI.
         tag = os.environ["GITHUB_REF_NAME"].removeprefix("v")
         assert streamstudio.__version__ == version("streamstudio") == tag, (streamstudio.__version__, version("streamstudio"), tag)
-        print(f"wheel smoke-test OK, version: {version('streamstudio')}, "
-              f"nodes: {len(streamstudio.NODE_CLASS_MAPPINGS)}")
+        print(f"wheel smoke-test OK, version: {version('streamstudio')}, graphs: {graphs}")
         EOF
-        # The console script is the documented entry point; --help exercises the full
-        # argparse build (every launcher flag) without cloning or launching ComfyUI.
+        # The console script is the documented entry point; --help renders every command's options without serving.
         /tmp/smoke/bin/streamstudio --help > /dev/null
     - uses: actions/upload-artifact@v7
       with:

@@ -1,17 +1,13 @@
-"""StreamStudio forces Loggair console coloring OFF — even if loggair was already
-configured (with colors) before streamstudio was imported.
+"""Importing StreamStudio leaves the importing process's console colors and environment alone.
 
-`streamstudio/__init__.py` calls ``loggair.force_no_color()`` at import, which sets
-the standard ``NO_COLOR=1`` AND reloads loggair when it is already configured.
-Merely inheriting/copying the env var is NOT enough once a coloring decision is
-baked into the live console sink — these tests pin the reload, and that a pre-set
-``NO_COLOR=`` (empty) still re-allows colors.
+A host that mounts the canvas editor imports ``streamstudio.app``. Measured before 2026-10-01, that import set
+``NO_COLOR=1`` in the host's own process — and in every child process it started — and reconfigured its loggair. The
+package touches neither, whatever else the process has imported.
 
-Each check runs in a SUBPROCESS (isolated loggair state) with ``cwd`` set to a
-throwaway dir so ``import streamstudio`` resolves to the installed package (not the
-workspace-root namespace-package shadow). ``PYCHARM_HOSTED=1`` forces loguru's
-color auto-detect ON for the real stderr, so a still-colorized sink is
-distinguishable from an auto-detected-off one.
+Each check runs in a SUBPROCESS (isolated loggair state) with ``cwd`` set to a throwaway dir so ``import streamstudio``
+resolves to the installed package (not the workspace-root namespace-package shadow). ``PYCHARM_HOSTED=1`` forces
+loguru's color auto-detect ON for the real stderr, so a still-colorized sink is distinguishable from an
+auto-detected-off one.
 """
 
 import os
@@ -19,41 +15,41 @@ import subprocess
 import sys
 from pathlib import Path
 
-_SNIPPET = (
-    "from loggair import get_logger\n"
-    "get_logger('early').info('pre-config -> colors baked in')\n"
-    "import streamstudio  # must force colorless via force_no_color()\n"
+import pytest
+
+_REPORT = (
+    "import os\n"
     "from loguru import logger\n"
-    "vals = [h._colorize for h in logger._core.handlers.values()"
-    " if type(h._sink).__name__ == 'StreamSink']\n"
+    "vals = [h._colorize for h in logger._core.handlers.values() if type(h._sink).__name__ == 'StreamSink']\n"
     "print('RESULT:' + str(vals[0] if vals else None))\n"
+    "print('NO_COLOR:' + repr(os.environ.get('NO_COLOR')))\n"
 )
 
+_PRECONFIGURED = "from loggair import get_logger\nget_logger('early').info('pre-config -> colors baked in')\n"
 
-def _stream_colorize(env: dict, cwd: Path) -> str:
-    proc = subprocess.run(
-        [sys.executable, "-c", _SNIPPET],
-        env=env,
-        cwd=str(cwd),
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    for line in proc.stdout.splitlines():
-        if line.startswith("RESULT:"):
-            return line[len("RESULT:") :]
-    raise AssertionError(f"no RESULT line:\n{proc.stdout}\n{proc.stderr}")
+_CHILD = (
+    "import subprocess, sys\n"
+    "print('CHILD:' + subprocess.run([sys.executable, '-c', 'import os; print(os.environ.get(\"NO_COLOR\"))'],"
+    " capture_output=True, text=True).stdout.strip())\n"
+)
+
+#: A module named ``server`` already imported — what some web hosts have; it changes nothing here.
+_A_SERVER_MODULE = "import sys, types\nsys.modules['server'] = types.ModuleType('server')\n"
 
 
-def test_streamstudio_forces_colorless_even_if_preconfigured(tmp_path: Path) -> None:
+def _env() -> dict:
     env = dict(os.environ)
     env.pop("NO_COLOR", None)
-    env["PYCHARM_HOSTED"] = "1"  # auto-detect would say "colorize" — but we forced off
-    assert _stream_colorize(env, tmp_path) == "False"
+    env["PYCHARM_HOSTED"] = "1"  # auto-detect would say "colorize"
+    return env
 
 
-def test_streamstudio_empty_no_color_re_allows_colors(tmp_path: Path) -> None:
-    env = dict(os.environ)
-    env["NO_COLOR"] = ""  # explicit "allow colors" — force_no_color must not clobber it
-    env["PYCHARM_HOSTED"] = "1"
-    assert _stream_colorize(env, tmp_path) == "True"
+@pytest.mark.parametrize("before", ["", _A_SERVER_MODULE], ids=["plain", "a-server-module-loaded"])
+def test_a_host_mounting_the_editor_keeps_its_environment_and_its_colors(tmp_path: Path, before: str) -> None:
+    """``import streamstudio.app`` leaves ``NO_COLOR`` unset, so the host's own console and every child process it
+    starts keep their colors."""
+    code = before + _PRECONFIGURED + "import streamstudio.app\n" + _REPORT + _CHILD
+    proc = subprocess.run([sys.executable, "-c", code], env=_env(), cwd=str(tmp_path), capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    lines = proc.stdout.splitlines()
+    assert {"RESULT:True", "NO_COLOR:None", "CHILD:None"} <= set(lines), proc.stdout
