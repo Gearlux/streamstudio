@@ -14,8 +14,8 @@ plugin lists (`lookups.py`) and the page build (`page.py`). A host app can mount
 
 Landed: phases 0–4 (`docs/rewrite.md`); the ComfyUI editor was deleted 2026-10-14, before the first release (user
 decision) — no module, test, command or document of it remains. Next: phase 5 (agent tools; root `TASKS.md`). Version
-`0.1.0a1`, not yet on PyPI (root `TASKS.md` "Publish streamstudio 0.1.0a1"); the repository stays private (user
-decision 2026-10-14).
+`0.1.0a1`, on PyPI since 2026-10-15 (`pip install streamstudio`); the repository stays private (user decision
+2026-10-14).
 
 Invariants:
 - **The YAML document is the only truth** (§0); the canvas is a drawing of it.
