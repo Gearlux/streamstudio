@@ -898,9 +898,9 @@ def _folds_case(folder: Path) -> bool:
 class TestAnIncludeSpelledInAnotherCase:
     """On a disk that ignores case, an include and the file it names may be spelled differently (``prep.steps.yaml`` /
     ``Prep.steps.yaml``). The editor holds a file under the spelling its include resolves to, so an edit of it is what
-    the canvas shows, what runs and what Save writes. The documented limit (README, "What is not there yet"): an
-    include spelling a steps file you have NOT saved in another case finds nothing until Save — measured 2026-09-30,
-    the edit that respells it is refused with ``… includes PREP.steps.yaml: Not found``."""
+    the canvas shows, what runs and what Save writes. The documented limit (`docs/editor.md`, "What is not there
+    yet"): an include spelling a steps file you have NOT saved in another case finds nothing until Save — measured
+    2026-09-30, the edit that respells it is refused with ``… includes PREP.steps.yaml: Not found``."""
 
     def test_an_edit_of_a_file_the_disk_spells_in_another_case_runs_and_saves(
         self, graph_dir: Path, tmp_path: Path

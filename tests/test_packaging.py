@@ -306,12 +306,21 @@ def test_the_changelog_is_shipped_in_the_sdist() -> None:
     assert not missing, f"MANIFEST.in does not include: {missing}"
 
 
-@pytest.mark.parametrize("word", ["taidal", "waivefront", "comfy"])
+#: The user documentation: the README (the PyPI page), the CHANGELOG (in the sdist) and the topic pages the README
+#: links. ``docs/architecture.md`` and ``docs/rewrite.md`` are the project's own decision records, dated history.
+_USER_DOCS = (
+    "README.md",
+    "CHANGELOG.md",
+    *(f"docs/{page}.md" for page in ("editor", "settings", "hosting", "api", "development")),
+)
+
+
+@pytest.mark.parametrize("word", ["taidal", "aisland", "waivefront", "annotaide", "navigaitor", "comfy"])
 def test_the_published_text_names_no_workspace_no_dependent_and_no_removed_editor(word: str) -> None:
-    """The README is the PyPI page and the CHANGELOG ships in the sdist: neither names the private workspace this
-    package is developed in, a project that depends on it, or the editor deleted before the first release (user
-    decision 2026-10-14). The package's own description is held to the same rule."""
-    texts = {"README.md": _README.read_text(), "CHANGELOG.md": (_REPO / "CHANGELOG.md").read_text()}
+    """The user documentation names neither the private workspace this package is developed in (nor its setup tool),
+    a project that depends on it, nor the editor deleted before the first release (user decisions 2026-10-14). The
+    package's own description is held to the same rule."""
+    texts = {name: (_REPO / name).read_text() for name in _USER_DOCS}
     texts["pyproject.toml description"] = str(_project()["description"])
     found = [
         f"{name}:{lineno}: {line.strip()[:80]}"

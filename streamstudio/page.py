@@ -381,7 +381,10 @@ def _check(folder: Path, dist: Path, source: str, say: Callable[[str], None]) ->
             say(f"streamstudio: the editor's page {why} and Node is not installed — the page built earlier is served")
             return PageCheck("unverified", why=why)
         how = "is not built" if built_from is None else "is out of date"
-        say(f"streamstudio: the editor's page {how} and Node is not installed — run aisland setup")
+        say(
+            f"streamstudio: the editor's page {how} and Node is not installed — "
+            "install Node.js (it brings npm) and start again"
+        )
         return PageCheck("no-node", why=how)
     with _held(folder, say):
         built_from = _built_from(dist)

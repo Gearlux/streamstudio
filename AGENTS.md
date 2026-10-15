@@ -1,7 +1,8 @@
 # StreamStudio Mandates
 
 Rules only. The reasons are in [`docs/architecture.md`](docs/architecture.md) (cited as *arch: "record title"*), the
-rewrite's scope and decisions in [`docs/rewrite.md`](docs/rewrite.md) (§N), usage in the [README](README.md). Root
+rewrite's scope and decisions in [`docs/rewrite.md`](docs/rewrite.md) (§N), usage in the [README](README.md) and the topic
+pages `docs/editor.md`, `docs/settings.md`, `docs/hosting.md`, `docs/api.md`, `docs/development.md`. Root
 `AGENTS.md` rules are not repeated here.
 
 ## Current state
@@ -389,6 +390,13 @@ arch: "A host mounts the editor through three methods"; pins `tests/test_host.py
 - **One editor, no torch** (user decision 2026-10-14): no ComfyUI module, `web/` folder, custom-node entry point, or
   torch/numpy dependency comes back; `import streamstudio.app` imports no torch.
   (`tests/test_packaging.py::test_the_package_carries_one_editor_and_no_torch`, `tests/test_lazy_package.py`)
-- **The published text — README (the PyPI page), CHANGELOG (in the sdist) and the package description — names neither
-  the private workspace, nor a project that depends on this one, nor the removed editor** (user instruction
-  2026-10-14). (`tests/test_packaging.py::test_the_published_text_names_no_workspace_no_dependent_and_no_removed_editor`)
+- **The user documentation — README (the PyPI page), CHANGELOG (in the sdist), the topic pages `docs/{editor,settings,
+  hosting,api,development}.md` — and the package description name neither the private workspace nor its setup tool,
+  nor a project that depends on this one, nor the removed editor** (user instructions 2026-10-14).
+  (`tests/test_packaging.py::test_the_published_text_names_no_workspace_no_dependent_and_no_removed_editor`)
+- **The README is the short PyPI page; the depth is in the topic pages** (user correction 2026-10-15: the 1,700-line
+  README put installation at line 1,627): pitch, installation, a quick start that runs, what it does, the editor at a
+  glance, mounting, plugins, the command line, the documentation index, development. A new feature adds its full
+  description to its topic page and at most a line to the README. User docs carry no dated measurement, no test
+  reference (but `docs/development.md`), no history ("before, …"): the rationale and the numbers go to
+  `docs/architecture.md`. Every example in them runs as written (`docs/hosting.md`'s smallest host was run 2026-10-15).
