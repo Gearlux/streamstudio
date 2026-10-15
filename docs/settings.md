@@ -200,7 +200,7 @@ A graph without an `app:` block says `This graph names no settings — it has no
 | … `input_feature` / `target_feature` | `hf_feature` — `GET /api/hf/features?path=<its dataset>` |
 | … `split` | `hf_split` — `GET /api/hf/splits?path=<its dataset>` |
 | … `metadata_features` | `hf_metadata` — the same columns, plus `*` (every other column) |
-| a parameter its class stamps with a tag (the class's widget stamp, `{"output_dir": "PLATFORM_DATASET_ID"}` — the attribute `streamstudio.palette.picker_of` reads) | the stamp, whatever the rules above say |
+| a parameter its class stamps with a tag (`__streamstudio_widget_params__ = {"output_dir": "PLATFORM_DATASET_ID"}` on the class) | the stamp, whatever the rules above say |
 | … a stamp an installed [plugin lists](#a-plugins-lists-beside-a-field) | the stamp and `lookup: true` — the plugin's list, `GET /api/lookups/<tag>?<the node's values>` |
 
 A picker fills the field; the field stays editable. The HuggingFace lookups never fail a request: no dataset, or
@@ -218,8 +218,16 @@ page's life; an empty list says why in its tooltip, in the server's words (`no d
 
 ## A plugin's lists beside a field
 
-A field its class stamps with a tag of its own (the widget stamp `streamstudio.palette.picker_of` reads, mapping a
-parameter to a tag: `{"dataset": "SHOP_DATASET"}`) is drawn as a plain text field — unless an installed plugin supplies
+A class names a picker tag of its own for a parameter in the class attribute `__streamstudio_widget_params__`:
+
+```python
+class ShopSource:
+    __streamstudio_widget_params__ = {"dataset": "SHOP_DATASET"}   # parameter -> tag
+
+    def __init__(self, project: str = "", dataset: str = "") -> None: ...
+```
+
+A field stamped with a tag the editor does not know is drawn as a plain text field — unless an installed plugin supplies
 a LIST for that tag. A plugin is a module an installed package names in the `streamstudio.plugins` entry-point group:
 
 ```toml

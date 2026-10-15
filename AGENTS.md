@@ -133,7 +133,9 @@ Invariants:
   is (it stops a host loading the graph; next section). The page narrows to the
   `app:` fields — a graph without an `app:` block shows none and says so — until *all parameters* is ticked.
   (`tests/test_app_form.py`, `frontend/src/__tests__/settings.test.ts`)
-- **Pickers are derived in `palette.picker_of`** (a stamp, then the HuggingFace names, then file/folder names). The
+- **Pickers are derived in `palette.picker_of`** (a stamp — the class attribute `__streamstudio_widget_params__`,
+  `palette._WIDGET_STAMP` — then the HuggingFace names, then file/folder names). No workspace or old project name in the
+  package (`tests/test_packaging.py::test_no_superseded_project_name_in_shipped_code`). The
   HuggingFace lookups are called through the package at call time so tests patch them; no test touches the network.
   (`tests/test_pickers.py`)
 - **A plugin's LIST beside a stamped field** (`lookups.py`, 2026-10-08): a `streamstudio.plugins` module's `LOOKUPS =

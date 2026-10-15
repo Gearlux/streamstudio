@@ -120,8 +120,15 @@ graphs with the page's `open` message. The whole protocol, with a host that runs
 
 ## Plugins
 
-An installed package can supply the list beside a field its classes stamp with a tag of their own. It names a module in
-the `streamstudio.plugins` entry-point group, and that module declares one function per tag:
+A class can name a picker of its own for a parameter, and an installed package can supply the list behind it. The
+class stamps the parameter with a tag:
+
+```python
+class ShopSource:
+    __streamstudio_widget_params__ = {"dataset": "SHOP_DATASET"}   # parameter -> tag
+```
+
+and the package names a module in the `streamstudio.plugins` entry-point group that declares one function per tag:
 
 ```python
 # my_plugin/studio/__init__.py

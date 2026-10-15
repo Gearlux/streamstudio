@@ -16,7 +16,7 @@
  *                                                                                       column but input/target) or
  *                                                                                       a column, appended
  *
- * — and a producer may name a picker of its own (`__taidal_widget_params__`); one the page does not know is a plain
+ * — and a producer may name a picker of its own (`__streamstudio_widget_params__`); one the page does not know is a plain
  * field. A picker only FILLS the field: the field stays free text (a Hub id that is not cached, a split slice like
  * `train[:90%]`, a folder typed by hand, `$DATA_ROOT/…`), and a pick is committed like a typed value.
  *

@@ -1715,7 +1715,7 @@ Separately, a host that runs something with a graph's settings (a run button bes
 settings file while the field the person had just typed in was still being written: a field writes when it is LEFT, and
 pressing the host's button leaves it — measured, the run read the old value.
 
-**Decision.** (1) *The seam.* A producer stamps a class with `__taidal_widget_params__: Mapping[str, str]` (parameter
+**Decision.** (1) *The seam.* A producer stamps a class with `__streamstudio_widget_params__: Mapping[str, str]` (parameter
 name → opaque tag). `palette.picker_of` reads it FIRST — before the HuggingFace conventions and the file/folder name
 rules — and the form schema carries the tag verbatim as `picker`: there is no registry of tags, and the page draws the
 pickers it knows and a plain field for any other. A plugin is a module an installed package names in the
@@ -1747,7 +1747,7 @@ sends `commit` is unaffected. The lists are process-level state like the catalog
 # the producer stamps the parameter with a tag of its own
 @configurable(category="value")
 class ShopDataset:
-    __taidal_widget_params__ = {"name": "SHOP_DATASET"}
+    __streamstudio_widget_params__ = {"name": "SHOP_DATASET"}
     def __init__(self, name: str = "", project: str = ""): ...
 # palette.picker_of(ShopDataset, "name", str)  ->  "SHOP_DATASET"
 ```

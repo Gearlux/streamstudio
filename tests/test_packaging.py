@@ -360,7 +360,7 @@ def test_no_vendor_traces_in_the_repository() -> None:
 
 
 def test_no_superseded_project_name_in_shipped_code() -> None:
-    """The package speaks its own name — not the two it used to have.
+    """The package speaks its own name — not the two it used to have, nor the workspace it is developed in.
 
     ``fluxstudio`` -> ``streamstudio`` renamed the distribution, the import, the repo, the
     console script, the env vars and the socket vocabulary. An older name still survived
@@ -369,10 +369,14 @@ def test_no_superseded_project_name_in_shipped_code() -> None:
     name that appears nowhere in the docs, and every ComfyUI session logged it to the
     browser console.
 
+    The workspace's prefix went the same way: a producer stamped its parameters' picker tags in
+    ``__<workspace>_widget_params__`` — a private name in an API every plugin author writes. It is
+    ``__streamstudio_widget_params__`` (2026-10-15).
+
     Scoped to the shipped package because that is what a user can see. Per the pre-1.0
     rule the old spellings are simply gone — there is no alias to keep working.
     """
-    superseded = re.compile("|".join(("Comfy" "Stream", "flux" "studio", "Flux" "studio")), re.IGNORECASE)
+    superseded = re.compile("|".join(("Comfy" "Stream", "flux" "studio", "Flux" "studio", "tai" "dal")), re.IGNORECASE)
 
     offenders = [
         f"{path.relative_to(_REPO)}:{lineno}: {line.strip()[:80]}"

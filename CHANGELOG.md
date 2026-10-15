@@ -6,7 +6,11 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-## [0.1.0a1] — 2026-10-14
+### Changed
+- A class names its parameters' picker tags in the class attribute `__streamstudio_widget_params__`
+  (`{"dataset": "SHOP_DATASET"}`): the pickers and a plugin's lists read it.
+
+## [0.1.0a1] — 2026-10-15
 
 First public pre-release: a graph editor for [RecordStream](https://github.com/Gearlux/recordstream) pipelines written
 as [confluid](https://github.com/Gearlux/confluid) YAML documents. The YAML file is the graph — the editor draws it,

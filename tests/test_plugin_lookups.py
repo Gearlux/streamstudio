@@ -1,9 +1,10 @@
 """A plugin's LISTS beside a field — the lookup pickers an installed package supplies.
 
-A producer stamps a parameter with a tag of its own (``__taidal_widget_params__ = {"dataset": "SHOP_DATASET"}``); a
-``streamstudio.plugins`` module that declares ``LOOKUPS = {"SHOP_DATASET": <function>}`` supplies the list the field
-gets. The function receives the node's current values (strings) and answers ``(names, reason)`` — so a list can depend
-on another field (the versions of the dataset named beside it). The form marks such a field ``lookup: true``; the page
+A producer stamps a parameter with a tag of its own (``__streamstudio_widget_params__ = {"dataset":
+"SHOP_DATASET"}``); a ``streamstudio.plugins`` module that declares ``LOOKUPS = {"SHOP_DATASET": <function>}``
+supplies the list the field gets. The function receives the node's current values (strings) and answers
+``(names, reason)`` — so a list can depend on another field (the versions of the dataset named beside it). The form
+marks such a field ``lookup: true``; the page
 asks ``GET api/lookups/<tag>?<the node's values>`` for it. A tag no plugin lists stays a plain field, as before.
 
 No test touches a network or the installed entry points: the plugin table is replaced.
@@ -34,7 +35,7 @@ class ShopSource:
         other: A tag nobody lists.
     """
 
-    __taidal_widget_params__ = {"dataset": "SHOP_DATASET", "version": "SHOP_VERSION", "other": "NOBODY_LISTS"}
+    __streamstudio_widget_params__ = {"dataset": "SHOP_DATASET", "version": "SHOP_VERSION", "other": "NOBODY_LISTS"}
 
     def __init__(self, dataset: str = "", version: str = "latest", other: str = "") -> None:
         self.dataset = dataset

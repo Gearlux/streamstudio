@@ -164,7 +164,7 @@ _HF_PICKERS: Dict[str, PickerKind] = {
 }
 #: The class attribute a producing package stamps to name a parameter's picker itself (``{param: tag}``) — the tag is
 #: the producer's; the page renders the pickers it knows and a plain field for any other.
-_WIDGET_STAMP = "__taidal_widget_params__"
+_WIDGET_STAMP = "__streamstudio_widget_params__"
 
 
 class SocketDict(TypedDict):
@@ -332,7 +332,7 @@ def picker_of(target: Callable[..., Any], name: str, annotation: Any) -> Optiona
     """The picker the parameter ``name`` of ``target`` gets — a :data:`PickerKind`, a producer's stamped tag, or
     ``None`` for a plain field. The rules, in their order:
 
-    1. a ``__taidal_widget_params__`` stamp naming the parameter wins (``{"output_dir": "PLATFORM_DATASET_ID"}``);
+    1. a ``__streamstudio_widget_params__`` stamp naming the parameter wins (``{"output_dir": "PLATFORM_DATASET_ID"}``);
     2. on a ``HuggingFace*`` class: ``path`` / ``repo_id`` → ``hf_dataset``, ``input_feature`` / ``target_feature`` →
        ``hf_feature``, ``split`` → ``hf_split``, ``metadata_features`` → ``hf_metadata``;
     3. a ``Literal`` gets none — its choices are already a list — nor does a bool / int / float parameter
