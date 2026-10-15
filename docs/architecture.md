@@ -2,7 +2,8 @@
 
 Design rationale for mechanisms whose existence or shape is not obvious from their name or the
 user docs. Each record: Context → Decision → Consequences → Example → What you may change.
-User-facing usage lives in the README; agent-facing rules in `AGENTS.md` — this file answers
+User-facing usage lives in the README and the topic pages beside this file (`editor.md`, `settings.md`,
+`hosting.md`, `api.md`, `development.md`); agent-facing rules in `AGENTS.md` — this file answers
 "why does this mechanism exist?".
 
 ## The studio is addressed by its PORT, not by a pid file (2026-08-26)

@@ -444,12 +444,12 @@ The review of 3b put four questions. The user's answers, verbatim, and what each
 | 3 | Pipeline graphs: should adding and removing work on `ops` list members? | *"yes"* | landed: a click, a palette pick or a dropped wire adds a member after the selected member, or at the end of the list; Delete / Cut remove members as one edit; later members keep their places |
 | 4 | Shift+click: add to the selection like ComfyUI, or keep React Flow's box? | *"match"* | landed: Shift+click adds a card and never removes one; Cmd/Ctrl+click toggles; Shift+drag on empty canvas still draws a box |
 
-How each works, and what it refuses: README → "Unsaved work survives a stop", "New, Open and the file browser",
+How each works, and what it refuses: `docs/editor.md` → "Unsaved work survives a stop", "New, Open and the file browser",
 "Pipelines — adding to and removing from an `ops:` list", and the gesture table; the reasons:
 `docs/architecture.md` → "Unsaved work is kept in a hidden file of the served folder", "Changes stay in the editor
 until Save" (its 2026-09-29 update: why New… writes at once) and "An op-list member is named by its place".
 
-What a stop still cannot keep, stated in the README: a `kill -9`, a crash, and the undo history. Closing the
+What a stop still cannot keep, stated in `docs/editor.md`: a `kill -9`, a crash, and the undo history. Closing the
 editor's terminal (SIGHUP) keeps the work since 2026-09-30 (the user's pick).
 
 ## 6d. Phase 4 — four decisions and three steps (decided 2026-10-01)
@@ -477,23 +477,23 @@ What the person sees, before → after the whole phase:
 | saving | ComfyUI writes `view_bte.json`; the workspace converts it before every run | Save writes `view_bte.yaml`; the workspace runs that file; no JSON, no converter process |
 | processes | ComfyUI on 8188 and a converter child | none: the editor is mounted in the workspace's own server |
 
-**Step 1 — the editor gains what a host needs (streamstudio; landed 2026-10-01).** Eight items, each in the README
+**Step 1 — the editor gains what a host needs (streamstudio; landed 2026-10-01).** Eight items, each in the user docs
 and with its reason in `docs/architecture.md`:
 
 1. **A host supplies the record** — `editor_blueprint(host=…)`, a `name` and three methods: `folder()` (asked at each
    request, so a folder the host moves is followed), `record(graph, path)` (what a Run of a graph without a source of
    its own runs, with the window and band the host fills in), `saved(paths)` (after every Save, Save As and New…).
-   README → "Mounting the editor in a host app"; architecture → "A host mounts the editor through three methods".
+   `docs/hosting.md`; architecture → "A host mounts the editor through three methods".
 2. **Settings narrowed to the `app:` fields**, with *all parameters*; `requires` is never a field; `?tab=settings`
-   opens the tab. README → "Settings: a graph's `app:` fields".
+   opens the tab. `docs/settings.md` → "Settings: a graph's `app:` fields".
 3. **An unknown `?graph=` says so**, naming the graphs there are, instead of opening the first one.
 4. **Unsaved edits survive the host's stop**: `studio_of(app).stash()`, and the mounted page asks the restore question.
 5. **Set source…** on the canvas — `POST …/slot`, reached from the card, the node menu or a wire out of the slot.
-   README → "Set source… — putting a source into a `Stream`".
+   `docs/editor.md` → "Set source… — putting a source into a `Stream`".
 6. **Both pickers** — the `picker` mark on the form schema, `GET /api/files?show=all`, `GET /api/hf/*`, and the page's
-   `…` browser and lists. README → "Pickers".
+   `…` browser and lists. `docs/settings.md` → "Pickers".
 7. **Embedded mode** — `?embed=1`, the page under a prefix (`/studio/`), and its `state` / `saved` / `open` messages.
-   README → "The page in the host's panel"; architecture → "The page in a host's panel speaks through its link and
+   `docs/hosting.md` → "The page in the host's panel"; architecture → "The page in a host's panel speaks through its link and
    three messages".
 8. **Loading speed** — `import streamstudio.app` 6.2–8.0 s → 0.2 s, no torch (step 3 left the package root with no
    second half to be lazy about). Architecture → "A host mounts the editor through three methods", its update of 2026-10-14.

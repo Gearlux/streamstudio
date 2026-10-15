@@ -45,8 +45,14 @@ CHANGED = "streamstudio: the editor's page changed since its last build — buil
 NO_RECORD = "streamstudio: the editor's page has no record of the source it was built from — building it"
 INSTALLING = "streamstudio: installing the page's libraries first (npm ci) — the first time takes about a minute"
 BUILT = re.compile(r"^streamstudio: built the editor's page in \d+\.\d s$")
-NO_NODE_NOT_BUILT = "streamstudio: the editor's page is not built and Node is not installed — run aisland setup"
-NO_NODE_OUT_OF_DATE = "streamstudio: the editor's page is out of date and Node is not installed — run aisland setup"
+NO_NODE_NOT_BUILT = (
+    "streamstudio: the editor's page is not built and Node is not installed — "
+    "install Node.js (it brings npm) and start again"
+)
+NO_NODE_OUT_OF_DATE = (
+    "streamstudio: the editor's page is out of date and Node is not installed — "
+    "install Node.js (it brings npm) and start again"
+)
 NO_NODE_NO_RECORD = (
     "streamstudio: the editor's page has no record of the source it was built from and Node is not installed — "
     "the page built earlier is served"
@@ -621,14 +627,14 @@ class TestABuildByHand:
 
 
 class TestWithoutNode:
-    def test_a_page_never_built_starts_anyway_and_says_to_run_aisland_setup(
+    def test_a_page_never_built_starts_anyway_and_says_to_install_node(
         self, frontend: Path, no_node: None, capsys: pytest.CaptureFixture[str]
     ) -> None:
         check = page.ensure_page_built(frontend)
         assert _printed(capsys) == [NO_NODE_NOT_BUILT]
         assert check.state == "no-node" and not _built(frontend).exists()
 
-    def test_an_out_of_date_page_starts_anyway_and_says_to_run_aisland_setup(
+    def test_an_out_of_date_page_starts_anyway_and_says_to_install_node(
         self, frontend: Path, no_node: None, capsys: pytest.CaptureFixture[str]
     ) -> None:
         _built(frontend).mkdir(parents=True)
@@ -893,13 +899,19 @@ class TestThePageServed:
         (_built(frontend) / page.STAMP).write_text("0" * 64)  # built from another source: out of date
         page.ensure_page_built(frontend)
         text = _page(_built(frontend)).test_client().get("/").get_data(as_text=True)
-        assert "The editor&#x27;s page is out of date and Node is not installed — run aisland setup" in text, text
+        assert (
+            "The editor&#x27;s page is out of date and Node is not installed — "
+            "install Node.js (it brings npm), then start this server again" in text
+        ), text
         assert "the old page" not in text
 
     def test_without_node_a_page_never_built_says_so(self, frontend: Path, no_node: None) -> None:
         page.ensure_page_built(frontend)
         text = _page(_built(frontend)).test_client().get("/").get_data(as_text=True)
-        assert "The editor&#x27;s page is not built and Node is not installed — run aisland setup" in text, text
+        assert (
+            "The editor&#x27;s page is not built and Node is not installed — "
+            "install Node.js (it brings npm), then start this server again" in text
+        ), text
 
     def test_a_failed_build_says_so_names_the_command_that_shows_why_and_its_last_lines(
         self, frontend: Path, npm: FakeNpm
@@ -928,7 +940,10 @@ class TestThePageServed:
         monkeypatch.setattr(page, "FRONTEND", frontend)
         page.ensure_page_built()
         text = _page().test_client().get("/").get_data(as_text=True)
-        assert "is not built and Node is not installed — run aisland setup" in text, text
+        assert (
+            "is not built and Node is not installed — install Node.js (it brings npm), then start this server again"
+            in text
+        ), text
 
     def test_a_check_of_another_folder_leaves_a_page_it_did_not_check(
         self, frontend: Path, no_node: None, tmp_path: Path
@@ -956,7 +971,7 @@ class TestAHostPanelIsToldThePageIsUnavailable:
     """The page served instead of the editor — the placeholder, no Node, a failed build — tells a host's panel
     (``?embed=1``) that no editor will answer: ``{source: "streamstudio", type: "unavailable"}``. Measured before: a
     host covering its panel until the editor's first ``state`` message covered these pages for good — the person saw
-    ``loading sink…`` over ``…Node is not installed — run aisland setup…``."""
+    ``loading sink…`` over ``…Node is not installed — install Node.js…``."""
 
     @staticmethod
     def _messages(dist: Path, frame: str) -> List[Any]:

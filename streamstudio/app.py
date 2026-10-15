@@ -2286,7 +2286,7 @@ def page_blueprint(dist: Optional[Path] = None) -> Blueprint:
 #: parent window, same origin only, and only with ``?embed`` (the editor's own rule, ``link.ts::embedFromSearch``):
 #: ``{source: "streamstudio", type: "unavailable"}``, no editor will answer here. Measured before: a host covering its
 #: panel until the editor's first ``state`` message covered these pages for good, its veil reading ``loading sink…``
-#: over ``…Node is not installed — run aisland setup…``. A host that waits for no message ignores it.
+#: over ``…Node is not installed — install Node.js…``. A host that waits for no message ignores it.
 _TELL_THE_HOST = (
     "<script>(() => {"
     " const asked = new URLSearchParams(location.search).get('embed');"
@@ -2301,7 +2301,7 @@ def _unbuildable_page(problem: PageCheck) -> str:
     """What ``/`` says when this server's start could not make the page current — the start's own words."""
     if problem.state == "no-node":
         said = html.escape(
-            f"The editor's page {problem.why} and Node is not installed — run aisland setup, "
+            f"The editor's page {problem.why} and Node is not installed — install Node.js (it brings npm), "
             "then start this server again."
         )
     else:
