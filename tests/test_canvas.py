@@ -114,6 +114,23 @@ class TinySource:
             yield {"image": image, "class": Label("cat" if index == 0 else "dog")}
 
 
+@configurable(category="source", group="canvas-test")
+class ListedSource:
+    """A source whose model comes from a plugin's list (the field is stamped with the list's tag).
+
+    Args:
+        model: A model the plugin lists.
+    """
+
+    __streamstudio_widget_params__ = {"model": "CANVAS_MODELS"}
+
+    def __init__(self, model: str = "") -> None:
+        self.model = model
+
+    def __iter__(self) -> Iterator[Record]:
+        return iter([])
+
+
 @configurable(category="op", group="canvas-test")
 class TinyGain:
     """Scale the image entry — declares its interface by NAME.
@@ -803,6 +820,62 @@ class TestWidgets:
         assert served == document.text == (graph_dir / "pets.yaml").read_text()
         assert document.model.node("stream.ops[1]").params["low_level"].value == 0.75
         assert document.check() == []
+
+
+class TestAPluginsListIsAskedAgainOnTheWord:
+    """A plugin's list is asked once per page; the list's last entry, "↻ ask again", asks it again — a model packaged
+    after the list was first opened shows only then. Measured before: the page kept the first answer until it was
+    reloaded, and an annotation workspace never reloads its settings panel."""
+
+    def test_ask_again_shows_what_the_plugin_lists_now_and_picks_nothing(
+        self,
+        open_graph: Callable[[str], Opened],
+        server: str,
+        graph_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from streamstudio import lookups, palette
+
+        models = ["$RUN_DIR/a/package"]
+        asked: List[str] = []
+
+        def list_models(values: Mapping[str, str]) -> Tuple[List[str], str]:
+            asked.append("asked")
+            return list(models), ""
+
+        monkeypatch.setattr(lookups, "_FOUND", {"CANVAS_MODELS": list_models})
+        monkeypatch.setattr(palette, "_cache", None)
+        monkeypatch.setattr(palette, "_cache_scanned", False)
+        (graph_dir / "listed.yaml").write_text(f"source:\n  _target_: {MOD}.ListedSource\n")
+        opened = open_graph("listed")
+        page = opened.page
+        picker = page.locator(f'{node_root("source")} select[data-picker="plugin"][data-picker-for="model"]')
+        offered = "os => os.filter(o => !o.disabled).map(o => o.value)"
+
+        picker.hover()
+        page.wait_for_selector(f'{node_root("source")} select[data-picker-for="model"][data-picker-state="ready"]')
+        assert picker.locator("option").evaluate_all(offered) == ["", "$RUN_DIR/a/package", "\u0000ask-again"]
+        assert picker.locator("option").evaluate_all("os => os.map(o => o.textContent)")[-1] == "↻ ask again"
+
+        models.append("$RUN_DIR/b/package")  # packaged while the page is open
+        page.locator(node_root("source")).hover()
+        picker.hover()
+        assert picker.get_attribute("data-picker-count") == "1", "reaching for it again keeps the page's answer"
+
+        picker.select_option("\u0000ask-again")
+        page.wait_for_selector(
+            f'{node_root("source")} select[data-picker-for="model"][data-picker-state="ready"][data-picker-count="2"]'
+        )
+        assert picker.locator("option").evaluate_all(offered) == [
+            "",
+            "$RUN_DIR/a/package",
+            "$RUN_DIR/b/package",
+            "\u0000ask-again",
+        ]
+        assert asked == ["asked", "asked"]
+        assert page.locator(".app").get_attribute("data-saves") == "0", "asking again picks nothing"
+        assert "$RUN_DIR" not in api_get(server, "api/graphs/listed")["text"]
+        assert opened.errors == []
 
 
 # ------------------------------------------------------------------------------------------------

@@ -144,7 +144,10 @@ Invariants:
   error: no plugin, a raise and a list slower than `TIMEOUT_S` (a daemon thread) each answer `[]` with the reason. The
   table is read once per process (`_FOUND`) — like `catalogue.CATALOGUE`, it describes the installed packages, the same
   for every app a process mounts; tests replace `_FOUND`. A plugin that fails to import is a `warning`. The page sends
-  the node's text/number/switch values and keys its cache on all of them (`pickers.pluginLookupKey`). The canvas
+  the node's text/number/switch values and keys its cache on all of them (`pickers.pluginLookupKey`); the answer is
+  kept for the page's life and a plugin's list ends in "↻ ask again" (`pickers.ASK_AGAIN` → `forgetLookup`, user pick C
+  2026-10-16), never asked again unbidden — not on hover, not on a panel's open
+  (`tests/test_canvas.py::TestAPluginsListIsAskedAgainOnTheWord`). The canvas
   modules still name no vendor. (`tests/test_plugin_lookups.py`, `frontend/src/__tests__/{pickers,api}.test.ts`)
   arch: "A plugin supplies the list beside a field".
 - `POST …/slot` replaces one slot's value as one edit; a list slot or a typed parameter is refused.

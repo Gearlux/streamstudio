@@ -253,7 +253,9 @@ LOOKUPS = {"SHOP_DATASET": shop_datasets}
 The form marks the field `lookup: true` beside its `picker` tag, and the page puts a `list…` beside it, asked
 (`GET /api/lookups/SHOP_DATASET?project=store&dataset=…`) when the person points at it — with the node's current text,
 number and switch values, so a list can follow the field beside it (the versions of the dataset named there): a changed
-field asks again. A list never fails a request: a tag no plugin lists, a function that raises and one that takes longer
+field asks again. The page keeps a list's answer while it is open; the list's last entry, **↻ ask again**, asks the
+plugin again — for what changed since (a model packaged after the list was first opened, a dataset added). Picking it
+picks nothing, and the page never asks again unbidden. A list never fails a request: a tag no plugin lists, a function that raises and one that takes longer
 than 20 s (`streamstudio.lookups.TIMEOUT_S`) answer no names and say why (`{"names": [], "reason": "ConnectionError:
 …"}`). The plugins' lists are read once per process; a plugin that fails to import is skipped with a warning naming
 it. The group is read from installed metadata — reinstall an editable plugin after adding the entry point.

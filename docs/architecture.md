@@ -1781,6 +1781,17 @@ group; `committed` is never posted before the writes land. Pins: `tests/test_plu
 **Update, 2026-10-14.** The stamp and the entry-point group, first decided on 2026-08-25, are decided here: a plugin
 supplies lists, and nothing else is read from its module.
 
+**Update, 2026-10-16: "↻ ask again".** A list's answer is kept for the page's life (`pickers.cachedLookup`), and a host
+that embeds the page re-targets it rather than reloading it (a reload of a page holding unsaved work asks "Leave
+site?"), so a list a plugin answers from the disk or a platform went stale: a model packaged after the list was first
+opened never showed until the host's whole page was reloaded. A plugin's list now ends in a "↻ ask again" entry
+(`pickers.ASK_AGAIN`, a NUL-led value no name can be); picking it forgets that one answer (`pickers.forgetLookup`) and
+asks the editor again, and picks nothing. Rejected (the user's pick between three): asking again every time the person
+reaches for a list — a platform list would ask a remote service on every hover; asking again on every panel open — a
+list would stay stale while the panel stays open. The HuggingFace lists keep their answer for the page's life (a column
+lookup can open a dataset). Pins: `frontend/src/__tests__/pickers.test.ts` (forgetLookup),
+`tests/test_canvas.py::TestAPluginsListIsAskedAgainOnTheWord`.
+
 ## A field another parameter does not ask for is grayed, by the value the HOST runs (`settings.offReason`, the `values` command, 2026-10-08)
 
 **Context.** A class whose parameters belong to one choice among several (a detector's rule: a margin for most rules,

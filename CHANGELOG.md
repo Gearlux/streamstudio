@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- A plugin's list ends in **↻ ask again**: it asks the plugin again, so what changed while the page was open (a model
+  packaged since the list was first opened) shows without reloading the page.
+
 ### Changed
 - A class names its parameters' picker tags in the class attribute `__streamstudio_widget_params__`
   (`{"dataset": "SHOP_DATASET"}`): the pickers and a plugin's lists read it.

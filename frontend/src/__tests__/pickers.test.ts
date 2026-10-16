@@ -6,8 +6,10 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
   ALL_COLUMNS,
+  ASK_AGAIN,
   browseStart,
   cachedLookup,
+  forgetLookup,
   forgetLookups,
   hfDataset,
   isLookup,
@@ -124,6 +126,32 @@ describe("cachedLookup — one answer per question for the page's life", () => {
     await expect(cachedLookup("datasets", failing)).rejects.toThrow("the editor is busy");
     expect(await cachedLookup("datasets", async () => ["a"])).toEqual(["a"]);
     expect(asked).toBe(1);
+  });
+});
+
+describe("forgetLookup — a list asked again on the person's word (\"↻ ask again\")", () => {
+  it("the forgotten question is asked again; every other one keeps its answer", async () => {
+    let models = ["$RUN_DIR/a/package"];
+    let asked = 0;
+    const listModels = async () => {
+      asked += 1;
+      return [...models];
+    };
+    const key = pluginLookupKey("TRAINED_MODEL", { model: "" });
+    expect(await cachedLookup(key, listModels)).toEqual(["$RUN_DIR/a/package"]);
+    models = ["$RUN_DIR/a/package", "$RUN_DIR/b/package"]; // a package made in between
+    expect(await cachedLookup(key, listModels)).toEqual(["$RUN_DIR/a/package"]); // still the page's answer
+    await cachedLookup("datasets", async () => ["ylecun/mnist"]);
+
+    forgetLookup(key);
+
+    expect(await cachedLookup(key, listModels)).toEqual(["$RUN_DIR/a/package", "$RUN_DIR/b/package"]);
+    expect(asked).toBe(2);
+    expect(await cachedLookup("datasets", async () => ["other"])).toEqual(["ylecun/mnist"]);
+  });
+
+  it("the entry that asks again is no name a list can hold", () => {
+    expect(ASK_AGAIN.startsWith("\u0000")).toBe(true);
   });
 });
 

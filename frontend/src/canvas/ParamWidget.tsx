@@ -35,6 +35,8 @@ import {
   parseMetadata,
   pickerFor,
   pluginLookupKey,
+  forgetLookup,
+  ASK_AGAIN,
   pluginTag,
   pluginValues,
   rangePair,
@@ -263,7 +265,9 @@ type LookupState = "unnamed" | "idle" | "loading" | "ready" | "failed";
  * It is asked when the person reaches for it (the pointer over it, or the focus on it) — never as a canvas draws: a
  * column lookup can open a dataset on the editor's machine, which nobody asked for by opening a graph — and once per
  * question for the page's life (`pickers.cachedLookup`). An answer with nothing in it, or a failed one, says why — and
- * a list that failed asks again the next time the person reaches for it.
+ * a list that failed asks again the next time the person reaches for it. A PLUGIN's list ends in "↻ ask again", which
+ * forgets its answer and asks the editor again — what a plugin lists changes while the page is open (a model packaged
+ * since), and a host that embeds the page never reloads it; nothing is asked again unbidden (user pick C, 2026-10-16).
  * `data-picker-state` is where it is (`LookupState`), `data-picker-count` how many entries it offers.
  */
 function LookupPicker({ picker, tag = "", param, values, label, choices, onPick }: LookupPickerProps) {
@@ -301,12 +305,16 @@ function LookupPicker({ picker, tag = "", param, values, label, choices, onPick 
   else if (state === "ready" && offered.length === 0) note = listed.reason.trim() || NOTHING_FOUND[picker];
   // Reaching for the list asks it; reaching for it again after a failure asks again (`cachedLookup` forgot the failure).
   // Measured before: the effect depended on nothing that changed, so a list that failed once never asked again.
-  const ask = () => {
-    setAsked(true);
-    if (state !== "failed") return;
+  const askAgain = () => {
     setListed((was) => ({ ...was, key: undefined })); // asking again: "loading" until the editor answers
     setAttempt((count) => count + 1);
   };
+  const ask = () => {
+    setAsked(true);
+    if (state === "failed") askAgain();
+  };
+  // "↻ ask again": a plugin's answered list, forgotten and asked anew on the person's word.
+  const offersAskAgain = picker === "plugin" && state === "ready" && key !== undefined;
   return (
     <select
       className="picker nodrag"
@@ -321,7 +329,11 @@ function LookupPicker({ picker, tag = "", param, values, label, choices, onPick 
       onFocus={ask}
       onMouseDown={ask}
       onChange={(event) => {
-        if (event.target.value !== "") onPick(event.target.value);
+        const value = event.target.value;
+        if (value === ASK_AGAIN && key !== undefined) {
+          forgetLookup(key);
+          askAgain();
+        } else if (value !== "") onPick(value);
       }}
     >
       <option value="">{label}</option>
@@ -335,6 +347,7 @@ function LookupPicker({ picker, tag = "", param, values, label, choices, onPick 
           {note}
         </option>
       )}
+      {offersAskAgain && <option value={ASK_AGAIN}>↻ ask again</option>}
     </select>
   );
 }

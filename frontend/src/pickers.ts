@@ -122,6 +122,18 @@ export function cachedLookup<T>(key: string, fetch: () => Promise<T>): Promise<T
 /** Forget every remembered lookup (a test's isolation). */
 export const forgetLookups = (): void => lookups.clear();
 
+/**
+ * Forget ONE remembered lookup, so the next ask of `key` asks the editor again — a plugin list's "↻ ask again": what the
+ * plugin lists can change while the page is open (a model packaged since, a dataset added on a platform), and a page an
+ * embedding host never reloads would otherwise keep its first answer.
+ */
+export const forgetLookup = (key: string): void => {
+  lookups.delete(key);
+};
+
+/** The value of a plugin list's "↻ ask again" entry — led by a NUL, so no name a list can hold is mistaken for it. */
+export const ASK_AGAIN = "\u0000ask-again";
+
 /** A `metadata_features` value as the columns it lists: `*` → `["*"]`, `"a, b"` → `["a", "b"]`, `null` → `[]`. */
 export function metadataList(value: Json | undefined): string[] {
   if (Array.isArray(value)) return value.filter((item): item is string => typeof item === "string");
