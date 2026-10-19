@@ -171,7 +171,7 @@ class TestWhatAStopKeeps:
 
     def test_the_file_names_are_the_ones_git_ignores(self) -> None:
         """A stop inside a checkout must never leave a committable file: this project's ``.gitignore`` holds the
-        pattern (so do the ones of the projects whose folders hold editor graphs — waivefront, annotaide)."""
+        pattern (so do the ones of the projects whose folders hold editor graphs — annotaide among them)."""
         assert RECOVERY_FILE == ".streamstudio-workspace.json"
         assert BROKEN_RECOVERY_FILE == ".streamstudio-workspace.broken.json"
         gitignore = Path(__file__).resolve().parent.parent / ".gitignore"

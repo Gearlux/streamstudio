@@ -1,12 +1,12 @@
 """A document's short class name (``AnnotationUpdateSink``) is found by importing ONE entry point at a time.
 
-A registry key resolves only once the module defining it has been imported. Before, the first miss imported
-every ``confluid.configurables`` entry point (``confluid.load_configurables``) — measured 2026-10-02 in a fresh
-annotation app: the first graph list of the editor took 13.9 s for ONE key from ``waivefront.sinks``, because the
-miss also imported torch, transformers and the detection backends. Now the miss walks the entry points one by one
-and stops at the first after which the name resolves; entry points of a package that is already imported go first,
-an entry point whose module is already imported is not loaded again, and a name nothing defines ends with every
-entry point imported exactly once per process, so a later miss costs nothing.
+A registry key resolves only once the module defining it has been imported. Before, the first miss imported every
+``confluid.configurables`` entry point (``confluid.load_configurables``) — measured 2026-10-02 in a fresh annotation
+app: the first graph list of the editor took 13.9 s for ONE key from a domain package's ``sinks``, because the miss also
+imported torch, transformers and the detection backends. Now the miss walks the entry points one by one and stops at the
+first after which the name resolves; entry points of a package that is already imported go first, an entry point whose
+module is already imported is not loaded again, and a name nothing defines ends with every entry point imported exactly
+once per process, so a later miss costs nothing.
 
 The entry points are real ``importlib.metadata.EntryPoint`` objects over modules written to ``tmp_path`` (the
 import genuinely happens inside the lookup); ``importlib.metadata.entry_points`` serves only them for the group. A
@@ -176,7 +176,7 @@ def test_a_short_name_imports_the_entry_point_that_defines_it_and_stops_there(tm
 
 
 def test_the_entry_points_of_an_already_imported_package_are_tried_first(tmp_path: Path, served: Served) -> None:
-    """The real case: the sink's package (``waivefront``) is imported by the app already; the backends are not."""
+    """The real case: the sink's package (a domain package) is imported by the app already; the backends are not."""
     write(tmp_path, "ssq4_backend", defining("Ssq4Backend"))
     write(tmp_path, "ssq4_domain.__init__", "")
     write(tmp_path, "ssq4_domain.sinks", defining("Ssq4DomainSink"))

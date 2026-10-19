@@ -666,7 +666,7 @@ def _import_until(name: str) -> Any:
 
     Measured 2026-10-02: importing all of them on the first miss (``confluid.load_configurables``)
     made the first graph list of an editor mounted in a fresh host app take 13.9 s (6.0 s on a warm
-    disk cache) — for one key, ``AnnotationUpdateSink``, whose module (``waivefront.sinks``) was not
+    disk cache) — for one key, ``AnnotationUpdateSink``, whose module (a domain package's ``sinks``) was not
     imported yet; the other entry points brought torch, transformers and the detection backends with
     them. This walk finds it after 15 of the 127 and the list takes 1.1 s. So:
 
@@ -687,8 +687,8 @@ def _import_until(name: str) -> Any:
     entry point off the list), so walking on would answer "cannot resolve", or import an entry point
     nobody needs.
 
-    Known limit: a name two entry points define (``FourierOp``: ``waivefront.fourier`` and
-    ``waivefront.fourier_torch``) resolves to the first one the walk imports, because the second is
+    Known limit: a name two entry points define (``FourierOp``: a package's ``fourier`` and
+    ``fourier_torch`` modules) resolves to the first one the walk imports, because the second is
     not imported yet; once the catalogue has imported everything the name is ambiguous and resolves
     to nothing, which is what a run (``strict``) refuses.
 
