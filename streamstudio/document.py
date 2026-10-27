@@ -2615,10 +2615,15 @@ class Document:
     def open_shipped(cls, path: Union[str, Path], shipped: Union[str, Path], *, history_depth: int = 50) -> "Document":
         """The graph ``path`` — a file NOT written yet — as a host ships it, in ``shipped``: it holds the shipped text
         as the graph's and nothing unsaved, so a Save writes the graph only once it was changed (the COPY), and the
-        settings file beside ``path`` from the first setting changed. ``shipped`` itself is never written."""
+        settings file beside ``path`` from the first setting changed. ``shipped`` itself is never written. Its relative
+        ``include:`` entries are rebased to name, from ``path``'s folder, the files they name beside ``shipped``
+        (:func:`rebase_includes`): confluid reads an include beside the document, and the folder holds no copy of a
+        file shipped with it (measured before 2026-10-27: a shipped graph including a pane shipped beside it loaded
+        no node — ``includes pane_view.yaml: Not found``)."""
         given = Path(path)
         with _DISK_LOCK:
-            texts = {given.resolve(): Path(shipped).read_text()}
+            text = rebase_includes(Path(shipped).read_text(), Path(shipped).parent, given.parent)
+            texts = {given.resolve(): text}
             texts.update(_settings_texts(given))
         return cls(given, texts, history_depth=history_depth, shipped=Path(shipped))
 

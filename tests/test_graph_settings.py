@@ -84,6 +84,24 @@ class SetFloor:
         return record
 
 
+@configurable(category="op", group="settings-test")
+class SetGain:
+    """A third class — the one step a graph adds after the file it includes.
+
+    Args:
+        gain_db: A gain — a setting.
+    """
+
+    consumes = {"image": "Image"}
+    produces = {"image": "Image"}
+
+    def __init__(self, gain_db: float = 0.0) -> None:
+        self.gain_db = float(gain_db)
+
+    def __call__(self, record: Record) -> Record:
+        return record
+
+
 # ------------------------------------------------------------------------------------------------
 # documents
 # ------------------------------------------------------------------------------------------------
@@ -664,6 +682,69 @@ class TestASettingsOnlyGraph:
         assert app["graph"] == "editable"
         located = [problem for problem in app["problems"] if problem["loc"] == f"{folder / 'odd.yaml'}:6:10"]
         assert located and "editable, settings-only" in located[0]["message"], app["problems"]
+
+
+#: A shipped graph that INCLUDES another file it ships beside it, the way a host ships a graph extending a pane.
+WRAP_TEXT = f"""\
+include: pane_view.yaml
+flow:
+  fourth:
+    op: !class:{MOD}.SetGain {{}}
+    from: third
+outputs: fourth
+app:
+  inputs:
+    - [SetGain, gain_db]
+"""
+
+
+class TestAShippedGraphThatIncludesAFileShippedBesideIt:
+    """Measured before 2026-10-27: a shipped graph opened where its copy would go looked for its included file in the
+    host's folder, where it is not — `does not load: ConfigFileNotFoundError … includes pane_view.yaml: Not found`,
+    no node, and every `app:` entry `names no node of this graph`."""
+
+    @pytest.fixture
+    def wrapping(self, empty: Path, package: Path) -> Any:  # flask.testing.FlaskClient
+        _write(package, "wrap_view.yaml", WRAP_TEXT)
+        host = ShippingHost(empty, {"view_wrap": package / "wrap_view.yaml"})
+        app = Flask("host")
+        app.register_blueprint(editor_blueprint(host=host), url_prefix=PREFIX)
+        return app.test_client()
+
+    def test_it_opens_with_the_included_files_nodes_and_no_problem(self, wrapping: Any, empty: Path) -> None:
+        graph = _ok(wrapping.get(f"{PREFIX}/api/graphs/view_wrap"))
+        assert {"first", "second", "third", "fourth"} <= {node["name"] for node in graph["model"]["nodes"]}
+        assert _ok(wrapping.get(f"{PREFIX}/api/graphs/view_wrap/check"))["problems"] == []
+        assert graph["dirty"] is False and graph["shipped"] is True
+        assert _yaml_files(empty) == []
+
+    def test_its_settings_form_names_the_included_nodes(self, wrapping: Any) -> None:
+        app = _ok(wrapping.get(f"{PREFIX}/api/graphs/view_wrap/app"))
+        assert app["problems"] == []
+        assert app["fields"], "the app: entries name nodes of the graph"
+
+    def test_a_setting_saves_the_settings_file_alone(self, wrapping: Any, empty: Path, package: Path) -> None:
+        _ok(wrapping.post(f"{PREFIX}/api/graphs/view_wrap/param", json={"node": "fourth", "param": "gain_db", "value": 3.0}))
+        _ok(wrapping.post(f"{PREFIX}/api/graphs/view_wrap/save", json={"only": "settings"}))
+        assert _yaml_files(empty) == ["view_wrap.settings.yaml"]
+        assert (package / "wrap_view.yaml").read_text() == WRAP_TEXT, "the shipped graph is never written"
+
+    def test_the_copy_a_change_writes_includes_the_shipped_file(self, wrapping: Any, empty: Path, package: Path) -> None:
+        added = {"name": "fifth", "after": "fourth", "class_path": f"{MOD}.SetFloor", "params": {}}
+        _ok(wrapping.post(f"{PREFIX}/api/graphs/view_wrap/steps", json=added))
+        _ok(wrapping.post(f"{PREFIX}/api/graphs/view_wrap/save"))
+        copy = empty / "view_wrap.yaml"
+        assert copy.is_file() and (package / "wrap_view.yaml").read_text() == WRAP_TEXT
+        reopened = _ok(wrapping.get(f"{PREFIX}/api/graphs/view_wrap"))
+        assert reopened["shipped"] is False
+        assert {"first", "fifth"} <= {node["name"] for node in reopened["model"]["nodes"]}
+
+    def test_revert_reads_it_again_with_its_include(self, wrapping: Any) -> None:
+        added = {"name": "fifth", "after": "fourth", "class_path": f"{MOD}.SetFloor", "params": {}}
+        _ok(wrapping.post(f"{PREFIX}/api/graphs/view_wrap/steps", json=added))
+        reverted = _ok(wrapping.post(f"{PREFIX}/api/graphs/view_wrap/revert"))
+        assert reverted["dirty"] is False
+        assert "first" in {node["name"] for node in reverted["model"]["nodes"]}
 
 
 # ================================================================================================
