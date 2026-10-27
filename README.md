@@ -141,6 +141,11 @@ LOOKUPS = {"SHOP_DATASET": shop_datasets}
 
 See [docs/settings.md](docs/settings.md#a-plugins-lists-beside-a-field).
 
+## Environment variables
+
+`HF_HOME` is the HuggingFace cache folder the editor's dataset pickers read. It is read at import, so restart the
+editor after changing it. `env.complete` lists it.
+
 ## Command line
 
 ```bash
