@@ -141,6 +141,8 @@ The Run asked the host for its record and set its fill on `mask` (`Threshold` ha
   plus `host_error: "RuntimeError: …"`, for the page to show.
 - **`shipped()`** names the graphs the host ships from OUTSIDE its folder (a package's templates), by name: each is
   listed and opened while the folder holds no file of its name ([A graph the host ships](settings.md#a-graph-the-host-ships)).
+  A relative `include:` in it names the file beside where it ships (another graph the host ships with it): the editor
+  rewrites the entry to reach that file from the folder, so the graph loads there and a copy saved later keeps it.
   A host that ships nothing answers `{}`. If it raises, the request is a refusal in words naming the host, like
   `folder()`'s.
 - **Every path the host is handed is spelled ONE way** — under `folder()` exactly as `folder()` spells it, for a file
@@ -201,6 +203,12 @@ listens to its own parent window only:
   // …or say what the host RUNS the graph with over its settings (values it applies by name and never writes)
   studio.contentWindow.postMessage({target: "streamstudio", type: "values", graph: "view_scan",
                                     values: {rule: "fixed"}}, location.origin);
+  // …or show a line under a setting (what the host measured for it), never written
+  studio.contentWindow.postMessage({target: "streamstudio", type: "hints", graph: "view_scan",
+                                    hints: {level_db: "measured 14.6 dB"}}, location.origin);
+  // …or hand the settings form the host page's font
+  studio.contentWindow.postMessage({target: "streamstudio", type: "style", font_size_px: 13,
+                                    font_family: "-apple-system, sans-serif"}, location.origin);
 </script>
 ```
 

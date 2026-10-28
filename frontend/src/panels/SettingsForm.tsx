@@ -44,9 +44,11 @@ export interface SettingsFormProps {
   fixed?: boolean;
   /** What the host runs this graph with over its settings, by parameter name (a pane's knobs) — grays by it. */
   hostValues?: Record<string, Json>;
+  /** A line under a setting, by parameter name — what the host measured for it (the `hints` host message). */
+  hints?: Record<string, string>;
 }
 
-export function SettingsForm({ graph, level = "", all: allTicked, onAll, fixed = false, hostValues }: SettingsFormProps) {
+export function SettingsForm({ graph, level = "", all: allTicked, onAll, fixed = false, hostValues, hints = {} }: SettingsFormProps) {
   const { form, setParam } = useEditor();
   /** The graph's `app:` answer (or why there is none); `undefined` until the first one arrives. */
   const [app, setApp] = useState<{ app: AppForm | null; error: string | null } | undefined>(undefined);
@@ -113,6 +115,11 @@ export function SettingsForm({ graph, level = "", all: allTicked, onAll, fixed =
                     </fieldset>
                   ) : (
                     <code className="ro">not in the model</code>
+                  )}
+                  {hints[name] !== undefined && (
+                    <small className="field-hint" data-field-hint={name}>
+                      {hints[name]}
+                    </small>
                   )}
                 </label>
               );

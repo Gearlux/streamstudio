@@ -194,7 +194,11 @@ arch: "A host mounts the editor through three methods"; pins `tests/test_host.py
   file of it (`Studio._scan`), opened with `Document.open_shipped` (the shipped text, nothing unsaved). A settings
   change writes only the settings file into the folder; the first Save of a graph change writes the copy, which wins
   from then on. The shipped file is NEVER written; Revert reads it again. Answers carry `shipped`.
-  (`tests/test_graph_settings.py::TestAShippedGraph`)
+  (`tests/test_graph_settings.py::TestAShippedGraph`) Its relative `include:` entries are rebased from the shipped
+  file's folder to the host's (`rebase_includes` in `open_shipped`), so a shipped graph including a file shipped beside
+  it loads there and its saved copy keeps reaching it — never a second include search path
+  (`::TestAShippedGraphThatIncludesAFileShippedBesideIt`; measured before 2026-10-27: no node, every `app:` entry
+  refused).
 - **`folder()` is asked at EACH request** — never cache it. A moved folder rebases every held document WITH its
   unsaved texts and history (`Document.moved`); never re-open documents on a move. Relative includes follow the move
   (`document.follow_includes`).
@@ -323,6 +327,10 @@ arch: "A host mounts the editor through three methods"; pins `tests/test_host.py
   on `?only=settings` saves it), waits for every write on its way (`writes`, filled by `commitParam`), and posts
   `committed` — a host READING what the page writes (a tool's run beside a settings panel) asks it first; never answer
   before the writes land. (`tests/test_canvas.py::TestTheHostHearsAndFollows::test_commit_writes_the_field_being_typed_in_and_answers_committed`)
+  **`hints`** and **`style`** (2026-10-28): `{graph, hints: {param: line}}` shows each line under the setting of that
+  name (`[data-field-hint]`), never written, the last sent standing; `{font_size_px?, font_family?}` sets the settings
+  form's font (`--host-font-size` / `--host-font-family`, `.app.settings-only .settings`), so a host's panel reads at
+  the host's size. (`frontend/src/__tests__/host.test.ts`, `tests/test_canvas.py::TestTheSettingsOnlyPage::test_the_host_sets_the_font_and_a_line_under_a_setting`)
   **`values`** (2026-10-08) is the third: `{graph, values}`, what the host RUNS that graph with over its settings (a
   pane's knobs, applied by name, never written) — the page keeps the last per graph and the settings form grays by it
   (`settings.offReason`); it never writes, saves or marks anything dirty. A field whose schema carries

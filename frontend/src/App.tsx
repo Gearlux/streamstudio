@@ -279,6 +279,8 @@ function Editor() {
   const [tab, setTab] = useState<SideTab>(() => tabFromSearch(window.location.search));
   /** What the host runs each graph with over its settings (`values`, `host.ts`) — the settings form grays by it. */
   const [hostValues, setHostValues] = useState<Record<string, Record<string, Json>>>({});
+  // What the host measured for each setting, by graph (`hints`): a line under the field, never written.
+  const [hostHints, setHostHints] = useState<Record<string, Record<string, string>>>({});
   /** The tab the side panel shows: the settings, always, on a settings-only page. */
   const sideTab: SideTab = settingsOnly ? "settings" : tab;
   /**
@@ -854,6 +856,13 @@ function Editor() {
       const command = parseHostCommand(event.data);
       if (command?.type === "commit") void commitAskedRef.current();
       else if (command?.type === "values") setHostValues((all) => ({ ...all, [command.graph]: command.values }));
+      else if (command?.type === "hints") setHostHints((all) => ({ ...all, [command.graph]: command.hints }));
+      else if (command?.type === "style") {
+        // the host page's font, as variables the settings form reads (styles.css `.app.settings-only`)
+        const root = document.documentElement.style;
+        if (command.fontSizePx !== undefined) root.setProperty("--host-font-size", `${command.fontSizePx}px`);
+        if (command.fontFamily !== undefined) root.setProperty("--host-font-family", command.fontFamily);
+      }
       else if (command !== undefined) void openAskedRef.current(command);
     };
     window.addEventListener("message", onMessage);
@@ -2363,6 +2372,7 @@ function Editor() {
                 onAll={(all) => setAllParams((ticked) => ({ ...ticked, [graph.name]: all }))}
                 fixed={settingsOnly}
                 hostValues={hostValues[graph.name]}
+                hints={hostHints[graph.name]}
               />
             )}
             {sideTab === "run" && graph !== null && (

@@ -724,12 +724,18 @@ class TestAShippedGraphThatIncludesAFileShippedBesideIt:
         assert app["fields"], "the app: entries name nodes of the graph"
 
     def test_a_setting_saves_the_settings_file_alone(self, wrapping: Any, empty: Path, package: Path) -> None:
-        _ok(wrapping.post(f"{PREFIX}/api/graphs/view_wrap/param", json={"node": "fourth", "param": "gain_db", "value": 3.0}))
+        _ok(
+            wrapping.post(
+                f"{PREFIX}/api/graphs/view_wrap/param", json={"node": "fourth", "param": "gain_db", "value": 3.0}
+            )
+        )
         _ok(wrapping.post(f"{PREFIX}/api/graphs/view_wrap/save", json={"only": "settings"}))
         assert _yaml_files(empty) == ["view_wrap.settings.yaml"]
         assert (package / "wrap_view.yaml").read_text() == WRAP_TEXT, "the shipped graph is never written"
 
-    def test_the_copy_a_change_writes_includes_the_shipped_file(self, wrapping: Any, empty: Path, package: Path) -> None:
+    def test_the_copy_a_change_writes_includes_the_shipped_file(
+        self, wrapping: Any, empty: Path, package: Path
+    ) -> None:
         added = {"name": "fifth", "after": "fourth", "class_path": f"{MOD}.SetFloor", "params": {}}
         _ok(wrapping.post(f"{PREFIX}/api/graphs/view_wrap/steps", json=added))
         _ok(wrapping.post(f"{PREFIX}/api/graphs/view_wrap/save"))

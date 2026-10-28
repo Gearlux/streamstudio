@@ -469,3 +469,10 @@ button { font: inherit; }
 .app.settings-only { grid-template-rows: 1fr; }
 .app.settings-only .body { grid-template-columns: 1fr; }
 .app.settings-only .side { border-left: 0; }
+/* inside a host's panel the form reads in the HOST's font (the `style` host message sets the two variables) */
+.app.settings-only .settings { font-size: var(--host-font-size, 12px); font-family: var(--host-font-family, inherit); }
+.app.settings-only .settings .field, .app.settings-only .settings .form-node h3,
+.app.settings-only .settings .field input[type=number], .app.settings-only .settings .field input[type=text],
+.app.settings-only .settings .field select { font-size: inherit; font-family: inherit; }
+/* what the host measured for a setting (the `hints` host message), under its widget */
+.field .field-hint { grid-column: 2; color: var(--dim); font-size: .92em; margin-top: -1px; }

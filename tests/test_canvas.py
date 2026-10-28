@@ -5258,6 +5258,29 @@ class TestTheSettingsOnlyPage:
         assert float(shown) == 5.5
         assert opened.errors == []
 
+    def test_the_host_sets_the_font_and_a_line_under_a_setting(self, browser: Any, hosted: Hosted) -> None:
+        """``style`` hands the form the host page's font; ``hints`` a line under a setting (what the host measured for
+        it) — shown, never written."""
+        opened = open_hosted(browser, hosted, "graph=pane&embed=1&only=settings")
+        page = opened.page
+        page.wait_for_selector('.app[data-graph="pane"][data-ready="true"] [data-settings]')
+        before = page.locator('[data-form-node="gain"] .field').first.evaluate("e => getComputedStyle(e).fontSize")
+        assert before == "12px"
+        page.evaluate(
+            "() => { window.postMessage({target: 'streamstudio', type: 'style', font_size_px: 15}, location.origin);"
+            " window.postMessage({target: 'streamstudio', type: 'hints', graph: 'pane',"
+            " hints: {gain: 'measured 3.2 dB'}}, location.origin); }"
+        )
+        page.wait_for_selector('[data-form-node="gain"] [data-field-hint="gain"]')
+        assert page.locator('[data-form-node="gain"] [data-field-hint="gain"]').inner_text() == "measured 3.2 dB"
+        size = page.locator('[data-form-node="gain"] .field').first.evaluate("e => getComputedStyle(e).fontSize")
+        widget = page.locator('[data-form-node="gain"] input[data-param="gain"]').evaluate(
+            "e => getComputedStyle(e).fontSize"
+        )
+        assert (size, widget) == ("15px", "15px")
+        assert not (hosted.folder / "pane.settings.yaml").exists(), "a hint is never written"
+        assert opened.errors == []
+
     def test_a_graph_with_no_settings_says_so_and_offers_no_tick_box(self, browser: Any, hosted: Hosted) -> None:
         opened = open_hosted(browser, hosted, "graph=source&embed=1&only=settings")
         page = opened.page

@@ -7,12 +7,19 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- A host shows a line under a setting (`hints`: what it measured for it) and hands the settings form its own font
+  (`style`) — two more host messages.
 - A plugin's list ends in **↻ ask again**: it asks the plugin again, so what changed while the page was open (a model
   packaged since the list was first opened) shows without reloading the page.
 
 ### Changed
 - A class names its parameters' picker tags in the class attribute `__streamstudio_widget_params__`
   (`{"dataset": "SHOP_DATASET"}`): the pickers and a plugin's lists read it.
+
+### Fixed
+- A graph a host ships that `include:`s a file shipped beside it opens with that file's nodes: its relative includes
+  are rewritten to reach the shipped file from the host's folder. Before, it loaded no node and every `app:` entry
+  was refused.
 
 ## [0.1.0a1] — 2026-10-15
 
