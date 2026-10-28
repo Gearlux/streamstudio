@@ -131,6 +131,10 @@ streamstudio = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# The fast run (plain `pytest`) stays within 5 minutes; `aisland tests report streamstudio` picks the tests that move
+# to the slow run (`pytest -m slow`, CI's slow leg) — never-failed and slowest first.
+addopts = "-m 'not slow'"
+markers = ["slow: never failed and among the slowest; left out of the fast run, run by CI's slow leg"]
 
 [tool.isort]
 profile = "black"

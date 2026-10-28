@@ -417,11 +417,17 @@ def wait_ready(page: Any, name: str) -> None:
     page.wait_for_selector(f'.canvas[data-graph="{name}"][data-initialized="true"]')
 
 
+#: How long the page may wait for the catalogue. The FIRST ask of a test process builds it — a helper process importing
+#: every installed package, 20-28 s on the development machine when idle, past the 30 s default under load — so a test
+#: run alone (or one whose earlier test did not build it) waits that long; every later ask answers at once.
+COLD_CATALOGUE_MS = 120_000
+
+
 def wait_palette_loaded(page: Any) -> None:
     """The page asks ``GET api/palette`` on FIRST NEED — when the Nodes sidebar, Add Node ▸, the palette or Set source…
     is first shown, never as it opens; ``data-palette-ready`` says the catalogue has arrived. Call it right after the
     gesture that shows one of them, so what the test reads next is the whole catalogue."""
-    page.wait_for_selector('.app[data-palette-ready="true"]')
+    page.wait_for_selector('.app[data-palette-ready="true"]', timeout=COLD_CATALOGUE_MS)
 
 
 def box_select(page: Any, *names: str) -> None:

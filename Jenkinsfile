@@ -208,7 +208,7 @@ with open('isort-checkstyle.xml', 'w') as f:
                 sh 'rm -f test-report.xml coverage.xml'
                 script {
                     if (fileExists('tests') && sh(script: "find tests -name '*.py' | grep -q .", returnStatus: true) == 0) {
-                        sh "${VENV_BIN}/pytest tests --junitxml=test-report.xml --cov=streamstudio --cov-report=xml:coverage.xml --cov-report=term"
+                        sh "${VENV_BIN}/pytest tests -m 'not slow' --junitxml=test-report.xml --cov=streamstudio --cov-report=xml:coverage.xml --cov-report=term"
                     } else {
                         echo "No tests found in 'tests' directory. Skipping."
                     }
@@ -226,6 +226,28 @@ with open('isort-checkstyle.xml', 'w') as f:
                                 name: 'Streamstudio Coverage',
                                 tools: [[parser: 'COBERTURA', pattern: 'coverage.xml']]
                             )
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Slow Tests') {
+            steps {
+                sh 'rm -f slow-test-report.xml'
+                script {
+                    // 5 = the marker is registered but nothing is currently marked — valid, not a failure.
+                    def rc = sh(script: "${VENV_BIN}/pytest tests -m slow --junitxml=slow-test-report.xml", returnStatus: true)
+                    if (rc != 0 && rc != 5) {
+                        error("Slow tests failed (exit ${rc}).")
+                    }
+                }
+            }
+            post {
+                always {
+                    script {
+                        if (fileExists('slow-test-report.xml')) {
+                            junit allowEmptyResults: true, testResults: 'slow-test-report.xml'
                         }
                     }
                 }

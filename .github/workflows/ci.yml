@@ -62,7 +62,7 @@ jobs:
     - name: Run Tests
       run: |
         if [ -d tests ] && find tests -name '*.py' | grep -q .; then
-          pytest tests --junitxml=test-report.xml --cov=streamstudio --cov-report=xml --cov-report=term
+          pytest tests -m 'not slow' --junitxml=test-report.xml --cov=streamstudio --cov-report=xml --cov-report=term
         else
           echo "No tests found. Skipping."
         fi
@@ -71,6 +71,37 @@ jobs:
       with:
         name: test-results
         path: test-report.xml
+      if: always()
+
+  slow-tests:
+    name: Slow Tests
+    needs: [quality-gates]
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+    - name: Set up Python 3.12
+      uses: actions/setup-python@v7
+      with:
+        python-version: "3.12"
+    - name: Install uv
+      uses: astral-sh/setup-uv@v7
+    - name: Install dependencies
+      run: |
+        
+        # Internal Gearlux dependencies — installed FIRST with --no-deps so
+        # `-e .[dev]` below finds them pre-satisfied instead of hitting PyPI.
+        uv pip install --system --no-deps git+https://github.com/Gearlux/recordstream.git@main
+        uv pip install --system -e ".[dev]"
+    - name: Run Slow Tests
+      run: |
+        rc=0; pytest tests -m slow --junitxml=slow-test-report.xml || rc=$?
+        # 5 = the marker is registered but nothing is currently marked — valid, not a failure.
+        if [ $rc -ne 0 ] && [ $rc -ne 5 ]; then exit $rc; fi
+    - name: Upload Slow Test Results
+      uses: actions/upload-artifact@v7
+      with:
+        name: slow-test-results
+        path: slow-test-report.xml
       if: always()
 
   verify-examples:

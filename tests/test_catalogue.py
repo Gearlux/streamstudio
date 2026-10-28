@@ -135,6 +135,7 @@ def test_what_an_imported_package_prints_never_reaches_the_answer() -> None:
     assert entries == [listed_dict(spec) for spec in specs]
 
 
+@pytest.mark.slow  # 27.9 s, 0 of 25 runs failed (`aisland tests report streamstudio`, 2026-10-28)
 def test_the_helper_lists_every_installed_class_as_its_full_spec_less_the_settings() -> None:
     entries, specs = run_helper()
     assert len(entries) == len(specs)
