@@ -44,6 +44,7 @@ jobs:
     name: Unit Tests & Coverage
     needs: [quality-gates]
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
     - uses: actions/checkout@v7
     - name: Set up Python 3.12
@@ -77,6 +78,7 @@ jobs:
     name: Slow Tests
     needs: [quality-gates]
     runs-on: ubuntu-latest
+    timeout-minutes: 180
     steps:
     - uses: actions/checkout@v7
     - name: Set up Python 3.12
@@ -108,6 +110,7 @@ jobs:
     name: Verify Examples
     needs: [unit-tests]
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
     - uses: actions/checkout@v7
     - name: Set up Python 3.12
@@ -145,6 +148,7 @@ jobs:
     name: Verify Notebooks
     needs: [unit-tests]
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
     - uses: actions/checkout@v7
     - name: Set up Python 3.12
