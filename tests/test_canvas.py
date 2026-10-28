@@ -58,6 +58,7 @@ import streamstudio
 from streamstudio import layout
 from streamstudio.app import (
     EXTENSION,
+    PLACE_VARIABLES,
     RECOVERY_FILE,
     HostRecord,
     Studio,
@@ -2993,6 +2994,93 @@ class TestFileDialogPath:
         assert width > shown  # the path is longer than the field
         assert left + shown >= width - 1  # scrolled to its end: "…/graphs" is what shows
         assert opened.errors == []
+
+
+class TestFileDialogPlacesAndNewFolder:
+    """The dialog's shortcut buttons — the graph folder and each place variable set to a folder — and its New folder
+    (user request 2026-10-28)."""
+
+    @pytest.fixture
+    def places(self, tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> Path:
+        for variable in PLACE_VARIABLES:
+            monkeypatch.delenv(variable, raising=False)
+        data = tmp_path_factory.mktemp("data_root").resolve()
+        monkeypatch.setenv("DATA_ROOT", str(data))
+        return data
+
+    def test_a_place_button_lists_its_folder_and_is_marked_while_it_is_shown(
+        self, open_graph: Callable[[str], Opened], graph_dir: Path, places: Path
+    ) -> None:
+        (places / "captures").mkdir()
+        opened = open_graph("wires")
+        page = opened.page
+        menu_command(page, "file", "open")
+        page.wait_for_selector(f'[data-file-mode="open"][data-file-dir="{graph_dir.resolve()}"]')
+        buttons = page.locator("[data-file-place]").evaluate_all("bs => bs.map(b => [b.dataset.filePlace, b.title])")
+        assert buttons == [["Graphs", str(graph_dir.resolve())], ["DATA_ROOT", str(places)]]
+        assert page.locator('[data-file-place="Graphs"]').get_attribute("aria-pressed") == "true"
+        page.locator('[data-file-place="DATA_ROOT"]').click()
+        page.wait_for_selector(f'[data-file-dir="{places}"]')
+        assert page.locator("[data-file-path]").input_value() == str(places)
+        assert page.locator("[data-file-entry]").evaluate_all("es => es.map(e => e.dataset.fileEntry)") == ["captures"]
+        assert page.locator('[data-file-place="DATA_ROOT"]').get_attribute("aria-pressed") == "true"
+        assert page.locator('[data-file-place="Graphs"]').get_attribute("aria-pressed") == "false"
+        page.locator('[data-file-place="Graphs"]').click()
+        page.wait_for_selector(f'[data-file-dir="{graph_dir.resolve()}"]')
+        assert opened.errors == []
+
+    def test_open_offers_no_new_folder(self, open_graph: Callable[[str], Opened], graph_dir: Path) -> None:
+        opened = open_graph("wires")
+        page = opened.page
+        menu_command(page, "file", "open")
+        page.wait_for_selector(f'[data-file-mode="open"][data-file-dir="{graph_dir.resolve()}"]')
+        assert page.locator("[data-file-new-folder]").count() == 0
+        assert opened.errors == []
+
+    def test_save_as_makes_a_new_folder_enters_it_and_saves_there(
+        self, open_graph: Callable[[str], Opened], graph_dir: Path, places: Path
+    ) -> None:
+        opened = open_graph("pets")
+        page = opened.page
+        menu_command(page, "file", "save-as")
+        page.wait_for_selector(f'[data-file-mode="save"][data-file-dir="{graph_dir.resolve()}"]')
+        page.locator('[data-file-place="DATA_ROOT"]').click()
+        page.wait_for_selector(f'[data-file-dir="{places}"]')
+        page.locator("[data-file-new-folder]").click()
+        page.locator("[data-file-new-folder-name]").fill("outputs")
+        page.locator("[data-file-new-folder-name]").press("Enter")
+        page.wait_for_selector(f'[data-file-dir="{places / "outputs"}"]')
+        assert (places / "outputs").is_dir()
+        assert page.locator("[data-file-new-folder-name]").count() == 0  # the name field closes once it is made
+        assert page.locator("[data-file-name]").input_value() == "pets.yaml"  # the typed file name survives
+        page.locator("[data-file-confirm]").click()
+        wait_ready(page, "pets")
+        assert (places / "outputs" / "pets.yaml").read_text() == PETS_TEXT
+        assert opened.errors == []
+
+    def test_a_refused_name_says_why_and_makes_nothing(
+        self, open_graph: Callable[[str], Opened], graph_dir: Path, places: Path
+    ) -> None:
+        (places / "outputs").mkdir()
+        opened = open_graph("wires")
+        page = opened.page
+        open_new(page, "pipeline")
+        page.locator("[data-new-browse]").click()
+        page.wait_for_selector('[data-dialog="file"] [data-file-mode="folder"]')
+        page.locator('[data-file-place="DATA_ROOT"]').click()
+        page.wait_for_selector(f'[data-file-dir="{places}"]')
+        page.locator("[data-file-new-folder]").click()
+        page.locator("[data-file-new-folder-name]").fill("outputs")
+        page.locator("[data-file-new-folder-name]").press("Enter")
+        page.wait_for_selector(".file-error")
+        assert page.locator(".file-error").inner_text() == f"{places / 'outputs'} already exists — pick another name"
+        assert page.locator("[data-file-dir]").get_attribute("data-file-dir") == str(places)
+        assert page.locator("[data-file-new-folder-name]").input_value() == "outputs"  # kept to correct
+        page.locator("[data-file-new-folder-name]").press("Escape")
+        assert page.locator("[data-file-new-folder-name]").count() == 0
+        page.locator('[data-dialog="file"]').wait_for()  # Escape closed the name field, not the dialog
+        assert sorted(child.name for child in places.iterdir()) == ["outputs"]
+        assert opened.errors == [REFUSED_400]
 
 
 class TestToastsKeepClearOfTheTabs:

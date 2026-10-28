@@ -313,6 +313,10 @@ button { font: inherit; }
 
 /* the file dialog */
 .file-path { display: flex; gap: 6px; }
+.file-places { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.file-place { height: 26px; padding: 0 10px; font-family: var(--mono); font-size: 12px; }
+.file-place[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+.file-new-folder { margin-top: 8px; }
 .file-path-input { flex: 1; padding: 6px 9px; background: #111118; color: var(--text); border: 1px solid var(--line-2); border-radius: 6px; font-family: var(--mono); font-size: 12px; outline: none; }
 .file-path-input:focus { border-color: var(--accent); }
 .file-error { margin-top: 8px; padding: 6px 9px; color: #ff8a80; background: #2a1414; border-left: 3px solid var(--danger); border-radius: 3px; font-size: 12px; }

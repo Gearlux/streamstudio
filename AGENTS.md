@@ -76,7 +76,10 @@ Invariants:
 - A Save writes all of its YAML files or none (`Document._refuse_unwritable`), the graph's own file LAST; a file it
   cannot read is refused (`CANNOT_READ`); any `OSError` a route meets is a `400 {error}` naming the file.
   (`tests/test_app_save.py::TestASaveTheDiskRefusesWritesNothing`) The sidecar is not in the check yet (`TASKS.md`).
-- Only two gestures write without Save: File ▸ New… and Save as template….
+- Only three gestures write without Save: File ▸ New…, Save as template… and the file browser's New folder (a folder,
+  never a document; `Studio.new_folder`, user request 2026-10-28). The browser's shortcut buttons are the server's
+  (`Studio.places`, `PLACE_VARIABLES`); the page keeps no list of its own. (`tests/test_app_files.py::TestPlaces`,
+  `::TestNewFolder`, `tests/test_canvas.py::TestFileDialogPlacesAndNewFolder`)
 - **No graph exists only in the editor:** New… writes its starter at once through `Document.create` (`open(path,
   "x")`, never over an existing file), and every refusal comes before anything is written. Do not reintroduce a
   graph held only in memory, a first-write case in Save, or a "clear workspace" command. The page keeps no copy of the

@@ -143,6 +143,12 @@ FileEntryKind = Literal["dir", "yaml", "file"]
 FileShow = Literal["graphs", "all"]
 FILE_SHOWS: Tuple[str, ...] = get_args(FileShow)
 
+#: The environment variables the file browser offers as shortcut buttons, in this order, after the graph folder —
+#: each only while this machine sets it to a folder (user request 2026-10-28). Read at every listing, never cached.
+PLACE_VARIABLES: Tuple[str, ...] = ("HOME", "PROJECT_ROOT", "DATA_ROOT", "MODEL_ROOT", "RUN_DIR")
+#: The shortcut button of the folder the editor was started on (a host's: its folder).
+GRAPHS_PLACE = "Graphs"
+
 #: The RECOVERY FILE: what a stop keeps of the unsaved work, in the folder the editor was started on (the user's
 #: item 1, 2026-09-29: "save the file to a tmp workspace file (hidden)"). Hidden (a leading dot — the graph list
 #: reads ``*.yaml`` and the file browser leaves hidden entries out) and JSON, because it is editor state, not a
@@ -930,16 +936,7 @@ class Studio:
         naming it (``DATA_ROOT is not set on the editor's machine ($DATA_ROOT/captures)``)."""
         if show not in FILE_SHOWS:
             raise ValueError(f"show must be one of {', '.join(FILE_SHOWS)} — got {show!r}")
-        expanded = os.path.expandvars(directory) if directory else ""
-        folder = self._absolute(expanded) if directory else self.graph_dir
-        if not folder.is_dir():
-            # a `$VAR` this machine does not have is named — measured before: the path was read against the graph
-            # folder, "no directory <folder>/$DATA_ROOT/captures"; a folder really named `$x` is listed as any other
-            unset = _UNSET_VARIABLE.search(expanded)
-            if unset is not None:
-                raise KeyError(f"{unset.group(1) or unset.group(2)} is not set on the editor's machine ({directory})")
-            raise KeyError(f"no directory {folder}")
-        folder = folder.resolve()
+        folder = self._browsed_folder(directory)
         # Every look at the directory's children is inside the try: read permission WITHOUT search permission
         # lists the names but cannot tell a file from a directory (measured before: `is_dir()` raised, a 500).
         try:
@@ -959,7 +956,53 @@ class Studio:
             "dir": str(folder),
             "parent": None if folder.parent == folder else str(folder.parent),
             "entries": [_file_entry(d, "dir") for d in dirs] + sorted(listed, key=lambda entry: entry["name"].lower()),
+            "places": self.places(),
         }
+
+    def _browsed_folder(self, directory: Optional[str]) -> Path:
+        """The existing folder ``directory`` names, resolved — the graph folder when it is absent; a ``$VAR`` in it
+        expanded. A missing one is a ``KeyError`` naming it, or naming the variable this machine does not have."""
+        expanded = os.path.expandvars(directory) if directory else ""
+        folder = self._absolute(expanded) if directory else self.graph_dir
+        if not folder.is_dir():
+            # a `$VAR` this machine does not have is named — measured before: the path was read against the graph
+            # folder, "no directory <folder>/$DATA_ROOT/captures"; a folder really named `$x` is listed as any other
+            unset = _UNSET_VARIABLE.search(expanded)
+            if unset is not None:
+                raise KeyError(f"{unset.group(1) or unset.group(2)} is not set on the editor's machine ({directory})")
+            raise KeyError(f"no directory {folder}")
+        return folder.resolve()
+
+    def places(self) -> List[Dict[str, str]]:
+        """The file browser's shortcut buttons, ``[{name, path}]``: the graph folder, then each of
+        :data:`PLACE_VARIABLES` this machine sets to an absolute folder (``~`` expanded), resolved — the spelling a
+        listing answers as ``dir``, so the page marks the button of the folder shown. Unset, empty, relative or not a
+        folder: left out, never an error (a published editor runs where none of them is set)."""
+        found = [{"name": GRAPHS_PLACE, "path": str(self.graph_dir.resolve())}]
+        for variable in PLACE_VARIABLES:
+            value = os.environ.get(variable, "")
+            path = Path(value).expanduser() if value else None
+            if path is not None and path.is_absolute() and path.is_dir():
+                found.append({"name": variable, "path": str(path.resolve())})
+        return found
+
+    def new_folder(self, directory: str, name: str) -> Dict[str, Any]:
+        """Make the folder ``name`` inside ``directory`` (a ``$VAR`` expanded) and answer ITS listing (:meth:`files`)
+        — the file browser's New folder, for a run's outputs (user request 2026-10-28). A name that is empty, holds a
+        ``/``, is ``.``/``..``, starts with a dot (the browser hides it) or is already there is refused, and nothing
+        is made; a folder the disk refuses is the route's ``OSError`` answer, naming the path."""
+        wanted = name.strip()
+        if wanted == "":
+            raise ValueError("a new folder needs a name")
+        if "/" in wanted or wanted in (".", ".."):
+            raise ValueError(f"{wanted!r} is not a folder name — a name holds no '/'")
+        if wanted.startswith("."):
+            raise ValueError(f"{wanted!r} starts with a dot — the file browser hides it; pick another name")
+        path = self._browsed_folder(directory) / wanted
+        if path.exists():
+            raise ValueError(f"{path} already exists — pick another name")
+        path.mkdir()
+        return self.files(str(path))
 
     # -- save, save as, revert, check ----------------------------------------------------------
 
@@ -1968,6 +2011,11 @@ def editor_blueprint(
     def files() -> Response:
         show = cast(FileShow, request.args.get("show") or "graphs")  # checked against FILE_SHOWS by files
         return jsonify(_studio().files(request.args.get("dir") or None, show))
+
+    @blueprint.post("/api/files/folder")
+    def new_folder() -> Response:
+        body = _body()
+        return jsonify(_studio().new_folder(str(_field(body, "dir")), str(_field(body, "name"))))
 
     @blueprint.get("/api/hf/datasets")
     def hf_datasets() -> Response:

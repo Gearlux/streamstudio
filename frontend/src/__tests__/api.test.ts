@@ -17,6 +17,7 @@ import {
   getApp,
   listFiles,
   listGraphs,
+  makeFolder,
   saveGraph,
   newGraph,
   onRestarted,
@@ -340,6 +341,20 @@ describe("GET api/files — the graph browser's listing, or every file for a fil
       "api/files?dir=%24DATA_ROOT%2Fmodels&show=all",
       "api/files?show=all",
     ]);
+  });
+});
+
+describe("POST api/files/folder — New folder in the file dialog", () => {
+  it("sends the folder shown and the typed name, and answers the new folder's listing", async () => {
+    const listing = { dir: "/data/outputs", parent: "/data", entries: [], places: [{ name: "Graphs", path: "/w" }] };
+    const sent = stub(listing);
+    expect(await makeFolder("/data", "outputs")).toEqual(listing);
+    expect(sent).toEqual([{ path: "api/files/folder", method: "POST", body: { dir: "/data", name: "outputs" } }]);
+  });
+
+  it("a refusal is the server's line", async () => {
+    stub({ error: "/data/outputs already exists — pick another name" }, 400);
+    await expect(makeFolder("/data", "outputs")).rejects.toThrow("/data/outputs already exists — pick another name");
   });
 });
 

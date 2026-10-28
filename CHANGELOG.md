@@ -7,6 +7,9 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- The file browser has a row of buttons that jump to a folder — the graph folder, then `HOME`, `PROJECT_ROOT`,
+  `DATA_ROOT`, `MODEL_ROOT`, `RUN_DIR` when set — and, in Save As and the folder browsers, **New folder**
+  (`POST /api/files/folder`).
 - A host shows a line under a setting (`hints`: what it measured for it) and hands the settings form its own font
   (`style`) — two more host messages.
 - A plugin's list ends in **↻ ask again**: it asks the plugin again, so what changed while the page was open (a model

@@ -20,7 +20,15 @@ from typing import Any, List, get_args, get_type_hints
 
 import pytest
 
-from streamstudio.app import NEW_GRAPH_KINDS, FileEntryKind, NewGraphKind, Studio, create_app, starter_text
+from streamstudio.app import (
+    NEW_GRAPH_KINDS,
+    PLACE_VARIABLES,
+    FileEntryKind,
+    NewGraphKind,
+    Studio,
+    create_app,
+    starter_text,
+)
 from streamstudio.document import ALREADY_EXISTS, Document
 
 PROBE = "recordstream.ops.debug.PrintRecordOp"
@@ -398,6 +406,161 @@ class TestFiles:
         response = client.get("/api/files", query_string={"dir": str(graph_dir / "demo.yaml")})
         assert response.status_code == 404
         assert _error(response) == f"no directory {graph_dir / 'demo.yaml'}"
+
+
+@pytest.fixture
+def places(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Every place variable cleared, then ``HOME`` and ``DATA_ROOT`` set to folders of their own; returns the parent."""
+    for variable in PLACE_VARIABLES:
+        monkeypatch.delenv(variable, raising=False)
+    root = tmp_path / "places"
+    for variable in ("HOME", "DATA_ROOT"):
+        (root / variable.lower()).mkdir(parents=True)
+        monkeypatch.setenv(variable, str(root / variable.lower()))
+    return root
+
+
+class TestPlaces:
+    """Every listing carries the dialog's shortcut buttons: the graph folder, then each place variable this machine
+    sets to a folder, in :data:`PLACE_VARIABLES`' order (user request 2026-10-28)."""
+
+    def test_the_graph_folder_comes_first_then_each_variable_set_to_a_folder(
+        self, client: Any, graph_dir: Path, places: Path
+    ) -> None:
+        body = client.get("/api/files").get_json()
+        assert body["places"] == [
+            {"name": "Graphs", "path": str(graph_dir.resolve())},
+            {"name": "HOME", "path": str((places / "home").resolve())},
+            {"name": "DATA_ROOT", "path": str((places / "data_root").resolve())},
+        ]
+
+    def test_every_listing_carries_them(self, client: Any, places: Path) -> None:
+        body = client.get("/api/files", query_string={"dir": str(places / "data_root"), "show": "all"}).get_json()
+        assert [place["name"] for place in body["places"]] == ["Graphs", "HOME", "DATA_ROOT"]
+
+    def test_the_variables_are_the_five_in_their_order(self) -> None:
+        assert PLACE_VARIABLES == ("HOME", "PROJECT_ROOT", "DATA_ROOT", "MODEL_ROOT", "RUN_DIR")
+
+    def test_all_five_set_to_folders_are_all_five_buttons(
+        self, client: Any, places: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        for variable in PLACE_VARIABLES:
+            (places / variable.lower()).mkdir(exist_ok=True)
+            monkeypatch.setenv(variable, str(places / variable.lower()))
+        names = [place["name"] for place in client.get("/api/files").get_json()["places"]]
+        assert names == ["Graphs", *PLACE_VARIABLES]
+
+    def test_a_variable_naming_a_file_a_missing_folder_or_a_relative_path_is_left_out(
+        self, client: Any, places: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        (places / "a_file").write_text("x")
+        monkeypatch.setenv("PROJECT_ROOT", str(places / "a_file"))
+        monkeypatch.setenv("MODEL_ROOT", str(places / "nowhere"))
+        monkeypatch.setenv("RUN_DIR", "runs")
+        names = [place["name"] for place in client.get("/api/files").get_json()["places"]]
+        assert names == ["Graphs", "HOME", "DATA_ROOT"]
+
+    def test_an_empty_variable_is_left_out(self, client: Any, places: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("MODEL_ROOT", "")
+        names = [place["name"] for place in client.get("/api/files").get_json()["places"]]
+        assert names == ["Graphs", "HOME", "DATA_ROOT"]
+
+    def test_a_tilde_is_expanded_and_a_symbolic_link_resolved(
+        self, client: Any, places: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The path is the one the listing answers as ``dir``, so the page can mark the button of the folder shown."""
+        (places / "home" / "models").mkdir()
+        (places / "link").symlink_to(places / "home" / "models")
+        monkeypatch.setenv("MODEL_ROOT", "~/models")
+        monkeypatch.setenv("RUN_DIR", str(places / "link"))
+        found = {place["name"]: place["path"] for place in client.get("/api/files").get_json()["places"]}
+        assert found["MODEL_ROOT"] == found["RUN_DIR"] == str((places / "home" / "models").resolve())
+        listed = client.get("/api/files", query_string={"dir": found["RUN_DIR"]}).get_json()
+        assert listed["dir"] == found["RUN_DIR"]
+
+
+class TestNewFolder:
+    """``POST api/files/folder {dir, name}`` makes one folder inside ``dir`` and answers ITS listing — the dialog
+    enters it (user request 2026-10-28: a new folder for outputs). Every refusal makes nothing."""
+
+    def _children(self, folder: Path) -> List[str]:
+        return sorted(child.name for child in folder.iterdir())
+
+    def test_the_folder_is_made_and_its_listing_answered(self, client: Any, graph_dir: Path, places: Path) -> None:
+        response = client.post("/api/files/folder", json={"dir": str(graph_dir), "name": "outputs"})
+        assert response.status_code == 200, response.get_json()
+        body = response.get_json()
+        assert (graph_dir / "outputs").is_dir()
+        assert body["dir"] == str((graph_dir / "outputs").resolve())
+        assert body["parent"] == str(graph_dir.resolve())
+        assert body["entries"] == []
+        assert [place["name"] for place in body["places"]] == ["Graphs", "HOME", "DATA_ROOT"]
+
+    def test_the_name_is_trimmed_and_may_hold_spaces(self, client: Any, graph_dir: Path) -> None:
+        response = client.post("/api/files/folder", json={"dir": str(graph_dir), "name": "  run 2  "})
+        assert response.status_code == 200, response.get_json()
+        assert (graph_dir / "run 2").is_dir()
+
+    def test_a_variable_in_the_folder_is_expanded(self, client: Any, places: Path) -> None:
+        response = client.post("/api/files/folder", json={"dir": "$DATA_ROOT", "name": "generated"})
+        assert response.status_code == 200, response.get_json()
+        assert (places / "data_root" / "generated").is_dir()
+
+    @pytest.mark.parametrize(
+        ("name", "said"),
+        [
+            ("", "a new folder needs a name"),
+            ("   ", "a new folder needs a name"),
+            ("a/b", "'a/b' is not a folder name — a name holds no '/'"),
+            ("..", "'..' is not a folder name — a name holds no '/'"),
+            (".", "'.' is not a folder name — a name holds no '/'"),
+            (".cache", "'.cache' starts with a dot — the file browser hides it; pick another name"),
+        ],
+    )
+    def test_a_name_that_is_no_folder_name_is_refused(self, client: Any, graph_dir: Path, name: str, said: str) -> None:
+        before = self._children(graph_dir)
+        response = client.post("/api/files/folder", json={"dir": str(graph_dir), "name": name})
+        assert response.status_code == 400
+        assert _error(response) == said
+        assert self._children(graph_dir) == before
+
+    def test_a_name_already_there_is_refused(self, client: Any, graph_dir: Path) -> None:
+        (graph_dir / "outputs").mkdir()
+        response = client.post("/api/files/folder", json={"dir": str(graph_dir), "name": "outputs"})
+        assert response.status_code == 400
+        assert _error(response) == f"{graph_dir.resolve() / 'outputs'} already exists — pick another name"
+        response = client.post("/api/files/folder", json={"dir": str(graph_dir), "name": "demo.yaml"})
+        assert _error(response) == f"{graph_dir.resolve() / 'demo.yaml'} already exists — pick another name"
+
+    def test_a_missing_folder_is_404_naming_it(self, client: Any, tmp_path: Path) -> None:
+        response = client.post("/api/files/folder", json={"dir": str(tmp_path / "nowhere"), "name": "x"})
+        assert response.status_code == 404
+        assert _error(response) == f"no directory {tmp_path / 'nowhere'}"
+        assert not (tmp_path / "nowhere").exists()
+
+    def test_an_unset_variable_is_named(self, client: Any, places: Path) -> None:
+        response = client.post("/api/files/folder", json={"dir": "$MODEL_ROOT", "name": "x"})
+        assert response.status_code == 404
+        assert _error(response) == "MODEL_ROOT is not set on the editor's machine ($MODEL_ROOT)"
+
+    def test_a_folder_that_cannot_be_written_is_400_naming_it(self, client: Any, tmp_path: Path) -> None:
+        locked = tmp_path / "locked"
+        locked.mkdir()
+        locked.chmod(0o555)
+        try:
+            if os.access(locked, os.W_OK):
+                pytest.skip("this user writes a read-only directory anyway (root)")
+            response = client.post("/api/files/folder", json={"dir": str(locked), "name": "x"})
+            assert response.status_code == 400
+            assert _error(response) == f"{locked.resolve() / 'x'}: Permission denied"
+            assert self._children(locked) == []
+        finally:
+            locked.chmod(0o755)
+
+    def test_both_fields_are_required(self, client: Any, graph_dir: Path) -> None:
+        assert client.post("/api/files/folder", json={"name": "x"}).status_code == 400
+        assert client.post("/api/files/folder", json={"dir": str(graph_dir)}).status_code == 400
+        assert self._children(graph_dir) == ["demo.yaml"]
 
 
 # ------------------------------------------------------------------------------------------------

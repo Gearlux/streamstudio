@@ -190,6 +190,15 @@ export interface FileListing {
   parent: string | null;
   /** Folders first; hidden entries and `*.layout.yaml` left out. */
   entries: FileEntry[];
+  /** The dialog's shortcut buttons: the graph folder, then each place variable (`HOME`, `DATA_ROOT` …) set to a folder. */
+  places: FilePlace[];
+}
+
+export interface FilePlace {
+  /** `Graphs`, or the variable's name. */
+  name: string;
+  /** Resolved — the spelling a listing answers as `dir`. */
+  path: string;
 }
 
 /**
@@ -203,6 +212,9 @@ export const listFiles = (dir?: string, show: FileShow = "graphs"): Promise<File
   const asked = query.toString();
   return call("GET", asked === "" ? "api/files" : `api/files?${asked}`);
 };
+
+/** `POST api/files/folder` `{dir, name}` — make the folder `name` inside `dir` and answer ITS listing (New folder). */
+export const makeFolder = (dir: string, name: string): Promise<FileListing> => call("POST", "api/files/folder", { dir, name });
 
 // ---------------------------------------------------------------------------------------------------
 // editing — each answers the whole graph after the edit

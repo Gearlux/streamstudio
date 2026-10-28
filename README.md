@@ -144,7 +144,8 @@ See [docs/settings.md](docs/settings.md#a-plugins-lists-beside-a-field).
 ## Environment variables
 
 `HF_HOME` is the HuggingFace cache folder the editor's dataset pickers read. It is read at import, so restart the
-editor after changing it. `env.complete` lists it.
+editor after changing it. `HOME`, `PROJECT_ROOT`, `DATA_ROOT`, `MODEL_ROOT` and `RUN_DIR`, when set to a folder, are
+buttons of the file browser that jump there. `env.complete` lists them.
 
 ## Command line
 

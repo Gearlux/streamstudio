@@ -272,6 +272,22 @@ red; changing the name or the folder clears it:
 folder: folders first, then `.yaml` files; hidden entries and `*.layout.yaml` are left out. An opened file joins
 the list. An unreadable file is refused with its name, and the list is untouched.
 
+Above the path, a row of buttons jumps to a folder: **Graphs** (the folder the editor was started on), then `HOME`,
+`PROJECT_ROOT`, `DATA_ROOT`, `MODEL_ROOT` and `RUN_DIR` — each only when the editor's environment sets it to a
+folder; the button of the folder shown is highlighted, and hovering one shows its path. Every browser of the editor
+has them: Open, Save As, New…'s **Browse…**, and the `…` of a folder or file field.
+
+**New folder** (in Save As and the folder browsers) makes a folder inside the one shown and enters it — a place for a
+run's outputs. It is made at once, without Save. Escape closes its name field and keeps the browser open.
+
+| You type in New folder | The browser says |
+| --- | --- |
+| `outputs`, inside `/data` | enters `/data/outputs` |
+| `outputs`, where `/data/outputs` exists | `/data/outputs already exists — pick another name` |
+| `a/b` | `'a/b' is not a folder name — a name holds no '/'` |
+| `.cache` | `'.cache' starts with a dot — the file browser hides it; pick another name` |
+| nothing | `a new folder needs a name` |
+
 ## The Nodes sidebar
 
 `N` (or the **Nodes** button) opens every class the editor can describe as a tree of folders: the **package** (the

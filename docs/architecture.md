@@ -1922,3 +1922,38 @@ with studio.lock:                       # the panel's request, if one is being s
 reentrant call goes away, which waits are `TURN_FREE`. What must hold: no editor request reads the graph list or a
 document without the lock; nothing waits on a process, a plugin or the network while holding it; a refusal and a raise
 let go of it; a host's read-change-save is one turn. Pins: `tests/test_studio_threads.py`.
+
+## The file browser's shortcut buttons and New folder are the server's (`Studio.places`, `Studio.new_folder`, 2026-10-28)
+
+**Context.** The file browser browses the machine the EDITOR runs on, starting in the graph folder; reaching a data
+or model folder meant typing its path. A run's outputs need a folder that is often not there yet, and the browser
+could only pick an existing one (user request 2026-10-28: shortcut buttons to `HOME`, `PROJECT_ROOT`, `DATA_ROOT`,
+`MODEL_ROOT`, … and a new folder for outputs).
+
+**Decision.** Every listing (`GET /api/files`) carries `places`: the graph folder as `Graphs`, then each of
+`PLACE_VARIABLES` — `HOME`, `PROJECT_ROOT`, `DATA_ROOT`, `MODEL_ROOT`, `RUN_DIR` — that the editor's environment sets
+to an absolute folder, resolved. The server decides because the folders are the editor's machine's, not the
+browser's; resolved so the page marks the button whose path equals the listing's `dir`. An unset, empty, relative or
+non-folder value is left out, never an error: a published editor runs where none is set. Riding on the listing costs
+a handful of `stat`s and no second request. `POST /api/files/folder {dir, name}` makes one folder (no parents) and
+answers its listing, so the page enters it with the answer it already draws. It is the third gesture that writes
+without Save — a folder holds no unsaved state. Rejected: a fixed list in the page (the variables are the server's);
+a `STREAMSTUDIO_PLACES` override (user choice 2026-10-28: a fixed list); every `*_ROOT`/`*_DIR` variable (it would
+offer `TMPDIR`-like folders nobody asked for).
+
+**Consequences.** A new shortcut is one entry in `PLACE_VARIABLES`. A name starting with `.` is refused because the
+browser hides it — a folder made and then invisible. The browser in a host's panel offers the same buttons, its
+`Graphs` being the host's folder.
+
+**Example.**
+
+```python
+studio.places()
+# [{'name': 'Graphs', 'path': '/home/me/graphs'}, {'name': 'HOME', 'path': '/home/me'},
+#  {'name': 'DATA_ROOT', 'path': '/data'}]
+studio.new_folder("$DATA_ROOT", "outputs")["dir"]   # '/data/outputs', made
+```
+
+**What you may change.** The variables and their order, the `Graphs` label, where the buttons sit. What must hold:
+the page draws only the server's list; a refused name makes nothing; New folder never makes parents. Pins:
+`tests/test_app_files.py::TestPlaces`, `::TestNewFolder`, `tests/test_canvas.py::TestFileDialogPlacesAndNewFolder`.

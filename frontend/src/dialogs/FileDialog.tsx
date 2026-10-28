@@ -13,12 +13,19 @@
  * The path field shows the END of the path — the folder's own name — whenever a folder is shown: a deep path is
  * longer than the field, and scrolled to its start the name was off to the right (measured: 907 px of text in 566).
  *
+ * Above the path, a row of shortcut buttons — the graph folder, then `HOME`, `PROJECT_ROOT`, `DATA_ROOT`,
+ * `MODEL_ROOT`, `RUN_DIR`, each only while the editor's machine sets it to a folder (the listing's `places`, decided
+ * by the server); the button of the folder shown is pressed. In `save` and `folder` mode, New folder makes a folder
+ * inside the one shown (`POST api/files/folder`) and enters it — a refusal is the server's line, the typed name kept;
+ * Escape closes the name field, not the dialog (user request 2026-10-28).
+ *
  * Hooks: `data-dialog="file"`, `data-file-mode`, `data-file-dir` (the folder shown), `data-file-path` (the path
  * field), `data-file-entry` + `data-file-kind` on a row, `data-file-name` (the name field), `data-file-up`,
- * `data-file-confirm`.
+ * `data-file-confirm`, `data-file-place` (a shortcut, `aria-pressed`), `data-file-new-folder` (the button) and
+ * `data-file-new-folder-name` (its field).
  */
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { errorMessage, listFiles, type FileListing, type FileShow } from "../api";
+import { errorMessage, listFiles, makeFolder, type FileListing, type FileShow } from "../api";
 import { joinPath, yamlName } from "../files";
 import { Modal } from "./Modal";
 
@@ -61,9 +68,12 @@ export function FileDialog({ request, onDone }: { request: FileRequest; onDone: 
   const [error, setError] = useState<string | null>(null);
   const [picked, setPicked] = useState<string | null>(null);
   const [name, setName] = useState(request.name ?? "");
+  /** New folder's name field: `null` while it is closed. */
+  const [folderName, setFolderName] = useState<string | null>(null);
   const normalise = request.normalise ?? yamlName;
   const pathField = useRef<HTMLInputElement>(null);
   const show: FileShow = request.mode === "file" ? "all" : "graphs";
+  const makesFolders = request.mode === "save" || request.mode === "folder";
 
   /** List `dir`: `null` once listed, else the server's message (shown). `keep` is a message to show over the listing. */
   const go = useCallback(
@@ -109,6 +119,21 @@ export function FileDialog({ request, onDone }: { request: FileRequest; onDone: 
       ? listing.entries.some((entry) => entry.kind === "yaml" && entry.name === normalise(name))
       : false;
   const chosen = target();
+
+  /** Make the typed folder inside the one shown and enter it; a refusal stays on screen with the name kept. */
+  const newFolder = async () => {
+    if (listing === null || folderName === null) return;
+    try {
+      const next = await makeFolder(listing.dir, folderName);
+      setListing(next);
+      setTypedDir(next.dir);
+      setError(null);
+      setPicked(null);
+      setFolderName(null);
+    } catch (exc) {
+      setError(errorMessage(exc));
+    }
+  };
   const confirm = () => chosen !== null && onDone({ path: chosen, overwrite: exists });
 
   return (
@@ -138,6 +163,23 @@ export function FileDialog({ request, onDone }: { request: FileRequest; onDone: 
       }
     >
       <div className="file-dialog" data-file-mode={request.mode} data-file-dir={listing?.dir ?? ""}>
+        {listing !== null && (
+          <div className="file-places">
+            {listing.places.map((place) => (
+              <button
+                key={place.name}
+                type="button"
+                className="button file-place"
+                data-file-place={place.name}
+                title={place.path}
+                aria-pressed={place.path === listing.dir}
+                onClick={() => void go(place.path)}
+              >
+                {place.name}
+              </button>
+            ))}
+          </div>
+        )}
         <div className="file-path">
           <button
             type="button"
@@ -159,7 +201,40 @@ export function FileDialog({ request, onDone }: { request: FileRequest; onDone: 
             onKeyDown={(event) => event.key === "Enter" && void go(typedDir)}
             title="type a folder and press Enter"
           />
+          {makesFolders && (
+            <button
+              type="button"
+              className="button"
+              data-file-new-folder
+              title="make a folder inside the one shown"
+              disabled={listing === null}
+              onClick={() => setFolderName((open) => open ?? "")}
+            >
+              New folder
+            </button>
+          )}
         </div>
+        {folderName !== null && (
+          <label className="modal-field file-new-folder">
+            <span>New folder</span>
+            <input
+              autoFocus
+              data-file-new-folder-name
+              spellCheck={false}
+              value={folderName}
+              onChange={(event) => setFolderName(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.stopPropagation();
+                  void newFolder();
+                } else if (event.key === "Escape") {
+                  event.stopPropagation(); // the name field closes, the dialog stays
+                  setFolderName(null);
+                }
+              }}
+            />
+          </label>
+        )}
         {error && <div className="file-error">{error}</div>}
         <ul className="file-list" role="listbox">
           {listing === null && !error && <li className="file-empty">reading the folder…</li>}
