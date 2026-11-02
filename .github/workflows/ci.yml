@@ -63,7 +63,7 @@ jobs:
     - name: Run Tests
       run: |
         if [ -d tests ] && find tests -name '*.py' | grep -q .; then
-          pytest tests -m 'not slow' --junitxml=test-report.xml --cov=streamstudio --cov-report=xml --cov-report=term
+          pytest tests -m 'not slow' --junitxml=test-report.xml --cov=streamstudio --cov-branch --cov-report=xml --cov-report=term
         else
           echo "No tests found. Skipping."
         fi
