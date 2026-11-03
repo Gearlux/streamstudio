@@ -169,8 +169,7 @@ arch: "A graph's settings live in a file of their own"; pins `tests/test_graph_s
   a class line only at its `settled` stage, after the `document` stage the model is derived at); the text tab shows
   the graph.
 - **Composition is confluid's `include:` rule and nothing else** — the held, never-written document
-  `include: [<graph>, <settings>]` (`settings.composed`), loaded with `texts=`. Root ruling "A configuration utility,
-  not a compiler": never a second precedence rule, a new spelling, or a walker into confluid for settings.
+  `include: [<graph>, <settings>]` (`settings.composed`), loaded with `texts=`.
 - **A setting names its node:** a flow step `flow.<step>.op.<param>`, a top-level object `<key>.<param>`, any other
   node `<Class>.<param>` only while that class is the node's alone (user pick); and a parameter ONE node of the whole
   drawing has may be written BARE (`floor_db: -60.0`, user question 2026-10-14) — confluid's own broadcast of a bare
