@@ -312,6 +312,13 @@ button { font: inherit; }
 .button.icon { width: 30px; padding: 0; font-size: 15px; }
 
 /* the file dialog */
+/* The LIST gives way when the window is short, so the dialog never scrolls twice: the list is 300px tall while there is room
+   and shrinks to a few rows when the modal's `max-height` cuts in; the rest of the dialog keeps its size. Left as a fixed
+   300px, the box around it (`.modal-body`, which scrolls) overflowed below ~557px of window — a second scrollbar beside the
+   list's own (measured: body 398 in 361 at 520px). Only the extreme (a window under ~460px) leaves the box scrolling. */
+.modal[data-dialog="file"] .modal-body { display: flex; flex-direction: column; }
+.file-dialog { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.file-dialog > * { flex: none; }
 .file-path { display: flex; gap: 6px; }
 .file-places { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
 .file-place { height: 26px; padding: 0 10px; font-family: var(--mono); font-size: 12px; }
@@ -320,7 +327,8 @@ button { font: inherit; }
 .file-path-input { flex: 1; padding: 6px 9px; background: #111118; color: var(--text); border: 1px solid var(--line-2); border-radius: 6px; font-family: var(--mono); font-size: 12px; outline: none; }
 .file-path-input:focus { border-color: var(--accent); }
 .file-error { margin-top: 8px; padding: 6px 9px; color: #ff8a80; background: #2a1414; border-left: 3px solid var(--danger); border-radius: 3px; font-size: 12px; }
-.file-list { list-style: none; margin: 8px 0 0; padding: 4px; height: 300px; overflow-y: auto; background: #15151d; border: 1px solid var(--line); border-radius: 8px; }
+.file-dialog > .file-list { flex: 0 1 300px; min-height: 84px; }
+.file-list { list-style: none; margin: 8px 0 0; padding: 4px; overflow-y: auto; background: #15151d; border: 1px solid var(--line); border-radius: 8px; }
 .file-entry { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 5px; cursor: default; font-size: 13px; }
 .file-entry:hover { background: #242434; }
 .file-entry[aria-selected=true] { background: var(--accent-strong); color: #fff; }

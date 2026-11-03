@@ -3088,6 +3088,33 @@ class TestFileDialogPlacesAndNewFolder:
         assert sorted(child.name for child in places.iterdir()) == ["outputs"]
         assert opened.errors == [REFUSED_400]
 
+    @pytest.mark.parametrize("mode", ["open", "save"])
+    def test_a_long_folder_in_a_short_window_scrolls_the_list_alone(
+        self, open_graph: Callable[[str], Opened], graph_dir: Path, mode: str
+    ) -> None:
+        """The list gives up height when the window is short; the box around it never scrolls beside it (two scrollbars)."""
+        for index in range(80):
+            (graph_dir / f"folder_{index:03d}").mkdir()
+        opened = open_graph("pets")
+        page = opened.page
+        menu_command(page, "file", "open" if mode == "open" else "save-as")
+        page.wait_for_selector(f'[data-file-mode="{mode}"][data-file-dir="{graph_dir.resolve()}"]')
+        page.wait_for_selector("[data-file-entry]")
+        if mode == "save":
+            page.locator("[data-file-new-folder]").click()  # the dialog at its tallest: a name field beside the list
+            page.locator("[data-file-new-folder-name]").wait_for()
+        scrolls = "el => el.scrollHeight > el.clientHeight + 1"
+        roomy = page.locator(".file-list").bounding_box()["height"]
+        assert page.locator(".file-list").evaluate(scrolls)
+        assert not page.locator('[data-dialog="file"] .modal-body').evaluate(scrolls)
+        page.set_viewport_size({"width": 1400, "height": 520})
+        assert page.locator(".file-list").evaluate(scrolls)
+        assert not page.locator('[data-dialog="file"] .modal-body').evaluate(scrolls)
+        assert page.locator(".file-list").bounding_box()["height"] < roomy  # it is the list that gave way
+        confirm = page.locator("[data-file-confirm]").bounding_box()
+        assert confirm["y"] + confirm["height"] <= 520  # the dialog still fits the window
+        assert opened.errors == []
+
 
 class TestToastsKeepClearOfTheTabs:
     """The review's LOW item: a toast never covers the side panel's tabs (or the bar), and a click on a tab switches."""
