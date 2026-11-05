@@ -4,7 +4,8 @@
  *
  * The widget comes from the parameter's own JSON-schema fragment (`Param.schema`, from `confluid.to_pydantic`)
  * merged with the settings form (`GET …/form`): an `enum` is a select, `boolean` a checkbox, `number` / `integer`
- * a number input carrying the schema's `minimum` / `maximum`, a `(min, max)` pair two such inputs (`pickers.rangePair` —
+ * a number input carrying the schema's `minimum` / `maximum` — but a number OR text (`Union[float, str]`, a number
+ * written with its unit) a text input sending a plain number as a number (`pickers.numberOrText`) —, a `(min, max)` pair two such inputs (`pickers.rangePair` —
  * the ComfyUI editor's `__lo` / `__hi` widgets), `string` a text input, and anything else the document spells as a
  * container (`List[str]`, `object`) is shown read-only — the document text is where that is edited.
  *
@@ -31,6 +32,8 @@ import {
   lookupKey,
   metadataChoices,
   metadataText,
+  numberOrText,
+  numberOrTextValue,
   pairValue,
   parseMetadata,
   pickerFor,
@@ -112,6 +115,23 @@ export function ParamWidget({ param, schema, onCommit, values = NO_VALUES }: Par
         data-param={param.name}
         checked={param.value === true}
         onChange={(event) => void commit(event.target.checked)}
+      />
+    );
+  }
+  const either = numberOrText(schema);
+  if (either) {
+    return (
+      <input
+        type="text"
+        className="nodrag"
+        data-param={param.name}
+        value={draft}
+        onChange={(event) => setDraft(event.target.value)}
+        onKeyDown={blurOnEnter}
+        onBlur={() => {
+          if (draft.trim() === "") return revert(); // an empty box is not a value; the constructor's default stays
+          void commit(numberOrTextValue(draft, either));
+        }}
       />
     );
   }

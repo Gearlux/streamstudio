@@ -18,6 +18,8 @@ import {
   metadataList,
   metadataText,
   followPair,
+  numberOrText,
+  numberOrTextValue,
   pairValue,
   parseMetadata,
   pickerFor,
@@ -250,5 +252,24 @@ describe("a plugin list's question — the tag and the node's values", () => {
     expect(pluginLookupKey("SHOP_VERSION", { dataset: "bte", project: "store" })).toBe(one);
     expect(pluginLookupKey("SHOP_VERSION", { project: "store", dataset: "lte" })).not.toBe(one);
     expect(pluginLookupKey("SHOP_DATASET", { project: "store", dataset: "bte" })).not.toBe(one);
+  });
+});
+
+describe("a field that takes a number or text", () => {
+  it("is one when the schema's arms are a number and a string, the number arm's word answered", () => {
+    expect(numberOrText({ anyOf: [{ type: "number" }, { type: "string" }], default: "0" })).toBe("number");
+    expect(numberOrText({ anyOf: [{ type: "integer" }, { type: "string" }] })).toBe("integer");
+    expect(numberOrText({ anyOf: [{ type: "number" }, { type: "null" }] })).toBeUndefined();
+    expect(numberOrText({ anyOf: [{ type: "string" }, { type: "null" }] })).toBeUndefined();
+    expect(numberOrText({ type: "number" })).toBeUndefined();
+  });
+
+  it("sends a plain number as a number and anything else as the text typed", () => {
+    expect(numberOrTextValue("200 kSa/s", "number")).toBe("200 kSa/s");
+    expect(numberOrTextValue("30kHz", "integer")).toBe("30kHz");
+    expect(numberOrTextValue("250000", "number")).toBe(250000);
+    expect(numberOrTextValue(" 1e6 ", "number")).toBe(1e6);
+    expect(numberOrTextValue("4096", "integer")).toBe(4096);
+    expect(numberOrTextValue("2.5", "integer")).toBe("2.5");
   });
 });

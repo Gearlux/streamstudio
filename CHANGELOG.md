@@ -20,6 +20,8 @@ All notable changes to this project are documented here. The format follows
   (`{"dataset": "SHOP_DATASET"}`): the pickers and a plugin's lists read it.
 
 ### Fixed
+- A setting that takes a number or text (a number written with its unit, `2.5 MSa/s`) is a text box: a number box
+  dropped the unit, so `200 kSa/s` was saved as `200`. A plain number typed there is still saved as a number.
 - A graph a host ships that `include:`s a file shipped beside it opens with that file's nodes: its relative includes
   are rewritten to reach the shipped file from the host's folder. Before, it loaded no node and every `app:` entry
   was refused.

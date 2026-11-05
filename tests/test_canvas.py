@@ -5402,6 +5402,29 @@ class TestTheSettingsOnlyPage:
         assert not (hosted.folder / "pane.settings.yaml").exists(), "a hint is never written"
         assert opened.errors == []
 
+    def test_a_number_written_with_its_unit_is_typed_and_saved_as_written(self, browser: Any, hosted: Hosted) -> None:
+        """A setting that takes a number OR text (``Union[float, str]``: recordstream's ``Quantity.value``) is a text box:
+        ``2.5 MSa/s`` is saved as typed, unit and all (a number box saved ``200 kSa/s`` as ``200``), and a plain number
+        as a number."""
+        (hosted.folder / "rate.yaml").write_text(
+            f"rate_value: !class:recordstream.quantity.Quantity\n  value: '0'\n  kind: rate\n"
+            f"flow:\n  gain:\n    op: !class:{MOD}.TinyGain {{gain: 2.0}}\noutputs: gain\n"
+            "app:\n  inputs:\n    - [Quantity, value]\n"
+        )
+        opened = open_hosted(browser, hosted, "graph=rate&embed=1&only=settings")
+        page = opened.page
+        page.wait_for_selector('.app[data-graph="rate"][data-ready="true"] [data-settings]')
+        widget = page.locator('[data-form-node="rate_value"] input[data-param="value"]')
+        assert widget.get_attribute("type") == "text"
+        set_widget(page, '[data-form-node="rate_value"]', "value", "2.5 MSa/s")
+        wait_saves(page, 2)
+        assert (hosted.folder / "rate.settings.yaml").read_text() == "rate_value.value: 2.5 MSa/s\n"
+        assert widget.input_value() == "2.5 MSa/s"
+        set_widget(page, '[data-form-node="rate_value"]', "value", "250000")
+        wait_saves(page, 4)
+        assert (hosted.folder / "rate.settings.yaml").read_text() == "rate_value.value: 250000\n"
+        assert opened.errors == []
+
     def test_a_graph_with_no_settings_says_so_and_offers_no_tick_box(self, browser: Any, hosted: Hosted) -> None:
         opened = open_hosted(browser, hosted, "graph=source&embed=1&only=settings")
         page = opened.page

@@ -229,6 +229,28 @@ export function rangePair(schema: Record<string, Json>): [PairEnd, PairEnd] | un
   return undefined;
 }
 
+/**
+ * The number a field that takes a number OR text holds (`Union[float, str]`: `{anyOf: [{type: number}, {type:
+ * string}]}`, a number written with its unit — `2.5 MSa/s`, `30kHz` — beside a plain one), when the schema is one:
+ * `"number"` or `"integer"`, the number arm's word; `undefined` for anything else. Such a field is a TEXT box — a number
+ * box drops the unit, so `200 kSa/s` was saved as `200`.
+ */
+export function numberOrText(schema: Record<string, Json>): "number" | "integer" | undefined {
+  if (!Array.isArray(schema.anyOf)) return undefined;
+  const words = schema.anyOf.map(asObject).map((arm) => arm?.type);
+  if (!words.includes("string")) return undefined;
+  if (words.includes("number")) return "number";
+  return words.includes("integer") ? "integer" : undefined;
+}
+
+/** What a number-or-text field's typed text is sent as: the number when it is one its number arm takes, else the text. */
+export function numberOrTextValue(draft: string, kind: "number" | "integer"): Json {
+  const text = draft.trim();
+  const value = Number(text);
+  if (text === "" || !Number.isFinite(value) || (kind === "integer" && !Number.isInteger(value))) return draft;
+  return value;
+}
+
 /** A pair's value as two numbers: the value when it is one, else the schema's default when that is one, else none. */
 export function pairValue(value: Json | undefined, fallback: Json | undefined): [number, number] | undefined {
   for (const candidate of [value, fallback]) {
