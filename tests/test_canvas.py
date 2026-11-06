@@ -3092,7 +3092,8 @@ class TestFileDialogPlacesAndNewFolder:
     def test_a_long_folder_in_a_short_window_scrolls_the_list_alone(
         self, open_graph: Callable[[str], Opened], graph_dir: Path, mode: str
     ) -> None:
-        """The list gives up height when the window is short; the box around it never scrolls beside it (two scrollbars)."""
+        """The list gives up height when the window is short; the box around it never scrolls beside it (two
+        scrollbars)."""
         for index in range(80):
             (graph_dir / f"folder_{index:03d}").mkdir()
         opened = open_graph("pets")
@@ -5403,9 +5404,9 @@ class TestTheSettingsOnlyPage:
         assert opened.errors == []
 
     def test_a_number_written_with_its_unit_is_typed_and_saved_as_written(self, browser: Any, hosted: Hosted) -> None:
-        """A setting that takes a number OR text (``Union[float, str]``: recordstream's ``Quantity.value``) is a text box:
-        ``2.5 MSa/s`` is saved as typed, unit and all (a number box saved ``200 kSa/s`` as ``200``), and a plain number
-        as a number."""
+        """A setting that takes a number OR text (``Union[float, str]``: recordstream's ``Quantity.value``) is a text
+        box: ``2.5 MSa/s`` is saved as typed, unit and all (a number box saved ``200 kSa/s`` as ``200``), and a plain
+        number as a number."""
         (hosted.folder / "rate.yaml").write_text(
             f"rate_value: !class:recordstream.quantity.Quantity\n  value: '0'\n  kind: rate\n"
             f"flow:\n  gain:\n    op: !class:{MOD}.TinyGain {{gain: 2.0}}\noutputs: gain\n"
