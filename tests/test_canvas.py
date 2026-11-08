@@ -1494,6 +1494,70 @@ class TestArrange:
         assert api_get(server, "api/graphs/wires")["positions"] == before
         assert opened.errors == []
 
+    @pytest.mark.parametrize("command", ["arrange-diagonal", "arrange-down"])
+    def test_diagonal_and_top_to_bottom_step_the_chain_down_and_save_it(
+        self, open_graph: Callable[[str], Opened], server: str, command: str
+    ) -> None:
+        opened = open_graph("wires")
+        page = opened.page
+        menu_command(page, "view", command)
+        wait_saves(page, 1)
+        placed = api_get(server, "api/graphs/wires")["positions"]
+        chain = [placed[name] for name in ("decode", "gain", "boost", "count")]
+        ys = [y for _x, y in chain]
+        assert ys == sorted(ys) and len(set(ys)) == 4, placed  # each step below the one before
+        xs = [x for x, _y in chain]
+        if command == "arrange-diagonal":
+            assert xs == sorted(xs) and len(set(xs)) == 4, placed  # ... and right of it
+        for name in WIRES_NODES:
+            assert node_translate(page, name) == tuple(placed[name]), name
+        drawn = node_boxes(page, *WIRES_NODES)
+        if command == "arrange-down":  # the one-input chain is one column (count sits between boost and <host>)
+            centres = [drawn[name]["x"] + drawn[name]["width"] / 2 for name in ("decode", "gain", "boost")]
+            assert max(centres) - min(centres) <= 10, drawn
+        boxes = list(drawn.values())
+        assert not any(overlap(a, b) for i, a in enumerate(boxes) for b in boxes[i + 1 :])
+        assert opened.errors == []
+
+    def test_top_to_bottom_moves_the_sockets_to_the_top_and_bottom_edges_and_undo_moves_them_back(
+        self, open_graph: Callable[[str], Opened]
+    ) -> None:
+        opened = open_graph("wires")
+        page = opened.page
+        assert page.locator(".canvas").get_attribute("data-direction") == "across"
+
+        def sockets() -> Dict[str, Tuple[float, float]]:
+            """Where gain's record sockets are, against its card: (x, y) of each centre, 0..1 across and down."""
+            card = node_boxes(page, "gain")["gain"]
+            found = {}
+            for kind in ("in", "out"):
+                x, y = centre(handle(page, "gain", "record", kind).bounding_box())
+                found[kind] = ((x - card["x"]) / card["width"], (y - card["y"]) / card["height"])
+            return found
+
+        beside = sockets()
+        assert beside["in"][0] < 0.05 and beside["out"][0] > 0.95, beside  # on the left and right edges
+        menu_command(page, "view", "arrange-down")
+        wait_saves(page, 1)
+        page.wait_for_selector('.canvas[data-direction="down"]')
+        page.wait_for_function(
+            "() => { const h = document.querySelector('.react-flow__handle[data-node=\"gain\"][data-socket=\"record\"][data-kind=\"in\"]');"
+            " const c = h && h.closest('.react-flow__node'); return !!c && Math.abs(h.getBoundingClientRect().top - c.getBoundingClientRect().top) < 8; }"
+        )
+        edges = sockets()
+        assert edges["in"][1] < 0.05 and edges["out"][1] > 0.95, edges  # on the top and bottom edges
+        assert 0.05 < edges["in"][0] < 0.95 and 0.05 < edges["out"][0] < 0.95, edges
+        page.keyboard.press("Control+z")  # the places go back, and the sockets with them
+        wait_saves(page, 2)
+        page.wait_for_selector('.canvas[data-direction="across"]')
+        page.wait_for_function(
+            "() => { const h = document.querySelector('.react-flow__handle[data-node=\"gain\"][data-socket=\"record\"][data-kind=\"in\"]');"
+            " const c = h && h.closest('.react-flow__node'); return !!c && Math.abs(h.getBoundingClientRect().left - c.getBoundingClientRect().left) < 8; }"
+        )
+        back = sockets()
+        assert back["in"][0] < 0.05 and back["out"][0] > 0.95, back
+        assert opened.errors == []
+
     def test_the_server_layout_button_writes_the_documents_layered_layout(
         self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path
     ) -> None:

@@ -48,6 +48,7 @@
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type DragEvent,
@@ -87,6 +88,8 @@ import {
   type Size,
   type XY,
 } from "../groups";
+import { DownContext } from "../context";
+import { runsDown } from "../layout";
 import { EMPTY_MODEL, breadcrumb, isBoundary, levelModel, levelPositions } from "../levels";
 import { CLASS_MIME } from "../panels/NodesSidebar";
 import { addToSelection, shiftAddsCard } from "../selection";
@@ -236,6 +239,16 @@ export function Canvas({
     setEdges(flow.edges);
   }
   const view = viewOf(graph, level);
+  // the level's direction, from the places the sidecar holds (not the drag in progress: the sockets turn on release)
+  const down = useMemo(() => {
+    const placed = levelPositions(view, graph.positions);
+    const boxes = Object.fromEntries(
+      nodes
+        .filter((node) => node.type === "generic" && placed[node.id] !== undefined)
+        .map((node) => [node.id, { x: placed[node.id][0], y: placed[node.id][1], ...sizeOf(node) }]),
+    );
+    return runsDown(boxes, view.wires);
+  }, [graph.positions, nodes, view]);
   const nodesRef = useRef(nodes);
   nodesRef.current = nodes;
   const flow = useReactFlow<CanvasNode, CanvasEdge>();
@@ -479,6 +492,7 @@ export function Canvas({
       data-graph={drawnFrom?.name ?? ""}
       data-level={level}
       data-view-level={viewLevel ?? undefined}
+      data-direction={down ? "down" : "across"}
       data-initialized={initialized && drawnFrom === graph ? "true" : "false"}
       onPointerDownCapture={onShiftPress}
       onMouseDownCapture={onPointerDownCapture}
@@ -486,57 +500,59 @@ export function Canvas({
       onDragOver={onDragOver}
       onDrop={onDrop}
     >
-      <ReactFlow<CanvasNode, CanvasEdge>
-        nodes={nodes}
-        edges={edges}
-        nodeTypes={nodeTypes}
-        onNodesChange={onNodesChange}
-        onEdgesChange={onEdgesChange}
-        onConnect={onConnect}
-        onConnectEnd={onConnectEnd}
-        isValidConnection={isValidConnection}
-        onNodeDragStop={onNodeDragStop}
-        onNodeClick={(_event, node) => node.type === "generic" && onNodeClick(node.id)}
-        onNodeDoubleClick={(event, node) => {
-          if (node.type !== "generic" || node.data.node.kind !== "subgraph" || inField(event.target)) return;
-          onOpenSubgraph?.(node.id);
-        }}
-        onPaneContextMenu={(event) => {
-          event.preventDefault();
-          onContextMenu({ kind: "pane", ...menuAt(event) });
-        }}
-        onNodeContextMenu={(event, node) => {
-          event.preventDefault();
-          if (node.type === "group") {
-            onContextMenu({ kind: "group", group: node.data.group.id, ...menuAt(event) });
-            return;
-          }
-          // a right-click acts on the selection when the node is part of it, else on the node alone
-          if (!node.selected)
-            flow.setNodes((all) => all.map((other) => (other.selected !== (other.id === node.id) ? { ...other, selected: other.id === node.id } : other)));
-          onContextMenu({ kind: "node", node: node.id, ...menuAt(event) });
-        }}
-        onSelectionContextMenu={(event, picked) => {
-          event.preventDefault();
-          const first = picked.find((node) => node.type === "generic");
-          if (first) onContextMenu({ kind: "node", node: first.id, ...menuAt(event) });
-          else onContextMenu({ kind: "pane", ...menuAt(event) });
-        }}
-        defaultViewport={START}
-        // low enough for a host's panel to show a large graph whole (`fitOnOpen`): the Bluetooth pane's 30 cards fit a
-        // 580-px canvas at about 0.06, and React Flow clamps a fit to this bound (measured at 0.1: 17 of the 30 cards)
-        minZoom={0.02}
-        snapToGrid
-        snapGrid={[10, 10]}
-        nodeDragThreshold={0}
-        zoomOnDoubleClick={false}
-        deleteKeyCode={null}
-        proOptions={{ hideAttribution: true }}
-      >
-        <Background gap={20} />
-        <Controls />
-        {showMinimap && <MiniMap pannable zoomable bgColor="#181822" nodeColor="#3949ab" maskColor="rgba(0, 0, 0, 0.55)" />}
-      </ReactFlow>
+      <DownContext.Provider value={down}>
+        <ReactFlow<CanvasNode, CanvasEdge>
+          nodes={nodes}
+          edges={edges}
+          nodeTypes={nodeTypes}
+          onNodesChange={onNodesChange}
+          onEdgesChange={onEdgesChange}
+          onConnect={onConnect}
+          onConnectEnd={onConnectEnd}
+          isValidConnection={isValidConnection}
+          onNodeDragStop={onNodeDragStop}
+          onNodeClick={(_event, node) => node.type === "generic" && onNodeClick(node.id)}
+          onNodeDoubleClick={(event, node) => {
+            if (node.type !== "generic" || node.data.node.kind !== "subgraph" || inField(event.target)) return;
+            onOpenSubgraph?.(node.id);
+          }}
+          onPaneContextMenu={(event) => {
+            event.preventDefault();
+            onContextMenu({ kind: "pane", ...menuAt(event) });
+          }}
+          onNodeContextMenu={(event, node) => {
+            event.preventDefault();
+            if (node.type === "group") {
+              onContextMenu({ kind: "group", group: node.data.group.id, ...menuAt(event) });
+              return;
+            }
+            // a right-click acts on the selection when the node is part of it, else on the node alone
+            if (!node.selected)
+              flow.setNodes((all) => all.map((other) => (other.selected !== (other.id === node.id) ? { ...other, selected: other.id === node.id } : other)));
+            onContextMenu({ kind: "node", node: node.id, ...menuAt(event) });
+          }}
+          onSelectionContextMenu={(event, picked) => {
+            event.preventDefault();
+            const first = picked.find((node) => node.type === "generic");
+            if (first) onContextMenu({ kind: "node", node: first.id, ...menuAt(event) });
+            else onContextMenu({ kind: "pane", ...menuAt(event) });
+          }}
+          defaultViewport={START}
+          // low enough for a host's panel to show a large graph whole (`fitOnOpen`): the Bluetooth pane's 30 cards fit a
+          // 580-px canvas at about 0.06, and React Flow clamps a fit to this bound (measured at 0.1: 17 of the 30 cards)
+          minZoom={0.02}
+          snapToGrid
+          snapGrid={[10, 10]}
+          nodeDragThreshold={0}
+          zoomOnDoubleClick={false}
+          deleteKeyCode={null}
+          proOptions={{ hideAttribution: true }}
+        >
+          <Background gap={20} />
+          <Controls />
+          {showMinimap && <MiniMap pannable zoomable bgColor="#181822" nodeColor="#3949ab" maskColor="rgba(0, 0, 0, 0.55)" />}
+        </ReactFlow>
+      </DownContext.Provider>
       {level !== "" && (
         <nav className="crumbs" data-breadcrumb aria-label="the subgraph shown">
           {crumbs.map((crumb, index) => (

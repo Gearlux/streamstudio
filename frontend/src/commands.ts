@@ -9,7 +9,7 @@
  *     New       Flow graph… | Pipeline… | Source graph (with its contract)…
  *     File      Open… Ctrl+O · Save Ctrl+S · Save As… Ctrl+Shift+S · Revert
  *     Edit      Undo Ctrl+Z · Redo Ctrl+Shift+Z · Cut / Copy / Paste · Delete · Select all · Rename… F2
- *     View      Nodes sidebar N · Fit to view · Arrange · Minimap
+ *     View      Nodes sidebar N · Fit to view · Arrange left to right / diagonally / top to bottom · Arrange in columns · Minimap
  *     Graph     Add group · Group selection G · Convert selection to subgraph · templates · Check graph
  *     Run       Run Ctrl+Enter · Step · Rerun selected node
  *
@@ -39,6 +39,8 @@ export const COMMAND_IDS = [
   "toggle-nodes",
   "fit",
   "arrange",
+  "arrange-diagonal",
+  "arrange-down",
   "arrange-server",
   "minimap",
   "add-group",
@@ -111,7 +113,15 @@ export const COMMANDS: Record<CommandId, Command> = {
   rename: command("rename", "Rename…", [{ key: "F2" }]),
   "toggle-nodes": command("toggle-nodes", "Nodes sidebar", [{ key: "n" }], { hint: "every class, by package, kind and group" }),
   fit: command("fit", "Fit to view"),
-  arrange: command("arrange", "Arrange", [], { action: "arrange", hint: "left to right by the cards' sizes" }),
+  arrange: command("arrange", "Arrange left to right", [], { action: "arrange", hint: "along the wires, by the cards' sizes" }),
+  "arrange-diagonal": command("arrange-diagonal", "Arrange diagonally", [], {
+    action: "arrange-diagonal",
+    hint: "top left to bottom right: each column below the one before",
+  }),
+  "arrange-down": command("arrange-down", "Arrange top to bottom", [], {
+    action: "arrange-down",
+    hint: "along the wires, a row per step",
+  }),
   "arrange-server": command("arrange-server", "Arrange in columns", [], {
     action: "arrange-server",
     hint: "the server's layered layout: a column per layer",
@@ -153,7 +163,7 @@ export const MENUS: MenuSpec[] = [
     label: "Edit",
     items: ["undo", "redo", "-", "cut", "copy", "paste", "delete", "-", "select-all", "rename"],
   },
-  { id: "view", label: "View", items: ["toggle-nodes", "-", "fit", "arrange", "arrange-server", "minimap"] },
+  { id: "view", label: "View", items: ["toggle-nodes", "-", "fit", "-", "arrange", "arrange-diagonal", "arrange-down", "arrange-server", "-", "minimap"] },
   {
     id: "graph",
     label: "Graph",

@@ -2,7 +2,8 @@
  * The menus the page shows, built as data (`menu/entries.ts`) from the command table (`commands.ts`) and the page's
  * state: the menu bar, and the three right-click menus of the approved scope —
  *
- *     empty canvas   Add Node ▸ (by kind, with search) · Add Group · Paste · Insert template ▸ · Insert steps file… · Arrange
+ *     empty canvas   Add Node ▸ (by kind, with search) · Add Group · Paste · Insert template ▸ · Insert steps file… ·
+ *                    Arrange left to right / diagonally / top to bottom
  *     a node         Rename… · Delete · Copy · Group · Convert to subgraph · Save as template… · Run to here
  *                    (a node with a source slot — a Stream — also: Set source…, `slots.ts`;
  *                     a subgraph node also: Open · Move to its own file…; a subgraph's <in>/<out>: nothing)
@@ -132,6 +133,8 @@ export function paneMenu(context: PaneMenuContext): Entry[] {
     },
     separator(),
     commandEntry("arrange", context),
+    commandEntry("arrange-diagonal", context),
+    commandEntry("arrange-down", context),
   ];
 }
 

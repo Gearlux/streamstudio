@@ -148,7 +148,7 @@ import {
   type OpenCommand,
   type PageMessage,
 } from "./host";
-import { arrange } from "./layout";
+import { type Direction, arrange } from "./layout";
 import {
   EMPTY_MODEL,
   allNodeNames,
@@ -1174,8 +1174,8 @@ function Editor() {
     if (fitRequests > 0) void flow.fitView({ padding: 0.1, maxZoom: 1, duration: 200 });
   }, [fitRequests, flow]);
 
-  /** dagre over the MEASURED cards, left to right along the wires — then saved like a drag, and shown whole. */
-  const arrangeHere = useCallback(() => {
+  /** dagre over the MEASURED cards along the wires, in `direction` — then saved like a drag, and shown whole. */
+  const arrangeHere = useCallback((direction: Direction) => {
     const current = graphRef.current;
     if (current === null) return;
     const drawn = flow.getNodes().filter((node) => node.type === "generic");
@@ -1184,7 +1184,7 @@ function Editor() {
       width: node.measured?.width ?? CARD.width,
       height: node.measured?.height ?? CARD.height,
     }));
-    const placed = arrange(boxes, viewNow().wires);
+    const placed = arrange(boxes, viewNow().wires, direction);
     void writeLayout(Object.fromEntries(Object.entries(placed).map(([name, { x, y }]) => [name, [x, y]])), undefined, true).then(
       (written) => {
         if (written) showWhole();
@@ -1941,7 +1941,11 @@ function Editor() {
         case "fit":
           return void flow.fitView({ padding: 0.15, duration: 200 });
         case "arrange":
-          return arrangeHere();
+          return arrangeHere("LR");
+        case "arrange-diagonal":
+          return arrangeHere("diagonal");
+        case "arrange-down":
+          return arrangeHere("TB");
         case "arrange-server":
           return void arrangeOnServer();
         case "minimap":

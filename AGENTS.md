@@ -306,6 +306,11 @@ arch: "A host mounts the editor through three methods"; pins `tests/test_host.py
   card's rows or CSS re-runs the calibration and updates the constants in the same change. `layout.py` imports no
   document code. (`tests/test_layout.py::TestCardHeight`, `::TestTallCards`, `tests/test_canvas.py::TestFirstLayout`)
   arch: "The graph document is the truth", update 2026-10-01.
+- **A card's sockets follow the drawing** (`layout.runsDown` → `DownContext`): top and bottom on a level whose wires
+  mostly run down, the sides otherwise — read from the positions, never a stored direction; a card re-measures its
+  handles only when the direction turns, never on mount. (`frontend/src/__tests__/layout.test.ts`,
+  `tests/test_canvas.py::TestArrange::test_top_to_bottom_moves_the_sockets_to_the_top_and_bottom_edges_and_undo_moves_them_back`)
+  arch: "A card's sockets follow the drawing".
 - **The page is built at a server's START** (`streamstudio.page.ensure_page_built()`), by the CLI and by a host
   before it announces its server — **never from `create_app`, `editor_blueprint` or `page_blueprint`**. Tests replace
   it (`tests/conftest.py::page_checks`) and never run npm. npm, Node and the disk never stop a start.

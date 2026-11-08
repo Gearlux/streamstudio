@@ -335,7 +335,7 @@ edit (`modelToFlow`, node id = the document's node name), and each behaviour is 
 | groups | a parent node in the arrays | the sidecar's `groups:` block; the box derived from its members every draw |
 | undo/redo | snapshots of the two arrays | the document's text history on the server + the page's layout timeline |
 | copy/paste | a copy of array entries | `add_step` per copied node, with the values the document spells |
-| auto-layout | dagre over the arrays | dagre on the page (*arrange*) or the server's layering (*columns*), saved as positions |
+| auto-layout | dagre over the arrays | dagre on the page (*arrange* left to right, diagonally or top to bottom) or the server's layering (*columns*), saved as positions |
 | save/load | `toDoc`/`load`, a JSON of its own (round trip 2278 bytes in, 2278 out) | none — each route call saves the YAML; `serialize.ts` has no successor |
 
 **Consequences.** Measured, the prototype (685 lines, one generic node component, a synthetic catalogue): palette of
@@ -1957,3 +1957,30 @@ studio.new_folder("$DATA_ROOT", "outputs")["dir"]   # '/data/outputs', made
 **What you may change.** The variables and their order, the `Graphs` label, where the buttons sit. What must hold:
 the page draws only the server's list; a refused name makes nothing; New folder never makes parents. Pins:
 `tests/test_app_files.py::TestPlaces`, `::TestNewFolder`, `tests/test_canvas.py::TestFileDialogPlacesAndNewFolder`.
+
+## A card's sockets follow the drawing: top and bottom on a level whose wires run down (`layout.runsDown`, `DownContext`, 2026-11-08)
+
+**Context.** The page arranges a level three ways — left to right, diagonally, top to bottom (dagre over the measured
+cards, `layout.arrange`). A card drew its input sockets on its left and its outputs on its right, so after *Arrange
+top to bottom* every wire left one card sideways and curled back into the side of the card below it (seen on a
+six-step forked flow on a scratch editor). The user asked for the sockets to move to the top and bottom edges there.
+
+**Decision.** The direction is READ from the drawing, never stored: `layout.runsDown` calls a level down when more of
+its wires run down than across — a wire runs down when its target starts below its source's bottom by more than the
+two cards' horizontal gap (negative when they overlap). The canvas works it out from the sidecar's positions and the
+measured sizes (not the drag in progress, so the sockets turn on release) and hands it to every card through
+`DownContext`; a card then draws its input and output sockets on its top and bottom edges, spread in row order, and
+asks React Flow to measure its handles again only when the direction TURNS (re-measuring every card as it mounts held
+back the first fit of a host's panel and of a subgraph's inside). A parameter's small handle stays on its row.
+Rejected: a `directions:` block in the sidecar, set by the arrange that last ran — it needs a sidecar block, a route,
+the recovery file and an undo entry kind for state the positions already imply, and it would be wrong after the
+person drags the cards into another shape.
+
+**Consequences.** A reload, an undo and the next arrange turn the sockets with the cards for free; dragging most cards
+of a level into a column turns them too. The diagonal stays across because its step (`DIAGONAL_GAP`, 20 px) is smaller
+than a column's gap (dagre's `ranksep`, 80 px) — keep it smaller, or diagonal levels draw down. A wide fan-out can tie
+(its outer children sit beside the parent rather than under it); a tie is across.
+
+**What you may change.** The rule's threshold, the spread of the sockets on an edge. What must hold: no layout state
+outside the positions and groups; *Arrange top to bottom* yields a down level and the other two arranges an across one
+(`frontend/src/__tests__/layout.test.ts`, `runsDown`). Pins: `tests/test_canvas.py::TestArrange::test_top_to_bottom_moves_the_sockets_to_the_top_and_bottom_edges_and_undo_moves_them_back`.

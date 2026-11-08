@@ -132,7 +132,7 @@ the server's located message.
 | `Ctrl+X` / `Ctrl+C`, then `Ctrl+V` | `POST …/copy`, then `POST …/paste` | the copied YAML text inserted after the selection (a Stream member after a member); a paste pressed before the copy answered waits for it |
 | `G`, Add group, resize or drag into / out of a box | `PUT …/groups` | unchanged — groups live in the sidecar |
 | drag a node or a box | `PUT …/positions` | unchanged — positions live in the sidecar |
-| *Arrange* (left to right by the cards' sizes) / *Arrange in columns* (the server's layers), then the view fits the whole level (never above zoom 1) | `PUT …/positions` / `POST …/layout` | unchanged |
+| *Arrange left to right* / *diagonally* / *top to bottom* (dagre by the cards' sizes) / *Arrange in columns* (the server's layers), then the view fits the whole level (never above zoom 1) | `PUT …/positions` / `POST …/layout` | unchanged |
 | `Ctrl+Z` / `Ctrl+Shift+Z` | a document edit: `POST …/undo` / `…/redo`; a move or group: the page writes the old layout back | the text history is the server's — an edit made through the API is undone the same way |
 | **run** tab: *run* (record #N, pausing before the selected node), *step*, click a node | `POST …/trace`, `GET/POST /api/runs/<run>…` | unchanged — each node shows its status, time and generation |
 | **run** tab in an editor mounted in a host, on a graph with no source of its own: *run* | `POST …/trace {}` — no record number; the host's record runs | unchanged — the panel says `record: the workspace's selection` before (the host's `name`), and after names what ran (`run_… · rec_7 · 0.25–0.75 s · 1–2 MHz`) and what the host filled in (`window: start_s = 0.25, stop_s = 0.75`) |
