@@ -84,6 +84,9 @@ export type RecoveryPhase = (typeof RECOVERY_PHASES)[number];
 /** Whether the question is answered — only then does the editor load a graph (it would read the file on disk). */
 export const answered = (phase: RecoveryPhase): boolean => phase === "restored" || phase === "discarded" || phase === "none";
 
+/** Whether the question is on screen, waiting for the person — what the page tells its host (`host.StateMessage.asking`). */
+export const waitsForAnswer = (phase: RecoveryPhase): boolean => phase === "asking" || phase === "confirming";
+
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
 /** `2026-09-29T13:25:07` → `29 Sep 13:25`, in the page's own time; a time it cannot read is shown as sent. */

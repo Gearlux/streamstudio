@@ -329,7 +329,10 @@ arch: "A host mounts the editor through three methods"; pins `tests/test_host.py
   which asks the host; pickers come from `schema.picker`; HuggingFace lists are asked only when the person reaches
   for one. `?embed=1` removes chrome, never a function. The `state`/`saved`/`open`/`unavailable` messages are a
   contract with the hosts — change them only together. A host switches graphs with `open`, never by setting the
-  iframe's `src`. A gesture belongs to the graph it began on. An unknown `?graph=` opens nothing.
+  iframe's `src`. A gesture belongs to the graph it began on. An unknown `?graph=` opens nothing. **`state`'s
+  `asking`** (2026-11-10) is true while the recovery question waits for the person (`recovery.waitsForAnswer`): no
+  graph opens until it is answered, so a host covering its panel while a graph loads uncovers it then
+  (`tests/test_canvas.py::TestTheHostHearsAndFollows::test_the_host_hears_while_the_page_asks_about_kept_work_and_the_graph_once_answered`).
   **`commit`** (2026-10-08) is the host's second command: the page blurs the field being typed in (which writes it;
   on `?only=settings` saves it), waits for every write on its way (`writes`, filled by `commitParam`), and posts
   `committed` — a host READING what the page writes (a tool's run beside a settings panel) asks it first; never answer

@@ -1014,8 +1014,17 @@ any window other than the parent, or another origin, is ignored.
 studio.src = "/studio/?graph=view_bte&tab=settings&embed=1";            // first open
 addEventListener("message", (e) => e.data?.type === "saved" && rerunPanes(e.data.path));
 studio.contentWindow.postMessage({target: "streamstudio", type: "open", graph: "view_fft", tab: "run"}, location.origin);
-// the page posts: {source: "streamstudio", type: "state", graph: "view_fft", dirty: false, unsaved: [], tab: "run"}
+// the page posts: {source: "streamstudio", type: "state", graph: "view_fft", dirty: false, unsaved: [], tab: "run",
+//                  asking: false}
 ```
+
+**Update 2026-11-10: `state` says when the page is ASKING.** No graph opens before the recovery question is answered
+("Unsaved work is kept in a hidden file"), and a host covering its panel until the graph it asked for shows (a veil
+reading `loading <graph>…`) could not tell that wait from a slow load: measured, a host's veil covered the question for good
+and the person saw nothing else. `state` now carries `asking` — true while the recovery dialog or its discard question
+is up (`recovery.waitsForAnswer`) — and a host uncovers the panel while it is. Rejected: a host uncovering whenever
+the page shows no graph (a normal first load would flash an empty editor for the seconds the catalogue takes), and a
+message of its own (`state` is already what a host follows, posted on every change).
 
 **Update 2026-10-01 (the review of the panel).** An `open` arrives while the person is doing something in the panel,
 with no click inside it — measured before: a value typed into `gain` and not left was committed into the NEXT graph's

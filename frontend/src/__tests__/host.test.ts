@@ -146,7 +146,7 @@ describe("ranOn — what the run panel says ran", () => {
 });
 
 describe("the panel's messages — posted to the host", () => {
-  it("state: the graph, its dirt, every unsaved graph, the tab", () => {
+  it("state: the graph, its dirt, every unsaved graph, the tab, and whether the page waits for an answer", () => {
     expect(stateMessage("view_bte", true, ["view_bte", "source"], "settings")).toEqual({
       source: MESSAGE_SOURCE,
       type: "state",
@@ -154,7 +154,9 @@ describe("the panel's messages — posted to the host", () => {
       dirty: true,
       unsaved: ["view_bte", "source"],
       tab: "settings",
+      asking: false,
     });
+    expect(stateMessage("", false, [], "text", true)).toMatchObject({ graph: "", asking: true });
   });
 
   it("saved: the graph and the file written", () => {

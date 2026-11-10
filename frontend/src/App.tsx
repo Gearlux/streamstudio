@@ -196,6 +196,7 @@ import {
   answered as recoveryAnswered,
   discardQuestion,
   restoredNames as restoredIn,
+  waitsForAnswer,
   type Recovery,
   type RecoveryPhase,
 } from "./recovery";
@@ -869,15 +870,18 @@ function Editor() {
     return () => window.removeEventListener("message", onMessage);
   }, [embed]);
 
-  // what the page shows and holds, posted to the host on every change — it warns before closing a panel with unsaved work
+  // what the page shows and holds, posted to the host on every change — it warns before closing a panel with unsaved work,
+  // and uncovers the panel while the recovery question waits for the person (no graph opens before it is answered)
   const unsavedKey = graphs
     .filter((entry) => entry.dirty)
     .map((entry) => entry.name)
     .join("\n");
   const shownDirty = Boolean(graph?.dirty);
+  const askingAboutKeptWork = waitsForAnswer(recoveryPhase);
   useEffect(() => {
-    postToHost(stateMessage(shownName ?? "", shownDirty, unsavedKey === "" ? [] : unsavedKey.split("\n"), tab));
-  }, [postToHost, shownName, shownDirty, unsavedKey, tab]);
+    const unsaved = unsavedKey === "" ? [] : unsavedKey.split("\n");
+    postToHost(stateMessage(shownName ?? "", shownDirty, unsaved, tab, askingAboutKeptWork));
+  }, [postToHost, shownName, shownDirty, unsavedKey, tab, askingAboutKeptWork]);
 
   // ---- document edits: the server's text history holds them ------------------------------------------------------
 

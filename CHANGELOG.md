@@ -20,6 +20,8 @@ All notable changes to this project are documented here. The format follows
   right-click menu too.
 - On a level whose wires mostly run down (after *Arrange top to bottom*), each card's input sockets sit on its top edge
   and its output sockets on its bottom edge, so a wire runs straight from one card to the card below it.
+- The page's `state` message to its host carries `asking`: true while the page asks about the last session's unsaved
+  work, when no graph opens until the person answers — a host that covers its panel while a graph loads uncovers it.
 
 ### Changed
 - A class names its parameters' picker tags in the class attribute `__streamstudio_widget_params__`

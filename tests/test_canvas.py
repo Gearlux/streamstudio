@@ -4947,6 +4947,7 @@ class TestTheHostHearsAndFollows:
             "dirty": False,
             "unsaved": [],
             "tab": "text",
+            "asking": False,
         }
 
         widget = frame.locator(f'{node_root("gain")} input[data-param="gain"]')
@@ -5005,6 +5006,39 @@ class TestTheHostHearsAndFollows:
         assert again.page.locator(".app").get_attribute("data-dirty") == "true"
         assert (hosted.folder / "pane.yaml").read_text() == HOST_PANE_TEXT
         assert again.errors == []
+
+    def test_the_host_hears_while_the_page_asks_about_kept_work_and_the_graph_once_answered(
+        self, browser: Any, hosted: Hosted, templates_dir: Path
+    ) -> None:
+        """No graph opens before the recovery question is answered, so a host covering its panel until the graph it
+        asked for shows must learn the page is ASKING — measured before: a host's "loading pane…" veil covered the
+        question for good, and the person saw nothing else."""
+        opened = open_hosted(browser, hosted, "graph=pane&embed=1")
+        wait_ready(opened.page, "pane")
+        set_widget(opened.page, node_root("gain"), "gain", "8")
+        wait_saves(opened.page, 1)
+        opened.page.close()
+        studio_of(hosted.app).stash()  # the host's stop keeps the unsaved work
+        hosted.app.extensions[EXTENSION] = Studio(host=hosted.host, templates_dir=templates_dir)  # the next start
+
+        page = browser.new_page(viewport={"width": 1400, "height": 900})
+        errors: List[str] = []
+        page.on("pageerror", lambda exc: errors.append(f"pageerror: {exc}"))
+        page.on("console", lambda msg: errors.append(f"console.error: {msg.text}") if msg.type == "error" else None)
+        page.goto(hosted.url)
+        page.wait_for_function("() => window.received.some(m => m.type === 'state' && m.asking)")
+        frame = page.frame_locator("#studio")
+        frame.locator('.app[data-recovery="asking"] [data-dialog="recovery"]').wait_for()
+        asking = page.evaluate("window.received.filter(m => m.type === 'state').pop()")
+        assert asking["asking"] is True and asking["graph"] == ""
+
+        frame.locator('[data-recovery-action="restore"]').click()
+        page.wait_for_function(
+            "() => { const s = window.received.filter(m => m.type === 'state').pop();"
+            " return s.graph === 'pane' && s.asking === false; }"
+        )
+        page.close()
+        assert errors == []
 
 
 # ------------------------------------------------------------------------------------------------

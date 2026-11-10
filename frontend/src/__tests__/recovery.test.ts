@@ -25,6 +25,7 @@ import {
   relativePath,
   savedAtLabel,
   discardQuestion,
+  waitsForAnswer,
   type RecoveredGraph,
   type Recovery,
 } from "../recovery";
@@ -171,6 +172,10 @@ describe("answered — the editor loads no graph until the question is answered"
   it("the phases, and which of them let a graph load", () => {
     expect(RECOVERY_PHASES).toEqual(["pending", "asking", "confirming", "restored", "discarded", "none"]);
     expect(RECOVERY_PHASES.filter(answered)).toEqual(["restored", "discarded", "none"]);
+  });
+
+  it("the phases in which the question waits for the person — what the page tells its host", () => {
+    expect(RECOVERY_PHASES.filter(waitsForAnswer)).toEqual(["asking", "confirming"]);
   });
 });
 

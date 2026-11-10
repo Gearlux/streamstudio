@@ -14,11 +14,13 @@
  *
  * **The panel's messages** (`?embed=1` only, `link.ts`): the page posts to `window.parent`, same origin only —
  *
- *     {source: "streamstudio", type: "state", graph, dirty, unsaved: [...], tab}   on every change of these
- *     {source: "streamstudio", type: "saved", graph, path}                         after a Save / Save As wrote it
+ *     {source: "streamstudio", type: "state", graph, dirty, unsaved: [...], tab, asking}   on every change of these
+ *     {source: "streamstudio", type: "saved", graph, path}                                 after a Save / Save As wrote it
  *
  * — so a host can warn before it closes a panel holding unsaved work, and re-run its panes the moment a graph is saved
- * — and takes these commands from it:
+ * — and takes these commands from it. `asking` is true while the page asks the person about the unsaved work of the
+ * last session (`recovery.ts`): no graph opens until it is answered, so a host covering the panel while a graph loads
+ * must uncover it then, or the question is never seen.
  *
  *     {target: "streamstudio", type: "open", graph: "view_bte", tab?: "settings", level?: "prep"}
  *     {target: "streamstudio", type: "commit"}
@@ -142,6 +144,8 @@ export interface StateMessage {
   /** Every listed graph holding unsaved changes — what closing the panel would leave unsaved. */
   unsaved: string[];
   tab: SideTab;
+  /** The page asks the person about the last session's unsaved work: no graph opens until it is answered. */
+  asking: boolean;
 }
 
 /** A Save or Save As wrote `path` (the graph's file). */
@@ -162,13 +166,14 @@ export interface CommittedMessage {
 
 export type PageMessage = StateMessage | SavedMessage | CommittedMessage;
 
-export const stateMessage = (graph: string, dirty: boolean, unsaved: string[], tab: SideTab): StateMessage => ({
+export const stateMessage = (graph: string, dirty: boolean, unsaved: string[], tab: SideTab, asking = false): StateMessage => ({
   source: MESSAGE_SOURCE,
   type: "state",
   graph,
   dirty,
   unsaved,
   tab,
+  asking,
 });
 
 export const savedMessage = (graph: string, path: string): SavedMessage => ({ source: MESSAGE_SOURCE, type: "saved", graph, path });

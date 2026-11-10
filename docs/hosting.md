@@ -191,7 +191,8 @@ listens to its own parent window only:
   // what the page posts — on every change of what it shows or holds, and after a Save wrote a file
   window.addEventListener("message", (event) => {
     if (event.origin !== location.origin || event.data?.source !== "streamstudio") return;
-    // {source: "streamstudio", type: "state", graph: "view_scan", dirty: true, unsaved: ["view_scan"], tab: "settings"}
+    // {source: "streamstudio", type: "state", graph: "view_scan", dirty: true, unsaved: ["view_scan"], tab: "settings",
+    //  asking: false}   — `asking`: the page asks about the last session's unsaved work; no graph opens until answered
     // {source: "streamstudio", type: "saved", graph: "view_scan", path: "/data/app/graphs/view_scan.yaml"}
     // {source: "streamstudio", type: "unavailable"}   — from the page served INSTEAD of the editor
     // {source: "streamstudio", type: "committed", graph: "view_scan"}   — the answer to a `commit`
@@ -211,6 +212,11 @@ listens to its own parent window only:
                                     font_family: "-apple-system, sans-serif"}, location.origin);
 </script>
 ```
+
+When the host stopped with unsaved work in the editor (`studio_of(app).stash()`), the page's next load asks the
+person whether to restore it, and opens no graph — the one the link or an `open` names included — until that is
+answered. Meanwhile every `state` says `asking: true`, so a host that covers its panel until the graph it asked for
+shows must uncover it then, or the question is never seen.
 
 A host that saves a SETTING itself does it through the editor — `studio_of(app).document(name).set_param(node, param,
 value)`, then `studio_of(app).save(name, only="settings")`, the editor staying the settings file's one writer — and
