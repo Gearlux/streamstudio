@@ -81,3 +81,9 @@ export const EditorContext = createContext<EditorApi>({
 });
 
 export const useEditor = (): EditorApi => useContext(EditorContext);
+
+/**
+ * Whether the level shown is drawn top to bottom (`layout.runsDown`): the canvas provides it, and every card then
+ * draws its inputs on its top edge and its outputs on its bottom edge instead of on its sides.
+ */
+export const DownContext = createContext(false);

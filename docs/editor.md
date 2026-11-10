@@ -131,7 +131,7 @@ YAML as the editor holds it), **settings** (a form of every node on the level th
 | **New** | Flow graph… · Pipeline… · Source graph (with its contract)… |
 | **File** | Open… `Ctrl+O` · Save `Ctrl+S` · Save As… `Ctrl+Shift+S` · Revert |
 | **Edit** | Undo `Ctrl+Z` · Redo `Ctrl+Shift+Z` (or `Ctrl+Y`) · Cut `Ctrl+X` · Copy `Ctrl+C` · Paste `Ctrl+V` · Delete `Delete`/`Backspace` · Select all `Ctrl+A` · Rename… `F2` |
-| **View** | Nodes sidebar `N` · Fit to view · Arrange · Arrange in columns · Minimap |
+| **View** | Nodes sidebar `N` · Fit to view · Arrange left to right · Arrange diagonally · Arrange top to bottom · Arrange in columns · Minimap |
 | **Graph** | Add group · Group selection `G` · Convert selection to subgraph · Insert template ▸ · Save selection as template… · Delete template ▸ · Check graph |
 | **Run** | Run `Ctrl+Enter` · Step · Rerun selected node |
 
@@ -595,7 +595,7 @@ an op into the source slot       stream.source = !class:recordstream.ops.numpy.T
 
 | on | items |
 | --- | --- |
-| empty canvas | Add Node ▸ (by kind, with a search) · Add Group · Paste · Insert template ▸ · Insert steps file… · Arrange |
+| empty canvas | Add Node ▸ (by kind, with a search) · Add Group · Paste · Insert template ▸ · Insert steps file… · Arrange left to right · Arrange diagonally · Arrange top to bottom |
 | a node | Rename… · Delete · Copy · Group · Convert to subgraph · Save as template… · Run to here — on a `Stream` also Set source… ([above](#set-source--putting-a-source-into-a-stream)), and on a subgraph node also Open · Move to its own file… |
 | a group's title bar | Rename… · Colour ▸ · Ungroup · Convert group to subgraph |
 
@@ -612,9 +612,22 @@ height plus 17 px, on the canvas's 10-px grid. 183 px is six rows under the titl
 output), or five on a subgraph card, whose bar of inner steps adds 26 px. A tall card never hides the card below it.
 
 A node the positions file does not name yet — a step added through the API — is laid out the same way, starting below the
-lowest card already placed. **View ▸ Arrange in columns** lays the whole graph out this way again; **View ▸ Arrange**
-spaces the cards by the sizes the page drew, left to right. Delete a line of the positions file to lay that node
-out again, the file to lay out everything.
+lowest card already placed. **View ▸ Arrange in columns** lays the whole graph out this way again. The other three
+arranges space the cards by the sizes the page drew, along the wires:
+
+- **Arrange left to right** — a column per step, the first on the left.
+- **Arrange diagonally** — the same columns, each one starting 20 px below the tallest card of the column before it,
+  so a chain runs from the top left to the bottom right.
+- **Arrange top to bottom** — a row per step, the first at the top.
+
+The sockets follow the drawing. When most of a level's wires run down — as *Arrange top to bottom* leaves them — every
+card on that level draws its inputs along its top edge and its outputs along its bottom edge, in the order its rows
+list them; on any other level they sit on the card's left and right. A parameter's small socket stays on its row. The
+sockets turn when a drag is let go, with an undo, and when the graph is opened again, since they are read from where
+the cards are.
+
+Each is saved like a drag and undone with `Ctrl+Z`. Delete a line of the positions file to lay that node out again,
+the file to lay out everything.
 
 ## Groups
 

@@ -60,6 +60,8 @@ describe("the menu layout", () => {
     expect(where("rename")).toBe("edit");
     expect(where("toggle-nodes")).toBe("view");
     expect(where("arrange")).toBe("view");
+    expect(where("arrange-diagonal")).toBe("view");
+    expect(where("arrange-down")).toBe("view");
     expect(where("group")).toBe("graph");
     expect(where("to-subgraph")).toBe("graph");
     expect(where("check")).toBe("graph");
@@ -85,6 +87,8 @@ describe("the menu layout", () => {
       redo: "redo",
       group: "group",
       arrange: "arrange",
+      "arrange-diagonal": "arrange-diagonal",
+      "arrange-down": "arrange-down",
       "arrange-server": "arrange-server",
     });
   });

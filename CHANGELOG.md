@@ -14,6 +14,12 @@ All notable changes to this project are documented here. The format follows
   (`style`) — two more host messages.
 - A plugin's list ends in **↻ ask again**: it asks the plugin again, so what changed while the page was open (a model
   packaged since the list was first opened) shows without reloading the page.
+- **View ▸ Arrange diagonally** and **View ▸ Arrange top to bottom** lay the graph out by the cards' sizes beside
+  **Arrange left to right** (the former *Arrange*): diagonally, each column of steps starts below the tallest card of
+  the column before, so a chain runs from the top left to the bottom right. All three are on the empty canvas's
+  right-click menu too.
+- On a level whose wires mostly run down (after *Arrange top to bottom*), each card's input sockets sit on its top edge
+  and its output sockets on its bottom edge, so a wire runs straight from one card to the card below it.
 
 ### Changed
 - A class names its parameters' picker tags in the class attribute `__streamstudio_widget_params__`

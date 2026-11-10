@@ -83,7 +83,7 @@ and the next start offers it back.
 | **New** | Flow graph… · Pipeline… · Source graph (with its contract)… — each written to disk at once |
 | **File** | Open… `Ctrl+O` · Save `Ctrl+S` · Save As… `Ctrl+Shift+S` · Revert |
 | **Edit** | Undo `Ctrl+Z` · Redo `Ctrl+Shift+Z` · Cut · Copy · Paste · Delete · Select all · Rename… `F2` |
-| **View** | Nodes sidebar `N` · Fit to view · Arrange · Arrange in columns · Minimap |
+| **View** | Nodes sidebar `N` · Fit to view · Arrange left to right · Arrange diagonally · Arrange top to bottom · Arrange in columns · Minimap |
 | **Graph** | Add group · Group selection `G` · Convert selection to subgraph · Insert template ▸ · Save selection as template… · Check graph |
 | **Run** | Run `Ctrl+Enter` · Step · Rerun selected node |
 

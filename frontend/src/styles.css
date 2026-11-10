@@ -214,6 +214,8 @@ button { font: inherit; }
 .gnode .note { padding: 3px 10px 5px; font-size: 10px; opacity: .55; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .gnode .react-flow__handle.socket { width: 10px; height: 10px; border: 1px solid #111; }
 .gnode .react-flow__handle.socket-param { width: 7px; height: 7px; opacity: .55; }
+/* a level drawn top to bottom: the input and output sockets sit on the card's edges, placed against the card */
+.gnode.down .row.in, .gnode.down .row.out { position: static; }
 
 /* wires: every edge is a wire of the document, coloured by its kind; a selected one (Delete takes it out) is bright */
 .react-flow__edge.wire .react-flow__edge-path { stroke: #9aa0b4; stroke-width: 1.6; }
