@@ -28,6 +28,7 @@ from recordstream.ops.numpy import ConnectedComponents, Scale, Threshold
 from recordstream.ops.structure import PutField, RandomNumber, RenameField
 from recordstream.processing import DatasetProcessor
 
+from streamstudio import palette as palette_module
 from streamstudio.palette import (
     NODE_KINDS,
     NodeSpec,
@@ -347,6 +348,35 @@ class TestPaletteAndLookup:
     def test_spec_for_an_importable_class_the_registry_does_not_hold(self) -> None:
         spec = spec_for(f"{Brightness.__module__}.{Brightness.__qualname__}")
         assert spec.kind == "algorithm"
+
+    def test_spec_for_describes_the_one_class_asked_for(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A first ``spec_for`` with nothing cached describes that class alone, never every registered one (a
+        host that had imported its domain waited 6-9 s for a graph's first settings form)."""
+        monkeypatch.setattr(palette_module, "_cache", None)
+        monkeypatch.setattr(palette_module, "_cache_scanned", False)
+        monkeypatch.setattr(palette_module, "_index", {})
+        described: List[str] = []
+        real_describe = palette_module.describe
+
+        def counting(target: Any, *args: Any, **kwargs: Any) -> Any:
+            described.append(f"{target.__module__}.{target.__qualname__}")
+            return real_describe(target, *args, **kwargs)
+
+        monkeypatch.setattr(palette_module, "describe", counting)
+        by_path = spec_for("recordstream.ops.numpy.Threshold")
+        assert spec_for("Threshold") is by_path
+        assert described == ["recordstream.ops.numpy.Threshold"]
+        assert palette_module._cache is None
+
+    def test_spec_for_an_unknown_name_with_nothing_cached_still_names_close_matches(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(palette_module, "_cache", None)
+        monkeypatch.setattr(palette_module, "_cache_scanned", False)
+        monkeypatch.setattr(palette_module, "_index", {})
+        with pytest.raises(KeyError) as caught:
+            spec_for("Treshold")
+        assert "Threshold" in str(caught.value)
 
 
 def test_the_full_scan_lists_every_installed_class() -> None:

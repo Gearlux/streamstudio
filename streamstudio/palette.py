@@ -769,24 +769,33 @@ def palette(refresh: bool = False, *, scan: bool = True) -> List[NodeSpec]:
 def spec_for(class_path: str) -> NodeSpec:
     """The spec of one class, by dotted path or registry key.
 
-    Reads the cached palette (building the cheap set when nothing is cached yet — it never runs the
-    entry-point scan on its own; call :func:`palette` once for that), then falls back to resolving the
-    name the way a document does (``confluid.registry.resolve_class``: a registry key, else an import),
-    so a class a test or a script defined is described even though nothing registered it.
+    Reads the specs described so far, then resolves the name the way a document does
+    (``confluid.registry.resolve_class``: a registry key, else an import) and describes THAT class alone — so a class
+    a test or a script defined is described even though nothing registered it. Only a name that resolves to nothing
+    builds the cheap palette (it never runs the entry-point scan on its own; call :func:`palette` once for that), to
+    look it up there and to name the close matches. Describing every registered class to answer for one cost a
+    graph's first settings form 6-9 s in a host that had imported its domain (measured 2026-11-10: thousands of
+    classes; 0.65 s for 141).
 
     Raises:
         KeyError: The name resolves to nothing; the message names the close matches the palette holds.
     """
-    if _cache is None:
-        palette(scan=False)
     known = _index.get(class_path)
     if known is not None:
         return known
-    target = resolve_class(class_path)
+    try:
+        target = resolve_class(class_path)
+    except Exception:  # broad on purpose: a malformed or ambiguous name is looked up in the palette below
+        target = None
     if target is not None:
         spec = describe(target)
         _remember(spec)
         return spec
+    if _cache is None:
+        palette(scan=False)
+        known = _index.get(class_path)
+        if known is not None:
+            return known
     close = difflib.get_close_matches(class_path, list(_index), n=5, cutoff=0.6)
     hint = f"did you mean {', '.join(close)}?" if close else "call palette() to scan the installed entry points"
     raise KeyError(f"no node class {class_path!r} in the palette of {len(_cache or [])} classes; {hint}")
