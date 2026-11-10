@@ -62,9 +62,11 @@ def shop(monkeypatch: pytest.MonkeyPatch) -> Dict[str, lookups.LookupFn]:
     table: Dict[str, lookups.LookupFn] = {"SHOP_DATASET": _datasets, "SHOP_VERSION": _versions}
     monkeypatch.setattr(lookups, "_FOUND", table)
     # the palette is described once per process — a test that built it earlier described these classes without the
-    # table above, so it is built again here (and again after, from the real table)
+    # table above, so it is built again here (and again after, from the real table); `spec_for` reads the classes it
+    # described one by one from `_index`, so that goes too
     monkeypatch.setattr(palette, "_cache", None)
     monkeypatch.setattr(palette, "_cache_scanned", False)
+    monkeypatch.setattr(palette, "_index", {})
     return table
 
 

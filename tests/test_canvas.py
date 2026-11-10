@@ -853,6 +853,7 @@ class TestAPluginsListIsAskedAgainOnTheWord:
         monkeypatch.setattr(lookups, "_FOUND", {"CANVAS_MODELS": list_models})
         monkeypatch.setattr(palette, "_cache", None)
         monkeypatch.setattr(palette, "_cache_scanned", False)
+        monkeypatch.setattr(palette, "_index", {})  # the classes `spec_for` described one by one
         (graph_dir / "listed.yaml").write_text(f"source:\n  _target_: {MOD}.ListedSource\n")
         opened = open_graph("listed")
         page = opened.page
