@@ -1470,6 +1470,34 @@ def overlap(a: Dict[str, float], b: Dict[str, float]) -> bool:
     )
 
 
+#: Resolves once the viewport's transform has not changed for 5 frames in a row. An arrange — and its undo — ends in a
+#: fit ANIMATED over 200 ms, and boxes read one call at a time while it runs are read at different zooms (measured
+#: 2026-11-10 on a loaded machine: a socket at 1.15 of its card's width, a column's centres 12-122 px apart).
+VIEW_STILL = """() => new Promise((done) => {
+  const read = () => document.querySelector('.react-flow__viewport').style.transform;
+  let last = read(), still = 0;
+  const tick = () => {
+    const now = read();
+    still = now === last ? still + 1 : 0;
+    last = now;
+    if (still >= 5) done(true); else requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+})"""
+
+
+def wait_view_still(page: Any) -> None:
+    page.wait_for_function(VIEW_STILL)
+
+
+#: True once gain's record input socket is within 8 px of its card's ``top`` or ``left`` edge (the argument).
+GAINS_INPUT_NEAR = """(edge) => {
+  const h = document.querySelector('.react-flow__handle[data-node="gain"][data-socket="record"][data-kind="in"]');
+  const c = h && h.closest('.react-flow__node');
+  return !!c && Math.abs(h.getBoundingClientRect()[edge] - c.getBoundingClientRect()[edge]) < 8;
+}"""
+
+
 class TestArrange:
     def test_arrange_lays_the_chain_out_left_to_right_and_saves_it_and_ctrl_z_puts_it_back(
         self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path
@@ -1479,6 +1507,7 @@ class TestArrange:
         before = api_get(server, "api/graphs/wires")["positions"]
         menu_command(page, "view", "arrange")
         wait_saves(page, 1)
+        wait_view_still(page)
         placed = api_get(server, "api/graphs/wires")["positions"]
         xs = [placed[name][0] for name in ("decode", "gain", "boost", "count")]
         assert xs == sorted(xs) and len(set(xs)) == 4, placed
@@ -1503,6 +1532,7 @@ class TestArrange:
         page = opened.page
         menu_command(page, "view", command)
         wait_saves(page, 1)
+        wait_view_still(page)
         placed = api_get(server, "api/graphs/wires")["positions"]
         chain = [placed[name] for name in ("decode", "gain", "boost", "count")]
         ys = [y for _x, y in chain]
@@ -1541,20 +1571,16 @@ class TestArrange:
         menu_command(page, "view", "arrange-down")
         wait_saves(page, 1)
         page.wait_for_selector('.canvas[data-direction="down"]')
-        page.wait_for_function(
-            "() => { const h = document.querySelector('.react-flow__handle[data-node=\"gain\"][data-socket=\"record\"][data-kind=\"in\"]');"
-            " const c = h && h.closest('.react-flow__node'); return !!c && Math.abs(h.getBoundingClientRect().top - c.getBoundingClientRect().top) < 8; }"
-        )
+        page.wait_for_function(GAINS_INPUT_NEAR, arg="top")
+        wait_view_still(page)
         edges = sockets()
         assert edges["in"][1] < 0.05 and edges["out"][1] > 0.95, edges  # on the top and bottom edges
         assert 0.05 < edges["in"][0] < 0.95 and 0.05 < edges["out"][0] < 0.95, edges
         page.keyboard.press("Control+z")  # the places go back, and the sockets with them
         wait_saves(page, 2)
         page.wait_for_selector('.canvas[data-direction="across"]')
-        page.wait_for_function(
-            "() => { const h = document.querySelector('.react-flow__handle[data-node=\"gain\"][data-socket=\"record\"][data-kind=\"in\"]');"
-            " const c = h && h.closest('.react-flow__node'); return !!c && Math.abs(h.getBoundingClientRect().left - c.getBoundingClientRect().left) < 8; }"
-        )
+        page.wait_for_function(GAINS_INPUT_NEAR, arg="left")
+        wait_view_still(page)
         back = sockets()
         assert back["in"][0] < 0.05 and back["out"][0] > 0.95, back
         assert opened.errors == []
@@ -3157,7 +3183,8 @@ class TestFileDialogPlacesAndNewFolder:
     def test_a_long_folder_in_a_short_window_scrolls_the_list_alone(
         self, open_graph: Callable[[str], Opened], graph_dir: Path, mode: str
     ) -> None:
-        """The list gives up height when the window is short; the box around it never scrolls beside it (two scrollbars)."""
+        """The list gives up height when the window is short; the box around it never scrolls beside it (two
+        scrollbars)."""
         for index in range(80):
             (graph_dir / f"folder_{index:03d}").mkdir()
         opened = open_graph("pets")
@@ -5468,9 +5495,9 @@ class TestTheSettingsOnlyPage:
         assert opened.errors == []
 
     def test_a_number_written_with_its_unit_is_typed_and_saved_as_written(self, browser: Any, hosted: Hosted) -> None:
-        """A setting that takes a number OR text (``Union[float, str]``: recordstream's ``Quantity.value``) is a text box:
-        ``2.5 MSa/s`` is saved as typed, unit and all (a number box saved ``200 kSa/s`` as ``200``), and a plain number
-        as a number."""
+        """A setting that takes a number OR text (``Union[float, str]``: recordstream's ``Quantity.value``) is a text
+        box: ``2.5 MSa/s`` is saved as typed, unit and all (a number box saved ``200 kSa/s`` as ``200``), and a plain
+        number as a number."""
         (hosted.folder / "rate.yaml").write_text(
             f"rate_value: !class:recordstream.quantity.Quantity\n  value: '0'\n  kind: rate\n"
             f"flow:\n  gain:\n    op: !class:{MOD}.TinyGain {{gain: 2.0}}\noutputs: gain\n"
