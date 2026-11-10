@@ -1137,6 +1137,24 @@ asks for the catalogue at most once while an answer is on its way or has arrived
 `tests/test_short_name_lookup.py`, `tests/test_canvas.py::TestTheCatalogueIsAskedForOnFirstNeed`,
 `frontend/src/__tests__/catalogue.test.ts`.
 
+### Amended 2026-11-10: within each tier, a module named with the name's words goes first (`_shared_words`)
+
+**Context.** User report from a host: opening one graph's settings panel took long. The host's workspace type ships 48
+graphs, and the first `GET api/graphs` derives them all. Three keys (`ExportMask`, `MeasureRecordLevels`,
+`GeneratedSignals`) live in one sub-package of a top-level package the host had imported, and that package lists
+eight other heavy packages' entry points before them: in listed order deriving the 48 graphs took 15.2 s and imported
+8 600 modules.
+
+**Decision.** The two tiers stay (an imported package's entry points, then the rest); within each, the entry points
+whose module's own name shares the most words with the key go first — the key split at its capitals, the module's last
+component at `_`, each word compared by its stem (`generated` and `generate`, `levels` and `level`) — then the listed
+order. A hint only: a module named otherwise is still reached in its turn, and nothing is imported that the listed
+order would not reach.
+
+**Consequences.** The 48 graphs derive in 1.5 s, importing 140 modules, to the same nodes and problems as before (every
+graph compared). A key two entry points define still resolves to the first the walk imports, which may now be the one
+whose module carries the key's words. Pin: `tests/test_short_name_lookup.py::test_a_module_named_with_the_names_words_is_tried_first_within_its_tier`.
+
 ## The canvas page builds itself at a server's start when its source changed (`streamstudio.page.ensure_page_built`, 2026-10-02)
 
 **Context.** The page is TypeScript/React in `frontend/` (committed), built by `npm run build` into `frontend/dist`

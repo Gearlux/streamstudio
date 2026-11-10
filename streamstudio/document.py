@@ -671,7 +671,13 @@ def _import_until(name: str) -> Any:
     them. This walk finds it after 15 of the 127 and the list takes 1.1 s. So:
 
     * the entry points of a package that is imported already go first (its dependencies are loaded,
-      so they are cheap — and the key usually lives there), then the rest in their listed order;
+      so they are cheap — and the key usually lives there), then the rest; within each, the entry points whose
+      module's own name shares a word with the name go first, the most words first (``ExportMask`` →
+      ``….export_mask``, words compared by their stem), then the listed order (:func:`_shared_words`).
+      Measured 2026-11-10: the 48 graphs of a host's workspace type named ``ExportMask``,
+      ``MeasureRecordLevels`` and ``GeneratedSignals``, and in listed order the walk imported eight other
+      packages of the same imported top-level package first — 15.2 s and 8 600 modules to derive them all,
+      1.5 s and 140 modules with the ranking;
     * each is loaded with ``EntryPoint.load()``, also when its module is in ``sys.modules`` already:
       that costs nothing for a module that is imported, and it WAITS for one another thread is still
       importing — Python lists a module in ``sys.modules`` before its body runs, and the catalogue
@@ -705,7 +711,8 @@ def _import_until(name: str) -> Any:
             _pending_entry_points = list(importlib.metadata.entry_points(group=_CONFIGURABLES))
         pending = _pending_entry_points
         imported = [ep for ep in pending if ep.module.split(".")[0] in sys.modules]
-        order = imported + [ep for ep in pending if ep.module.split(".")[0] not in sys.modules]
+        others = [ep for ep in pending if ep.module.split(".")[0] not in sys.modules]
+        order = [ep for tier in (imported, others) for ep in sorted(tier, key=lambda ep: -_shared_words(name, ep))]
         for ep in order:
             pending.remove(ep)
             try:
@@ -717,6 +724,24 @@ def _import_until(name: str) -> Any:
             if found is not None:
                 return found
     return None
+
+
+def _shared_words(name: str, entry_point: importlib.metadata.EntryPoint) -> int:
+    """How many words of the class name ``name`` (``MeasureRecordLevels`` → measure, record, levels) the entry point's
+    module's own name holds (``package.record_levels`` → record, levels: 2), each compared by its stem
+    (``GeneratedSignals`` shares ``generat`` with ``package.generate``) — the walk's hint where a name lives, never a
+    rule: a module named otherwise is still reached in its turn."""
+    words = {_stem(word) for word in re.findall(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|[0-9]+", name)}
+    return len(words & {_stem(word) for word in entry_point.module.rpartition(".")[2].split("_")})
+
+
+def _stem(word: str) -> str:
+    """``word`` in lower case without one ending ``-ing``, ``-ed``, ``-es``, ``-s`` or ``-e`` (files, file → fil)."""
+    word = word.lower()
+    for ending in ("ing", "ed", "es", "s", "e"):
+        if word.endswith(ending) and len(word) > len(ending) + 2:
+            return word[: -len(ending)]
+    return word
 
 
 def _registered(name: str) -> Any:
