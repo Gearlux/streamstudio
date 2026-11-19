@@ -183,6 +183,11 @@ arch: "A graph's settings live in a file of their own"; pins `tests/test_graph_s
 - **`app: {graph: settings-only}`** refuses every change but a setting: `@_structural` on each structural `Document`
   method refuses FIRST (before its own checks); `_commit` / `replace_text` refuse any other change of the graph
   (`_refuse_locked`). A new structural method gets `@_structural`. `GET …/app` answers `graph`.
+- **`Document.reset_settings()`** (2026-11-19) empties the settings file as ONE edit (undone like any) and answers
+  whether it held anything; a Save of a settings text holding nothing REMOVES the file (`Document._write`) — no file
+  is "no setting changed" on disk, for a host reading the folder too. The page offers no button of its own yet; a host
+  calls it under `Studio.lock`. (`tests/test_graph_settings.py::TestResettingTheSettings`,
+  `::TestAShippedGraph::test_a_reset_removes_the_folders_settings_file_and_tells_the_host`)
 - **Save As takes the held settings along** (`<new>.settings.yaml`, refused when one is there unasked); the old
   settings file stays. Removing or renaming a node a setting names is refused while the setting is there.
 

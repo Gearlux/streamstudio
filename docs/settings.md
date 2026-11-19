@@ -104,6 +104,9 @@ alone after a setting, the graph after a change to the graph. Save As takes the 
 (`<new>.settings.yaml`, refused like the graph when a file is already there) and leaves the old settings file as it
 was. A field the `app:` block does NOT name (ticked in with *all parameters*) is a change to the graph itself.
 
+A host can put every setting back to the graph's own value at once with `Document.reset_settings()`: the settings
+file is emptied as one edit (Undo brings the values back), and the Save that follows removes the file.
+
 **Loading them together.** The two are ONE confluid document by confluid's own `include:` rule: the graph first, the
 settings below it, so a setting wins over what the graph spells. A host runs it with `load_graph` — the settings file
 may sit anywhere (a host keeps a shipped graph's in its own folder); nothing is written:

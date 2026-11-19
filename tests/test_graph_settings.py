@@ -32,7 +32,7 @@ from confluid import configurable
 from flask import Flask
 from recordstream import Image, Record
 
-from streamstudio.app import EditorHost, HostRecord, create_app, editor_blueprint
+from streamstudio.app import EditorHost, HostRecord, create_app, editor_blueprint, studio_of
 from streamstudio.settings import SETTINGS_SUFFIX, SettingField, SettingsError, load_graph, set_setting, settings_path
 
 MOD = __name__
@@ -630,6 +630,65 @@ class TestAShippedGraph:
         _ok(hosted.post(f"{PREFIX}/api/graphs/view_pane/steps", json=added))
         reverted = _ok(hosted.post(f"{PREFIX}/api/graphs/view_pane/revert"))
         assert reverted["text"] == PANE_TEXT and reverted["dirty"] is False
+
+    def test_a_reset_removes_the_folders_settings_file_and_tells_the_host(
+        self, hosted: Any, shipping: ShippingHost, empty: Path, package: Path
+    ) -> None:
+        settings = _write(empty, "view_pane.settings.yaml", "flow.first.op.level: 0.9\n")
+        studio = studio_of(hosted.application)
+        with studio.lock:
+            assert studio.document("view_pane").reset_settings() is True
+            studio.save("view_pane", only="settings")
+        assert not settings.exists() and _yaml_files(empty) == []
+        assert shipping.saves == [[settings.resolve()]], "the host hears the settings file changed"
+        graph = _ok(hosted.get(f"{PREFIX}/api/graphs/view_pane"))
+        assert _value(graph, "first", "level") == 0.25 and graph["shipped"] is True
+        assert (package / "pane_view.yaml").read_text() == PANE_TEXT
+
+
+class TestResettingTheSettings:
+    """Every setting back to the graph's own value: the settings file emptied as ONE edit, its Save removing the file
+    (no file is what "no setting changed" is on disk)."""
+
+    def test_a_reset_gives_every_node_the_graphs_value_and_its_save_removes_the_file(
+        self, client: Any, folder: Path
+    ) -> None:
+        settings = _write(folder, "pane.settings.yaml", "# mine\nflow.first.op.level: 0.9\nflow.third.op.level: 0.7\n")
+        document = studio_of(client.application).document("pane")
+        assert document.reset_settings() is True
+        graph = _ok(client.get("/api/graphs/pane"))
+        assert (_value(graph, "first", "level"), _value(graph, "third", "level")) == (0.25, 0.5)
+        assert graph["dirty"] is True and settings.exists(), "held until Save, like any edit"
+        _ok(client.post("/api/graphs/pane/save", json={"only": "settings"}))
+        assert not settings.exists()
+        assert (folder / "pane.yaml").read_text() == PANE_TEXT, "the graph itself is never touched"
+
+    def test_undo_brings_the_settings_back(self, client: Any, folder: Path) -> None:
+        _write(folder, "pane.settings.yaml", "flow.first.op.level: 0.9\n")
+        assert studio_of(client.application).document("pane").reset_settings() is True
+        body = _ok(client.post("/api/graphs/pane/undo"))
+        assert _value(body, "first", "level") == 0.9 and body["dirty"] is False
+
+    def test_a_setting_set_after_a_reset_writes_the_file_again(self, client: Any, folder: Path) -> None:
+        settings = _write(folder, "pane.settings.yaml", "flow.first.op.level: 0.9\n")
+        assert studio_of(client.application).document("pane").reset_settings() is True
+        _ok(client.post("/api/graphs/pane/save", json={"only": "settings"}))
+        _ok(client.post("/api/graphs/pane/param", json={"node": "third", "param": "level", "value": 0.6}))
+        _ok(client.post("/api/graphs/pane/save", json={"only": "settings"}))
+        assert settings.read_text() == "flow.third.op.level: 0.6\n"
+
+    def test_nothing_to_reset_changes_nothing(self, client: Any, folder: Path) -> None:
+        document = studio_of(client.application).document("pane")
+        assert document.reset_settings() is False
+        assert document.dirty is False and not (folder / "pane.settings.yaml").exists()
+        _write(folder, "chain.settings.yaml", "\n")
+        assert studio_of(client.application).document("chain").reset_settings() is False
+
+    def test_a_settings_only_graph_is_reset_too(self, client: Any, folder: Path) -> None:
+        settings = _write(folder, "locked.settings.yaml", "flow.first.op.level: 0.9\n")
+        assert studio_of(client.application).document("locked").reset_settings() is True
+        _ok(client.post("/api/graphs/locked/save", json={"only": "settings"}))
+        assert not settings.exists()
 
 
 def _ok_list(response: Any) -> List[Dict[str, Any]]:

@@ -126,6 +126,7 @@ from streamstudio.settings import (
     declared_settings,
     graph_mode,
     graph_name,
+    is_settings_file,
     read_settings,
     set_setting,
 )
@@ -2879,6 +2880,19 @@ class Document:
         patched = YamlText(self._text_of(key)).set_kwarg(line, col, param, value)
         self._commit({key: patched}, f"{node}.{param} = {value!r}", found.loc)
 
+    def reset_settings(self) -> bool:
+        """Every setting back to the value the graph itself gives its node: the settings file emptied as ONE edit,
+        held until Save — which then REMOVES the file (a settings file holding nothing is no file, :meth:`_write`) —
+        and undone like any other edit. Answers whether the settings held anything to reset (``False`` changes
+        nothing). Refused, changing nothing, when the graph without its settings gains a problem (the edit's own
+        check)."""
+        key = self.settings_path.resolve()
+        current = self._text_of(key) if key in self._texts or key.is_file() else ""
+        if not current.strip():
+            return False
+        self._commit({key: ""}, "every setting back to the graph's own value", "")
+        return True
+
     @_structural
     def set_slot(self, node: str, slot: str, class_path: str, params: Dict[str, Any]) -> str:
         """Put a new object into the single slot ``slot`` of ``node`` — ``slot: !class:<class_path> {<params>}`` —
@@ -4068,8 +4082,15 @@ class Document:
     def _write(key: Path, text: str) -> None:
         """Write one file, refused in words naming it when the disk says no (``<path> cannot be written: No such file
         or directory``) — never a bare ``OSError`` (measured before: a Save into a folder moved away was an HTML 500).
+
+        A graph's SETTINGS file whose text holds nothing (every setting reset, :meth:`Document.reset_settings`) is
+        REMOVED instead: no file is what "no setting changed" is on disk, for the editor and for a host reading the
+        folder alike.
         """
         try:
+            if not text.strip() and is_settings_file(key):
+                key.unlink(missing_ok=True)
+                return
             key.write_text(text)
         except OSError as exc:
             raise ValueError(f"{key} cannot be written: {exc.strerror or exc}") from None
