@@ -127,9 +127,12 @@ class TestKindsAndSockets:
         assert spec.consumes_types == ["NDArrayItem"] and spec.produces_types == []
         assert set(spec.params_schema) == {"source_min", "source_max", "target_min", "target_max", "field"}
 
-    def test_connected_components_consumes_a_mask_and_produces_boxes(self) -> None:
+    def test_connected_components_has_the_sockets_its_class_declares(self) -> None:
+        """The sockets are recordstream's declaration, whatever it names — the op's own, never a copy kept here."""
         spec = describe(ConnectedComponents)
-        assert spec.consumes_types == ["Mask"] and spec.produces_types == ["Boxes"]
+        assert spec.consumes_types == [kind.__name__ for kind in ConnectedComponents.consumes] == ["Mask"]
+        assert spec.produces_types == [kind.__name__ for kind in ConnectedComponents.produces]
+        assert "Boxes" in spec.produces_types
         assert spec.params_schema["min_area_bins"]["type"] == "integer"
 
     def test_a_plain_op_has_the_record_sockets_and_nothing_else(self) -> None:
