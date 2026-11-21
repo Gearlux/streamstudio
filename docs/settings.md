@@ -107,6 +107,11 @@ was. A field the `app:` block does NOT name (ticked in with *all parameters*) is
 A host can put every setting back to the graph's own value at once with `Document.reset_settings()`: the settings
 file is emptied as one edit (Undo brings the values back), and the Save that follows removes the file.
 
+**Written by someone else.** While the editor holds nothing unsaved of a settings file, it reads the file again
+whenever another program wrote it — even when the graph itself holds unsaved work, a moved node say — so the form,
+a setting set and a reset all start from what the file holds. An unsaved change of the settings is never replaced:
+its Save is refused instead, like any file changed on disk.
+
 **Loading them together.** The two are ONE confluid document by confluid's own `include:` rule: the graph first, the
 settings below it, so a setting wins over what the graph spells. A host runs it with `load_graph` — the settings file
 may sit anywhere (a host keeps a shipped graph's in its own folder); nothing is written:

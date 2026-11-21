@@ -23,6 +23,7 @@ settings-only`` takes its settings and nothing else.
 Every test runs in-process over temporary folders.
 """
 
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -831,3 +832,117 @@ def test_a_host_without_shipped_is_not_a_host(empty: Path) -> None:
             pass
 
     assert not isinstance(Old(), EditorHost)
+
+
+class TestTheSettingsFollowTheDisk:
+    """A settings text the editor holds nothing unsaved of is the FILE's, whatever else the document holds unsaved
+    (``Document.follow_settings``). Measured before 2026-11-19 (an annotaide workspace's detect pane): a node moved on
+    the canvas made the document dirty, a dirty document was never read again, and so its settings stayed hours old
+    while another program wrote the file — the settings sheet's change started from the old text, its save was refused
+    as changed on disk, a reset refused the same way held an EMPTY text, and the next change wrote one line over it."""
+
+    def _moved(self, client: Any) -> None:
+        _ok(client.put("/api/graphs/pane/positions", json={"first": [40.0, 300.0]}))
+        assert _ok(client.get("/api/graphs/pane"))["dirty"] is True, "unsaved layout: the document is dirty"
+
+    def test_a_moved_node_never_keeps_a_settings_text_the_file_has_left(self, client: Any, folder: Path) -> None:
+        settings = _write(folder, "pane.settings.yaml", "flow.first.op.level: 0.9\nflow.second.op.floor_db: -60.0\n")
+        assert _value(_ok(client.get("/api/graphs/pane")), "second", "floor_db") == -60.0
+        self._moved(client)
+        settings.write_text("flow.first.op.level: 0.9\nflow.second.op.floor_db: -40.0\n")  # another program
+        assert _value(_ok(client.get("/api/graphs/pane")), "second", "floor_db") == -40.0, "the file's value"
+        _ok(client.post("/api/graphs/pane/param", json={"node": "third", "param": "level", "value": 0.6}))
+        _ok(client.post("/api/graphs/pane/save", json={"only": "settings"}))
+        assert settings.read_text() == (
+            "flow.first.op.level: 0.9\nflow.second.op.floor_db: -40.0\nflow.third.op.level: 0.6\n"
+        ), "the change starts from what the file holds — none of its settings lost"
+        assert _ok(client.get("/api/graphs/pane"))["dirty"] is True, "the moved node is still unsaved"
+
+    def test_a_reset_after_another_program_wrote_the_file_is_saved(self, client: Any, folder: Path) -> None:
+        settings = _write(folder, "pane.settings.yaml", "flow.first.op.level: 0.9\n")
+        _ok(client.get("/api/graphs/pane"))
+        self._moved(client)
+        settings.write_text("flow.first.op.level: 0.8\nflow.second.op.floor_db: -40.0\n")
+        document = studio_of(client.application).document("pane")
+        assert document.reset_settings() is True
+        _ok(client.post("/api/graphs/pane/save", json={"only": "settings"}))
+        assert not settings.exists(), "the reset removed the file, never refused as changed on disk"
+
+    def test_a_change_set_straight_on_the_document_follows_the_file_too(self, client: Any, folder: Path) -> None:
+        """A host holding the document (``Studio.document`` once) and setting through it later: ``set_param`` itself
+        follows the file."""
+        settings = _write(folder, "pane.settings.yaml", "flow.first.op.level: 0.9\n")
+        document = studio_of(client.application).document("pane")
+        self._moved(client)
+        settings.write_text("flow.first.op.level: 0.9\nflow.second.op.floor_db: -40.0\n")
+        document.set_param("third", "level", 0.6)
+        assert document.save_settings() == [settings.resolve()]
+        assert settings.read_text().splitlines() == [
+            "flow.first.op.level: 0.9",
+            "flow.second.op.floor_db: -40.0",
+            "flow.third.op.level: 0.6",
+        ]
+
+    def test_an_unsaved_settings_edit_is_never_replaced_and_its_save_is_refused(
+        self, client: Any, folder: Path
+    ) -> None:
+        settings = _write(folder, "pane.settings.yaml", "flow.first.op.level: 0.9\n")
+        _ok(client.post("/api/graphs/pane/param", json={"node": "third", "param": "level", "value": 0.6}))
+        settings.write_text("flow.second.op.floor_db: -40.0\n")
+        document = studio_of(client.application).document("pane")
+        assert document.follow_settings() is False
+        assert _value(_ok(client.get("/api/graphs/pane")), "third", "level") == 0.6, "the unsaved edit stays"
+        assert "changed on disk" in _error(client.post("/api/graphs/pane/save", json={"only": "settings"}))
+        assert settings.read_text() == "flow.second.op.floor_db: -40.0\n", "the other program's file is untouched"
+
+    def test_a_settings_file_removed_from_disk_is_held_no_more(self, client: Any, folder: Path) -> None:
+        settings = _write(folder, "pane.settings.yaml", "flow.first.op.level: 0.9\n")
+        _ok(client.get("/api/graphs/pane"))
+        self._moved(client)
+        settings.unlink()
+        graph = _ok(client.get("/api/graphs/pane"))
+        assert _value(graph, "first", "level") == 0.25, "the graph's own value"
+        _ok(client.post("/api/graphs/pane/param", json={"node": "third", "param": "level", "value": 0.6}))
+        _ok(client.post("/api/graphs/pane/save", json={"only": "settings"}))
+        assert settings.read_text() == "flow.third.op.level: 0.6\n"
+
+    def test_a_settings_file_written_after_the_graph_was_read_is_taken(self, client: Any, folder: Path) -> None:
+        _ok(client.get("/api/graphs/pane"))
+        self._moved(client)
+        _write(folder, "pane.settings.yaml", "flow.first.op.level: 0.9\n")
+        assert _value(_ok(client.get("/api/graphs/pane")), "first", "level") == 0.9
+
+    def test_an_undo_past_the_followed_file_never_brings_the_old_settings_back(self, client: Any, folder: Path) -> None:
+        settings = _write(folder, "pane.settings.yaml", "flow.first.op.level: 0.9\n")
+        _ok(client.post("/api/graphs/pane/param", json={"node": "first", "param": "other", "value": 3}))  # the graph
+        settings.write_text("flow.first.op.level: 0.7\n")
+        assert _value(_ok(client.get("/api/graphs/pane")), "first", "level") == 0.7
+        body = _ok(client.post("/api/graphs/pane/undo"))
+        assert _value(body, "first", "other") == 1 and _value(body, "first", "level") == 0.7
+        assert body["dirty"] is False, "back to what both files hold"
+
+    def test_an_unreadable_settings_file_is_left_as_held(self, client: Any, folder: Path) -> None:
+        settings = _write(folder, "pane.settings.yaml", "flow.first.op.level: 0.9\n")
+        document = studio_of(client.application).document("pane")
+        settings.write_text("flow.first.op.level: 0.7\n")
+        settings.chmod(0)
+        try:
+            if os.access(settings, os.R_OK):  # pragma: no cover - a user who reads anything (root)
+                pytest.skip("this user reads a file of mode 000")
+            assert document.follow_settings() is False
+        finally:
+            settings.chmod(0o644)
+
+    def test_a_restored_document_follows_the_file_written_while_it_was_kept(self, folder: Path) -> None:
+        settings = _write(folder, "pane.settings.yaml", "flow.first.op.level: 0.9\n")
+        before = create_app(folder).test_client()
+        _ok(before.get("/api/graphs/pane"))
+        self._moved(before)
+        assert studio_of(before.application).stash() == [str(folder / "pane.yaml")]
+        settings.write_text("flow.first.op.level: 0.7\n")  # while nothing ran
+        after = create_app(folder).test_client()
+        assert after.post("/api/workspace/recovery/restore").status_code == 200
+        graph = _ok(after.get("/api/graphs/pane"))
+        assert (
+            _value(graph, "first", "level") == 0.7 and graph["dirty"] is True
+        ), "the file's value, the moved node kept"

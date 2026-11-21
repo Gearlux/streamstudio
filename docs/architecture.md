@@ -2011,3 +2011,30 @@ than a column's gap (dagre's `ranksep`, 80 px) — keep it smaller, or diagonal 
 **What you may change.** The rule's threshold, the spread of the sockets on an edge. What must hold: no layout state
 outside the positions and groups; *Arrange top to bottom* yields a down level and the other two arranges an across one
 (`frontend/src/__tests__/layout.test.ts`, `runsDown`). Pins: `tests/test_canvas.py::TestArrange::test_top_to_bottom_moves_the_sockets_to_the_top_and_bottom_edges_and_undo_moves_them_back`.
+
+## A settings file the editor holds nothing unsaved of follows the disk (`Document.follow_settings`, 2026-11-19)
+
+**Context.** An annotaide workspace's detect pane showed `seed_margin_db` 0 dB in its settings panel while the
+settings file said 16 dB. The editor held the pane's graph with a node moved on its canvas: unsaved LAYOUT, so the
+document was dirty, and `Studio.document` re-reads only a document holding nothing unsaved. Its settings text and the
+baseline Save compares to stayed at what the file said hours earlier, while other programs wrote the file. The
+settings sheet's change — saved "at once" — then started from the old text and its save was refused as changed on
+disk; a reset refused the same way held an EMPTY settings text, the next change wrote one line over it
+(`ThresholdOverNoise.seed_margin_db: 10`), and the stop kept it as unsaved work. Its restore showed every other setting
+at the graph's default. Reproduced on a copy: a moved node, another program's write, a reset, one change → the held
+text one line, the baseline the old file, the disk untouched — the recovery file's exact shape.
+
+**Decision.** The settings file is the one text of a document that follows the disk on its own: whenever the editor
+holds nothing unsaved of it (not held, or held as its baseline) and the disk says otherwise, `follow_settings` takes
+the disk's text as both the held text and the baseline (a file gone is held no more), and every undo/redo entry that
+held the old text holds the new one — what the file said before those edits is what it says now, so an undo never
+brings old settings back. It runs at every `Studio.document` (each request, a restored document included) and at the
+start of `set_param` of a setting and of `reset_settings`, for a host holding the document between requests. An
+unsaved settings edit is never replaced: Save's changed-on-disk refusal stays the answer to two writers.
+
+**Rejected.** Re-reading the whole dirty document: it would drop the moved node and the history. A per-line three-way
+merge of the settings at Save: right in most cases, but it decides a conflict for the person; the refusal remains for
+the case where the editor holds an unsaved settings edit.
+
+**Pins.** `tests/test_graph_settings.py::TestTheSettingsFollowTheDisk`; annotaide's
+`tests/test_settings_survive_restart.py` drives it through a mounted editor.

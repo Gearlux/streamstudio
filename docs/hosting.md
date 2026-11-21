@@ -153,7 +153,9 @@ The Run asked the host for its record and set its fill on `mask` (`Threshold` ha
   time the editor is asked for it — when the editor holds NOTHING unsaved of it: the list, the panel and Run then
   show what the file says. A graph holding unsaved edits keeps them, and its Save refuses ("changed on disk since
   the editor read it — Revert to load it, or Save As to keep both"). Post `open` for the graph shown (below) to make
-  the panel show the new text at once.
+  the panel show the new text at once. A graph's SETTINGS file is read again whenever the editor holds nothing
+  unsaved of that file — even while the graph holds other unsaved work (a moved node) — so a setting set through the
+  editor always starts from what the file holds.
 - **Relative `include:` entries follow a moved folder**: when `folder()` names another folder, a graph the editor holds
   that includes a file OUT of the old folder (`../../home/gert/steps/prep.steps.yaml`, as Insert steps file… writes
   it) is rewritten to name the same file from the new place (`../../steps/prep.steps.yaml`), in its undo history

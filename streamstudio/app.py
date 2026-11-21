@@ -795,10 +795,15 @@ class Studio:
         writes graph files itself (a conversion, an edit of its own source graph), and someone may edit one in another
         editor. Measured before 2026-10-01: the first text read was kept for the life of the process, so the panel, a
         reload and Run showed ``label: one`` after the file said ``label: two`` — and only an edit's Save found out,
-        refused as changed on disk. A document holding unsaved work is never re-read: its Save is what refuses."""
+        refused as changed on disk. A document holding unsaved work is never re-read: its Save is what refuses — but its
+        SETTINGS file is, while the editor holds nothing unsaved of THAT file (:meth:`Document.follow_settings`): a
+        moved node kept the settings hours old, and the settings sheet's change was then refused and kept (2026-11-19).
+        """
         self.follow()
         held = self._documents.get(name)
         readable = held is not None and (held.path.is_file() or held.is_shipped)
+        if held is not None and readable:
+            held.follow_settings()  # its settings file, even while something else is unsaved (a moved node)
         if held is not None and not held.dirty and readable and held.changed_on_disk():
             logger.debug(f"{held.path} changed on disk and the editor held nothing unsaved of it — read again")
             del self._documents[name]

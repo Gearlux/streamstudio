@@ -28,6 +28,10 @@ All notable changes to this project are documented here. The format follows
   (`{"dataset": "SHOP_DATASET"}`): the pickers and a plugin's lists read it.
 
 ### Fixed
+- A graph's settings file another program wrote is read again even while the graph holds other unsaved work (a
+  moved node): a setting changed in the settings sheet, or a reset, no longer starts from the old text, is no
+  longer refused as changed on disk, and is no longer kept as unsaved work that a restore shows with the other
+  settings at their defaults.
 - A setting that takes a number or text (a number written with its unit, `2.5 MSa/s`) is a text box: a number box
   dropped the unit, so `200 kSa/s` was saved as `200`. A plain number typed there is still saved as a number.
 - A graph a host ships that `include:`s a file shipped beside it opens with that file's nodes: its relative includes

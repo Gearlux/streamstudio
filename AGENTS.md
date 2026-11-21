@@ -214,7 +214,14 @@ arch: "A host mounts the editor through three methods"; pins `tests/test_host.py
 - `saved()` hears only document files actually written (never the sidecar), New… included. A host that raises does
   not undo the write. Every path handed to the host is spelled under `folder()` as the host spelled it
   (`Studio._spelled`).
-- A document holding nothing unsaved is re-read when its file changed on disk; a dirty one never is.
+- A document holding nothing unsaved is re-read when its file changed on disk; a dirty one never is — but its
+  SETTINGS file is, while the editor holds nothing unsaved of THAT file (`Document.follow_settings`, called by
+  `Studio.document`, `set_param` of a setting and `reset_settings`): the text and its saved baseline become the
+  disk's, every undo/redo entry holding the old text holds the new one, and an unsaved settings edit is never
+  replaced (Save refuses then). Measured before 2026-11-19: a node moved on the canvas kept a settings text hours old,
+  the settings sheet's change was refused as changed on disk and kept, and its restore showed settings the file did
+  not hold. (`tests/test_graph_settings.py::TestTheSettingsFollowTheDisk`) arch: "A settings file the editor holds
+  nothing unsaved of follows the disk".
 - The host's stop calls `studio_of(app).stash()`.
 - **One request at a time** (2026-10-13): every editor request holds `Studio.lock` (an `RLock`) — `_take_turn`, the
   blueprint's FIRST `before_request`, takes it and `_end_turn` (teardown) lets go, a refusal or a raise included;

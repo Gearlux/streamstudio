@@ -2770,6 +2770,50 @@ class Document:
                     return True
         return False
 
+    def follow_settings(self) -> bool:
+        """Take the SETTINGS file's text from disk when the editor holds nothing unsaved of it and the disk says
+        something else — whatever else the document holds unsaved (a moved node, an edit of the graph). Answers
+        whether it changed anything; never raises (a file that cannot be read is left as held).
+
+        The settings text becomes what the disk holds — and its saved baseline too, so a Save compares to it; a file
+        gone from disk is held no more (the graph alone is loaded) — and every undo/redo entry that held the old text
+        (or, for a file not held before, none) holds the new one: what the file said before those edits is what it
+        says now, so an undo past them never brings the old settings back. An UNSAVED settings edit is never replaced:
+        Save's changed-on-disk refusal decides then.
+
+        Why (measured 2026-11-19, the RFUAV detect pane): a document dirty only by a moved node is never read again
+        (``streamstudio.app.Studio.document``), so its settings text and baseline stayed hours old while another
+        program wrote the file; the settings sheet's change then started from the old text, its save was refused as
+        changed on disk, and the stop kept it as unsaved work — whose restore showed settings the file did not hold.
+        """
+        key = self.settings_path.resolve()
+        old = self._texts.get(key)
+        if old is not None and self._saved.get(key) != old:
+            return False  # an unsaved settings edit: never replaced, Save refuses over a changed file
+        with _DISK_LOCK:
+            try:
+                disk: Optional[str] = key.read_text() if key.is_file() else None
+            except (OSError, UnicodeDecodeError):
+                return False
+        if disk == old:
+            return False
+        if disk is None:
+            self._texts.pop(key)
+            self._saved.pop(key, None)
+        else:
+            self._texts[key] = disk
+            self._saved[key] = disk
+        self._read.pop(key, None)
+        for entry in (*self._history, *self._redo):
+            if entry.texts.get(key) != old:
+                continue  # an older settings text — what an edit since replaced, kept for its undo
+            if disk is None:
+                entry.texts.pop(key, None)
+            else:
+                entry.texts[key] = disk
+        logger.debug(f"{key} changed on disk and the editor held nothing unsaved of it — read again")
+        return True
+
     def load(self) -> Any:  # the built document: a mapping of top-level objects, or the root object itself
         """The document BUILT from the texts the editor holds — saved or not, what the canvas shows — to
         the objects stage, solidified: what a run executes. Every call builds fresh objects (a run's ops
@@ -2866,6 +2910,7 @@ class Document:
         settings = self.declared()
         setting = settings.field(node, param)
         if setting is not None:
+            self.follow_settings()  # a change starts from what the file holds, unless an unsaved one is held
             key = self.settings_path.resolve()
             current = self._text_of(key) if key in self._texts or key.is_file() else ""
             self._commit({key: set_setting(current, setting, value)}, f"{node}.{param} = {value!r}", found.loc)
@@ -2886,6 +2931,7 @@ class Document:
         and undone like any other edit. Answers whether the settings held anything to reset (``False`` changes
         nothing). Refused, changing nothing, when the graph without its settings gains a problem (the edit's own
         check)."""
+        self.follow_settings()
         key = self.settings_path.resolve()
         current = self._text_of(key) if key in self._texts or key.is_file() else ""
         if not current.strip():
