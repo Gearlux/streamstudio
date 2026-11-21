@@ -131,10 +131,12 @@ export type Saved = Graph & { host_error?: string };
 export const saveGraph = (name: string): Promise<Saved> => call("POST", `${graphPath(name)}/save`);
 
 /**
- * `POST api/graphs/<name>/save` `{only: "settings"}` — write the graph's SETTINGS file alone (a settings sheet's save,
- * `?only=settings`): a change of the graph itself the editor holds stays unsaved.
+ * `POST api/graphs/<name>/param` `{node, param, value, save: "settings"}` — set one value AND write the graph's SETTINGS
+ * file alone, in one request (a settings sheet's change, `?only=settings`): a change of the graph itself the editor
+ * holds stays unsaved. A refused save keeps nothing: the server undoes the change before it answers.
  */
-export const saveSettings = (name: string): Promise<Saved> => call("POST", `${graphPath(name)}/save`, { only: "settings" });
+export const setParamAndSaveSettings = (name: string, node: string, param: string, value: Json): Promise<Saved> =>
+  call("POST", `${graphPath(name)}/param`, { node, param, value, save: "settings" });
 
 /** `POST api/graphs/<name>/save-as` `{path, overwrite?}` — write it to `path`; the list entry now names the new file. */
 export const saveGraphAs = (name: string, path: string, overwrite = false): Promise<Saved> =>

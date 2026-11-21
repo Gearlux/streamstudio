@@ -95,10 +95,10 @@ import {
   restoreRecovery,
   revertGraph,
   saveGraph,
-  saveSettings,
   saveGraphAs,
   saveTemplate,
   setParam as postParam,
+  setParamAndSaveSettings,
   setSlot,
   trace,
   undo as postUndo,
@@ -1423,40 +1423,43 @@ function Editor() {
   }, [accept, host, postToHost, push]);
 
   /**
-   * The settings sheet's Save (`?only=settings`): the graph's SETTINGS file alone (`api.saveSettings`) — a change of the
-   * graph itself the editor's tab holds stays unsaved there (user pick 2026-10-05). The host hears it like any Save.
+   * The settings sheet's change (`?only=settings`): the setting and the Save of the graph's SETTINGS file alone in ONE
+   * request (`api.setParamAndSaveSettings`) — a change of the graph itself the editor's tab holds stays unsaved there
+   * (user pick 2026-10-05). A refused Save keeps nothing: the server undoes the change before it answers, so the form
+   * shows what the editor holds and a stop keeps nothing of it. The host hears it like any Save.
    */
-  const saveSettingsAlone = useCallback(async () => {
-    const current = graphRef.current;
-    if (current === null) return;
-    try {
-      const { host_error: hostError, ...saved } = await saveSettings(current.name);
-      accept(saved);
-      postToHost(savedMessage(saved.name, saved.path)); // a host re-runs what reads this graph at once
-      if (hostError !== undefined) push("warning", `${fileOf(saved)} is saved, but ${host?.name ?? "the host"} said: ${hostError}`);
-    } catch (exc) {
-      push("error", errorMessage(exc));
-    }
-  }, [accept, host, postToHost, push]);
+  const setSettingAndSave = useCallback(
+    async (node: string, param: string, value: Json): Promise<boolean> => {
+      const current = graphRef.current;
+      if (current === null) return false;
+      try {
+        const { host_error: hostError, ...saved } = await setParamAndSaveSettings(current.name, node, param, value);
+        accept(saved, { kind: "document" });
+        postToHost(savedMessage(saved.name, saved.path)); // a host re-runs what reads this graph at once
+        if (hostError !== undefined) push("warning", `${fileOf(saved)} is saved, but ${host?.name ?? "the host"} said: ${hostError}`);
+        return true;
+      } catch (exc) {
+        push("error", errorMessage(exc));
+        return false;
+      }
+    },
+    [accept, host, postToHost, push],
+  );
 
   /**
-   * How the page writes a parameter: `setParam`, and on a settings-only page (`?only=settings`) the settings' Save right
-   * after — the sheet holds no unsaved state, and the host hears every change at once (its pane asks again). A setting
-   * the server refuses saves nothing.
+   * How the page writes a parameter: `setParam`, and on a settings-only page (`?only=settings`) the setting with its
+   * Save (`setSettingAndSave`) — the sheet holds no unsaved state, and the host hears every change at once (its pane
+   * asks again). A setting the server refuses, or whose Save it refuses, is not kept.
    */
   const commitParam = useCallback(
     (node: string, param: string, value: Json): Promise<boolean> => {
-      const writing = (async () => {
-        const done = await setParam(node, param, value);
-        if (done && settingsOnly) await saveSettingsAlone();
-        return done;
-      })();
+      const writing = settingsOnly ? setSettingAndSave(node, param, value) : setParam(node, param, value);
       // a host's `commit` waits for every write on its way (`commitAsked`)
       writes.current.add(writing);
       void writing.finally(() => writes.current.delete(writing));
       return writing;
     },
-    [saveSettingsAlone, setParam, settingsOnly],
+    [setParam, setSettingAndSave, settingsOnly],
   );
 
   const saveAs = useCallback(async () => {

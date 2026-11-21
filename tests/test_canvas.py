@@ -5496,7 +5496,7 @@ class TestTheSettingsOnlyPage:
         sections = page.locator("[data-form-node]").evaluate_all("ss => ss.map(s => s.dataset.formNode)")
         assert sections == ["band", "gain", "boost"]  # TinyGain's two nodes, each by its name
         set_widget(page, '[data-form-node="gain"]', "gain", "5.5")
-        wait_saves(page, 2)  # the setting, then the Save the page sends right after it
+        wait_saves(page, 1)  # the setting and its Save, one request (`save: "settings"`)
         assert root.get_attribute("data-dirty") == "false"
         assert (hosted.folder / "pane.settings.yaml").read_text() == "flow.gain.op.gain: 5.5\n"
         assert (hosted.folder / "pane.yaml").read_text() == HOST_PANE_TEXT
@@ -5504,6 +5504,35 @@ class TestTheSettingsOnlyPage:
         shown = page.locator('[data-form-node="gain"] input[data-param="gain"]').input_value()
         assert float(shown) == 5.5
         assert opened.errors == []
+
+    def test_a_change_whose_save_is_refused_is_not_kept_and_the_form_shows_what_is(
+        self, browser: Any, hosted: Hosted
+    ) -> None:
+        """A save refused as changed on disk keeps nothing of the sheet's change: the server undoes it in the same
+        request, so a stop never keeps it as unsaved work. The refusal needs an unsaved settings change of another view
+        (the editor's own tab) while another program writes the file. Measured before 2026-11-21: the change stayed
+        held after the refusal, and the next stop kept it."""
+        settings = hosted.folder / "pane.settings.yaml"
+        settings.write_text("flow.gain.op.gain: 4.0\n")
+        opened = open_hosted(browser, hosted, "graph=pane&embed=1&only=settings")
+        page = opened.page
+        page.wait_for_selector('.app[data-graph="pane"][data-ready="true"] [data-settings]')
+        studio = studio_of(hosted.app)
+        api_post(f"{hosted.url}{STUDIO}", "api/graphs/pane/param", {"node": "boost", "param": "gain", "value": 9.0})
+        with studio.lock:
+            held = studio.document("pane").held()  # the other view's change, unsaved
+        settings.write_text("flow.gain.op.gain: 6.0\n")  # another program
+
+        set_widget(page, '[data-form-node="gain"]', "gain", "5.5")
+
+        assert "changed on disk" in page.locator('[data-toast="error"]').inner_text()
+        with studio.lock:
+            assert studio.document("pane").held() == held, "only the other view's change is held"
+        assert settings.read_text() == "flow.gain.op.gain: 6.0\n" and hosted.host.saves == []
+        page.wait_for_function(
+            """() => Number(document.querySelector('[data-form-node="gain"] input[data-param="gain"]').value) === 4"""
+        )
+        assert opened.errors == [REFUSED_400]
 
     def test_the_host_sets_the_font_and_a_line_under_a_setting(self, browser: Any, hosted: Hosted) -> None:
         """``style`` hands the form the host page's font; ``hints`` a line under a setting (what the host measured for
@@ -5543,11 +5572,11 @@ class TestTheSettingsOnlyPage:
         widget = page.locator('[data-form-node="rate_value"] input[data-param="value"]')
         assert widget.get_attribute("type") == "text"
         set_widget(page, '[data-form-node="rate_value"]', "value", "2.5 MSa/s")
-        wait_saves(page, 2)
+        wait_saves(page, 1)
         assert (hosted.folder / "rate.settings.yaml").read_text() == "rate_value.value: 2.5 MSa/s\n"
         assert widget.input_value() == "2.5 MSa/s"
         set_widget(page, '[data-form-node="rate_value"]', "value", "250000")
-        wait_saves(page, 4)
+        wait_saves(page, 2)
         assert (hosted.folder / "rate.settings.yaml").read_text() == "rate_value.value: 250000\n"
         assert opened.errors == []
 

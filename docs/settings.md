@@ -186,8 +186,11 @@ host lists the graph, say), and the editor's edits and saves leave its line as i
 A host that shows a graph's settings in a sheet of its own opens the page with `?only=settings` (beside `?embed=1`):
 no menus, no canvas, no tabs and no *all parameters* box — the `app:` fields alone, at the panel's full width — and
 every change is SAVED at once, so the host hears `saved` and re-runs what reads the graph. The save writes the
-settings file ALONE (`POST …/save {only: "settings"}`): a change of the graph itself that the editor holds unsaved in
-another view of the same graph stays unsaved there. Toasts and the restore question work as on the whole page.
+settings file ALONE: a change of the graph itself that the editor holds unsaved in another view of the same graph
+stays unsaved there. The change and its save go in one request (`POST …/param {…, save: "settings"}`); when the save
+is refused — another program wrote the file while another view holds an unsaved setting — the change is undone too,
+so the sheet shows what the editor holds and nothing of the change is kept. Toasts and the restore question work as on
+the whole page.
 
 ```html
 <iframe src="/studio/?graph=view_scan&embed=1&only=settings"></iframe>

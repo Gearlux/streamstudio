@@ -1262,9 +1262,28 @@ class Studio:
         self.document(name).replace_text(text)
         return self.graph(name)
 
-    def set_param(self, name: str, node: str, param: str, value: Any) -> Dict[str, Any]:  # value: any YAML scalar
-        self.document(name).set_param(node, param, value)
-        return self.graph(name)
+    def set_param(  # value: any YAML scalar
+        self, name: str, node: str, param: str, value: Any, save: str = ""
+    ) -> Dict[str, Any]:
+        """Set ``node.param`` (:meth:`Document.set_param`: a setting goes to the graph's settings file).
+
+        ``save="settings"`` also writes the settings file — what the settings sheet (``?only=settings``) does with each
+        change — in the same turn, so no other edit comes between the change and its save. A refused save (a file
+        changed on disk, a disk that will not take it) UNDOES the change before it raises: a change saved "at once"
+        is saved or leaves nothing held. Measured before 2026-11-21: the sheet set and saved in two requests, and a
+        save refused as changed on disk left its change held, for the stop to keep as unsaved work."""
+        if save and save not in SAVE_ONLY:
+            raise ValueError(f"save must be one of {', '.join(SAVE_ONLY)} — got {save!r}")
+        document = self.document(name)
+        document.set_param(node, param, value)
+        if not save:
+            return self.graph(name)
+        try:
+            written = document.save_settings()
+        except (ValueError, OSError):
+            document.undo()
+            raise
+        return self._tell_host(written, self.graph(name))
 
     def set_slot(self, name: str, node: str, slot: str, class_path: str, params: Dict[str, Any]) -> Dict[str, Any]:
         """Put a new ``class_path`` object, built from ``params``, into the single slot ``slot`` of ``node`` — what
@@ -2114,9 +2133,8 @@ def editor_blueprint(
     @blueprint.post("/api/graphs/<name>/param")
     def set_param(name: str) -> Response:
         body = _body()
-        return jsonify(
-            _studio().set_param(name, str(_field(body, "node")), str(_field(body, "param")), _field(body, "value"))
-        )
+        node, param, value = str(_field(body, "node")), str(_field(body, "param")), _field(body, "value")
+        return jsonify(_studio().set_param(name, node, param, value, _text(body, "save") or ""))
 
     @blueprint.post("/api/graphs/<name>/slot")
     def set_slot(name: str) -> Response:

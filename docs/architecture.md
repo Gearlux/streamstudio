@@ -2038,3 +2038,13 @@ the case where the editor holds an unsaved settings edit.
 
 **Pins.** `tests/test_graph_settings.py::TestTheSettingsFollowTheDisk`; annotaide's
 `tests/test_settings_survive_restart.py` drives it through a mounted editor.
+
+**Update 2026-11-21 — the settings sheet's change and its save are one request.** The refusal that stays (an unsaved
+settings edit of another view, a file another program wrote) still left the SHEET's change held: the page set it in
+one request and saved in a second, and a refused save showed an error and kept the change, for the stop to keep as
+unsaved work. Now `POST …/param {save: "settings"}` (`Studio.set_param`) sets and saves in the same turn of
+`Studio.lock`, and a refused save undoes the change before it raises — what annotaide's own settings path does
+(`_save_settings_or_undo`). Rejected: the page sending Undo after the refusal — a third request, and another view's
+edit landing between the save and the Undo would be the one undone. Pins:
+`tests/test_graph_settings.py::TestASettingSavedAtOnce`,
+`tests/test_canvas.py::TestTheSettingsOnlyPage::test_a_change_whose_save_is_refused_is_not_kept_and_the_form_shows_what_is`.

@@ -367,9 +367,12 @@ arch: "A host mounts the editor through three methods"; pins `tests/test_host.py
   `frontend/src/__tests__/{host,link,pickers,slots}.test.ts`) arch: "The page in a host's panel".
 - **`?only=settings`** (a host's settings sheet, `link.onlyFromSearch`) renders the settings form and nothing else —
   no bar, canvas, Nodes sidebar, tabs or *all parameters* box (`SettingsForm fixed`) — and SAVES each change at once
-  (`App.commitParam`; user pick 2026-10-05), the settings file ALONE (`Document.save_settings`, `POST …/save {only:
-  "settings"}`): a change of the graph itself held in another view stays held (user pick 2026-10-05). Dialogs and toasts stay. (`tests/test_canvas.py::TestTheSettingsOnlyPage`,
-  `frontend/src/__tests__/{link,settings}.test.ts`)
+  (`App.commitParam`; user pick 2026-10-05), the settings file ALONE (`Document.save_settings`): a change of the graph
+  itself held in another view stays held (user pick 2026-10-05). The change and its save are ONE request (`POST
+  …/param {save: "settings"}`, `Studio.set_param`), and a refused save UNDOES the change before the answer, so nothing
+  of it stays held for a stop to keep — never a second request for the save (measured before 2026-11-21: a save
+  refused as changed on disk left the change held). Dialogs and toasts stay. (`tests/test_canvas.py::TestTheSettingsOnlyPage`,
+  `tests/test_graph_settings.py::TestASettingSavedAtOnce`, `frontend/src/__tests__/{api,link,settings}.test.ts`)
 - Dialogs take the keyboard and give it back (`Modal`).
 
 ### Testing the page

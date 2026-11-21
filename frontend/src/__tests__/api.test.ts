@@ -25,6 +25,7 @@ import {
   removeWires,
   restoreRecovery,
   setParam,
+  setParamAndSaveSettings,
   setSlot,
   trace,
   undo,
@@ -362,5 +363,22 @@ describe("a Save mounted in a host carries the host's failure, the file written 
   it("host_error rides on the saved graph", async () => {
     stub({ name: "pane", dirty: false, host_error: "RuntimeError: the workspace is closing" });
     expect((await saveGraph("pane")).host_error).toBe("RuntimeError: the workspace is closing");
+  });
+});
+
+describe("a settings sheet's change — the setting and its Save in one request", () => {
+  it("POST …/param carries `save: \"settings\"`, and the answer the host's failure", async () => {
+    const sent = stub({ name: "pane", dirty: false, host_error: "RuntimeError: the workspace is closing" });
+    const saved = await setParamAndSaveSettings("pane", "gain", "gain", 5.5);
+    expect(sent).toEqual([
+      { path: "api/graphs/pane/param", method: "POST", body: { node: "gain", param: "gain", value: 5.5, save: "settings" } },
+    ]);
+    expect(saved.host_error).toBe("RuntimeError: the workspace is closing");
+  });
+
+  it("a plain change carries no `save`", async () => {
+    const sent = stub({});
+    await setParam("pane", "gain", "gain", 5.5);
+    expect(sent[0].body).toEqual({ node: "gain", param: "gain", value: 5.5 });
   });
 });

@@ -946,3 +946,43 @@ class TestTheSettingsFollowTheDisk:
         assert (
             _value(graph, "first", "level") == 0.7 and graph["dirty"] is True
         ), "the file's value, the moved node kept"
+
+
+class TestASettingSavedAtOnce:
+    """``POST …/param`` with ``save: "settings"`` — the settings sheet's change (``?only=settings``): the setting AND
+    the save of the graph's settings file in ONE request, under the editor's lock, so no other edit comes between them.
+    A refused save keeps nothing: the change is undone before the answer. Measured before 2026-11-21: the sheet set,
+    then saved in a second request; a save refused as changed on disk left its change held, and the stop kept it as
+    unsaved work."""
+
+    def test_the_setting_is_written_and_nothing_is_left_unsaved(self, client: Any, folder: Path) -> None:
+        settings = _write(folder, "pane.settings.yaml", "flow.first.op.level: 0.9\n")
+        graph = _ok(
+            client.post(
+                "/api/graphs/pane/param", json={"node": "third", "param": "level", "value": 0.6, "save": "settings"}
+            )
+        )
+        assert settings.read_text() == "flow.first.op.level: 0.9\nflow.third.op.level: 0.6\n"
+        assert graph["dirty"] is False and _value(graph, "third", "level") == 0.6
+
+    def test_a_refused_save_keeps_nothing_of_the_change(self, client: Any, folder: Path) -> None:
+        settings = _write(folder, "pane.settings.yaml", "flow.first.op.level: 0.9\n")
+        _ok(client.post("/api/graphs/pane/param", json={"node": "first", "param": "level", "value": 0.7}))  # unsaved
+        held = studio_of(client.application).document("pane").held()
+        settings.write_text("flow.second.op.floor_db: -40.0\n")  # another program
+
+        refused = client.post(
+            "/api/graphs/pane/param", json={"node": "third", "param": "level", "value": 0.6, "save": "settings"}
+        )
+
+        assert "changed on disk" in _error(refused)
+        assert studio_of(client.application).document("pane").held() == held, "only the other view's change is held"
+        assert settings.read_text() == "flow.second.op.floor_db: -40.0\n", "the other program's file is untouched"
+
+    def test_a_save_of_anything_but_the_settings_is_refused_before_the_change(self, client: Any, folder: Path) -> None:
+        answer = client.post(
+            "/api/graphs/pane/param", json={"node": "third", "param": "level", "value": 0.6, "save": "graph"}
+        )
+        assert "save must be" in _error(answer)
+        assert not (folder / "pane.settings.yaml").exists()
+        assert _ok(client.get("/api/graphs/pane"))["dirty"] is False
