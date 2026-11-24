@@ -6,54 +6,57 @@ User-facing usage lives in the README and the topic pages beside this file (`edi
 `hosting.md`, `api.md`, `development.md`); agent-facing rules in `AGENTS.md` — this file answers
 "why does this mechanism exist?".
 
-## The studio is addressed by its PORT, not by a pid file (2026-08-26)
+## The standalone editor is served by portail (2026-11-24)
 
-**Context.** `stop` and `restart` need to find a running studio. The obvious mechanism is a pid file
-written at launch and removed at exit, and it is what most single-process servers do.
+**Context.** The editor's command line held its own serving code: a port probe, a per-process scan for the process
+listening on a port, a stop (SIGTERM, then a kill), and the signal handling that keeps unsaved work on the way out.
+Its `stop` ended WHATEVER listened on the port — it never asked what that program was — and there was no way to list
+running editors or to start one detached. portail, the framework a workspace web app is served by, holds all of this
+once: a server is found by what it answers (`/api/meta` names the app), and a listener that does not answer as the app
+is refused, never signalled.
 
-It does not fit here: the process that holds the port is not always the process anything recorded. A
-studio is started from a terminal, by a host app, or by a script, and a wrapper (a shell, a process
-manager) may stand between the one that wrote a pid file and the server that holds the port — so a
-pid file records whichever of them wrote it, and signalling that one does not free the port. Keeping
-a file in sync with a process that can be killed, crash, or be restarted by a third party is state
-that goes stale. Worse, a pid file only ever knows about studios THIS launcher started: a studio a
-host app spawned detached, or one a developer ran by hand, is exactly what a person reaches for
-`restart` to deal with.
+Measured before portail could serve the editor: it expected a workspace FILE (`open <folder>` was refused as
+`workspace file … does not exist`), its shell answered `/api/workspace` — the route the editor's page joins through,
+with another answer — and a detached start was rebuilt from the path and the port alone, losing `--templates-dir`.
+portail gained a folder workspace (`AppSpec(workspace="folder")`), serving options a workspace carries
+(`Served.options`) and a shell that leaves `/api/workspace` to an app that answers it.
 
-**Decision.** The port IS the identity. `_studio_process(port)` scans processes for the one listening
-on `127.0.0.1:<port>` and that process is the studio, whatever spawned it and whatever its ancestry.
-Nothing is written to disk, so there is no state to go stale.
+**Decision.** `cli.py` says who the editor is (`SPEC`), what it serves (`Folder`: the graph folder IS the workspace)
+and what is its own; everything else is portail's.
 
-The scan is per-process rather than whole-system because the whole-system call is privileged:
-`psutil.net_connections(kind='tcp')` raises `AccessDenied` for an ordinary user on macOS, while
-iterating processes and asking each for its own connections does not.
+- `open` (the default) and `restart` are the editor's commands, because they carry `--templates-dir`; they call
+  `Lifecycle.open` / `Lifecycle.restart` with `options={"templates_dir": …}`. `list` is registered by portail. `stop`
+  wraps portail's: it asks every running editor what it holds unsaved BEFORE the stop and, for each one gone
+  afterwards, reads the recovery file back and says where the work is.
+- The unsaved work is kept by `Hooks.leaving`; the page check runs in `Hooks.prepare` (the terminal) and
+  `Hooks.starting` (the serving process).
+- The standalone app is the editor's own Flask app with portail's shell mounted after its routes (`index=False`).
+  A host that mounts the editor's blueprint gets none of this.
 
 **Consequences.**
 
-- `stop` / `restart` work on any studio on that port — this launcher's, a host app's, a hand-run one.
-- No pid file, no lock file, no cleanup path, and no stale-state failure mode to reason about.
-- `psutil` is a hard dependency (imported at module scope by `cli.py`, declared in `pyproject.toml`).
-- The scan is O(processes) and touches every process the user owns. That is fine for a command a
-  human types; it would not be fine on a hot path, so do not reuse it as one.
-- Two studios on two ports are independent, which falls out for free: every command takes `--port`.
+- `stop` and `restart` never signal a program that is not the editor; a server is named by its port or its folder.
+- `list`, `--background`, `--auto-port` and `--browser` exist. Two editors on two ports are independent, and two on
+  one folder are told apart by their ports.
+- `psutil` is no longer a dependency; `portail` is.
+- The state folder `~/.streamstudio` holds portail's registry of running editors (`servers/`) and the folder served
+  last, beside the templates.
+- A restart of a port serves with the templates folder the running editor has.
+- The page has no ⏻ / ↻ button: that needs the shell's script in the page.
 
 **Example.**
 
-```python
-proc = _studio_process(8190)          # the LISTENER, whatever started it
-proc.terminate()                      # port measured free 64 ms later
-proc.wait(timeout=grace)              # deterministic; kill() only if it ignores SIGTERM
+```
+$ streamstudio graphs --port 8191 --background
+$ streamstudio list
+8191  /home/me/graphs  http://127.0.0.1:8191
+$ streamstudio stop 5432
+Error: port 5432 is held by something that is not streamstudio (pid 801 postgres) — not stopping it
 ```
 
-**What you may change.** Widen the match (a host other than loopback, a port range) inside
-`_studio_process`; make `grace` configurable if a slow shutdown ever needs it. Do not introduce a pid
-file, a lock file, or any launch-time state as a "faster" lookup — it would reintroduce exactly the
-staleness and the this-launcher-only blindness this avoids. Do not reach for the whole-system
-`net_connections()`; it is privileged, and the failure is a permission error rather than an empty
-result.
-
-**Update, 2026-10-14.** The decision is unchanged by the removal of the second editor, whose launcher started its
-server as a child: the owner of the port is the target, whatever started it.
+**What you may change.** What the editor's own commands take and say. Do not define a port probe, a process lookup, a
+stop or a signal handler in `cli.py` again (`tests/test_built_on_portail.py`), and do not answer `/api/meta` from the
+editor's blueprint — a host's app is the host's.
 
 ## The graph document is the truth; the canvas is derived and edits are located text patches (`streamstudio.document`, 2026-09-28)
 
@@ -707,15 +710,11 @@ templates folder, not the one the person had asked for.
 **Decision.** (1) The app is declared with `strict_flags=True`: every command takes PLAIN values, there is no
 configuration document for an override to fall through to, so an option that names no parameter of the command is an
 error that names it (and the nearest declared parameter, when there is one) before anything starts. (2) The folders are
-resolved to absolute paths ONCE, in `_canvas_folders`, before any work — and before `restart` stops anything, so a
-folder that is not there is refused naming it while the running editor is still running. liquifai binds CLI values
-verbatim as strings, so they are coerced there; every graph path the editor then answers is absolute, and a path from
-`GET /api/graphs` can be sent back. (3) Every command a message prints must parse back: the busy-port hint
-(`_report_port_in_use`) prints the SAME folder and templates folder one port up, absolute, shell-quoted (`shlex.join`),
-the folder first because liquifai binds positionals up to the first flag; the address is printed bare with `print()` on
-a line of its own, so a terminal linkifies it. (4) A taken port is refused before any work, and asked again after the
-page was built (a build takes seconds, and another start may take the port meanwhile). (5) `stop` and `restart` default
-to the editor's port, 8190 (`EDITOR_PORT`), and find the server by that port ("The studio is addressed by its PORT");
+resolved to absolute paths ONCE, before any work (the graph folder as the command opens it, the templates folder in
+`cli.open_folder`) — and before `restart` stops anything, so a folder that is not there is refused naming it while the
+running editor is still running. liquifai binds CLI values verbatim as strings, so they are coerced there; every graph
+path the editor then answers is absolute, and a path from `GET /api/graphs` can be sent back. (3) `stop` and `restart`
+default to the running editor and find a server by what it answers ("The standalone editor is served by portail");
 the way out of a start keeps the person's unsaved work ("Unsaved work is kept in a hidden file of the served folder").
 
 Rejected: a lenient mode that warns (the warning is the thing a launcher cannot raise, having materialized nothing);
@@ -751,11 +750,10 @@ sorted(cli.app._commands)        # ['restart', 'run', 'stop']  — liquifai's re
 cli.EDITOR_PORT                  # 8190                        — the port all three default to
 ```
 
-**What you may change.** The port, the option spellings, the layout of the busy-port hint, the wording of the
-refusals. What must hold: an option no command declares is refused, never ignored; the folders are resolved once,
-before any work, and `restart` checks its folder before it stops anything; every command a message prints is one the
-CLI accepts (pinned by parsing it back). Pins: `tests/test_cli_editor.py::TestTheCommands`, `::TestServingTheCanvas`,
-`::TestStopAndRestart`, `tests/test_cli_port.py`.
+**What you may change.** The port, the option spellings, the wording of the editor's own lines. What must hold: an
+option no command declares is refused, never ignored; the folders are resolved once, before any work, and `restart`
+checks its folder before it stops anything. Pins: `tests/test_cli_editor.py::TestTheCommands`,
+`::TestServingTheCanvas`, `::TestStopAndRestart`.
 
 ## Unsaved work is kept in a hidden file of the served folder when the editor stops, and the PAGE asks what to do with it (`Studio.stash`, `GET /api/workspace`, 2026-09-29)
 

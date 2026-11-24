@@ -153,19 +153,22 @@ buttons of the file browser that jump there. `env.complete` lists them.
 streamstudio path/to/graphs                    # serve that folder on port 8190
 streamstudio                                   # the current directory
 streamstudio path/to/graphs --port 8191 --templates-dir ~/my-templates
-streamstudio stop                              # stop what listens on 8190 (its unsaved work is kept)
+streamstudio path/to/graphs --background       # serve detached; the prompt comes back once it answers
+streamstudio list                              # every running editor: its port, its folder, its address
+streamstudio stop                              # stop the running editor (its unsaved work is kept)
+streamstudio stop 8191                         # the one on port 8191 — or name it by its folder
 streamstudio restart                           # stop it, then serve the same folder again
 streamstudio restart --help                    # every command's options, generated from its signature
 ```
 
-`-p` is the short form of `--port`, and an option works on either side of the command name. A taken port is refused
-before anything starts, with the address of what is there and the same command one port up. An option a command does
-not have is refused by name, not ignored:
+`-p` is the short form of `--port` and `-b` of `--background`. A folder that is already being served is not started
+twice: its address is printed. `stop` and `restart` only ever touch a StreamStudio server — a port another program
+holds is refused, never stopped. An option a command does not have is refused by name, not ignored:
 
 ```
 $ streamstudio restart --prt 9000
 Error: streamstudio: unknown option 'prt' — it names no parameter of the 'restart' command and no key in the
-configuration. Did you mean 'port'? Declared parameters: graph_dir, port, templates_dir.
+configuration. Did you mean 'port'? Declared parameters: target, port, templates_dir, background, browser.
 ```
 
 Shell completion comes from [liquifai](https://github.com/Gearlux/liquifai)'s installer: `liquifai-install-completions`.
@@ -191,7 +194,7 @@ Shell completion comes from [liquifai](https://github.com/Gearlux/liquifai)'s in
 | `pyyaml` | locating, and patching, the line an edit is about |
 | `liquifai` | the command line |
 | `loggair` | logging |
-| `psutil` | `stop` and `restart` find the server by the port it holds |
+| `portail` | serving the standalone editor: `stop`, `restart` and `list` find a server by what it answers |
 | `datasets` | the HuggingFace pickers: a dataset's columns and splits |
 
 ## Development

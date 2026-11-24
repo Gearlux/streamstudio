@@ -7,6 +7,8 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- `streamstudio list` (every running editor: port, folder, address), `--background` / `-b` (serve detached),
+  `--auto-port`, `--browser always|new|never` and `streamstudio stop --all`.
 - The file browser has a row of buttons that jump to a folder — the graph folder, then `HOME`, `PROJECT_ROOT`,
   `DATA_ROOT`, `MODEL_ROOT`, `RUN_DIR` when set — and, in Save As and the folder browsers, **New folder**
   (`POST /api/files/folder`).
@@ -24,10 +26,16 @@ All notable changes to this project are documented here. The format follows
   work, when no graph opens until the person answers — a host that covers its panel while a graph loads uncovers it.
 
 ### Changed
+- **The command line.** The standalone editor is served by portail. `streamstudio stop` and `restart` name a server
+  by its port or its folder (`streamstudio stop 8191`, `streamstudio stop path/to/graphs`) instead of `--port`, and
+  only ever touch a StreamStudio server: a port another program holds is refused, never stopped. A folder already
+  being served is not started twice. The default command is `open` (a bare `streamstudio [folder]` as before; the
+  `run` spelling is gone). `psutil` is no longer a dependency.
 - A class names its parameters' picker tags in the class attribute `__streamstudio_widget_params__`
   (`{"dataset": "SHOP_DATASET"}`): the pickers and a plugin's lists read it.
 
 ### Fixed
+- `streamstudio restart` of a running editor serves with the templates folder that editor was started with.
 - A graph's settings file another program wrote is read again even while the graph holds other unsaved work (a
   moved node): a setting changed in the settings sheet, or a reset, no longer starts from the old text, is no
   longer refused as changed on disk, and is no longer kept as unsaved work that a restore shows with the other

@@ -11,42 +11,61 @@ gesture by gesture: what each does to the document, and what it refuses.
 streamstudio path/to/graphs                                  # port 8190; the folder's *.yaml files are the graphs
 streamstudio                                                 # the same, over the current directory
 streamstudio path/to/graphs --port 8191 --templates-dir ~/my-templates
-streamstudio stop                                            # stop what listens on 8190
-streamstudio stop --port 8191                                # stop what listens on 8191
+streamstudio path/to/graphs --background                     # serve detached; the prompt comes back once it answers
+streamstudio list                                            # every running editor: port, folder, address
+streamstudio stop                                            # stop the running editor
+streamstudio stop 8191                                       # the one on port 8191
+streamstudio stop path/to/graphs                             # the one serving that folder
+streamstudio stop --all                                      # every running editor
 streamstudio restart                                         # stop it, then serve the SAME folder again
-streamstudio restart path/to/graphs                          # stop it, then serve that folder
+streamstudio restart 8191                                    # the one on port 8191, on that port again
+streamstudio restart path/to/graphs                          # stop the one serving that folder, serve it again
 ```
 
+`-p` is the short form of `--port`, `-b` of `--background`. `--browser always|new|never` opens the editor's address in
+your browser once it answers (default `never`); `--auto-port` takes the next free port without asking.
+
 `stop` and `restart` never throw away unsaved work: the editor keeps it in a hidden file of its folder, and the
-next start offers it back ([Unsaved work survives a stop](#unsaved-work-survives-a-stop)). `restart` without a folder asks
-the running editor which folder it serves and serves that one again, so the kept work is offered at once.
+next start offers it back ([Unsaved work survives a stop](#unsaved-work-survives-a-stop)). A bare `restart` serves the
+folder served last; `restart <port>` serves the folder the editor on that port serves, with the templates folder it
+was started with, so the kept work is offered at once.
 
 The folder is resolved once, so every path the editor shows is absolute. A folder that is not there is refused
 before anything is stopped or started (`restart` included):
 
 ```
 $ streamstudio restart grpahs
-Graph directory not found: /home/me/grpahs
+Error: 'grpahs' is not a workspace folder
 ```
 
-A taken port is refused before anything starts. The message gives the address to open, and the same command one
-port up (the folder printed absolute):
+A folder that is already being served is not started twice — the command prints where it is served and returns:
 
 ```
 $ streamstudio graphs
-Port 8190 is already in use — StreamStudio may already be running there.
-
-    Open it:  http://127.0.0.1:8190
-
-If that is a different program, run StreamStudio elsewhere:  streamstudio /home/me/graphs --port 8191
+streamstudio is already running — serving /home/me/graphs
+  http://127.0.0.1:8190
+  'streamstudio stop' stops it; 'streamstudio restart' reloads it.
 ```
+
+When ANOTHER folder is served on the port, the command asks whether to take the next free port (`--auto-port` takes
+it without asking). A port a program that is not StreamStudio holds is refused, and `stop` and `restart` never signal
+such a program:
+
+```
+$ streamstudio graphs --port 5432
+Error: port 5432 on 127.0.0.1 is in use (pid 801 postgres) — name another with --port (or stop that process)
+$ streamstudio stop 5432
+Error: port 5432 is held by something that is not streamstudio (pid 801 postgres) — not stopping it
+```
+
+With several editors running, a bare `stop` lists them and asks which one (`--all` stops every one).
 
 An option the command does not have is refused by name, not ignored:
 
 ```
 $ streamstudio restart --prt 9000
 Error: streamstudio: unknown option 'prt' — it names no parameter of the 'restart' command and no key in the
-configuration. Did you mean 'port'? Declared parameters: graph_dir, port, templates_dir.
+configuration. Did you mean 'port'? Declared parameters: target, port, templates_dir, background, browser.
 ```
 
 ## Unsaved work survives a stop
@@ -58,11 +77,12 @@ files themselves are not touched. `stop` says where the work went:
 
 ```
 $ streamstudio stop
-Stopped StreamStudio on port 8190 (pid 57474). Its unsaved work (demo.yaml) is kept in /home/me/graphs/.streamstudio-workspace.json — the next start asks what to do.
+streamstudio (/home/me/graphs): stopped pid 57474 (port 8190)
+Its unsaved work (demo.yaml) is kept in /home/me/graphs/.streamstudio-workspace.json — the next start asks what to do.
 ```
 
 The editor's own terminal prints the same as it exits (`Unsaved work (demo.yaml) is kept in … — the next start
-asks what to do.`). With nothing unsaved, `stop` prints only `Stopped StreamStudio on port 8190 (pid 57503).` and no
+asks what to do.`). With nothing unsaved, `stop` prints only its first line and no
 file is written. A graph made with New… and not changed since is not unsaved work: New… already wrote its file.
 
 **The next start on that folder** says so before anything else:

@@ -89,7 +89,7 @@ Invariants:
   (SIGTERM, SIGHUP, Ctrl+C) and only when something is unsaved; it is merged into, never overwritten; an unreadable
   one is moved aside, never deleted; it is removed only by an answer (restore or discard). No graph opens before the
   question is answered; a tab of an earlier editor is refused `409` before anything changes; `GET /api/workspace`
-  never raises. `stop`/`restart` ask the editor first (at most `cli.ASK_TIMEOUT`) and never claim work was kept
+  never raises. `stop` asks every running editor first (at most `cli.ASK_TIMEOUT`) and never claims work was kept
   without reading the recovery file back. There is no periodic
   autosave — adding one is a decision for the user. (`tests/test_recovery.py`, `tests/test_recovery_process.py`,
   `tests/test_cli_editor.py::TestWhatStopSays`, `tests/test_canvas.py::TestUnsavedWorkOfTheLastSession`,
@@ -97,9 +97,11 @@ Invariants:
 - Every file name the editor writes into a served folder matches `.streamstudio-workspace*.json`, which every project
   holding editor graphs ignores.
   (`tests/test_recovery.py::TestWhatAStopKeeps::test_the_file_names_are_the_ones_git_ignores`)
-- **Agents and tests: never run `streamstudio stop` / `restart` without an explicit `--port`** — a bare one stops the
-  person's own editor on 8190. Tests bind port 0 and stop only the pid they started; recovery tests use temporary
-  folders. A harness that starts an editor as a child must reap it (psutil counts a zombie as alive; `TASKS.md`).
+- **Agents and tests: never run `streamstudio stop` / `restart` without naming a port or a folder** — a bare one
+  stops the person's own editor. The suite never reaches, starts or stops an editor of the operator's
+  (`tests/conftest.py::_no_live_server`, `::home`: no live request, no detached start, no look at port 8190, the state
+  folder under the test's tmp dir); a test that starts a real editor gives it a free port and a `HOME` of its own and
+  stops only the pid it started; recovery tests use temporary folders.
 
 ## Subgraphs, reuse, op lists
 
@@ -387,17 +389,25 @@ arch: "A host mounts the editor through three methods"; pins `tests/test_host.py
 
 ## The CLI
 
-- Three commands — `run` (the default), `stop`, `restart` — and one default port, `EDITOR_PORT` 8190. There is no
+- **The standalone editor is served by portail** (`cli.SPEC`, `workspace="folder"`): serving, `stop` / `restart` /
+  `list`, `--background`, the port probe, the pids of a stop and the signal handling are portail's — `cli.py` defines
+  none of them again and imports neither `psutil`, `socket` nor `signal`. A host mounting the editor gets no shell
+  route. (`tests/test_built_on_portail.py`) arch: "The standalone editor is served by portail".
+- Four commands — `open` (the default), `stop`, `restart`, `list` — and one default port, `EDITOR_PORT` 8190. `open`
+  and `restart` are the editor's own (they carry `--templates-dir`, which rides `Folder.options` into a background
+  start and a restart); `list` is registered by portail; `stop` wraps portail's to say what was kept. There is no
   `--editor` and no second editor (deleted 2026-10-14): do not add a launcher, a converter command or a second
-  server to this CLI. Folders are resolved to absolute paths once, in the CLI; `restart` checks the folder before it
-  stops anything. Every command a message prints must parse back. No help text names the removed editor or the
-  workspace. (`tests/test_cli_editor.py::TestTheCommands`, `::TestWhatTheCliSaysAboutItself`)
-- `stop`/`restart` target the process LISTENING on the port (`_studio_process`), never the launcher and never a pid
-  file; stop with `terminate()` plus a deterministic `wait`, never sleep-and-recheck. (`tests/test_cli_restart.py`)
-  arch: "The studio is addressed by its PORT".
-- A taken port is refused BEFORE any work: the probe binds with `SO_REUSEADDR`, the address is printed bare with
-  `print()` (clickable), and the suggested `--port N+1` command parses back. (`tests/test_cli_port.py`,
-  `tests/test_cli_editor.py::TestServingTheCanvas`)
+  server to this CLI. Folders are resolved to absolute paths once; `restart` checks the folder before it stops
+  anything. No help text names the removed editor or the workspace. A start opens no browser unless asked
+  (`--browser` defaults to `never`). (`tests/test_cli_editor.py::TestTheCommands`, `::TestStopAndRestart`,
+  `::TestWhatTheCliSaysAboutItself`)
+- **`stop`/`restart` find a server by what it ANSWERS** (`/api/meta` names `streamstudio`), by its port or its
+  folder; a listener that does not answer as the editor is refused and never signalled.
+  (`tests/test_cli_restart.py`, real listeners)
+- `/api/workspace` stays the EDITOR's route (folder, session, recovery, host): portail's shell is mounted after the
+  editor's routes and leaves it. The ⏻ / ↻ buttons of the shell are not in the page.
+- The unsaved work is kept by `Hooks.leaving` (`cli._keep_unsaved_work`); the start's line about kept work is printed
+  by `cli.create_app`, and after a `--background` start it is asked of the new server.
 - The CLI is a liquifai app (`streamstudio.cli:app`, `strict_flags=True` — every command takes plain values, so a
   flag that reaches nothing is an error, refused before anything runs or stops). Do not restore argparse spellings:
   `-c`/`-s`/`-d`/`-h` are liquifai's, `-p` is `--port`. Command bodies coerce the string values themselves, and a

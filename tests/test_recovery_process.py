@@ -1,10 +1,11 @@
 """The signal path, against a REAL editor process: a stop keeps the unsaved work, the next start offers it.
 
-Each test starts ``python -m streamstudio.cli run <folder> --port <free port>`` (:data:`EDITOR_CLI`) as a child process
-over a temporary folder, waits until it LISTENS (werkzeug's own ``Running on http://…`` line — read from the pipe,
-never a sleep), makes an edit through the API, and stops it the way a person does:
+Each test starts ``python -m streamstudio.cli open <folder> --port <free port>`` (:data:`EDITOR_CLI`) as a child
+process over a temporary folder, with a ``HOME`` of its own (the registry of running editors is there), waits until it
+ANSWERS (``/api/meta``, asked until it does or the process exits), makes an edit through the API, and stops it the
+way a person does:
 
-* ``SIGTERM`` — what ``streamstudio stop`` and ``streamstudio restart`` send (``cli._stop_studio``);
+* ``SIGTERM`` — what ``streamstudio stop`` and ``streamstudio restart`` send;
 * ``SIGINT`` — Ctrl+C in the terminal the editor runs in;
 * ``SIGHUP`` — the terminal window the editor runs in is closed (POSIX only).
 
@@ -19,18 +20,20 @@ import json
 import os
 import pty
 import queue
-import select
 import signal
 import socket
 import subprocess
 import sys
 import threading
+import time
+import urllib.error
 import urllib.request
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
 import pytest
+from portail import serving
 
 from streamstudio import cli
 from streamstudio.app import RECOVERY_FILE
@@ -104,6 +107,33 @@ START_TIMEOUT = 180.0
 STOP_TIMEOUT = 60.0
 
 
+def _own_home() -> Dict[str, str]:
+    """The environment of an editor a test starts: its ``HOME`` is the test's (``tests/conftest.py::home``), so its
+    registry entry never lands in the operator's ``~/.streamstudio`` and an in-process ``stop`` finds it."""
+    return {**os.environ, "HOME": str(Path.home())}
+
+
+def _wait_until_answering(port: int, proc: "subprocess.Popen[Any]", said: Any) -> None:
+    """Return once the editor on ``port`` answers ``/api/meta``; fail when ``proc`` exits first or never answers.
+    ``said`` gives what it printed, for the failure."""
+    deadline = time.monotonic() + START_TIMEOUT
+    while time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(f"http://{cli.STUDIO_HOST}:{port}/api/meta", timeout=5.0):
+                return
+        except (urllib.error.URLError, OSError):
+            if proc.poll() is not None:
+                raise AssertionError(f"the editor exited before answering:\n{said()}") from None
+            time.sleep(0.05)
+    raise AssertionError(f"the editor never answered:\n{said()}")
+
+
+@pytest.fixture
+def live(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A test that runs a lifecycle command in-process against the editor IT started: the requests go out again."""
+    monkeypatch.setattr(serving, "_urlopen", urllib.request.urlopen)
+
+
 def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         probe.bind((cli.STUDIO_HOST, 0))
@@ -119,7 +149,7 @@ class _Editor:
         self.proc = subprocess.Popen(
             [
                 *EDITOR_CLI,
-                "run",
+                "open",
                 str(folder),
                 "--port",
                 str(self.port),
@@ -127,6 +157,7 @@ class _Editor:
                 str(work / "templates"),
             ],
             cwd=work,  # never the workspace root: its liquifai/ folder shadows the installed package
+            env=_own_home(),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -140,13 +171,7 @@ class _Editor:
         ]
         for reader in self._readers:
             reader.start()
-        ready = f"Running on http://{cli.STUDIO_HOST}:{self.port}"
-        while True:
-            line = self._lines.get(timeout=START_TIMEOUT)
-            if line is None and self.proc.poll() is not None:
-                raise AssertionError(f"the editor exited before listening:\n{''.join(self.out + self.err)}")
-            if line is not None and ready in line:
-                return
+        _wait_until_answering(self.port, self.proc, lambda: "".join(self.out + self.err))
 
     def _drain(self, stream: Any, into: List[str]) -> None:  # stream: the child's text pipe
         for line in stream:
@@ -287,17 +312,17 @@ def test_restore_then_save_then_stop_leaves_no_file(folder: Path, start: Any) ->
 
 
 def test_streamstudio_stop_names_the_unsaved_work_it_kept(
-    folder: Path, start: Any, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    folder: Path, start: Any, live: None, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     editor = start()
     editor.call("POST", "api/graphs/demo/param", EDIT)
-    monkeypatch.setattr(sys, "argv", ["streamstudio", "stop", "--port", str(editor.port)])
+    monkeypatch.setattr(sys, "argv", ["streamstudio", "stop", str(editor.port)])
     cli.main()
     assert editor.wait() == 0
-    assert capsys.readouterr().out.splitlines()[-1] == (
-        f"Stopped StreamStudio on port {editor.port} (pid {editor.proc.pid}). Its unsaved work (demo.yaml) is kept "
-        f"in {folder / RECOVERY_FILE} — the next start asks what to do."
-    )
+    assert capsys.readouterr().out.splitlines()[-2:] == [
+        f"streamstudio ({folder}): stopped pid {editor.proc.pid} (port {editor.port})",
+        f"Its unsaved work (demo.yaml) is kept in {folder / RECOVERY_FILE} — the next start asks what to do.",
+    ]
     assert os.path.exists(folder / RECOVERY_FILE)
 
 
@@ -323,7 +348,7 @@ def test_two_editors_on_one_folder_stopped_at_once_both_keep_their_work(
         assert line in editor.printed(), editor.printed()
 
 
-def test_a_restart_with_no_folder_serves_the_folder_the_running_editor_served(
+def test_a_restart_of_a_port_serves_the_folder_the_running_editor_served(
     folder: Path, tmp_path: Path, start: Any
 ) -> None:
     """Measured before (R6): ``streamstudio restart --port N`` typed in another folder served THAT folder — an empty
@@ -336,27 +361,20 @@ def test_a_restart_with_no_folder_serves_the_folder_the_running_editor_served(
         [
             *EDITOR_CLI,
             "restart",
-            "--port",
             str(first.port),
-            "--templates-dir",
-            str(tmp_path / "templates"),
         ],
         cwd=elsewhere,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,  # werkzeug's "Running on" line and the CLI's own lines, in one pipe
-        text=True,
+        env=_own_home(),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
     try:
         assert first.wait() == 0
-        ready = f"Running on http://{cli.STUDIO_HOST}:{first.port}"
-        seen: List[str] = []
-        assert restarted.stdout is not None
-        for line in restarted.stdout:
-            seen.append(line)
-            if ready in line:
-                break
-        else:
-            raise AssertionError(f"the restarted editor never listened:\n{''.join(seen)}")
+        _wait_until_answering(first.port, restarted, lambda: "(its output is not kept)")
+        meta = first.call("GET", "api/meta")
+        assert meta["pid"] == restarted.pid and meta["workspace"]["options"] == {
+            "templates_dir": str(tmp_path / "templates")
+        }
         workspace = first.call("GET", "api/workspace")
         assert workspace["folder"] == str(folder)
         assert [graph["name"] for graph in workspace["recovery"]["graphs"]] == ["demo"]
@@ -375,25 +393,18 @@ def test_a_closed_terminal_window_keeps_the_work_although_nothing_can_be_printed
     trace = tmp_path / "editor-writes.txt"
     terminal, editor_side = pty.openpty()
     proc = subprocess.Popen(
-        [*TRACED_EDITOR_CLI, "run", str(folder), "--port", str(port)]
+        [*TRACED_EDITOR_CLI, "open", str(folder), "--port", str(port)]
         + ["--templates-dir", str(tmp_path / "templates")],
         cwd=tmp_path,  # never the workspace root: its liquifai/ folder shadows the installed package
         stdin=editor_side,
         stdout=editor_side,
         stderr=editor_side,
         close_fds=True,
-        env={**os.environ, "EDITOR_TRACE": str(trace)},
+        env={**_own_home(), "EDITOR_TRACE": str(trace)},
     )
     os.close(editor_side)
     try:
-        ready = f"Running on http://{cli.STUDIO_HOST}:{port}".encode()
-        seen = b""
-        while ready not in seen:
-            readable, _, _ = select.select([terminal], [], [], START_TIMEOUT)
-            assert readable, f"the editor never listened:\n{seen.decode(errors='replace')}"
-            chunk = os.read(terminal, 4096)
-            assert chunk, f"the editor exited before listening:\n{seen.decode(errors='replace')}"
-            seen += chunk
+        _wait_until_answering(port, proc, lambda: "(it printed to the pseudo-terminal)")
         request = urllib.request.Request(
             f"http://{cli.STUDIO_HOST}:{port}/api/graphs/demo/param",
             data=json.dumps(EDIT).encode(),

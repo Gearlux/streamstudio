@@ -42,10 +42,8 @@ dependencies = [
     "recordstream>=0.1.0a3",
     # Imported lazily by the HuggingFace pickers (streamstudio/__init__.py: a dataset's columns and splits).
     "datasets",
-    # Imported at MODULE scope by cli.py: `stop` / `restart` locate the running studio by the port
-    # it holds, and the only unprivileged way to do that is a per-process connection scan (the
-    # whole-system psutil.net_connections() raises AccessDenied on macOS).
-    "psutil",
+    # The standalone server: serving, `stop` / `restart` / `list` by the server's identity (cli.py).
+    "portail>=0.1.0a1",
     # Imported at MODULE scope by document.py / _yamltext.py: the document model composes the YAML
     # text with PyYAML's own node tree (yaml.compose) to locate the line a marker came from, and
     # spells patched values with yaml.safe_dump. Already transitive via confluid; declared because
@@ -72,12 +70,11 @@ dev = [
     "isort>=5.13.0,<6.0.0",
     "flake8>=6.0.0,<8.0.0",
     "mypy>=1.0.0,<2.0.0",
-    # Type stubs for two DECLARED dependencies that ship none (pyyaml, psutil). This project's own CI
+    # Type stubs for a DECLARED dependency that ships none (pyyaml). This project's own CI
     # runs `mypy .` from the project directory with the default error codes, so without them every
-    # `import yaml` / `import psutil` is an `import-untyped` error there (the workspace-root run hides
+    # `import yaml` is an `import-untyped` error there (the workspace-root run hides
     # it by disabling that code).
     "types-PyYAML>=6.0.0",
-    "types-psutil",
     "pytest>=7.0.0,<9.0.0",
     "pytest-cov>=4.0.0,<7.0.0",
 ]
