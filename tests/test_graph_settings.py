@@ -986,3 +986,71 @@ class TestASettingSavedAtOnce:
         assert "save must be" in _error(answer)
         assert not (folder / "pane.settings.yaml").exists()
         assert _ok(client.get("/api/graphs/pane"))["dirty"] is False
+
+
+class TestAHostSetsSeveralSettings:
+    """What a HOST calls for a gesture of its own that changes settings — a knob of its page, a remembered run picked,
+    a reset: ``Studio.settings`` / ``set_settings`` / ``reset_settings``. Each takes the editor's turn itself, names a
+    setting by its KEY, saves the settings file alone and tells the host — or, when the save is refused, undoes every
+    edit it made: a gesture saved "at once" is saved or leaves nothing held."""
+
+    def test_the_settings_as_the_editor_holds_them(self, client: Any, folder: Path) -> None:
+        _write(folder, "pane.settings.yaml", "flow.third.op.level: 0.6\n")
+        held = studio_of(client.application).settings("pane")
+        assert sorted(held) == sorted(PANE_SETTINGS)
+        assert (held["flow.first.op.level"], held["flow.third.op.level"]) == (0.25, 0.6)
+
+    def test_several_settings_are_set_and_saved_as_one(self, client: Any, folder: Path) -> None:
+        studio = studio_of(client.application)
+        held = studio.set_settings("pane", {"flow.first.op.level": 0.5, "flow.third.op.level": 0.6})
+        assert (folder / "pane.settings.yaml").read_text() == "flow.first.op.level: 0.5\nflow.third.op.level: 0.6\n"
+        assert (held["flow.first.op.level"], held["flow.third.op.level"]) == (0.5, 0.6)
+        assert studio.dirty("pane") is False and held == studio.settings("pane")
+
+    def test_a_key_the_graph_does_not_declare_sets_nothing(self, client: Any, folder: Path) -> None:
+        studio = studio_of(client.application)
+        with pytest.raises(
+            ValueError, match="flow.nope.op.level is not a setting of pane — its settings are: flow.first"
+        ):
+            studio.set_settings("pane", {"flow.first.op.level": 0.5, "flow.nope.op.level": 1})
+        assert not (folder / "pane.settings.yaml").exists()
+        assert studio.settings("pane")["flow.first.op.level"] == 0.25 and studio.dirty("pane") is False
+
+    def test_no_values_change_nothing(self, client: Any, folder: Path) -> None:
+        studio = studio_of(client.application)
+        assert studio.set_settings("pane", {}) == studio.settings("pane")
+        assert not (folder / "pane.settings.yaml").exists()
+
+    def test_a_refused_save_undoes_every_setting_it_set(self, client: Any, folder: Path) -> None:
+        settings = _write(folder, "pane.settings.yaml", "flow.first.op.level: 0.9\n")
+        _ok(client.post("/api/graphs/pane/param", json={"node": "first", "param": "level", "value": 0.7}))  # unsaved
+        studio = studio_of(client.application)
+        before = studio.document("pane").held()
+        settings.write_text("flow.second.op.floor_db: -40.0\n")  # another program
+
+        with pytest.raises(ValueError, match="changed on disk"):
+            studio.set_settings("pane", {"flow.third.op.level": 0.6, "flow.second.op.floor_db": -30.0})
+        assert studio.document("pane").held() == before, "only the edit the editor's own tab held stays"
+        assert settings.read_text() == "flow.second.op.floor_db: -40.0\n", "the other program's file is untouched"
+
+    def test_a_reset_removes_the_settings_file_and_says_whether_it_changed_anything(
+        self, client: Any, folder: Path
+    ) -> None:
+        settings = _write(folder, "pane.settings.yaml", "flow.first.op.level: 0.9\n")
+        studio = studio_of(client.application)
+        assert studio.settings("pane")["flow.first.op.level"] == 0.9
+        assert studio.reset_settings("pane") is True
+        assert not settings.exists() and studio.settings("pane")["flow.first.op.level"] == 0.25
+        assert studio.reset_settings("pane") is False, "nothing left to reset"
+
+    def test_a_refused_reset_is_undone(self, client: Any, folder: Path) -> None:
+        settings = _write(folder, "pane.settings.yaml", "flow.first.op.level: 0.9\n")
+        _ok(client.post("/api/graphs/pane/param", json={"node": "first", "param": "level", "value": 0.7}))  # unsaved
+        studio = studio_of(client.application)
+        before = studio.document("pane").held()
+        settings.write_text("flow.second.op.floor_db: -40.0\n")  # another program
+
+        with pytest.raises(ValueError, match="changed on disk"):
+            studio.reset_settings("pane")
+        assert studio.document("pane").held() == before
+        assert settings.read_text() == "flow.second.op.floor_db: -40.0\n"

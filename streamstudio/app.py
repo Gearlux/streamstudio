@@ -1299,6 +1299,59 @@ class Studio:
             raise
         return self._tell_host(written, self.graph(name))
 
+    def settings(self, name: str) -> Dict[str, Any]:  # a value: any YAML scalar or container
+        """The settings of the graph ``name`` as the editor holds them — ``{key: value}`` in the order its ``app:``
+        block declares them, each the settings file's value, else what the graph gives its node. What a HOST reads to
+        show a graph's settings in a surface of its own."""
+        with self.lock:
+            document = self.document(name)
+            model = document.model
+            return {field.key: model.node(field.node).params[field.param].value for field in document.declared().fields}
+
+    def set_settings(self, name: str, values: Mapping[str, Any]) -> Dict[str, Any]:  # a value: as above
+        """Set the settings ``values`` names by their KEY and save the graph's settings file alone — one gesture of a
+        HOST (a knob of its page, a remembered run picked), in ONE turn of the editor. Answers :meth:`settings`.
+
+        A key the graph does not declare is refused naming its settings, and nothing is set. A refused save (a file
+        changed on disk, a disk that will not take it) UNDOES every setting it set before it raises, as
+        :meth:`set_param` with ``save="settings"`` does for one: saved, or nothing left held. No values change
+        nothing and write nothing."""
+        with self.lock:
+            document = self.document(name)
+            fields = {field.key: field for field in document.declared().fields}
+            unknown = [key for key in values if key not in fields]
+            if unknown:
+                raise ValueError(
+                    f"{', '.join(unknown)} is not a setting of {name} — its settings are: {', '.join(fields) or 'none'}"
+                )
+            edits = 0
+            try:
+                for key, value in values.items():
+                    document.set_param(fields[key].node, fields[key].param, value)
+                    edits += 1
+                if edits:
+                    self.save(name, only="settings")
+            except (ValueError, OSError):
+                for _ in range(edits):
+                    document.undo()
+                raise
+            return self.settings(name)
+
+    def reset_settings(self, name: str) -> bool:
+        """Every setting of the graph ``name`` back to the value the graph itself gives its node, SAVED — which
+        removes the settings file (:meth:`Document.reset_settings`). Answers whether anything was reset. A refused
+        save undoes the reset before it raises, as :meth:`set_settings` does."""
+        with self.lock:
+            document = self.document(name)
+            if not document.reset_settings():
+                return False
+            try:
+                self.save(name, only="settings")
+            except (ValueError, OSError):
+                document.undo()
+                raise
+            return True
+
     def set_slot(self, name: str, node: str, slot: str, class_path: str, params: Dict[str, Any]) -> Dict[str, Any]:
         """Put a new ``class_path`` object, built from ``params``, into the single slot ``slot`` of ``node`` — what
         it held is replaced (:meth:`Document.set_slot`; one edit). The canvas's *set source…*. Answers the graph plus

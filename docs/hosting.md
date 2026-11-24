@@ -37,13 +37,16 @@ editor_link("view_scan", tab="settings")         # "studio/?graph=view_scan&embe
 keep_unsaved_edits(app)                          # on the host's own stop: the unsaved work is offered at the next start
 ```
 
-The four calls a host makes, all from `streamstudio.app`:
+The calls a host makes, all from `streamstudio.app` (`studio` is what `mount_editor` answers, `studio_of(app)`):
 
 | call | does |
 | --- | --- |
 | `mount_editor(app, host, prefix="/studio")` | registers the editor's API (`editor_blueprint`) and its page (`page_blueprint`) under one prefix and answers the editor (`studio_of(app)`). A host that wants the API alone registers `editor_blueprint` itself. |
 | `editor_link(graph, tab="", only="", prefix="/studio")` | the link the host's page frames the editor by, RELATIVE to that page so it holds behind a path proxy. `tab` is `text`, `settings` or `run`; `only="settings"` shows the settings form and nothing else. Any other word is a `ValueError` naming the ones the page knows. |
 | `keep_unsaved_edits(app)` | on the host's way out: the unsaved work goes into the folder's recovery file. Answers the graph files kept; `[]` when nothing was unsaved or no editor is mounted. |
+| `studio.settings(graph)` | the graph's settings as the editor holds them, `{key: value}` — what a host shows in a surface of its own. |
+| `studio.set_settings(graph, {key: value, …})` | one gesture of the host that changes settings (a knob of its page, a remembered run): every named setting set and the settings file saved, in one turn of the editor. A key the graph does not declare is a `ValueError` naming its settings, and nothing is set. A save the editor refuses undoes every setting it set: saved, or nothing left held. |
+| `studio.reset_settings(graph)` | every setting back to the graph's own value, saved (the settings file goes); answers whether anything changed; a refused save undoes it. |
 | `studio.forget(graph)` | after the host REPLACED or removed a graph itself (a copy written into the folder of a graph it ships, a graph deleted): the editor lets go of the one it holds and reads afresh. Unsaved edits of it go too; the answer says whether there were any. A file the host merely rewrote needs no call — a graph holding nothing unsaved is read again by itself. |
 
 ```
@@ -182,10 +185,10 @@ The Run asked the host for its record and set its fill on `mask` (`Threshold` ha
 
   ```python
   studio = studio_of(app)
-  with studio.lock:                     # waits while the panel's request is served
+  studio.set_settings("view_fft", {"flow.fft.op.size": 4096})   # one turn of the editor: set, saved — or undone
+  with studio.lock:                     # anything else: waits while the panel's request is served
       document = studio.document("view_fft")
-      document.set_param("fft", "size", 4096)
-      studio.save("view_fft", only="settings")
+      ...
   ```
 
 ### The page in the host's panel
@@ -228,8 +231,8 @@ person whether to restore it, and opens no graph — the one the link or an `ope
 answered. Meanwhile every `state` says `asking: true`, so a host that covers its panel until the graph it asked for
 shows must uncover it then, or the question is never seen.
 
-A host that saves a SETTING itself does it through the editor — `studio_of(app).document(name).set_param(node, param,
-value)`, then `studio_of(app).save(name, only="settings")`, the editor staying the settings file's one writer — and
+A host that saves a SETTING itself does it through the editor — `studio_of(app).set_settings(name, {key: value})`,
+the editor staying the settings file's one writer — and
 posts `open` for the graph shown: the page shows the new value (an `open` of the graph shown re-presents it when its
 text or its model changed).
 

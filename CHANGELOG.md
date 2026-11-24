@@ -7,6 +7,10 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **A host sets a graph's settings in one call** — `Studio.settings(graph)` reads them by key,
+  `Studio.set_settings(graph, values)` sets several and saves the settings file in one turn, and
+  `Studio.reset_settings(graph)` puts every one back. A save the editor refuses undoes what the call set: saved, or
+  nothing left held (`docs/hosting.md`).
 - **A list of text is typed in the editor** — a `List[str]` setting (a class-names card's `names`, a source's
   `files`) is ONE text box on its card and in the settings tab, the names separated by commas: `cat, dog` writes
   `names: [cat, dog]`. It showed `∅` and could be set nowhere in the page. A list the box cannot spell back (a name

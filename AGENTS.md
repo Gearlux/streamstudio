@@ -234,7 +234,10 @@ arch: "A host mounts the editor through three methods"; pins `tests/test_host.py
   prefix)` (relative; an unknown `tab` / `only` is a `ValueError` naming the known ones), `keep_unsaved_edits(app)` on
   its stop (`studio_of(app).stash()`; no editor mounted answers `[]`, never an error) and `Studio.forget(name)` after
   it replaced or removed a graph itself (unsaved edits go with it; the answer says so). A host never touches
-  `Studio._documents`. (`tests/test_host.py::TestMountEditor`, `::TestEditorLink`, `::TestKeepUnsavedEdits`,
+  `Studio._documents`. **A host's gesture that changes settings goes through `Studio.set_settings` /
+  `reset_settings`** (keys, one turn, saved-or-undone), never its own `set_param` loop plus `save`: two hosts'
+  loops had no undo, and a refused save left their edit held for the stop to keep
+  (`tests/test_graph_settings.py::TestAHostSetsSeveralSettings`). (`tests/test_host.py::TestMountEditor`, `::TestEditorLink`, `::TestKeepUnsavedEdits`,
   `::TestForget`)
 - **One request at a time** (2026-10-13): every editor request holds `Studio.lock` (an `RLock`) — `_take_turn`, the
   blueprint's FIRST `before_request`, takes it and `_end_turn` (teardown) lets go, a refusal or a raise included;
