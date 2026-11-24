@@ -17,6 +17,9 @@ import {
   metadataChoices,
   metadataList,
   metadataText,
+  parseTextList,
+  textListEditable,
+  textListText,
   followPair,
   numberOrText,
   numberOrTextValue,
@@ -273,3 +276,48 @@ describe("a field that takes a number or text", () => {
     expect(numberOrTextValue("2.5", "integer")).toBe("2.5");
   });
 });
+
+describe("a list of text — typed as names separated by commas", () => {
+  it("the list as text and the text as a list", () => {
+    expect(textListText(["cat", "dog"])).toBe("cat, dog");
+    expect(textListText([])).toBe("");
+    expect(textListText(null)).toBe("");
+    expect(parseTextList("cat, dog")).toEqual(["cat", "dog"]);
+  });
+
+  it("spaces around a name go, and an empty name between commas is no name", () => {
+    expect(parseTextList("  cat ,dog ,, bird  ")).toEqual(["cat", "dog", "bird"]);
+    expect(parseTextList("two words, one")).toEqual(["two words", "one"]);
+  });
+
+  it("an empty box is an empty list", () => {
+    expect(parseTextList("")).toEqual([]);
+    expect(parseTextList("  ,  ")).toEqual([]);
+  });
+
+  it("a list the text can spell is editable: unset, empty, or plain names", () => {
+    expect(textListEditable(null)).toBe(true);
+    expect(textListEditable(undefined)).toBe(true);
+    expect(textListEditable([])).toBe(true);
+    expect(textListEditable(["cat", "dog"])).toBe(true);
+    expect(textListEditable(["0", "1"])).toBe(true);
+  });
+
+  it("CON: a list the text cannot spell back stays read-only", () => {
+    expect(textListEditable(["a, b", "c"])).toBe(false); // a name holding a comma would come back as two
+    expect(textListEditable([" padded"])).toBe(false); // the spaces would be trimmed away
+    expect(textListEditable([""])).toBe(false); // an empty name would vanish
+    expect(textListEditable([1, 2])).toBe(false); // numbers would come back as text
+    expect(textListEditable([["a"], ["b"]])).toBe(false);
+    expect(textListEditable("cat")).toBe(false); // a value that is no list (a reference, a typed word)
+    expect(textListEditable({ a: 1 })).toBe(false);
+  });
+
+  it("what is editable round-trips", () => {
+    for (const names of [[], ["cat"], ["cat", "dog"], ["two words", "x"]]) {
+      expect(textListEditable(names)).toBe(true);
+      expect(parseTextList(textListText(names))).toEqual(names);
+    }
+  });
+});
+

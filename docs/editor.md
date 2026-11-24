@@ -146,6 +146,18 @@ A menu bar across the top, the canvas in the middle, a side panel on the right w
 YAML as the editor holds it), **settings** (a form of every node on the level the canvas shows — of the graph's
 `app:` fields when it declares them, [below](settings.md#settings-a-graphs-app-fields)) and **run**.
 
+**A setting is typed where it is shown** — on its card, and in the settings tab. Enter or leaving the field saves the
+value into the editor; a refused value puts the old one back. What the field is follows the setting's type:
+
+| the setting is | its field |
+| --- | --- |
+| a choice | a list to pick from |
+| yes / no | a tick |
+| a number | a number box |
+| text | a text box |
+| a list of text (`names: List[str]`) | ONE text box, the names separated by commas: `cat, dog` writes `names: [cat, dog]`. Spaces around a name go; an emptied box writes an empty list. |
+| anything else (a mapping, a list of numbers, a list whose names hold a comma) | shown, not typed: edit it in the graph's YAML file |
+
 | menu | items (shortcut; on a Mac ⌘ for Ctrl) |
 | --- | --- |
 | **New** | Flow graph… · Pipeline… · Source graph (with its contract)… |
@@ -338,7 +350,8 @@ nothing selected it reads `Click adds at the end of stream.ops · drag places it
 The `Subgraph` class is not listed — an empty one
 is refused — and the footer says how one is made instead:
 `A subgraph is made from steps: Graph ▸ Convert selection to subgraph, Insert template ▸ or Insert steps file…`.
-Double-clicking empty canvas opens the same catalogue as a search palette.
+Double-clicking empty canvas opens the same catalogue as a search palette. It, too, looks for every word you type, in
+any order, in the class's name and path: `class names` finds `ClassNamesOutput`, as `ClassNames` does.
 
 **When the catalogue is read.** Building it means importing every installed package that declares classes (torch,
 TensorFlow, JAX, the training and detection backends) and describing each class. The editor does that in a separate

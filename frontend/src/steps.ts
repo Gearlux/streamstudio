@@ -28,10 +28,17 @@ export function paletteMatches(spec: NodeSpec, filter: PaletteFilter | undefined
   return spec.outputs.some((socket) => compatible(socket.type, filter.type, types));
 }
 
-/** The palette's text filter: a case-insensitive substring of the class path or of the class name. */
+/**
+ * The palette's text filter, case-insensitive: every word of the query is a part of the class path or of the class
+ * name — so `class names` finds `ClassNamesOutput` as `ClassNames` does, the words in any order.
+ */
 export function searchMatches(spec: Pick<NodeSpec, "class_path" | "name">, query: string): boolean {
-  const needle = query.trim().toLowerCase();
-  return needle === "" || spec.class_path.toLowerCase().includes(needle) || spec.name.toLowerCase().includes(needle);
+  const searched = `${spec.class_path} ${spec.name}`.toLowerCase();
+  return query
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(Boolean)
+    .every((word) => searched.includes(word));
 }
 
 /** `base` when it is free, else `base2`, `base3`, … — a new subgraph's or template's suggested name. */

@@ -156,6 +156,28 @@ export function parseMetadata(text: string): Json {
   return columns.length === 1 && columns[0] === ALL_COLUMNS ? ALL_COLUMNS : columns;
 }
 
+/**
+ * May a `List[str]` value be typed as names separated by commas? — an unset one, or a list of names the text spells
+ * back as they are: text only, none empty, none holding a comma or a space at its ends. Any other value (a list of
+ * numbers or of lists, a name with a comma, a value that is no list) stays read-only: typed, it would come back changed.
+ */
+export function textListEditable(value: Json | undefined): boolean {
+  if (value === null || value === undefined) return true;
+  if (!Array.isArray(value)) return false;
+  return value.every((item) => typeof item === "string" && item !== "" && item === item.trim() && !item.includes(","));
+}
+
+/** The text a `List[str]` field shows: its names, comma-separated (nothing for an unset or empty list). */
+export const textListText = (value: Json | undefined): string =>
+  Array.isArray(value) ? value.filter((item): item is string => typeof item === "string").join(", ") : "";
+
+/** The list a typed `List[str]` text commits: the names between the commas, trimmed, an empty one dropped. */
+export const parseTextList = (text: string): string[] =>
+  text
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+
 /** The value after "add column" picked `column`: `*` replaces the list; a column is appended (once; never after `*`). */
 export function withColumn(current: Json | undefined, column: string): Json {
   if (column === ALL_COLUMNS) return ALL_COLUMNS;

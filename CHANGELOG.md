@@ -7,6 +7,10 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **A list of text is typed in the editor** — a `List[str]` setting (a class-names card's `names`, a source's
+  `files`) is ONE text box on its card and in the settings tab, the names separated by commas: `cat, dog` writes
+  `names: [cat, dog]`. It showed `∅` and could be set nowhere in the page. A list the box cannot spell back (a name
+  holding a comma, a list of numbers) stays shown, not typed.
 - **A host's calls in one place** (`streamstudio.app`): `mount_editor(app, host, prefix="/studio")` registers the API
   and the page under one prefix; `editor_link(graph, tab="", only="", prefix="/studio")` is the relative link a host's
   page frames the editor by; `keep_unsaved_edits(app)` keeps the unsaved work on the host's way out; and
@@ -30,6 +34,9 @@ All notable changes to this project are documented here. The format follows
   work, when no graph opens until the person answers — a host that covers its panel while a graph loads uncovers it.
 
 ### Changed
+- **The search palette looks for every word** — the palette a double-click or a dropped wire opens matched the
+  query as one piece, so `class names` found nothing; it now finds `ClassNamesOutput`, the words in any order, as
+  the Nodes sidebar's search does.
 - **The command line.** The standalone editor is served by portail. `streamstudio stop` and `restart` name a server
   by its port or its folder (`streamstudio stop 8191`, `streamstudio stop path/to/graphs`) instead of `--port`, and
   only ever touch a StreamStudio server: a port another program holds is refused, never stopped. A folder already

@@ -224,6 +224,12 @@ arch: "A host mounts the editor through three methods"; pins `tests/test_host.py
   the settings sheet's change was refused as changed on disk and kept, and its restore showed settings the file did
   not hold. (`tests/test_graph_settings.py::TestTheSettingsFollowTheDisk`) arch: "A settings file the editor holds
   nothing unsaved of follows the disk".
+- **A `List[str]` setting is ONE text box of names separated by commas** (`ParamWidget`'s `TextListField`,
+  `pickers.parseTextList` / `textListEditable`): an emptied box is `[]`, a box left empty on a list the document
+  never set commits nothing, and a list the box cannot spell back (a name with a comma or outer spaces, numbers,
+  nested lists, a non-list value) stays read-only. No other container gets a field. The palette's search
+  (`steps.searchMatches`) matches every word of the query. (`frontend/src/__tests__/pickers.test.ts`,
+  `steps.test.ts`, `tests/test_add_node.py::TestTheWireDroppedOnEmptyCanvas::test_the_names_typed_into_the_new_card_are_written_as_a_list`)
 - **A host's four calls are `streamstudio.app`'s** — `mount_editor(app, host, prefix)`, `editor_link(graph, tab, only,
   prefix)` (relative; an unknown `tab` / `only` is a `ValueError` naming the known ones), `keep_unsaved_edits(app)` on
   its stop (`studio_of(app).stash()`; no editor mounted answers `[]`, never an error) and `Studio.forget(name)` after

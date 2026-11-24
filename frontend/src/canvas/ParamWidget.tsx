@@ -6,8 +6,9 @@
  * merged with the settings form (`GET …/form`): an `enum` is a select, `boolean` a checkbox, `number` / `integer`
  * a number input carrying the schema's `minimum` / `maximum` — but a number OR text (`Union[float, str]`, a number
  * written with its unit) a text input sending a plain number as a number (`pickers.numberOrText`) —, a `(min, max)` pair two such inputs (`pickers.rangePair` —
- * the ComfyUI editor's `__lo` / `__hi` widgets), `string` a text input, and anything else the document spells as a
- * container (`List[str]`, `object`) is shown read-only — the document text is where that is edited.
+ * the ComfyUI editor's `__lo` / `__hi` widgets), `string` a text input, a list of text (`List[str]`) ONE text input
+ * of names separated by commas (`pickers.parseTextList`), and anything else the document spells as a container
+ * (`object`, a list that field cannot spell) is shown read-only — the graph's YAML file is where that is edited.
  *
  * A fragment the server marked with a `picker` (`pickers.ts`) adds the ComfyUI editor's chooser beside the field: a
  * `directory` or `file` field a `…` button opening the editor's file browser (`data-browse`), a HuggingFace source's
@@ -36,6 +37,7 @@ import {
   numberOrTextValue,
   pairValue,
   parseMetadata,
+  parseTextList,
   pickerFor,
   pluginLookupKey,
   forgetLookup,
@@ -43,6 +45,8 @@ import {
   pluginTag,
   pluginValues,
   rangePair,
+  textListEditable,
+  textListText,
   withColumn,
   type LookupPicker as LookupKind,
   type PairEnd,
@@ -195,11 +199,45 @@ export function ParamWidget({ param, schema, onCommit, values = NO_VALUES }: Par
       </span>
     );
   }
-  // a container (`List[str]`, `object`) or an unspelled default: shown as the document would spell it
+  if (param.type === LIST_STR && textListEditable(param.value)) return <TextListField param={param} commit={commit} />;
+  // a container (`object`, a list the text field cannot spell) or an unspelled default: shown as the document
+  // would spell it
   return (
-    <code className="ro" data-param={param.name} title={`${param.type} — edit it in the document text`}>
+    <code className="ro" data-param={param.name} title={`${param.type} — edit it in the graph's YAML file`}>
       {truth || "∅"}
     </code>
+  );
+}
+
+/** The socket type of a list of text, as the model names it (`streamstudio.document.LIST_STR`). */
+const LIST_STR = "List[str]";
+
+/**
+ * A list of text as ONE text field, its names separated by commas (`cat, dog` → `[cat, dog]`). An emptied box is an
+ * empty list — but a box left empty on a list the document never set commits nothing, so a click through the field
+ * writes no `names: []`.
+ */
+function TextListField({ param, commit }: { param: Param; commit: (value: Json) => Promise<boolean> }) {
+  const truth = textListText(param.value);
+  const [draft, setDraft] = useState(truth);
+  useEffect(() => setDraft(truth), [truth]);
+  return (
+    <input
+      type="text"
+      className="nodrag"
+      data-param={param.name}
+      data-list="text"
+      placeholder="a, b, …"
+      title="names separated by commas"
+      value={draft}
+      onChange={(event) => setDraft(event.target.value)}
+      onKeyDown={blurOnEnter}
+      onBlur={() => {
+        const names = parseTextList(draft);
+        if (names.length === 0 && !Array.isArray(param.value)) return setDraft(truth);
+        void commit(names).then((taken) => taken && setDraft(names.join(", ")));
+      }}
+    />
   );
 }
 
