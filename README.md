@@ -103,13 +103,13 @@ Three kinds of graph:
 
 ```python
 from flask import Flask
-from streamstudio.app import editor_blueprint, page_blueprint, studio_of
+from streamstudio.app import editor_blueprint, keep_unsaved_edits, page_blueprint
 
 app = Flask(__name__)
 app.register_blueprint(editor_blueprint(graph_dir), url_prefix="/studio")   # the API at /studio/api/…
 app.register_blueprint(page_blueprint(), url_prefix="/studio")             # the page at /studio/
 ...
-studio_of(app).stash()   # on your app's stop: unsaved work is offered at the next start
+keep_unsaved_edits(app)   # on your app's stop: unsaved work is offered at the next start
 ```
 
 Instead of a folder, an app may give the editor a HOST — an object with a `name` and the methods `folder()`,

@@ -7,6 +7,10 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **A host's calls in one place** (`streamstudio.app`): `mount_editor(app, host, prefix="/studio")` registers the API
+  and the page under one prefix; `editor_link(graph, tab="", only="", prefix="/studio")` is the relative link a host's
+  page frames the editor by; `keep_unsaved_edits(app)` keeps the unsaved work on the host's way out; and
+  `Studio.forget(name)` lets go of a graph the host replaced or removed itself (`docs/hosting.md`).
 - `streamstudio list` (every running editor: port, folder, address), `--background` / `-b` (serve detached),
   `--auto-port`, `--browser always|new|never` and `streamstudio stop --all`.
 - The file browser has a row of buttons that jump to a folder — the graph folder, then `HOME`, `PROJECT_ROOT`,

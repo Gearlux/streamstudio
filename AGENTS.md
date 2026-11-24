@@ -224,7 +224,12 @@ arch: "A host mounts the editor through three methods"; pins `tests/test_host.py
   the settings sheet's change was refused as changed on disk and kept, and its restore showed settings the file did
   not hold. (`tests/test_graph_settings.py::TestTheSettingsFollowTheDisk`) arch: "A settings file the editor holds
   nothing unsaved of follows the disk".
-- The host's stop calls `studio_of(app).stash()`.
+- **A host's four calls are `streamstudio.app`'s** — `mount_editor(app, host, prefix)`, `editor_link(graph, tab, only,
+  prefix)` (relative; an unknown `tab` / `only` is a `ValueError` naming the known ones), `keep_unsaved_edits(app)` on
+  its stop (`studio_of(app).stash()`; no editor mounted answers `[]`, never an error) and `Studio.forget(name)` after
+  it replaced or removed a graph itself (unsaved edits go with it; the answer says so). A host never touches
+  `Studio._documents`. (`tests/test_host.py::TestMountEditor`, `::TestEditorLink`, `::TestKeepUnsavedEdits`,
+  `::TestForget`)
 - **One request at a time** (2026-10-13): every editor request holds `Studio.lock` (an `RLock`) — `_take_turn`, the
   blueprint's FIRST `before_request`, takes it and `_end_turn` (teardown) lets go, a refusal or a raise included;
   `stash()` takes it. A host that reads, changes and saves a document from its own route holds it across all three.

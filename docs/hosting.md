@@ -8,7 +8,7 @@ methods.
 from pathlib import Path
 from typing import Mapping, Sequence
 
-from streamstudio.app import HostRecord, editor_blueprint, page_blueprint, studio_of
+from streamstudio.app import HostRecord, editor_link, keep_unsaved_edits, mount_editor
 
 
 class ViewerHost:
@@ -31,11 +31,20 @@ class ViewerHost:
         return {"view_scan": Path(my_package.__file__).parent / "graphs" / "scan.yaml"}
 
 
-app.register_blueprint(editor_blueprint(host=ViewerHost(viewer)), url_prefix="/studio")   # /studio/api/…
-app.register_blueprint(page_blueprint(), url_prefix="/studio")                          # the page at /studio/
+studio = mount_editor(app, ViewerHost(viewer))   # the API at /studio/api/…, the page at /studio/
 ...
-studio_of(app).stash()   # on the host's own stop: the unsaved work is offered at the next start
+editor_link("view_scan", tab="settings")         # "studio/?graph=view_scan&embed=1&tab=settings", for the host's page
+keep_unsaved_edits(app)                          # on the host's own stop: the unsaved work is offered at the next start
 ```
+
+The four calls a host makes, all from `streamstudio.app`:
+
+| call | does |
+| --- | --- |
+| `mount_editor(app, host, prefix="/studio")` | registers the editor's API (`editor_blueprint`) and its page (`page_blueprint`) under one prefix and answers the editor (`studio_of(app)`). A host that wants the API alone registers `editor_blueprint` itself. |
+| `editor_link(graph, tab="", only="", prefix="/studio")` | the link the host's page frames the editor by, RELATIVE to that page so it holds behind a path proxy. `tab` is `text`, `settings` or `run`; `only="settings"` shows the settings form and nothing else. Any other word is a `ValueError` naming the ones the page knows. |
+| `keep_unsaved_edits(app)` | on the host's way out: the unsaved work goes into the folder's recovery file. Answers the graph files kept; `[]` when nothing was unsaved or no editor is mounted. |
+| `studio.forget(graph)` | after the host REPLACED or removed a graph itself (a copy written into the folder of a graph it ships, a graph deleted): the editor lets go of the one it holds and reads afresh. Unsaved edits of it go too; the answer says whether there were any. A file the host merely rewrote needs no call — a graph holding nothing unsaved is read again by itself. |
 
 ```
 GET /studio            -> 308 /studio/            GET /studio/api/graphs    -> the host folder's graphs
@@ -62,7 +71,7 @@ import numpy as np
 from flask import Flask
 from recordstream.items import Image
 
-from streamstudio.app import HostRecord, editor_blueprint, page_blueprint
+from streamstudio.app import HostRecord, mount_editor
 
 
 class Host:
@@ -86,8 +95,7 @@ class Host:
 
 
 app = Flask(__name__)
-app.register_blueprint(editor_blueprint(host=Host(Path(sys.argv[1]))), url_prefix="/studio")
-app.register_blueprint(page_blueprint(), url_prefix="/studio")
+mount_editor(app, Host(Path(sys.argv[1])))
 
 client = app.test_client()
 print(client.get("/studio/api/workspace").get_json()["host"])
@@ -161,7 +169,7 @@ The Run asked the host for its record and set its fill on `mask` (`Threshold` ha
   it) is rewritten to name the same file from the new place (`../../steps/prep.steps.yaml`), in its undo history
   too, as Save As does; the graph is then unsaved, and Save writes the corrected include. An include between two
   files of the moved folder is left as written.
-- **`studio_of(app).stash()`** on the host's stop keeps the unsaved work in the host folder's recovery file
+- **`keep_unsaved_edits(app)`** (`studio_of(app).stash()`) on the host's stop keeps the unsaved work in the host folder's recovery file
   ([Unsaved work survives a stop](editor.md#unsaved-work-survives-a-stop)); the next mount over that folder offers it, and
   the page asks the same question as the standalone editor.
 - **One request at a time:** the panel's requests and the host's own reach the editor from the threads of one server,

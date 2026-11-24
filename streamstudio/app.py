@@ -89,6 +89,7 @@ from typing import (
     get_args,
     runtime_checkable,
 )
+from urllib.parse import urlencode
 
 import yaml
 from flask import Blueprint, Flask, Response, abort, current_app, g, jsonify, request, send_from_directory
@@ -834,6 +835,19 @@ class Studio:
         """Whether the editor holds changes of ``name`` its file does not (a graph never opened holds none)."""
         document = self._documents.get(name)
         return document is not None and document.dirty
+
+    def forget(self, name: str) -> bool:
+        """Let go of the document of ``name`` the editor holds, so its next use reads the graph afresh — what a HOST
+        calls after it replaced or removed the graph itself. :meth:`document` already reads a changed file again, but
+        not a graph that was the host's shipped one and now has a copy in the folder, nor one whose file is gone.
+
+        Whatever the editor held unsaved of it goes with it — the host decided the graph is another one now — and the
+        answer says whether there was any, so the host can say so. A graph the editor never opened is ``False``."""
+        with self.lock:
+            held = self._documents.pop(name, None)
+        if held is not None and held.dirty:
+            logger.debug(f"forgot {name} with unsaved edits: its host replaced or removed the graph")
+        return held is not None and held.dirty
 
     def graphs(self) -> List[Dict[str, Any]]:
         """``[{name, path, kind, dirty, shipped}]`` of every graph of the list — ``shipped``: still the graph its host
@@ -2421,11 +2435,66 @@ def studio_of(app: Flask) -> Studio:
     return studio
 
 
+#: Where a host mounts the editor unless it says otherwise: the page at ``/studio/``, the API at ``/studio/api/…``.
+#: Never the root of a host that has an ``/api/workspace`` of its own — the two would collide.
+STUDIO_PREFIX = "/studio"
+
+#: The side tabs of the editor's page a link may open (``?tab=``; ``text`` is the page's default).
+EditorTab = Literal["text", "settings", "run"]
+EDITOR_TABS = get_args(EditorTab)
+#: What a link may ask the page to show and nothing else — ``?only=settings``: the graph's settings form, each change
+#: saved at once.
+EditorOnly = Literal["settings"]
+EDITOR_ONLY = get_args(EditorOnly)
+
+
+def mount_editor(app: Flask, host: EditorHost, prefix: str = STUDIO_PREFIX) -> Studio:
+    """Mount the editor on a host's ``app``: its API (:func:`editor_blueprint`) and its page (:func:`page_blueprint`)
+    side by side under ``prefix``, hosted by ``host``. Answers the editor (:func:`studio_of`)."""
+    app.register_blueprint(editor_blueprint(host=host), url_prefix=prefix)
+    app.register_blueprint(page_blueprint(), url_prefix=prefix)
+    return studio_of(app)
+
+
+def editor_link(graph: str, tab: str = "", only: str = "", prefix: str = STUDIO_PREFIX) -> str:
+    """The link a host's page frames the editor by — ``studio/?graph=<name>&embed=1[&tab=<tab>][&only=settings]``.
+
+    RELATIVE to the host's page, so it holds wherever that page is served (behind a path proxy the page sits under a
+    prefix of the proxy's, and a link from the site's root would leave the host). ``graph`` is the name the editor
+    LISTS the graph under (its file's stem); ``embed=1`` is the page's embedded mode; ``tab`` opens one of
+    :data:`EDITOR_TABS`; ``only="settings"`` shows the settings form and nothing else.
+
+    Raises:
+        ValueError: ``tab`` is not one of :data:`EDITOR_TABS`, or ``only`` not one of :data:`EDITOR_ONLY`.
+    """
+    if tab and tab not in EDITOR_TABS:
+        raise ValueError(f"tab must be one of {', '.join(EDITOR_TABS)} — got {tab!r}")
+    if only and only not in EDITOR_ONLY:
+        raise ValueError(f"only must be one of {', '.join(EDITOR_ONLY)} — got {only!r}")
+    query = {"graph": graph, "embed": "1", **({"tab": tab} if tab else {}), **({"only": only} if only else {})}
+    return f"{prefix.strip('/')}/?{urlencode(query)}"
+
+
+def keep_unsaved_edits(app: Any) -> List[str]:  # app: a Flask app, or anything a host's way out is handed
+    """Keep the mounted editor's unsaved work in its folder's recovery file — what a host calls on its own way out
+    (:meth:`Studio.stash`). Answers the graph files kept: none when nothing was unsaved, and none — never an error —
+    when no editor is mounted on ``app``."""
+    try:
+        studio = studio_of(app)
+    except (KeyError, AttributeError):
+        return []
+    return list(studio.stash())
+
+
 __all__ = [
     "BROKEN_RECOVERY_FILE",
     "BUILD_COMMAND",
+    "EDITOR_ONLY",
+    "EDITOR_TABS",
     "EXTENSION",
     "EditorHost",
+    "EditorOnly",
+    "EditorTab",
     "FILE_SHOWS",
     "FileEntryKind",
     "FileShow",
@@ -2440,11 +2509,15 @@ __all__ = [
     "SESSION_HEADER",
     "SIDECAR_SUFFIX",
     "STEPS_SUFFIX",
+    "STUDIO_PREFIX",
     "Studio",
     "create_app",
     "default_templates_dir",
     "editor_blueprint",
+    "editor_link",
     "ensure_page_built",
+    "keep_unsaved_edits",
+    "mount_editor",
     "page_blueprint",
     "page_check_environment",
     "starter_text",

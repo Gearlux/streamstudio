@@ -39,6 +39,9 @@ from streamstudio.app import (
     HostRecord,
     create_app,
     editor_blueprint,
+    editor_link,
+    keep_unsaved_edits,
+    mount_editor,
     page_blueprint,
     studio_of,
     web_dist,
@@ -807,3 +810,115 @@ class TestTheHostsStop:
         host.where = moved
         assert studio_of(app).stash() == [str(moved / "pane.yaml")]
         assert (moved / RECOVERY_FILE).is_file()
+
+
+# ------------------------------------------------------------------------------------------------
+# the host's four calls: mount, link, keep on the way out, forget
+# ------------------------------------------------------------------------------------------------
+
+
+class TestMountEditor:
+    """``mount_editor`` is the mount every host makes: the API and the page under ONE prefix, the editor answered."""
+
+    def test_the_api_and_the_page_answer_under_studio(self, host: FakeHost) -> None:
+        app = Flask("host")
+        studio = mount_editor(app, host)
+        assert studio is studio_of(app)
+        client = app.test_client()
+        assert _ok(client.get("/studio/api/workspace"))["host"] == {"name": host.name}
+        assert client.get("/studio/").status_code == 200
+
+    def test_the_prefix_is_the_hosts_to_name(self, host: FakeHost) -> None:
+        app = Flask("host")
+        mount_editor(app, host, prefix="/graphs")
+        client = app.test_client()
+        assert client.get("/graphs/api/workspace").status_code == 200
+        assert client.get("/studio/api/workspace").status_code == 404
+
+    def test_CON_the_hosts_own_routes_stay_the_hosts(self, host: FakeHost) -> None:
+        app = Flask("host")
+
+        @app.get("/api/workspace")
+        def workspace() -> Dict[str, str]:
+            return {"owner": "the host"}
+
+        mount_editor(app, host)
+        assert app.test_client().get("/api/workspace").get_json() == {"owner": "the host"}
+
+
+class TestEditorLink:
+    """The link a host's page frames the editor by — RELATIVE, so it works wherever the host's page is served."""
+
+    def test_a_graphs_link_is_relative_and_embedded(self) -> None:
+        assert editor_link("view_scan") == "studio/?graph=view_scan&embed=1"
+
+    def test_a_tab_and_the_settings_alone(self) -> None:
+        assert editor_link("view_scan", tab="settings") == "studio/?graph=view_scan&embed=1&tab=settings"
+        assert editor_link("view_scan", only="settings") == "studio/?graph=view_scan&embed=1&only=settings"
+
+    def test_a_name_is_spelled_for_an_address(self) -> None:
+        assert editor_link("my graph&co") == "studio/?graph=my+graph%26co&embed=1"
+
+    def test_the_link_follows_the_hosts_prefix(self) -> None:
+        assert editor_link("pane", prefix="/graphs") == "graphs/?graph=pane&embed=1"
+
+    def test_a_tab_the_page_does_not_have_is_refused_naming_the_tabs(self) -> None:
+        with pytest.raises(ValueError, match="tab must be one of text, settings, run — got 'canvas'"):
+            editor_link("pane", tab="canvas")
+
+    def test_an_only_the_page_does_not_know_is_refused_naming_what_it_knows(self) -> None:
+        with pytest.raises(ValueError, match="only must be one of settings — got 'run'"):
+            editor_link("pane", only="run")
+
+
+class TestKeepUnsavedEdits:
+    """What a host calls on its way out: the unsaved work kept for the next start, never an error."""
+
+    def test_the_unsaved_work_is_kept_and_the_files_named(self, host: FakeHost, folder: Path, dist: Path) -> None:
+        app = host_app(host, dist)
+        client = app.test_client()
+        _ok(client.post(f"{PREFIX}/api/graphs/pane/param", json={"node": "gain", "param": "gain", "value": 3.0}))
+        assert keep_unsaved_edits(app) == [str(folder / "pane.yaml")]
+        assert (folder / RECOVERY_FILE).is_file()
+
+    def test_nothing_unsaved_keeps_nothing(self, host: FakeHost, folder: Path, dist: Path) -> None:
+        assert keep_unsaved_edits(host_app(host, dist)) == []
+        assert not (folder / RECOVERY_FILE).exists()
+
+    def test_CON_an_app_without_an_editor_answers_nothing(self) -> None:
+        assert keep_unsaved_edits(Flask("bare")) == []
+        assert keep_unsaved_edits(object()) == []
+
+
+class TestForget:
+    """A host that REPLACES or removes a graph itself tells the editor to let go of the one it holds."""
+
+    def test_a_shipped_graph_the_host_wrote_a_folder_copy_of_is_read_from_the_folder(
+        self, host: FakeHost, folder: Path, tmp_path: Path, dist: Path
+    ) -> None:
+        shipped = tmp_path / "shipped" / "extra.yaml"
+        shipped.parent.mkdir()
+        shipped.write_text(PANE_TEXT)
+        host.shipped = lambda: {"extra": shipped}  # type: ignore[method-assign]
+        app = host_app(host, dist)
+        client = app.test_client()
+        gain = TestTheHostWritesAGraph()._label
+        assert gain(_ok(client.get(f"{PREFIX}/api/graphs/extra"))) == 2.0
+
+        (folder / "extra.yaml").write_text(PANE_TEXT.replace("gain: 2.0", "gain: 5.0"))  # the host's own copy
+        assert studio_of(app).forget("extra") is False, "it held nothing unsaved"
+        assert gain(_ok(client.get(f"{PREFIX}/api/graphs/extra"))) == 5.0
+
+    def test_unsaved_edits_go_with_the_graph_and_the_answer_says_so(
+        self, host: FakeHost, folder: Path, dist: Path
+    ) -> None:
+        app = host_app(host, dist)
+        client = app.test_client()
+        _ok(client.post(f"{PREFIX}/api/graphs/pane/param", json={"node": "gain", "param": "gain", "value": 3.0}))
+        assert studio_of(app).forget("pane") is True
+        shown = _ok(client.get(f"{PREFIX}/api/graphs/pane"))
+        assert shown["dirty"] is False and TestTheHostWritesAGraph()._label(shown) == 2.0
+
+    def test_CON_a_graph_never_opened_is_forgotten_without_a_word(self, host: FakeHost, dist: Path) -> None:
+        assert studio_of(host_app(host, dist)).forget("pane") is False
+        assert studio_of(host_app(host, dist)).forget("no_such_graph") is False
