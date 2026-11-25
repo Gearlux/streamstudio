@@ -67,6 +67,9 @@ All notable changes to this project are documented here. The format follows
   (`{"dataset": "SHOP_DATASET"}`): the pickers and a plugin's lists read it.
 
 ### Fixed
+- **Run works on a pipeline that holds a helper stream.** A graph whose run stream draws from a split or a range
+  over a second, indexable stream was refused (`several streams draw records`); Run now traces the stream no
+  other node draws its records from.
 - `streamstudio restart` of a running editor serves with the templates folder that editor was started with.
 - A graph's settings file another program wrote is read again even while the graph holds other unsaved work (a
   moved node): a setting changed in the settings sheet, or a reset, no longer starts from the old text, is no

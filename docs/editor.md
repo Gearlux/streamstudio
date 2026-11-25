@@ -221,7 +221,11 @@ page asks first. On the document of [Subgraphs](#subgraphs--a-flow-used-as-one-s
 | **File ▸ Save** | `target_max: 2.0` | `demo.yaml` |
 | undo back to the saved text | unchanged | the ● goes away |
 
-**Run** traces what the editor holds, not the file: an unsaved value is the value the run uses.
+**Run** traces what the editor holds, not the file: an unsaved value is the value the run uses. In a graph of several
+streams it runs the one no other node draws its records from — a stream that only makes a source indexable for a
+split or a range is a helper, not the run. Two streams that are both an end of the graph are refused by name:
+`graph.yaml: several streams draw records (['first', 'second']) and no node draws from either — tracing one of
+several is not supported`.
 
 **Save refuses to overwrite someone else's change.** When the file changed on disk since the editor read or wrote
 it, nothing is written:

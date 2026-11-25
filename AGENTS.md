@@ -70,7 +70,9 @@ Invariants:
   writing nothing, when a file changed on disk since the editor read it (`CHANGED_ON_DISK`;
   `CHANGED_ON_DISK_INCLUDED` offers Revert only). arch: "Changes stay in the editor until Save". Five rules, each from
   a measured break:
-  1. The trace runs the in-memory document, never `confluid.load(path)`.
+  1. The trace runs the in-memory document, never `confluid.load(path)`. Of several streams with a source it runs
+     the one no other node reads as its `source` (`app._fed_stream`: a helper stream feeding a split or a range is
+     not the run); several ends are refused by name. (`tests/test_trace_stream.py`)
      (`tests/test_app.py::TestTrace::test_the_trace_runs_what_the_editor_shows_not_the_file_on_disk`)
   2. A read-only operation (Copy, Save as template) never holds an included file; when an edit first holds one,
      every older history entry gets the text it was read as.

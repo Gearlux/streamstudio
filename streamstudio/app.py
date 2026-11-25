@@ -1794,12 +1794,23 @@ def _no_source(where: str) -> str:
 
 def _fed_stream(model: Model, where: str) -> Optional[Node]:
     """The ONE engine node whose ``source`` slot is wired — the stream a trace draws its record from — or ``None``
-    when no stream draws its own records (the graph runs the record a host supplies)."""
+    when no stream draws its own records (the graph runs the record a host supplies).
+
+    Of several, the one no other node draws ITS records from: a pipeline may hold a helper stream that only makes a
+    source indexable for the split or the range the run stream then reads (measured before: such a graph was refused
+    whole — ``several streams draw records (['indexable', 'runnable.stream'])``). Several that are each an end of the
+    graph are refused by name: nothing says which the person means."""
     fed = {wire.target for wire in model.wires if wire.target_socket == "source"}
     streams = [node for node in model.nodes if node.kind == "engine" and node.name in fed]
     if len(streams) > 1:
+        read = {wire.source for wire in model.wires if wire.target_socket == "source"}
+        streams = [node for node in streams if node.name not in read]
+    if len(streams) > 1:
         names = [node.name for node in streams]
-        raise ValueError(f"{where}: several streams draw records ({names}) — tracing one of several is not supported")
+        raise ValueError(
+            f"{where}: several streams draw records ({names}) and no node draws from either — "
+            "tracing one of several is not supported"
+        )
     return streams[0] if streams else None
 
 
