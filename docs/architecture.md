@@ -42,7 +42,25 @@ and what is its own; everything else is portail's.
 - The state folder `~/.streamstudio` holds portail's registry of running editors (`servers/`) and the folder served
   last, beside the templates.
 - A restart of a port serves with the templates folder the running editor has.
-- The page has no ⏻ / ↻ button: that needs the shell's script in the page.
+- The standalone page's ↻ and ⏻ are the shell's (the update below).
+
+**Update 2026-11-25 — the page's ↻ and ⏻ are portail's shell.** The page loads the shell's script from beside itself
+(`portail/shell.js`, a relative address, so it holds behind a path proxy) and hands it one slot in the bar, after
+**Run** (`frontend/src/shell.ts`). The shell draws the two buttons there, so ↻ is `streamstudio restart <port>` and ⏻
+is `streamstudio stop <port>`: the unsaved work is kept by the same `Hooks.leaving`, and every open tab is told.
+Tried on a real editor: ↻ came back under a new process id with the tab reloaded; ⏻ with one unsaved edit closed the
+tab, left the graph file as it was and wrote the edit into the folder's recovery file.
+
+The page asks for the script only where it is served. `GET /api/workspace` answers `shell: true` when the app routes
+`/portail/…`, and the slot exists only for a page that is not `?embed`ded and has no host (`wantsServerButtons`): in a
+host's panel the server is the host's, and stopping it is the host's button. Measured before the answer carried
+`shell`: the page asked for the script in every app, an app mounting the editor answered 404, the browser logged it,
+and 127 browser tests failed on their zero-console-errors gate.
+
+Rejected: a stop and a restart route of the editor's own (a second way out beside the one portail holds — the
+recovery file would be written by two paths); probing for the script with a request and ignoring the 404 (the
+console line is the browser's, a page cannot silence it); a build-time switch (one built page is served standalone
+and mounted). Pins: `frontend/src/__tests__/shell.test.ts`, `tests/test_built_on_portail.py`.
 
 **Example.**
 
@@ -971,6 +989,38 @@ answers `__version__` and the HuggingFace lookups the pickers call, registers no
 environment (no `NO_COLOR`, no colour setting). A host that mounts the editor pays for it only when it serves one. Pins:
 `tests/test_lazy_package.py`,
 `tests/test_logflow_colorize_default.py::test_a_host_mounting_the_editor_keeps_its_environment_and_its_colors`.
+
+**Update 2026-11-25 — what a host CALLS is the editor's too.** The four methods are what the editor asks the host.
+The other direction — what a host calls on the editor — had no home: each host wrote it again. Measured across two
+hosts: both registered the two blueprints under a prefix and both built the panel's link by hand, each with its own
+arguments; one kept the unsaved work on its stop through a helper of its own, and the second imported that helper
+from the first — a host depending on another host for a call of the editor's; one dropped a graph it had replaced by
+reaching into `Studio._documents`; and both set several settings with a loop of `set_param` followed by `save`. The
+loops differed from the editor's own gesture in two ways that showed on screen: neither was one undo, and a save
+refused as changed on disk left the edit HELD, so the host's stop kept it and the next start offered to restore a
+change the person never saw land.
+
+So `streamstudio.app` holds the calls, and a host makes them and nothing lower:
+
+| call | what it replaces in a host |
+|---|---|
+| `mount_editor(app, host, prefix="/studio")` | registering `editor_blueprint` and `page_blueprint` by hand; answers the `Studio` |
+| `editor_link(graph, tab, only, prefix)` | a link built by hand; always relative, an unknown `tab` or `only` is a `ValueError` naming the known ones |
+| `keep_unsaved_edits(app)` | `studio_of(app).stash()` behind a check that an editor is mounted; no editor answers `[]` |
+| `Studio.forget(name)` | deleting from `Studio._documents`; answers whether unsaved edits went with it |
+| `Studio.settings(name)`, `set_settings(name, values)`, `reset_settings(name)` | the `set_param` loop plus `save` |
+
+`set_settings` is one turn of the editor (`Studio.lock` held across read, change and save), takes the settings by
+their keys, and a refused save undoes the change before it answers — the rule the page's own `?only=settings` change
+follows (`POST …/param {save: "settings"}`), now one implementation for the page and the hosts. An unknown key is a
+`ValueError` before anything changes.
+
+Rejected: a base class a host inherits (`EditorHost` is a Protocol so a host imports nothing to conform; a base class
+would turn four answers into a framework); a refusal from `forget` while the graph holds unsaved edits (the host
+calls it AFTER it replaced the file — refusing then leaves the editor showing a graph that is gone; the answer says
+what was lost and the host words it); keeping the helpers in the first host and importing them from there (the
+editor would depend on a package that depends on it). Pins: `tests/test_host.py::TestMountEditor`, `::TestEditorLink`,
+`::TestKeepUnsavedEdits`, `::TestForget`, `tests/test_graph_settings.py::TestAHostSetsSeveralSettings`.
 
 **What you may change.** What a host adds beyond the four methods, how a run labels the record, the fill rule's
 reach (into subgraphs, once the tracer exposes their ops). What must hold: the editor never caches the host's folder
