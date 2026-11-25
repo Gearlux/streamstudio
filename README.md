@@ -211,4 +211,4 @@ Changing the editor's page needs Node.js; the page is rebuilt and committed with
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+[PolyForm Noncommercial License 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0) (the `LICENSE` file): free for personal, academic and other noncommercial use. Commercial use needs a separate licence from the author.

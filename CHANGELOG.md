@@ -42,6 +42,7 @@ All notable changes to this project are documented here. The format follows
   work, when no graph opens until the person answers — a host that covers its panel while a graph loads uncovers it.
 
 ### Changed
+- **The licence is now the PolyForm Noncommercial License 1.0.0** (`LICENSE`, `pyproject.toml`): free for personal, academic and other noncommercial use; commercial use needs a separate licence from the author. It was MIT; the versions released under MIT keep that licence.
 - **The search palette looks for every word** — the palette a double-click or a dropped wire opens matched the
   query as one piece, so `class names` found nothing; it now finds `ClassNamesOutput`, the words in any order, as
   the Nodes sidebar's search does.

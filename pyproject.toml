@@ -8,7 +8,7 @@ version = "0.1.0a1"
 description = "A graph editor for recordstream pipelines written as confluid YAML."
 readme = "README.md"
 authors = [{ name = "Gert Behiels" }]
-license = "MIT"
+license = "PolyForm-Noncommercial-1.0.0"
 license-files = ["LICENSE"]
 classifiers = [
     "Development Status :: 3 - Alpha",
