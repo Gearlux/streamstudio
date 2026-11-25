@@ -201,6 +201,7 @@ import {
   type RecoveryPhase,
 } from "./recovery";
 import { nextNode } from "./run";
+import { mountServerButtons, shellServed, wantsServerButtons } from "./shell";
 import { addableSpecs } from "./sidebar";
 import { sourceSlots, type Slot } from "./slots";
 import { selectedAnchor, spotBeside, stepName, uniqueName } from "./steps";
@@ -318,6 +319,14 @@ function Editor() {
   const [folder, setFolder] = useState("");
   /** The app the editor is mounted in (`GET api/workspace`'s `host`): a graph without its own source runs ITS record. */
   const [host, setHost] = useState<HostInfo | null>(null);
+  /** The standalone editor's own server: its ↻ and ⏻ go at the end of the bar (`shell.ts`). */
+  const [shell, setShell] = useState(false);
+  const ownServer = wantsServerButtons(shell, embed, host === null ? null : host.name);
+  const serverButtons = useRef<HTMLSpanElement>(null);
+  useEffect(() => {
+    if (!ownServer || serverButtons.current === null) return;
+    return mountServerButtons(serverButtons.current);
+  }, [ownServer]);
   /** A link (or the host) named a graph the list does not hold: the page says so instead of opening another one. */
   const [missing, setMissing] = useState<string | null>(null);
   /** Set source…: the slot whose class picker and form are up (`slots.ts`). */
@@ -378,6 +387,7 @@ function Editor() {
         joinSession(workspace.session); // every request from now on says which editor it was meant for (R1, P1)
         setFolder(workspace.folder);
         setHost(hostOf(workspace));
+        setShell(shellServed(workspace));
         setRecovery(workspace.recovery);
         setRecoveryPhase(workspace.recovery === null ? "none" : "asking");
       },
@@ -547,6 +557,7 @@ function Editor() {
       joinSession(workspace.session);
       setFolder(workspace.folder);
       setHost(hostOf(workspace));
+      setShell(shellServed(workspace));
       setGraphs(list);
       setListed(true);
       setRecovery(workspace.recovery);
@@ -2280,6 +2291,8 @@ function Editor() {
               </svg>
               Run
             </button>
+            {/* ↻ and ⏻ of the standalone editor's own server: the serving framework's shell fills this (`shell.ts`) */}
+            {ownServer && <span className="server-buttons" data-server-buttons ref={serverButtons} />}
           </div>
         </header>}
         <main className={`body${sidebar && !settingsOnly ? " with-nodes" : ""}`} ref={body}>

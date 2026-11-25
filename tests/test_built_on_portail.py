@@ -137,6 +137,37 @@ class TestTheStandaloneApp:
         answer = self._client(tmp_path).get("/api/workspace").get_json()
         assert {"folder", "session", "recovery", "host"} <= set(answer)
 
+    def test_the_pages_stop_and_restart_buttons_find_their_shell(self, tmp_path: Path) -> None:
+        """The page's ↻ and ⏻ are portail's shell: the page loads ``portail/shell.js`` from BESIDE itself
+        (``frontend/src/shell.ts``) and the shell stops and restarts the server through its own routes. Nothing of
+        the editor's ``/api/workspace`` makes the shell ask about unsaved changes: the stop keeps them."""
+        import streamstudio
+
+        client = self._client(tmp_path)
+        assert client.get("/portail/shell.js").status_code == 200
+        assert client.get("/portail/shell.css").status_code == 200
+        workspace = client.get("/api/workspace").get_json()
+        assert workspace["shell"] is True, "what tells the page its buttons can be loaded"
+        assert not (workspace.get("path") and workspace.get("dirty")), "the shell would ask before a stop"
+        built = "".join(
+            path.read_text(encoding="utf-8")
+            for path in (Path(streamstudio.__file__).parent / "canvas" / "assets").glob("*.js")
+        )
+        assert '"portail/shell.js"' in built and '"/portail/shell.js"' not in built, "relative to the page"
+
+    def test_CON_mounted_in_a_host_the_page_finds_no_shell_and_draws_no_buttons(self, tmp_path: Path) -> None:
+        """That server is the host's to stop: beside the mounted page there is no shell to load."""
+        from flask import Flask
+
+        from streamstudio.app import editor_blueprint, page_blueprint
+
+        host = Flask("host")
+        host.register_blueprint(editor_blueprint(graph_dir=tmp_path), url_prefix="/studio")
+        host.register_blueprint(page_blueprint(), url_prefix="/studio")
+        client = host.test_client()
+        assert client.get("/studio/api/workspace").get_json()["shell"] is False, "the page then asks for no shell"
+        assert client.get("/studio/portail/shell.js").status_code == 404
+
     def test_a_host_mounting_the_editor_gets_no_shell_routes(self, tmp_path: Path) -> None:
         """portail serves the STANDALONE editor only; a host's app is the host's."""
         from flask import Flask

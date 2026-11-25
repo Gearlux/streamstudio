@@ -7,6 +7,10 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **The standalone editor's page has ↻ and ⏻** at the end of its bar: ↻ restarts the server with the code on disk
+  now and reloads the tab, ⏻ stops it and closes the tab, keeping unsaved work as `streamstudio stop` does. Every
+  open tab is told when its server goes. A page in a host's panel or mounted in a host's app has neither: that
+  server is the host's.
 - **A host sets a graph's settings in one call** — `Studio.settings(graph)` reads them by key,
   `Studio.set_settings(graph, values)` sets several and saves the settings file in one turn, and
   `Studio.reset_settings(graph)` puts every one back. A save the editor refuses undoes what the call set: saved, or

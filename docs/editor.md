@@ -30,6 +30,11 @@ next start offers it back ([Unsaved work survives a stop](#unsaved-work-survives
 folder served last; `restart <port>` serves the folder the editor on that port serves, with the templates folder it
 was started with, so the kept work is offered at once.
 
+**From the page:** the bar ends in two buttons. **↻** restarts the server with the code on disk now — what
+`streamstudio restart <port>` does — and reloads the tab once the new server answers. **⏻** stops it — what
+`streamstudio stop <port>` does — and closes the tab. Both keep unsaved work the same way. Every other open tab of that
+editor is told its server went. A page shown in another app's panel has neither button: that server is the app's.
+
 The folder is resolved once, so every path the editor shows is absolute. A folder that is not there is refused
 before anything is stopped or started (`restart` included):
 

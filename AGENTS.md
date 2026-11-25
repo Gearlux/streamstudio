@@ -224,6 +224,12 @@ arch: "A host mounts the editor through three methods"; pins `tests/test_host.py
   the settings sheet's change was refused as changed on disk and kept, and its restore showed settings the file did
   not hold. (`tests/test_graph_settings.py::TestTheSettingsFollowTheDisk`) arch: "A settings file the editor holds
   nothing unsaved of follows the disk".
+- **The standalone page's ↻ and ⏻ are portail's shell, never buttons of the page's own** (`frontend/src/shell.ts`):
+  the page loads `portail/shell.js` from BESIDE itself (relative — a path proxy) and hands it the bar's
+  `[data-server-buttons]`; only a page that knows its workspace, is not `?embed`ded and has no host gets the slot
+  (`wantsServerButtons`). A shell that is not served leaves the bar without them. Never a stop or restart route of
+  the editor's own. (`frontend/src/__tests__/shell.test.ts`,
+  `tests/test_built_on_portail.py::TestTheStandaloneApp::test_the_pages_stop_and_restart_buttons_find_their_shell`)
 - **A `List[str]` setting is ONE text box of names separated by commas** (`ParamWidget`'s `TextListField`,
   `pickers.parseTextList` / `textListEditable`): an emptied box is `[]`, a box left empty on a list the document
   never set commits nothing, and a list the box cannot spell back (a name with a comma or outer spaces, numbers,
@@ -419,7 +425,7 @@ arch: "A host mounts the editor through three methods"; pins `tests/test_host.py
   folder; a listener that does not answer as the editor is refused and never signalled.
   (`tests/test_cli_restart.py`, real listeners)
 - `/api/workspace` stays the EDITOR's route (folder, session, recovery, host): portail's shell is mounted after the
-  editor's routes and leaves it. The ⏻ / ↻ buttons of the shell are not in the page.
+  editor's routes and leaves it. Its answer's `shell` says whether the shell is served, which is what the page's ⏻ / ↻ wait for.
 - The unsaved work is kept by `Hooks.leaving` (`cli._keep_unsaved_work`); the start's line about kept work is printed
   by `cli.create_app`, and after a `--background` start it is asked of the new server.
 - The CLI is a liquifai app (`streamstudio.cli:app`, `strict_flags=True` — every command takes plain values, so a

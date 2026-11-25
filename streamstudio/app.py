@@ -2129,7 +2129,11 @@ def editor_blueprint(
 
     @blueprint.get("/api/workspace")
     def workspace() -> Response:
-        return jsonify(_studio().workspace())
+        # `shell`: whether the app serves the framework's page shell beside the page (`/portail/<file>`, the
+        # standalone editor's own server) — the page loads its ↻ and ⏻ from there, and must not ask an app that has
+        # none: a file that is not there is an error in the browser's console.
+        shell = any(rule.rule.startswith("/portail/") for rule in current_app.url_map.iter_rules())
+        return jsonify({**_studio().workspace(), "shell": shell})
 
     @blueprint.post("/api/workspace/recovery/restore")
     def restore_recovery() -> Response:

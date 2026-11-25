@@ -40,6 +40,10 @@ button { font: inherit; }
 .bar-button:hover { background: #30304a; }
 .bar-button.on { background: #2c3263; border-color: var(--accent); }
 .bar-button.run { background: #2e7d32; border-color: #43a047; font-weight: 600; }
+/* ↻ and ⏻ of the standalone editor's server, drawn by the serving framework's shell: sized as the bar's own buttons */
+.server-buttons { display: inline-flex; align-items: center; gap: 6px; margin-left: 4px; }
+.server-buttons .portail-button { height: 26px; min-width: 28px; padding: 0 7px; background: var(--raised); color: var(--text); border: 1px solid var(--line-2); border-radius: 6px; font-size: 14px; line-height: 1; cursor: pointer; }
+.server-buttons .portail-button:hover { background: #30304a; }
 .bar-button.run:hover { background: #388e3c; }
 .bar-button:disabled { opacity: .45; cursor: default; }
 
