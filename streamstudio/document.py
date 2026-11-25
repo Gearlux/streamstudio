@@ -282,6 +282,8 @@ class Param:
         schema: The JSON-schema fragment ``confluid.to_pydantic`` gives this parameter (enum, bounds, …).
         spelled: Whether the document spells the parameter (an unspelled one is INSERTED by ``set_param``).
         required: A parameter with no default, or declared ``Mandatory``.
+        ref: The top-level key the document reads the value from (``stop: !ref:limit`` → ``limit``, ``value`` that
+            key's plain value); blank for a value spelled in place. Such a field is never set from the form.
     """
 
     name: str
@@ -292,6 +294,7 @@ class Param:
     schema: Dict[str, Any] = field(default_factory=dict)
     spelled: bool = False
     required: bool = False
+    ref: str = ""
 
 
 @dataclass
@@ -1144,6 +1147,8 @@ class _Derivation(NamedTuple):
 
 #: A ``!ref:`` still to be wired: (target node, target socket, the reference, the wire kind).
 _Pending = Tuple[str, str, Reference, WireKind]
+#: What a key that is no parameter of a node answers where a parameter is asked for.
+_NO_PARAM = Param("", ANY, None, None)
 
 
 class _Builder:
@@ -1156,11 +1161,20 @@ class _Builder:
         pending: The root's list of ``!ref:`` still to wire. A reference names a TOP-LEVEL key, which an
             inside may use too, so every level hands its references to the root, which resolves them once
             every level's nodes exist.
+        values: The root's top-level PLAIN values by key (``limit: 3`` — nothing of a class inside), which a
+            parameter of any level may read with ``!ref:<key>`` (:meth:`value_references`).
     """
 
-    def __init__(self, path: Path, prefix: str = "", pending: Optional[List[_Pending]] = None) -> None:
+    def __init__(
+        self,
+        path: Path,
+        prefix: str = "",
+        pending: Optional[List[_Pending]] = None,
+        values: Optional[Dict[str, Any]] = None,
+    ) -> None:
         self.path = path
         self.prefix = prefix
+        self.values: Dict[str, Any] = {} if values is None else values
         self.model = Model()
         self.instances: Dict[str, Any] = {}
         self.declarations: Dict[str, _Declaration] = {}
@@ -1180,6 +1194,11 @@ class _Builder:
         if isinstance(doc, Target):
             self.add_marker(self.path.stem, doc)
         elif isinstance(doc, dict):
+            self.values.update(
+                (str(key), value)
+                for key, value in doc.items()
+                if str(key) not in _TOP_LEVEL_NOT_NODES and not _holds_fluid(value)
+            )
             for key, value in doc.items():
                 key = str(key)
                 if key == "flow" and isinstance(value, dict):
@@ -1246,7 +1265,7 @@ class _Builder:
         line (a refused ``Literal`` of an inner op, an inner ``from:`` naming a step outside) would otherwise
         be reported twice, once at the inner node and once at the subgraph (measured: both messages)."""
         steps, result = kwargs.get("steps"), kwargs.get("result")
-        child = _Builder(self.path, prefix=node.name + SEPARATOR, pending=self.pending)
+        child = _Builder(self.path, prefix=node.name + SEPARATOR, pending=self.pending, values=self.values)
         child.derive_inside(
             steps if isinstance(steps, dict) else {}, result if isinstance(result, str) else "", node.source_file
         )
@@ -1289,7 +1308,11 @@ class _Builder:
             self.problem(f"{name}: cannot resolve the class {str(marker.target)!r} at {loc}", loc)
             return node
         kind = _kind_of(cls)
-        described = _describe(cls, kind, kwargs, marker)
+        read = self.value_references(kind, kwargs)
+        described = _describe(cls, kind, {**kwargs, **{param: self.values[key] for param, key in read.items()}}, marker)
+        for param, key in read.items():
+            if param in described.params:
+                described.params[param] = replace(described.params[param], ref=key)
         node = Node(
             name, _dotted(cls), kind, described.params, described.inputs, described.outputs, loc, self.file_of(loc)
         )
@@ -1310,11 +1333,26 @@ class _Builder:
             return node
         members: List[str] = []
         for key, value in kwargs.items():
-            self.wire_value(node, key, value, kind, members)
+            if not node.params.get(key, _NO_PARAM).ref:  # a value read from a key is the field's, never a wire
+                self.wire_value(node, key, value, kind, members)
         if kind == "engine" and members:
             self.streams.append((name, members))
             self.chain(members)
         return node
+
+    def value_references(self, kind: NodeKind, kwargs: Dict[str, Any]) -> Dict[str, str]:
+        """The parameters the document fills with ``!ref:<key>`` where ``<key>`` is a top-level plain value, each by
+        its key — the knobs a graph keeps at its top (``stop: !ref:limit`` under ``limit: 3``). Such a parameter is
+        described and built with the VALUE: a field of the card, not a slot waiting for a card (measured before: an
+        open ``*`` socket, a card never built, and ``names no node`` for each). A root and a subgraph marker have
+        none: their parameters are slots and steps."""
+        if kind in ("contract", "subgraph"):
+            return {}
+        return {
+            param: str(value.target)
+            for param, value in kwargs.items()
+            if isinstance(value, Reference) and str(value.target) in self.values
+        }
 
     def wire_value(self, node: Node, key: str, value: Any, kind: NodeKind, members: List[str]) -> None:
         """A nested marker, a reference, or a container of them under ``key`` → child nodes and wires."""
@@ -1403,8 +1441,13 @@ class _Builder:
             target = self.model.node(target_name)
             wanted = str(ref.target)
             if wanted not in names:
+                what = (
+                    f"names the top-level value {wanted}, and a card is wired here"
+                    if wanted in self.values
+                    else "names no node and no top-level value"
+                )
                 self.problem(
-                    f"{target_name}.{socket}: !ref:{wanted} names no node at {target.loc} (the nodes are: {names})",
+                    f"{target_name}.{socket}: !ref:{wanted} {what} at {target.loc} (the nodes are: {names})",
                     target.loc,
                 )
                 continue
@@ -2907,6 +2950,11 @@ class Document:
         found = self.model.node(node)
         if param not in found.params:
             raise ValueError(f"{node} has no parameter {param!r} (its parameters are: {list(found.params)})")
+        knob = found.params[param].ref
+        if knob:
+            raise ValueError(
+                f"{node}.{param} is the value of the top-level key {knob} (!ref:{knob}) — change {knob} in the text tab"
+            )
         settings = self.declared()
         setting = settings.field(node, param)
         if setting is not None:
