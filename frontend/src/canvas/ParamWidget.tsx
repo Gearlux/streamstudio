@@ -6,9 +6,13 @@
  * merged with the settings form (`GET …/form`): an `enum` is a select, `boolean` a checkbox, `number` / `integer`
  * a number input carrying the schema's `minimum` / `maximum` — but a number OR text (`Union[float, str]`, a number
  * written with its unit) a text input sending a plain number as a number (`pickers.numberOrText`) —, a `(min, max)` pair two such inputs (`pickers.rangePair` —
- * the ComfyUI editor's `__lo` / `__hi` widgets), `string` a text input, a list of text (`List[str]`) ONE text input
- * of names separated by commas (`pickers.parseTextList`), and anything else the document spells as a container
- * (`object`, a list that field cannot spell) is shown read-only — the graph's YAML file is where that is edited.
+ * the ComfyUI editor's `__lo` / `__hi` widgets) and any other fixed count of numbers that many (`pickers.tupleEnds`),
+ * `string` a text input, a list of text (`List[str]`) ONE text input of names separated by commas
+ * (`pickers.parseTextList`), a list of numbers ONE text input of numbers separated by commas
+ * (`pickers.parseNumberList`), names with a number or a text each (`Dict[str, int]`) one row per name
+ * (`pickers.parseMapRows`; on a card, which has one row per parameter, read-only), and anything else the document
+ * spells as a container (`object`, a list or a map those fields cannot spell) is shown read-only — the graph's YAML
+ * file is where that is edited.
  *
  * A fragment the server marked with a `picker` (`pickers.ts`) adds the ComfyUI editor's chooser beside the field: a
  * `directory` or `file` field a `…` button opening the editor's file browser (`data-browse`), a HuggingFace source's
@@ -31,12 +35,19 @@ import {
   hfDataset,
   isLookup,
   lookupKey,
+  mapEditable,
+  mapRows,
   metadataChoices,
   metadataText,
+  numberList,
+  numberListEditable,
+  numberListText,
   numberOrText,
   numberOrTextValue,
   pairValue,
+  parseMapRows,
   parseMetadata,
+  parseNumberList,
   parseTextList,
   pickerFor,
   pluginLookupKey,
@@ -44,11 +55,13 @@ import {
   ASK_AGAIN,
   pluginTag,
   pluginValues,
-  rangePair,
+  scalarMap,
   textListEditable,
   textListText,
+  tupleEnds,
   withColumn,
   type LookupPicker as LookupKind,
+  type MapKind,
   type PairEnd,
 } from "../pickers";
 
@@ -68,6 +81,8 @@ export interface ParamWidgetProps {
   onCommit: (value: Json) => Promise<boolean>;
   /** The node's current values — what a HuggingFace list is asked about (the dataset its `path` names). */
   values?: Record<string, Json | undefined>;
+  /** The widget has ONE row to draw in (a card on the canvas): a field of several rows is shown read-only there. */
+  oneRow?: boolean;
 }
 
 /** The values a node's fields hold now: what its widgets' `values` are on the canvas and in the settings tab. */
@@ -76,7 +91,7 @@ export const valuesOf = (params: Record<string, Param>): Record<string, Json> =>
 
 const NO_VALUES: Record<string, Json | undefined> = {};
 
-export function ParamWidget({ param, schema, onCommit, values = NO_VALUES }: ParamWidgetProps) {
+export function ParamWidget({ param, schema, onCommit, values = NO_VALUES, oneRow = false }: ParamWidgetProps) {
   const [draft, setDraft] = useState<string>(asText(param.value));
   const truth = asText(param.value);
   // The caller's value is the truth: when it changes (an accepted edit, an undo, the other surface), follow it.
@@ -170,7 +185,7 @@ export function ParamWidget({ param, schema, onCommit, values = NO_VALUES }: Par
       />
     );
   }
-  const ends = rangePair(schema);
+  const ends = tupleEnds(schema);
   if (ends) return <PairWidget param={param} ends={ends} fallback={schema.default} commit={commit} />;
   if (picker === "hf_metadata") return <MetadataField param={param} values={values} commit={commit} />;
   if (param.type === "string") {
@@ -209,10 +224,16 @@ export function ParamWidget({ param, schema, onCommit, values = NO_VALUES }: Par
     );
   }
   if (param.type === LIST_STR && textListEditable(param.value)) return <TextListField param={param} commit={commit} />;
-  // a container (`object`, a list the text field cannot spell) or an unspelled default: shown as the document
+  const numbers = numberList(schema);
+  if (numbers && numberListEditable(param.value)) return <NumberListField param={param} kind={numbers} commit={commit} />;
+  const map = scalarMap(schema);
+  const rows = map !== undefined && mapEditable(param.value, map);
+  if (map && rows && !oneRow) return <MapField param={param} kind={map} commit={commit} />;
+  // a container (`object`, a list or a map no field can spell) or an unspelled default: shown as the document
   // would spell it
+  const where = rows ? "edit it in the settings tab" : "edit it in the graph's YAML file";
   return (
-    <code className="ro" data-param={param.name} title={`${param.type} — edit it in the graph's YAML file`}>
+    <code className="ro" data-param={param.name} title={`${param.type} — ${where}`}>
       {truth || "∅"}
     </code>
   );
@@ -247,6 +268,112 @@ function TextListField({ param, commit }: { param: Param; commit: (value: Json) 
         void commit(names).then((taken) => taken && setDraft(names.join(", ")));
       }}
     />
+  );
+}
+
+/**
+ * A list of numbers as ONE text field, its numbers separated by commas (`1200, 2400` → `[1200, 2400]`). Text that is
+ * not all numbers of `kind` goes back to the value; an emptied box is an empty list, and a box left empty on a list
+ * the document never set commits nothing.
+ */
+function NumberListField({
+  param,
+  kind,
+  commit,
+}: {
+  param: Param;
+  kind: "number" | "integer";
+  commit: (value: Json) => Promise<boolean>;
+}) {
+  const truth = numberListText(param.value);
+  const [draft, setDraft] = useState(truth);
+  useEffect(() => setDraft(truth), [truth]);
+  return (
+    <input
+      type="text"
+      className="nodrag"
+      data-param={param.name}
+      data-list="number"
+      placeholder="1, 2, …"
+      title={kind === "integer" ? "whole numbers separated by commas" : "numbers separated by commas"}
+      value={draft}
+      onChange={(event) => setDraft(event.target.value)}
+      onKeyDown={blurOnEnter}
+      onBlur={() => {
+        const numbers = parseNumberList(draft, kind);
+        if (numbers === undefined || (numbers.length === 0 && !Array.isArray(param.value))) return setDraft(truth);
+        void commit(numbers).then((taken) => taken && setDraft(numbers.join(", ")));
+      }}
+    />
+  );
+}
+
+/**
+ * Names with a value each, one row per name: a name box, a value box and a ✕, and a last line that adds a row. The
+ * rows are committed together as one map when a box is left or a row removed — but only while they ARE a map
+ * (`pickers.parseMapRows`): a half-typed row waits, marked, and nothing is sent. Rows the document never had and that
+ * were left empty commit nothing.
+ */
+function MapField({ param, kind, commit }: { param: Param; kind: MapKind; commit: (value: Json) => Promise<boolean> }) {
+  const held = mapRows(param.value);
+  const key = JSON.stringify(held);
+  const [rows, setRows] = useState<[string, string][]>(held);
+  useEffect(() => setRows(held), [key]); // `key` is `held`, spelled as one string
+  const send = (next: [string, string][]) => {
+    const map = parseMapRows(next, kind);
+    if (map === undefined) return; // no map yet: the row being typed waits
+    if (Object.keys(map).length === 0 && (param.value === null || param.value === undefined)) return;
+    void commit(map).then((taken) => !taken && setRows(held));
+  };
+  const waits = parseMapRows(rows, kind) === undefined;
+  const typed = (row: number, end: 0 | 1, text: string) =>
+    setRows((was) => was.map((cells, i) => (i === row ? (end === 0 ? [text, cells[1]] : [cells[0], text]) : cells)));
+  return (
+    <span className="map" data-param={param.name} data-map={kind} data-map-waits={waits || undefined}>
+      {rows.map(([name, value], row) => (
+        <span className="map-row" key={row} data-map-row={row}>
+          <input
+            type="text"
+            className="nodrag"
+            data-map-name
+            aria-label={`${param.name} name ${row + 1}`}
+            placeholder="name"
+            value={name}
+            onChange={(event) => typed(row, 0, event.target.value)}
+            onKeyDown={blurOnEnter}
+            onBlur={() => send(rows)}
+          />
+          <input
+            type="text"
+            className="nodrag"
+            data-map-value
+            aria-label={`${param.name} value ${row + 1}`}
+            placeholder={kind === "string" ? "text" : "number"}
+            value={value}
+            onChange={(event) => typed(row, 1, event.target.value)}
+            onKeyDown={blurOnEnter}
+            onBlur={() => send(rows)}
+          />
+          <button
+            type="button"
+            className="nodrag map-remove"
+            data-map-remove
+            aria-label={`remove ${name || `row ${row + 1}`}`}
+            title="remove this name"
+            onClick={() => {
+              const next = rows.filter((_, i) => i !== row);
+              setRows(next);
+              send(next);
+            }}
+          >
+            ✕
+          </button>
+        </span>
+      ))}
+      <button type="button" className="nodrag map-add" data-map-add onClick={() => setRows((was) => [...was, ["", ""]])}>
+        + add a name
+      </button>
+    </span>
   );
 }
 
@@ -462,7 +589,8 @@ function MetadataField({
 const endText = (value: number | undefined): string => (value === undefined ? "" : String(value));
 
 /**
- * A `(min, max)` pair: two numbers, committed together as `[min, max]` when either is left. When the value under it
+ * A fixed count of numbers — a `(min, max)` pair, a three-number shape: that many boxes, committed together as one
+ * list when any is left. When the value under it
  * changes, a box the person is typing into keeps what they typed (`pickers.followPair`); the commits go out one after
  * the other, so a `[min, old max]` and the `[min, max]` typed right after reach the editor in that order.
  */
@@ -473,16 +601,18 @@ function PairWidget({
   commit,
 }: {
   param: Param;
-  ends: [PairEnd, PairEnd];
+  ends: PairEnd[];
   fallback: Json | undefined;
   commit: (value: Json) => Promise<boolean>;
 }) {
-  const shown = pairValue(param.value, fallback);
-  const truth: [string, string] = [endText(shown?.[0]), endText(shown?.[1])];
+  const shown = pairValue(param.value, fallback, ends.length);
+  const truth = ends.map((_, i) => endText(shown?.[i]));
+  /** What each box is called: the two ends of a pair, else its place. */
+  const called = (i: number): string => (ends.length === 2 ? (i === 0 ? "min" : "max") : String(i + 1));
   const key = truth.join("\u0000");
-  const [draft, setDraft] = useState<[string, string]>(truth);
+  const [draft, setDraft] = useState<string[]>(truth);
   /** The value the boxes were last brought up to — what tells a box the person changed from one they did not. */
-  const followed = useRef<[string, string]>(truth);
+  const followed = useRef<string[]>(truth);
   useEffect(() => {
     const before = followed.current;
     followed.current = truth;
@@ -491,7 +621,7 @@ function PairWidget({
   /** The commits on their way, in order. */
   const sending = useRef<Promise<unknown>>(Promise.resolve());
   const leave = () => {
-    const sent: [string, string] = [draft[0], draft[1]];
+    const sent = [...draft];
     const numbers = sent.map((text) => Number(text));
     const fits = numbers.every(
       (value, i) => sent[i].trim() !== "" && Number.isFinite(value) && (ends[i].type === "number" || Number.isInteger(value)),
@@ -503,19 +633,24 @@ function PairWidget({
     });
   };
   return (
-    <span className="pair" data-param={param.name} title={`${param.name}: (min, max)`}>
+    <span
+      className="pair"
+      data-param={param.name}
+      data-pair-count={ends.length}
+      title={ends.length === 2 ? `${param.name}: (min, max)` : `${param.name}: ${ends.length} numbers`}
+    >
       {ends.map((end, i) => (
         <input
           key={i}
           type="number"
           className="nodrag"
-          data-pair-end={i === 0 ? "min" : "max"}
-          aria-label={`${param.name} ${i === 0 ? "min" : "max"}`}
+          data-pair-end={called(i)}
+          aria-label={`${param.name} ${called(i)}`}
           value={draft[i]}
           step={end.type === "integer" ? 1 : "any"}
           min={end.minimum}
           max={end.maximum}
-          onChange={(event) => setDraft((was) => (i === 0 ? [event.target.value, was[1]] : [was[0], event.target.value]))}
+          onChange={(event) => setDraft((was) => was.map((text, at) => (at === i ? event.target.value : text)))}
           onKeyDown={blurOnEnter}
           onBlur={leave}
         />

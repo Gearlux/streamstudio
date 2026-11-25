@@ -454,6 +454,19 @@ button { font: inherit; }
 .pair { display: flex; gap: 3px; min-width: 0; }
 .field .pair input[type=number] { flex: 1; width: auto; min-width: 0; }
 .gnode .row .pair input[type=number] { width: 58px; }
+/* three or four numbers on a card: narrower boxes, the row's height unchanged */
+.gnode .row .pair[data-pair-count="3"] input[type=number] { width: 44px; }
+.gnode .row .pair[data-pair-count="4"] input[type=number] { width: 36px; }
+/* names with a value each: one row per name (the settings form; a card shows the map read-only) */
+.map { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.map-row { display: flex; gap: 3px; min-width: 0; }
+.field .map-row input[type=text][data-map-name] { flex: 2; width: auto; min-width: 0; }
+.field .map-row input[type=text][data-map-value] { flex: 1; width: auto; min-width: 0; }
+.map-remove, .map-add { background: none; border: 1px solid #444; border-radius: 3px; color: #aaa; font-size: 11px; padding: 0 5px; cursor: pointer; }
+.map-remove:hover, .map-add:hover { color: #fff; border-color: #888; }
+.map-add { align-self: flex-start; padding: 1px 6px; }
+/* a row being typed that is no map yet: nothing is sent until it is */
+.map[data-map-waits] { border-left: 2px solid #b58900; padding-left: 4px; }
 /* a source slot's Set source… on a card: inside the row's height, so the card keeps its calibrated size (layout.py) */
 .gnode .row .set-slot { margin-left: auto; height: 16px; padding: 0 6px; background: #00897b33; color: #c8f2ec; border: 1px solid #26a69a; border-radius: 4px; font-size: 10px; line-height: 14px; cursor: pointer; }
 .gnode .row .set-slot:hover { background: #00897b; color: #fff; }

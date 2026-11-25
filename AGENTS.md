@@ -241,8 +241,16 @@ arch: "A host mounts the editor through three methods"; pins `tests/test_host.py
 - **A `List[str]` setting is ONE text box of names separated by commas** (`ParamWidget`'s `TextListField`,
   `pickers.parseTextList` / `textListEditable`): an emptied box is `[]`, a box left empty on a list the document
   never set commits nothing, and a list the box cannot spell back (a name with a comma or outer spaces, numbers,
-  nested lists, a non-list value) stays read-only. No other container gets a field. The palette's search
-  (`steps.searchMatches`) matches every word of the query. (`frontend/src/__tests__/pickers.test.ts`,
+  nested lists, a non-list value) stays read-only. **Three more containers of plain values have a field (user picks
+  2026-11-25), each decided from the parameter's SCHEMA in `pickers.ts`, never from a class or a name:** a list of
+  numbers ONE text box (`numberList` / `parseNumberList`; text that is no list of numbers goes back, nothing sent); a
+  fixed count of numbers that many boxes (`tupleEnds` — the `(min, max)` pair is the count of two, `PairWidget` draws
+  any count); names with a number or text each one ROW per name (`scalarMap` / `parseMapRows`, `MapField`), sent only
+  while the rows ARE a map — a half-typed row waits (`data-map-waits`). A map's rows need more than one line, so a
+  card passes `oneRow` and shows it read-only: never draw a field taller than one row on a card (`layout.card_height`).
+  The names of a written map are in alphabetical order (the document's spelling and the routes' JSON both sort), so
+  the rows are too. No other container gets a field. The palette's search
+  (`steps.searchMatches`) matches every word of the query. (`frontend/src/__tests__/pickers.test.ts`, `tests/test_canvas.py::TestContainersOfPlainValues`,
   `steps.test.ts`, `tests/test_add_node.py::TestTheWireDroppedOnEmptyCanvas::test_the_names_typed_into_the_new_card_are_written_as_a_list`)
 - **A host's four calls are `streamstudio.app`'s** — `mount_editor(app, host, prefix)`, `editor_link(graph, tab, only,
   prefix)` (relative; an unknown `tab` / `only` is a `ValueError` naming the known ones), `keep_unsaved_edits(app)` on

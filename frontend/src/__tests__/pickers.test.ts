@@ -21,15 +21,24 @@ import {
   textListEditable,
   textListText,
   followPair,
+  mapEditable,
+  mapRows,
+  numberList,
+  numberListEditable,
+  numberListText,
   numberOrText,
   numberOrTextValue,
   pairValue,
+  parseMapRows,
   parseMetadata,
+  parseNumberList,
   pickerFor,
   pluginLookupKey,
   pluginTag,
   pluginValues,
   rangePair,
+  scalarMap,
+  tupleEnds,
   withColumn,
 } from "../pickers";
 
@@ -321,3 +330,115 @@ describe("a list of text — typed as names separated by commas", () => {
   });
 });
 
+describe("a list of numbers — typed as numbers separated by commas", () => {
+  it("is read off its schema: a list of numbers or of whole numbers, also beside null", () => {
+    expect(numberList({ type: "array", items: { type: "number" } })).toBe("number");
+    expect(numberList({ anyOf: [{ type: "array", items: { type: "integer" } }, { type: "null" }] })).toBe("integer");
+  });
+
+  it("is nothing else: names, a fixed count, a list of lists, a number beside the list", () => {
+    expect(numberList({ type: "array", items: { type: "string" } })).toBeUndefined();
+    expect(numberList({ type: "array", prefixItems: [{ type: "number" }, { type: "number" }] })).toBeUndefined();
+    expect(numberList({ type: "array", items: { type: "array", items: { type: "number" } } })).toBeUndefined();
+    expect(numberList({ anyOf: [{ type: "integer" }, { type: "array", items: { type: "integer" } }] })).toBeUndefined();
+    expect(numberList({ type: "number" })).toBeUndefined();
+  });
+
+  it("the list as text and the text as a list", () => {
+    expect(numberListText([1200, 2400.5, -3])).toBe("1200, 2400.5, -3");
+    expect(numberListText(null)).toBe("");
+    expect(parseNumberList("1200, 2400.5 ,-3", "number")).toEqual([1200, 2400.5, -3]);
+    expect(parseNumberList(" 1e3 ", "number")).toEqual([1000]);
+    expect(parseNumberList("", "number")).toEqual([]);
+  });
+
+  it("text that is not all numbers is no list, and a fraction is no whole number", () => {
+    expect(parseNumberList("1, two", "number")).toBeUndefined();
+    expect(parseNumberList("1,,2", "number")).toBeUndefined();
+    expect(parseNumberList("1, 2.5", "integer")).toBeUndefined();
+    expect(parseNumberList("1, 2", "integer")).toEqual([1, 2]);
+  });
+
+  it("a list the text can spell is editable: unset, empty, or plain numbers", () => {
+    expect(numberListEditable(null)).toBe(true);
+    expect(numberListEditable([])).toBe(true);
+    expect(numberListEditable([1, 2.5])).toBe(true);
+    expect(numberListEditable([1, "2"])).toBe(false);
+    expect(numberListEditable([[1, 2]])).toBe(false);
+    expect(numberListEditable("1, 2")).toBe(false);
+  });
+});
+
+describe("tupleEnds — a fixed count of numbers read off its schema", () => {
+  const SHAPE = { type: "array", prefixItems: [{ type: "integer" }, { type: "integer" }, { type: "integer" }] };
+
+  it("three whole numbers are three ends, also beside null; a pair is two", () => {
+    const ends = [{ type: "integer" }, { type: "integer" }, { type: "integer" }];
+    expect(tupleEnds(SHAPE)).toEqual(ends);
+    expect(tupleEnds({ anyOf: [SHAPE, { type: "null" }] })).toEqual(ends);
+    expect(tupleEnds({ type: "array", prefixItems: [{ type: "number", minimum: 0 }, { type: "number" }] })).toEqual([
+      { type: "number", minimum: 0 },
+      { type: "number" },
+    ]);
+  });
+
+  it("is nothing else: a member that is no number, an open list, a number", () => {
+    expect(tupleEnds({ type: "array", prefixItems: [{ type: "integer" }, { type: "string" }] })).toBeUndefined();
+    expect(tupleEnds({ type: "array", items: { type: "integer" } })).toBeUndefined();
+    expect(tupleEnds({ type: "integer" })).toBeUndefined();
+  });
+
+  it("its value is that many numbers: the value, else the default, else none", () => {
+    expect(pairValue([3, 224, 224], null, 3)).toEqual([3, 224, 224]);
+    expect(pairValue(null, [1, 2, 3], 3)).toEqual([1, 2, 3]);
+    expect(pairValue([3, 224], null, 3)).toBeUndefined();
+  });
+
+  it("three boxes follow the value like two do", () => {
+    expect(followPair(["3", "9", "224"], ["3", "224", "224"], ["4", "224", "224"])).toEqual(["4", "9", "224"]);
+  });
+});
+
+describe("names with a value each — one row per name", () => {
+  it("is read off its schema: a map to numbers, whole numbers or text, also beside null", () => {
+    expect(scalarMap({ type: "object", additionalProperties: { type: "integer" } })).toBe("integer");
+    expect(scalarMap({ type: "object", additionalProperties: { type: "number" } })).toBe("number");
+    expect(scalarMap({ anyOf: [{ type: "object", additionalProperties: { type: "string" } }, { type: "null" }] })).toBe("string");
+  });
+
+  it("is nothing else: an open map, a map of lists, a model with named fields", () => {
+    expect(scalarMap({ type: "object", additionalProperties: true })).toBeUndefined();
+    expect(scalarMap({ type: "object" })).toBeUndefined();
+    expect(scalarMap({ type: "object", additionalProperties: { type: "array", items: { type: "number" } } })).toBeUndefined();
+    expect(scalarMap({ type: "object", properties: { a: { type: "integer" } }, additionalProperties: { type: "integer" } })).toBeUndefined();
+    expect(scalarMap({ type: "string" })).toBeUndefined();
+  });
+
+  it("the map as rows and the rows as a map, in the order written", () => {
+    expect(mapRows({ dog: 1, cat: 0 })).toEqual([["dog", "1"], ["cat", "0"]]);
+    expect(mapRows(null)).toEqual([]);
+    expect(parseMapRows([["dog", "1"], [" cat ", " 0 "]], "integer")).toEqual({ dog: 1, cat: 0 });
+    expect(parseMapRows([["a", "x y"]], "string")).toEqual({ a: "x y" });
+    expect(parseMapRows([], "integer")).toEqual({});
+  });
+
+  it("a row left empty is no row; a half-typed or doubled one is no map yet", () => {
+    expect(parseMapRows([["cat", "0"], ["", ""]], "integer")).toEqual({ cat: 0 });
+    expect(parseMapRows([["cat", ""]], "integer")).toBeUndefined();
+    expect(parseMapRows([["", "1"]], "integer")).toBeUndefined();
+    expect(parseMapRows([["cat", "0"], ["cat", "1"]], "integer")).toBeUndefined();
+    expect(parseMapRows([["cat", "0.5"]], "integer")).toBeUndefined();
+    expect(parseMapRows([["cat", "0.5"]], "number")).toEqual({ cat: 0.5 });
+    expect(parseMapRows([["cat", "zero"]], "number")).toBeUndefined();
+  });
+
+  it("a map the rows can spell is editable: unset, empty, or values of its one kind", () => {
+    expect(mapEditable(null, "integer")).toBe(true);
+    expect(mapEditable({}, "integer")).toBe(true);
+    expect(mapEditable({ cat: 0 }, "integer")).toBe(true);
+    expect(mapEditable({ cat: "0" }, "integer")).toBe(false);
+    expect(mapEditable({ cat: "x" }, "string")).toBe(true);
+    expect(mapEditable({ cat: { a: 1 } }, "string")).toBe(false);
+    expect(mapEditable([1], "integer")).toBe(false);
+  });
+});

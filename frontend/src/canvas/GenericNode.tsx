@@ -169,6 +169,7 @@ export function GenericNodeView({ data, selected }: NodeProps<GenericNode>) {
             schema={{ ...param.schema, ...(schemas[param.name] ?? {}) }}
             onCommit={(value) => setParam(node.name, param.name, value)}
             values={values}
+            oneRow
           />
         </div>
       ))}

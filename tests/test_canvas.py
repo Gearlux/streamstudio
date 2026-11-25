@@ -44,7 +44,7 @@ import threading
 import time
 import urllib.request
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Mapping, NamedTuple, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Mapping, NamedTuple, Optional, Sequence, Tuple
 
 import numpy as np
 import pytest
@@ -148,6 +148,36 @@ class TinyGain:
 
     def __call__(self, record: Record) -> Record:
         return {**record, "image": record["image"] * self.gain}
+
+
+@configurable(category="op", group="canvas-test")
+class TinyShapes:
+    """Keep the record — an op whose settings are CONTAINERS of plain values: what the settings form has a field for.
+
+    Args:
+        rates_hz: A list of numbers.
+        shape: Three whole numbers.
+        label_to_index: A whole number per name.
+        windows: A list of lists, which no field spells.
+    """
+
+    consumes = {"image": "Image"}
+    produces = {"image": "Image"}
+
+    def __init__(
+        self,
+        rates_hz: Sequence[float] = (1200.0, 2400.0),
+        shape: Tuple[int, int, int] = (3, 224, 224),
+        label_to_index: Optional[Dict[str, int]] = None,
+        windows: Optional[List[List[float]]] = None,
+    ) -> None:
+        self.rates_hz = list(rates_hz)
+        self.shape = tuple(shape)
+        self.label_to_index = dict(label_to_index or {})
+        self.windows = windows
+
+    def __call__(self, record: Record) -> Record:
+        return record
 
 
 @configurable(category="op", group="canvas-test")
@@ -276,6 +306,14 @@ flow:
   count:
     op: !class:{MOD}.TinyCount {{keys: {{label: image}}}}
     from: decode
+"""
+
+#: One op whose settings are containers of plain values (:class:`TinyShapes`), one of them set.
+SHAPES_TEXT = f"""\
+stream: !class:recordstream.core.stream.Stream
+  source: !class:{MOD}.TinySource {{size: 2}}
+  ops:
+    - !class:{MOD}.TinyShapes {{label_to_index: {{cat: 0, dog: 1}}}}
 """
 
 DOCUMENTS = {"pets": PETS_TEXT, "wires": WIRES_TEXT, "clip": CLIP_TEXT, "mismatch": MISMATCH_TEXT}
@@ -1867,6 +1905,101 @@ class TestRunPanel:
         assert page.locator("[data-run-error]").inner_text() == NO_SOURCE
         assert run_statuses(page, *WIRES_NODES) == {name: "" for name in WIRES_NODES}
         assert opened.errors == [REFUSED_400]
+
+
+class TestContainersOfPlainValues:
+    """A list of numbers is ONE text box, a fixed count of numbers that many boxes, names with a value each one row
+    per name (the user's picks 2026-11-25: 1 A, 2 B, 3 C) — and each writes the document's own spelling."""
+
+    SHAPES = '[data-form-node="stream.ops[0]"]'
+
+    @pytest.fixture(autouse=True)
+    def _the_shapes_graph(self, graph_dir: Path) -> None:
+        (graph_dir / "shapes.yaml").write_text(SHAPES_TEXT)
+
+    def _open(self, open_graph: Callable[[str], Opened]) -> Opened:
+        opened = open_graph("shapes")
+        opened.page.locator('[data-tab="settings"]').click()
+        opened.page.locator("[data-settings-all]").check()
+        opened.page.wait_for_selector('[data-settings][data-settings-mode="all"]')
+        return opened
+
+    def _params(self, server: str) -> Dict[str, Any]:
+        nodes = api_get(server, "api/graphs/shapes")["model"]["nodes"]
+        shapes = next(node for node in nodes if node["name"] == "stream.ops[0]")
+        return {name: param["value"] for name, param in shapes["params"].items()}
+
+    def test_a_list_of_numbers_is_typed_with_commas_and_text_that_is_no_number_goes_back(
+        self, open_graph: Callable[[str], Opened], server: str
+    ) -> None:
+        opened = self._open(open_graph)
+        page = opened.page
+        box = page.locator(f'{self.SHAPES} input[data-param="rates_hz"][data-list="number"]')
+        assert box.input_value() == "1200, 2400"  # the document sets none: the constructor's default, shown
+        set_widget(page, self.SHAPES, "rates_hz", "1200, 4800.5")
+        wait_saves(page, 1)
+        assert self._params(server)["rates_hz"] == [1200, 4800.5]
+        assert "rates_hz: [1200, 4800.5]" in api_get(server, "api/graphs/shapes")["text"]
+        set_widget(page, self.SHAPES, "rates_hz", "1200, fast")
+        assert box.input_value() == "1200, 4800.5"  # no list of numbers: nothing sent, the value back
+        assert self._params(server)["rates_hz"] == [1200, 4800.5]
+        assert opened.errors == []
+
+    def test_three_numbers_are_three_boxes_committed_together(
+        self, open_graph: Callable[[str], Opened], server: str
+    ) -> None:
+        opened = self._open(open_graph)
+        page = opened.page
+        shape = page.locator(f'{self.SHAPES} [data-param="shape"][data-pair-count="3"]')
+        ends = [shape.locator(f'[data-pair-end="{place}"]') for place in ("1", "2", "3")]
+        assert [end.input_value() for end in ends] == ["3", "224", "224"]  # the default, shown
+        ends[1].fill("128")
+        ends[1].press("Enter")
+        wait_saves(page, 1)
+        assert self._params(server)["shape"] == [3, 128, 224]
+        assert opened.errors == []
+
+    def test_names_with_a_value_each_are_rows_that_add_change_and_remove(
+        self, open_graph: Callable[[str], Opened], server: str
+    ) -> None:
+        opened = self._open(open_graph)
+        page = opened.page
+        field = page.locator(f'{self.SHAPES} [data-param="label_to_index"][data-map="integer"]')
+        rows = field.locator("[data-map-row]")
+        read = "rs => rs.map(r => [...r.querySelectorAll('input')].map(i => i.value))"
+        assert rows.evaluate_all(read) == [["cat", "0"], ["dog", "1"]]
+
+        field.locator("[data-map-add]").click()
+        new = rows.nth(2)
+        new.locator("[data-map-name]").fill("bird")
+        new.locator("[data-map-name]").press("Enter")  # a name without its value: no map yet, nothing sent
+        assert field.get_attribute("data-map-waits") == "true"
+        assert self._params(server)["label_to_index"] == {"cat": 0, "dog": 1}
+        new.locator("[data-map-value]").fill("2")
+        new.locator("[data-map-value]").press("Enter")
+        wait_saves(page, 1)
+        assert self._params(server)["label_to_index"] == {"cat": 0, "dog": 1, "bird": 2}
+        # the document's spelling of a map has its names in alphabetical order, and so have the rows
+        assert "label_to_index: {bird: 2, cat: 0, dog: 1}" in api_get(server, "api/graphs/shapes")["text"]
+        assert rows.evaluate_all(read) == [["bird", "2"], ["cat", "0"], ["dog", "1"]]
+        assert field.get_attribute("data-map-waits") is None
+
+        rows.nth(1).locator("[data-map-remove]").click()  # cat
+        wait_saves(page, 2)
+        assert self._params(server)["label_to_index"] == {"dog": 1, "bird": 2}
+        assert rows.evaluate_all(read) == [["bird", "2"], ["dog", "1"]]
+        assert opened.errors == []
+
+    def test_a_list_of_lists_stays_read_only_and_a_card_shows_a_map_read_only(
+        self, open_graph: Callable[[str], Opened]
+    ) -> None:
+        opened = self._open(open_graph)
+        page = opened.page
+        assert page.locator(f'{self.SHAPES} code.ro[data-param="windows"]').count() == 1
+        card = page.locator(node_root("stream.ops[0]"))
+        assert card.locator('code.ro[data-param="label_to_index"]').count() == 1  # one row per parameter on a card
+        assert card.locator("[data-map-row]").count() == 0
+        assert opened.errors == []
 
 
 # ------------------------------------------------------------------------------------------------
