@@ -437,10 +437,13 @@ arch: "A host mounts the editor through three methods"; pins `tests/test_host.py
   anything. `open` also takes a graph's FILE (an existing `*.yaml`): its folder is served — the workspace stays a
   folder, portail is handed nothing else — and one line names the page opened on that graph (`?graph=<stem>`), printed
   by `cli.create_app` for a server this process runs, else by `open_` from the running server's port
-  (`cli._NAMED_GRAPH`); `--browser` still opens the base address.
+  (`cli._NAMED_GRAPH`). The browser opens on that graph (user request 2026-11-25): the `Folder` carries portail's
+  optional `page` (`?graph=<stem>`) and `open`'s `--browser`, left out, is `always` for a file and `never` for a
+  folder — decided in the body, the signature's default is blank; an explicit value wins. Never a wait-and-open
+  thread of the editor's own.
   (`tests/test_cli_editor.py::TestServingTheCanvas::test_a_graph_file_serves_its_folder_and_names_the_graphs_address`)
-  No help text names the removed editor or the workspace. A start opens no browser unless asked
-  (`--browser` defaults to `never`). (`tests/test_cli_editor.py::TestTheCommands`, `::TestStopAndRestart`,
+  No help text names the removed editor or the workspace. A start over a FOLDER opens no browser unless asked,
+  and `restart` none (`--browser never`). (`tests/test_cli_editor.py::TestTheCommands`, `::TestStopAndRestart`,
   `::TestWhatTheCliSaysAboutItself`)
 - **`stop`/`restart` find a server by what it ANSWERS** (`/api/meta` names `streamstudio`), by its port or its
   folder; a listener that does not answer as the editor is refused and never signalled.

@@ -75,6 +75,8 @@ class Folder:
         self.template = ""
         self.title = Path(path).name or path
         self.options: Dict[str, str] = {"templates_dir": templates_dir} if templates_dir else {}
+        #: What the browser's tab opens on (portail's optional ``page``): the graph a start named by its file.
+        self.page = _graph_page(_NAMED_GRAPH[0]) if _NAMED_GRAPH else ""
 
     def state_dir(self) -> Path:
         """The folder itself: the recovery file is kept there."""
@@ -331,9 +333,14 @@ def _notice_of_the_server_of(folder: str) -> None:
 _NAMED_GRAPH: List[str] = []
 
 
+def _graph_page(graph: str) -> str:
+    """The part of the editor's address that opens on ``graph``."""
+    return f"?graph={urllib.parse.quote(graph, safe='')}"
+
+
 def _graph_address(host: str, port: int, graph: str) -> str:
     """The line naming the page that opens on ``graph`` — the address alone on it, so a terminal links all of it."""
-    return f"  http://{host}:{port}/?graph={urllib.parse.quote(graph, safe='')}"
+    return f"  http://{host}:{port}/{_graph_page(graph)}"
 
 
 # =======================================================================================
@@ -356,7 +363,7 @@ def open_(
     templates_dir: str = "",
     auto_port: bool = False,
     background: bool = False,
-    browser: BrowserChoice = "never",
+    browser: str = "",
 ) -> None:
     """Serve the editor over a folder of graphs (the default command).
 
@@ -372,8 +379,8 @@ def open_(
             template saved).
         auto_port: Take the next free port without asking when the port is taken.
         background: Serve detached and return once the editor answers (``streamstudio stop`` stops it).
-        browser: Open the editor's address in the browser: ``always``, ``new`` (only for a server started now) or
-            ``never`` (the default).
+        browser: Open the editor in the browser: ``always``, ``new`` (only for a server started now) or ``never``.
+            Left out, a graph's file opens its tab (``always``, on that graph) and a folder opens none (``never``).
     """
     named = Path(graph_dir).expanduser() if graph_dir else None
     del _NAMED_GRAPH[:]
@@ -386,7 +393,7 @@ def open_(
         auto_port=auto_port,
         port=port,
         background=background,
-        browser=browser,
+        browser=browser or ("always" if _NAMED_GRAPH else "never"),
         options=_options(templates_dir),
     )
     if background:

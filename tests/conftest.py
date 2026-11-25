@@ -57,6 +57,21 @@ def _own_log_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 
 
 @pytest.fixture(autouse=True)
+def browser_opens(monkeypatch: pytest.MonkeyPatch) -> List[str]:
+    """No test opens a tab in the operator's browser: the addresses a start would open are recorded instead."""
+    import webbrowser
+
+    opened: List[str] = []
+
+    def record(url: str, *args: object, **kwargs: object) -> bool:
+        opened.append(url)
+        return True
+
+    monkeypatch.setattr(webbrowser, "open", record)
+    return opened
+
+
+@pytest.fixture(autouse=True)
 def _no_live_server(monkeypatch: pytest.MonkeyPatch) -> None:
     """The suite never reaches, starts or stops an editor of the operator's.
 

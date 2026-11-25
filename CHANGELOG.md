@@ -11,8 +11,9 @@ All notable changes to this project are documented here. The format follows
   `limit = 3` on the card and in the settings tab, and the card is checked with that value. It was an open socket,
   and each such reference was listed as a problem (`names no node`). The field is not typed in: the key is changed in
   the text tab.
-- **`streamstudio path/to/demo.yaml` serves the graph's folder** and prints the address of the page opened on that
-  graph (`http://127.0.0.1:8190/?graph=demo`). A file name was refused as a folder that does not exist.
+- **`streamstudio path/to/demo.yaml` serves the graph's folder** and opens the browser on that graph
+  (`http://127.0.0.1:8190/?graph=demo`, also printed), in a running editor of that folder too; `--browser never` keeps
+  it closed. A file name was refused as a folder that does not exist.
 - **Lists of numbers, fixed counts of numbers and maps of names are typed in the editor.** A `List[float]` or
   `List[int]` setting is ONE text box, the numbers separated by commas; a `Tuple[int, int, int]` (any fixed count of
   numbers) is that many boxes; a `Dict[str, int]`, `Dict[str, float]` or `Dict[str, str]` setting is one row per

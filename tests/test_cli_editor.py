@@ -18,6 +18,7 @@ import json
 import signal
 import socket
 import sys
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
@@ -285,6 +286,59 @@ class TestServingTheCanvas:
             _main(monkeypatch, str(graph_dir / "flow.yaml"), "-p", "9123")
         create_app_mock.assert_not_called()
         assert f"  http://{cli.STUDIO_HOST}:9123/?graph=flow" in capsys.readouterr().out.splitlines()
+
+    @pytest.mark.usefixtures("free")
+    def test_a_graph_file_opens_the_browser_on_the_graph_once_the_editor_answers(
+        self, graph_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A file named is one graph asked for: its tab opens without ``--browser`` (user request 2026-11-25)."""
+        (graph_dir / "flow.yaml").write_text("flow: {}\n")
+        opened: List[str] = []
+        seen = threading.Event()
+        bound = threading.Event()
+
+        def open_tab(url: str, *args: object, **kwargs: object) -> bool:
+            opened.append(url)
+            seen.set()
+            return True
+
+        def run(**kwargs: object) -> None:  # the server: answers from here on, and stays up until the tab opened
+            bound.set()
+            assert seen.wait(10), "the tab never opened on an editor that answers"
+
+        info = {"path": str(graph_dir), "template": "", "state_dir": str(graph_dir), "options": {}}
+        answer = {"app": "streamstudio", "title": "x", "pid": 4780, "workspace": info}
+        monkeypatch.setattr(serving, "meta_at", lambda host, port: answer if bound.is_set() else None)
+        monkeypatch.setattr(serving.webbrowser, "open", open_tab)
+        with _serving(graph_dir) as create_app_mock:
+            create_app_mock.return_value.run.side_effect = run
+            _main(monkeypatch, str(graph_dir / "flow.yaml"))
+        assert opened == [f"http://{cli.STUDIO_HOST}:{cli.EDITOR_PORT}/?graph=flow"]
+
+    def test_a_graph_file_of_a_folder_already_served_opens_the_browser_on_the_graph_there(
+        self, graph_dir: Path, monkeypatch: pytest.MonkeyPatch, browser_opens: List[str]
+    ) -> None:
+        (graph_dir / "my flow.yaml").write_text("flow: {}\n")
+        _running(monkeypatch, {9123: graph_dir})
+        _main(monkeypatch, str(graph_dir / "my flow.yaml"), "-p", "9123")
+        assert browser_opens == [f"http://{cli.STUDIO_HOST}:9123/?graph=my%20flow"]
+
+    def test_browser_never_with_a_graph_file_opens_nothing(
+        self, graph_dir: Path, monkeypatch: pytest.MonkeyPatch, browser_opens: List[str]
+    ) -> None:
+        (graph_dir / "flow.yaml").write_text("flow: {}\n")
+        _running(monkeypatch, {9123: graph_dir})
+        _main(monkeypatch, str(graph_dir / "flow.yaml"), "-p", "9123", "--browser", "never")
+        assert browser_opens == []
+
+    def test_a_folder_opens_no_browser_unless_asked_and_then_the_address_alone(
+        self, graph_dir: Path, monkeypatch: pytest.MonkeyPatch, browser_opens: List[str]
+    ) -> None:
+        _running(monkeypatch, {9123: graph_dir})
+        _main(monkeypatch, str(graph_dir), "-p", "9123")
+        assert browser_opens == []
+        _main(monkeypatch, str(graph_dir), "-p", "9123", "--browser", "always")
+        assert browser_opens == [f"http://{cli.STUDIO_HOST}:9123"]
 
     def test_a_folder_names_no_graphs_address(
         self,

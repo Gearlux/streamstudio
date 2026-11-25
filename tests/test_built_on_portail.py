@@ -105,12 +105,15 @@ class TestTheCommands:
         assert {"port", "templates_dir", "background"} <= set(inspect.signature(app._commands[command]).parameters)
         assert getattr(app._commands[command], "__liquifai_short__", {}).get("p") == "port"
 
-    def test_a_start_opens_no_browser_unless_asked(self) -> None:
+    def test_a_start_decides_the_browser_by_what_is_named_and_a_restart_opens_none(self) -> None:
+        """``open`` leaves ``--browser`` blank: a folder opens no tab, a graph's file opens its own (pinned in
+        ``tests/test_cli_editor.py::TestServingTheCanvas``). ``restart`` opens none unless asked."""
         import inspect
 
         from streamstudio.cli import app
 
-        assert inspect.signature(app._commands["open"]).parameters["browser"].default == "never"
+        assert inspect.signature(app._commands["open"]).parameters["browser"].default == ""
+        assert inspect.signature(app._commands["restart"]).parameters["browser"].default == "never"
 
     def test_no_function_of_portails_serving_is_defined_again(self) -> None:
         """Before the move ``cli.py`` held its own port probe, process scan, stop and signal handling."""
