@@ -1091,7 +1091,7 @@ it), and refusing it while a dialog is up (the host cannot see the panel's dialo
 Node was missing at the server's start, or the start's build failed — `/` answers a short page that says which and
 what to do. In a host's panel that page used to say nothing to its parent, and a host that covers its panel until
 the editor's first `state` (so a graph is never shown under another's name) covered it for good — measured: the
-panel read `loading sink…` over `The editor's page is not built and Node is not installed — run aisland setup`.
+panel read `loading sink…` over `The editor's page is not built and Node is not installed — run the workspace's setup`.
 That page now posts a fourth message, `{source: "streamstudio", type: "unavailable"}`, under the same rules (`?embed`
 only, its parent, same origin): no editor will answer here, so the host uncovers the page and, to show another graph,
 loads the frame again rather than posting `open`. Rejected: posting `state` from it (the host would then post `open`
@@ -1253,8 +1253,8 @@ cannot — the page in it is whatever the last build left.
 Rejected: **committing `dist`** (every page change becomes a second, generated diff that merges badly, and a commit
 that forgets it ships a page out of step with its routes — the very drift this removes; *reversed 2026-10-04* with a
 test that catches the forgotten commit and a binary merge rule — "The built page is committed inside the package"
-below); **building in `aisland
-setup`** (setup runs once per machine, not after each pull, so the stale page after a pull stays); **building by hand**
+below); **building in the workspace's setup
+command** (setup runs once per machine, not after each pull, so the stale page after a pull stays); **building by hand**
 (what existed — the measured stale page and placeholder); **building at app creation** (a test suite makes hundreds of
 apps and must never run npm); **deciding whether the PAGE is current by modification times instead of contents** (a
 branch switched away and back changes every time and nothing in the page). The install decision (item 3) does use
@@ -1297,7 +1297,7 @@ streamstudio: the editor's page changed since its last build — building it
 streamstudio: built the editor's page in 2.0 s
 # the next start: nothing
 # the same change, no Node on PATH: the server starts, and GET / answers
-The editor's page is out of date and Node is not installed — run aisland setup, then start this server again.
+The editor's page is out of date and Node is not installed — run the workspace's setup, then start this server again.
 ```
 
 **What you may change.** The list of inputs (as long as it covers everything the build reads — a missed input is a
@@ -1379,7 +1379,7 @@ Rejected, each measured or counted against the same consuming CI:
 **Consequences.** Measured 2026-10-04:
 - in a copy of the tree (`git ls-files -co`) with no Node on `PATH`, `streamstudio <graphs> --port 8194` printed
   nothing about the page and `GET /` served the committed `index.html` byte for byte — before, the same start printed
-  `streamstudio: the editor's page is not built and Node is not installed — run aisland setup` and served that line;
+  `streamstudio: the editor's page is not built and Node is not installed — run the workspace's setup` and served that line;
 - in the consuming app's CI mirror (streamstudio installed non-editable, `--no-deps`, from a copy), `web_dist()` named
   `…/site-packages/streamstudio/canvas`, `page.FRONTEND` did not exist, and the editor tests went from `30 passed, 10
   skipped` to `40 passed`;
