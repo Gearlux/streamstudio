@@ -23,7 +23,7 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { errorMessage, hfDatasets, hfFeatures, hfSplits, pluginLookup, type Listed } from "../api";
 import { useEditor } from "../context";
-import type { Json, Param } from "../model";
+import { refLabel, refTitle, type Json, type Param } from "../model";
 import {
   browseStart,
   cachedLookup,
@@ -91,6 +91,15 @@ export function ParamWidget({ param, schema, onCommit, values = NO_VALUES }: Par
   };
   const revert = () => setDraft(truth);
   const picker = pickerFor(schema);
+
+  // a value the document reads from a top-level key (`stop: !ref:limit`): the key and its value, never typed here
+  if (param.ref) {
+    return (
+      <code className="ro" data-param={param.name} data-ref={param.ref} title={refTitle(param)}>
+        {refLabel(param)}
+      </code>
+    );
+  }
 
   const options = Array.isArray(schema.enum) ? (schema.enum as Json[]) : undefined;
   if (options) {

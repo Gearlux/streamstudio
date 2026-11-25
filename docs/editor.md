@@ -167,6 +167,7 @@ value into the editor; a refused value puts the old one back. What the field is 
 | text | a text box |
 | a list of text (`names: List[str]`) | ONE text box, the names separated by commas: `cat, dog` writes `names: [cat, dog]`. Spaces around a name go; an emptied box writes an empty list. |
 | anything else (a mapping, a list of numbers, a list whose names hold a comma) | shown, not typed: edit it in the graph's YAML file |
+| read from a key at the top of the graph (`stop: !ref:limit` under `limit: 3`) | the key and its value, `limit = 3`, shown and not typed: the key may feed several settings, so change it in the text tab. Setting it through the editor is refused: `source.stop is the value of the top-level key limit (!ref:limit) — change limit in the text tab`. A key that is not there is a problem at the node's line: `source.stop: !ref:nowhere names no node and no top-level value`. |
 
 | menu | items (shortcut; on a Mac ⌘ for Ctrl) |
 | --- | --- |

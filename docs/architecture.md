@@ -2096,3 +2096,34 @@ unsaved work. Now `POST …/param {save: "settings"}` (`Studio.set_param`) sets 
 edit landing between the save and the Undo would be the one undone. Pins:
 `tests/test_graph_settings.py::TestASettingSavedAtOnce`,
 `tests/test_canvas.py::TestTheSettingsOnlyPage::test_a_change_whose_save_is_refused_is_not_kept_and_the_form_shows_what_is`.
+
+## A reference to a top-level plain value is that value (`_Builder.value_references`, `Param.ref`, 2026-11-25)
+
+**Context.** A graph keeps its knobs at the top (`limit: 3`, `split_name: train`) and hands each to the parameters
+that use it (`stop: !ref:limit`), so a scope replaces one key. The model knew a `!ref:` only as a wire from a card:
+any reference made its parameter a slot (`_slot_sockets`), a marker holding one was never built (`_build`), and
+`resolve_references` reported a target that is no node. Measured 2026-11-25 on a conversion graph with nine such
+references: nine problems (`source.stop: !ref:limit names no node`), nine open `*` sockets where fields belong, and
+no card holding one built. With the nine values written in place of their references the same graph derived ten nodes
+and no problem.
+
+**Decision.** Before a marker is described, a parameter filled by `!ref:<key>` where `<key>` is a top-level key
+holding a plain value (nothing of a class inside; never `flow`, `outputs`, `app`, `include`, …) is described and
+built with that value (`_Builder.value_references`). It is a parameter of the node again, carrying `Param.ref`, the
+key. Every level reads the root's keys, as every level hands its references to the root. `set_param` of such a field
+is refused, naming the key: the key may feed several parameters (one split name fed a view and a sink), and replacing
+one reference by a literal would silently cut that parameter loose. The page shows `limit = 3` in place of a box
+(`model.refLabel`), with the reason as its title. The value is the document's own, before any scope: the model is
+derived at confluid's `document` stage.
+
+**Rejected.** A card per referenced key, wired to its users (option B, shown to the user as a drawing): nine more
+cards on a graph of ten, and add, rename, delete and wiring rules for a card that is no object. Editing the key from
+the field: one field would change another card's setting.
+
+**Consequences.** A reference to a key that is not there says `names no node and no top-level value`; a plain value
+named where a card is wired (a slot by name or by annotation, a list member) says `names the top-level value <key>,
+and a card is wired here`. A root's `delivered:` and a subgraph marker are read as before.
+
+**What you may change.** The label's wording. What must hold: the parameter stays a field and is never drawn as a
+wire; the editor never replaces the reference by a literal. Pins: `tests/test_value_references.py`,
+`tests/test_canvas.py::TestAValueReadFromATopLevelKey`.

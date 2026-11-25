@@ -9,6 +9,8 @@ import {
   handleId,
   modelToFlow,
   parseHandle,
+  refLabel,
+  refTitle,
   requiredMark,
   socketType,
   type Model,
@@ -138,5 +140,21 @@ describe("a rooted graph's host card and root (the server's model, drawn as it i
       ["input", ""],
       ["classes", ""],
     ]);
+  });
+});
+
+describe("a field read from a top-level key (`stop: !ref:limit`)", () => {
+  const read = (value: unknown, ref = "limit") =>
+    ({ name: "stop", type: "integer", value, default: null, doc: "", schema: {}, spelled: true, required: false, ref }) as never;
+
+  it("shows the key and its value", () => {
+    expect(refLabel(read(3))).toBe("limit = 3");
+    expect(refLabel(read("train", "split_name"))).toBe("split_name = train");
+    expect(refLabel(read(null))).toBe("limit = null");
+    expect(refLabel(read(["a", "b"], "classes"))).toBe('classes = ["a","b"]');
+  });
+
+  it("says where the value is changed", () => {
+    expect(refTitle(read(3))).toBe("set by the top-level key limit — change it in the text tab");
   });
 });

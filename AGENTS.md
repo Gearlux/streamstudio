@@ -47,6 +47,14 @@ Invariants:
   both); so a number node (recordstream's `Quantity`) is wired into a number setting and saved `<param>: !ref:<P>`
   (user pick 2026-10-09: any node whose result is a number). The output keeps the name `object`. (`tests/test_number_wires.py`)
   arch: "A value node that IS a number offers a number".
+- **A `!ref:` to a top-level PLAIN value is that value** (`stop: !ref:limit` under `limit: 3`; user pick A
+  2026-11-25): `_Builder.value_references` describes and builds the card with the value, and the parameter is a FIELD
+  carrying `Param.ref` (the key) — never a socket, never a wire, never a card for the key. `set_param` of such a field
+  is refused naming the key (the key may feed several parameters); the page shows `limit = 3` read-only
+  (`model.refLabel`). A root's and a subgraph marker's parameters, and a reference inside a list or a map, are not
+  read this way. A key that is not there stays a located problem. (`tests/test_value_references.py`,
+  `tests/test_canvas.py::TestAValueReadFromATopLevelKey`, `frontend/src/__tests__/model.test.ts`) arch: "A
+  reference to a top-level plain value is that value".
 - Parameter help comes from the class's docstring `Args:`, choices from a `Literal`, bounds from an `Interval` mark —
   never restated in the editor. (`tests/test_palette.py::TestAlgorithm::test_interval_and_literal_marks_reach_the_schema`)
 - **A short class name resolves one entry point at a time** (`document._import_until`). Never call

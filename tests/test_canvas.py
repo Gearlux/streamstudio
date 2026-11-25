@@ -5805,3 +5805,34 @@ class TestACardOfItsOwn:
         wait_edges(page, 5)
         assert api_get(server, "api/graphs/files")["text"] == FILES_TEMPLATE_TEXT
         assert opened.errors == []
+
+
+#: A knob at the top of the graph, read by a card's parameter.
+KNOB_TEXT = """\
+level: 0.25
+mask: !class:recordstream.ops.numpy.Threshold
+  low_level: !ref:level
+"""
+
+
+class TestAValueReadFromATopLevelKey:
+    """``low_level: !ref:level`` under ``level: 0.25`` is a field naming the key and its value, not typed in — on the
+    card and in the settings tab. Measured before: an open socket, and ``names no node`` in the problems."""
+
+    def test_the_field_names_the_key_and_its_value_and_is_not_a_box(
+        self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path
+    ) -> None:
+        (graph_dir / "knob.yaml").write_text(KNOB_TEXT)
+        opened = open_graph("knob")
+        page = opened.page
+        on_card = page.locator('.react-flow__node[data-id="mask"] code[data-param="low_level"]')
+        assert on_card.inner_text() == "level = 0.25"
+        assert on_card.get_attribute("data-ref") == "level"
+        assert on_card.get_attribute("title") == "set by the top-level key level — change it in the text tab"
+        assert page.locator('.react-flow__node[data-id="mask"] input[data-param="low_level"]').count() == 0
+        page.locator('[data-tab="settings"]').click()
+        page.locator("[data-settings-all]").check()
+        page.wait_for_selector('[data-settings][data-settings-mode="all"]')
+        assert page.locator('[data-form-node="mask"] code[data-param="low_level"]').inner_text() == "level = 0.25"
+        assert api_get(server, "api/graphs/knob")["model"]["problems"] == []
+        assert opened.errors == []

@@ -63,7 +63,17 @@ export interface Param {
   schema: Record<string, Json>;
   spelled: boolean;
   required: boolean;
+  /** The top-level key the document reads the value from (`stop: !ref:limit` → `limit`); blank or absent: none. */
+  ref?: string;
 }
+
+/** What a field read from a top-level key shows — the key and its value: `limit = 3`, `split_name = train`. */
+export const refLabel = (param: Param): string =>
+  `${param.ref} = ${typeof param.value === "string" ? param.value : JSON.stringify(param.value ?? null)}`;
+
+/** Why such a field is not typed in, and where its value is changed. */
+export const refTitle = (param: Param): string =>
+  `set by the top-level key ${param.ref} — change it in the text tab`;
 
 export interface ModelNode {
   name: string;
