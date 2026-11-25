@@ -20,6 +20,7 @@ page asks the restore question.
 Everything runs in-process over temporary folders through Flask's test client.
 """
 
+import json
 import re
 import shutil
 from pathlib import Path
@@ -366,6 +367,22 @@ class TestTheMount:
             editor_blueprint()
         with pytest.raises(ValueError, match="not both"):
             editor_blueprint(folder, host=host)
+
+    def test_a_map_set_through_the_mounted_editor_keeps_the_order_it_was_sent_in(
+        self, client: Any, folder: Path
+    ) -> None:
+        """The host's app sorts the names of its own answers (Flask's default); the editor's answers never do."""
+        (folder / "names.yaml").write_text("labels: !class:recordstream.labels.LabelMap {mapping: {cat: 0, dog: 1}}\n")
+        sent = {"node": "labels", "param": "mapping", "value": {"dog": 1, "cat": 0, "bird": 2}}
+        # sent as text: the test client's `json=` goes through the host app's JSON, which sorts
+        response = client.post(
+            f"{PREFIX}/api/graphs/names/param", data=json.dumps(sent), content_type="application/json"
+        )
+        assert response.status_code == 200, response.get_data(as_text=True)
+        raw = response.get_data(as_text=True)
+        assert "mapping: {dog: 1, cat: 0, bird: 2}" in response.get_json()["text"]
+        assert '"dog": 1, "cat": 0, "bird": 2' in raw.replace("\n", " ").replace("  ", "")
+        assert client.get("/api/workspace").get_json() == {"owner": "the host"}  # the host's own route, untouched
 
     def test_the_editor_is_reached_from_the_hosts_app(self, host: FakeHost, dist: Path) -> None:
         app = host_app(host, dist)

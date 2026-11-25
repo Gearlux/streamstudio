@@ -70,9 +70,10 @@ def spell(value: Any) -> str:  # a document value: a scalar or a plain container
 
     PyYAML's own dumper decides the quoting (``smooth`` stays bare, ``'1.0'`` gets quotes so it
     stays a string, ``$DATA_ROOT/x`` needs none), containers come out in flow style, and the
-    ``...`` document-end marker a bare scalar is dumped with is stripped.
+    ``...`` document-end marker a bare scalar is dumped with is stripped. A mapping keeps the order of its names:
+    the order a person typed them in is theirs.
     """
-    dumped = yaml.safe_dump(value, default_flow_style=True, width=10**9).strip()
+    dumped = yaml.safe_dump(value, default_flow_style=True, width=10**9, sort_keys=False).strip()
     if dumped.endswith("\n..."):
         dumped = dumped[: -len("\n...")].strip()
     return dumped

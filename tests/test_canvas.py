@@ -1978,16 +1978,16 @@ class TestContainersOfPlainValues:
         new.locator("[data-map-value]").fill("2")
         new.locator("[data-map-value]").press("Enter")
         wait_saves(page, 1)
-        assert self._params(server)["label_to_index"] == {"cat": 0, "dog": 1, "bird": 2}
-        # the document's spelling of a map has its names in alphabetical order, and so have the rows
-        assert "label_to_index: {bird: 2, cat: 0, dog: 1}" in api_get(server, "api/graphs/shapes")["text"]
-        assert rows.evaluate_all(read) == [["bird", "2"], ["cat", "0"], ["dog", "1"]]
+        # the names stay in the order typed: in the answer, in the document and in the rows
+        assert list(self._params(server)["label_to_index"].items()) == [("cat", 0), ("dog", 1), ("bird", 2)]
+        assert "label_to_index: {cat: 0, dog: 1, bird: 2}" in api_get(server, "api/graphs/shapes")["text"]
+        assert rows.evaluate_all(read) == [["cat", "0"], ["dog", "1"], ["bird", "2"]]
         assert field.get_attribute("data-map-waits") is None
 
-        rows.nth(1).locator("[data-map-remove]").click()  # cat
+        rows.nth(0).locator("[data-map-remove]").click()  # cat
         wait_saves(page, 2)
-        assert self._params(server)["label_to_index"] == {"dog": 1, "bird": 2}
-        assert rows.evaluate_all(read) == [["bird", "2"], ["dog", "1"]]
+        assert list(self._params(server)["label_to_index"].items()) == [("dog", 1), ("bird", 2)]
+        assert rows.evaluate_all(read) == [["dog", "1"], ["bird", "2"]]
         assert opened.errors == []
 
     def test_a_list_of_lists_stays_read_only_and_a_card_shows_a_map_read_only(

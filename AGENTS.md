@@ -248,8 +248,9 @@ arch: "A host mounts the editor through three methods"; pins `tests/test_host.py
   any count); names with a number or text each one ROW per name (`scalarMap` / `parseMapRows`, `MapField`), sent only
   while the rows ARE a map — a half-typed row waits (`data-map-waits`). A map's rows need more than one line, so a
   card passes `oneRow` and shows it read-only: never draw a field taller than one row on a card (`layout.card_height`).
-  The names of a written map are in alphabetical order (the document's spelling and the routes' JSON both sort), so
-  the rows are too. No other container gets a field. The palette's search
+  A map's names stay in the order typed: `_yamltext.spell` and the routes' own `jsonify` (`app.py`) never sort —
+  Flask's `jsonify` would, by a setting that is the host's when the editor is mounted, so no route answers through it
+  (`tests/test_host.py::TestTheMount::test_a_map_set_through_the_mounted_editor_keeps_the_order_it_was_sent_in`). No other container gets a field. The palette's search
   (`steps.searchMatches`) matches every word of the query. (`frontend/src/__tests__/pickers.test.ts`, `tests/test_canvas.py::TestContainersOfPlainValues`,
   `steps.test.ts`, `tests/test_add_node.py::TestTheWireDroppedOnEmptyCanvas::test_the_names_typed_into_the_new_card_are_written_as_a_list`)
 - **A host's four calls are `streamstudio.app`'s** — `mount_editor(app, host, prefix)`, `editor_link(graph, tab, only,

@@ -92,7 +92,7 @@ from typing import (
 from urllib.parse import urlencode
 
 import yaml
-from flask import Blueprint, Flask, Response, abort, current_app, g, jsonify, request, send_from_directory
+from flask import Blueprint, Flask, Response, abort, current_app, g, request, send_from_directory
 from loggair import get_logger
 from recordstream.core.stream import Stream
 from recordstream.flow import FlowGraph, Tracer
@@ -1922,6 +1922,15 @@ def _mapping(body: Mapping[str, Any], key: str) -> Dict[str, Any]:  # one JSON-o
     if not isinstance(value, dict):
         raise ValueError(f"{key!r} must be a JSON object, got {value!r}")
     return value
+
+
+def jsonify(data: Any) -> Response:
+    """One answer of the editor's API as JSON, every mapping's names in the order the editor holds them — a map
+    setting's rows are the order a person typed. Flask's own ``jsonify`` sorts names unless the APP says otherwise,
+    and the app may be a host's: its setting is the host's, so the editor's routes never go through it."""
+    provider = current_app.json
+    text = json.dumps(data, default=getattr(provider, "default", None), ensure_ascii=False, sort_keys=False)
+    return current_app.response_class(f"{text}\n", mimetype="application/json")
 
 
 def _error(message: str, status: int) -> Tuple[Response, int]:

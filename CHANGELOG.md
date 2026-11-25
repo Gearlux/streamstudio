@@ -17,7 +17,8 @@ All notable changes to this project are documented here. The format follows
 - **Lists of numbers, fixed counts of numbers and maps of names are typed in the editor.** A `List[float]` or
   `List[int]` setting is ONE text box, the numbers separated by commas; a `Tuple[int, int, int]` (any fixed count of
   numbers) is that many boxes; a `Dict[str, int]`, `Dict[str, float]` or `Dict[str, str]` setting is one row per
-  name in the settings tab, with ✕ to remove a name and **+ add a name**. Deeper containers stay shown, not typed.
+  name in the settings tab, with ✕ to remove a name and **+ add a name**; the names are written in the order of the
+  rows. Deeper containers stay shown, not typed.
 - **The standalone editor's page has ↻ and ⏻** at the end of its bar: ↻ restarts the server with the code on disk
   now and reloads the tab, ⏻ stops it and closes the tab, keeping unsaved work as `streamstudio stop` does. Every
   open tab is told when its server goes. A page in a host's panel or mounted in a host's app has neither: that

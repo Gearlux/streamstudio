@@ -1724,6 +1724,7 @@ class TestPatcher:
         assert spell(True) == "true"
         assert spell([1, 2]) == "[1, 2]"
         assert spell({"a": 1}) == "{a: 1}"
+        assert spell({"dog": 1, "cat": 0}) == "{dog: 1, cat: 0}"  # a map keeps the order it was given in
         assert spell("$DATA_ROOT/x") == "$DATA_ROOT/x"
 
 
