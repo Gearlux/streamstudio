@@ -152,6 +152,7 @@ buttons of the file browser that jump there. `env.complete` lists them.
 ```bash
 streamstudio path/to/graphs                    # serve that folder on port 8190
 streamstudio                                   # the current directory
+streamstudio path/to/graphs/demo.yaml          # that graph's folder; prints the address that opens on demo
 streamstudio path/to/graphs --port 8191 --templates-dir ~/my-templates
 streamstudio path/to/graphs --background       # serve detached; the prompt comes back once it answers
 streamstudio list                              # every running editor: its port, its folder, its address

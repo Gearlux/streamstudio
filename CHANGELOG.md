@@ -7,6 +7,8 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **`streamstudio path/to/demo.yaml` serves the graph's folder** and prints the address of the page opened on that
+  graph (`http://127.0.0.1:8190/?graph=demo`). A file name was refused as a folder that does not exist.
 - **The standalone editor's page has ↻ and ⏻** at the end of its bar: ↻ restarts the server with the code on disk
   now and reloads the tab, ⏻ stops it and closes the tab, keeping unsaved work as `streamstudio stop` does. Every
   open tab is told when its server goes. A page in a host's panel or mounted in a host's app has neither: that

@@ -10,6 +10,7 @@ gesture by gesture: what each does to the document, and what it refuses.
 ```bash
 streamstudio path/to/graphs                                  # port 8190; the folder's *.yaml files are the graphs
 streamstudio                                                 # the same, over the current directory
+streamstudio path/to/graphs/demo.yaml                        # that graph's folder; prints the address that opens on demo
 streamstudio path/to/graphs --port 8191 --templates-dir ~/my-templates
 streamstudio path/to/graphs --background                     # serve detached; the prompt comes back once it answers
 streamstudio list                                            # every running editor: port, folder, address
@@ -21,6 +22,10 @@ streamstudio restart                                         # stop it, then ser
 streamstudio restart 8191                                    # the one on port 8191, on that port again
 streamstudio restart path/to/graphs                          # stop the one serving that folder, serve it again
 ```
+
+Naming a graph's file serves its folder — every graph of the folder is in the list — and prints one more line, the
+address of the page opened on that graph (`http://127.0.0.1:8190/?graph=demo`). A folder already being served is not
+started twice: the line names the graph on the running editor.
 
 `-p` is the short form of `--port`, `-b` of `--background`. `--browser always|new|never` opens the editor's address in
 your browser once it answers (default `never`); `--auto-port` takes the next free port without asking.

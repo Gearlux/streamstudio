@@ -4,8 +4,8 @@ Serving, ``stop``, ``restart`` and ``list`` are portail's — the framework a wo
 says who the editor is (:data:`SPEC`), what it serves (a :class:`Folder` of graphs) and what is its own:
 
 * ``open`` (the default — bare ``streamstudio``): the editor (``docs/rewrite.md``) over the confluid documents of a
-  folder — ``streamstudio [graph_dir] [--port 8190] [--templates-dir DIR] [--background]``, the Flask app of
-  :mod:`streamstudio.app`, standalone (a consuming Flask app mounts the same blueprint instead).
+  folder — ``streamstudio [graph_dir | graph.yaml] [--port 8190] [--templates-dir DIR] [--background]``, the Flask
+  app of :mod:`streamstudio.app`, standalone (a consuming Flask app mounts the same blueprint instead).
 * ``stop [folder | port] [--all]`` / ``restart [folder | port]``: a server of the editor, found by what it answers —
   never a program that is not the editor. The editor stops by the same way out for SIGTERM (what they send) as for
   Ctrl+C, keeping its unsaved work in the folder's hidden ``.streamstudio-workspace.json``; ``stop`` names what was
@@ -17,6 +17,7 @@ import http.client
 import json
 import os
 import sys
+import urllib.parse
 import urllib.request
 from datetime import datetime
 from pathlib import Path
@@ -216,6 +217,8 @@ def create_app(server: Server) -> "Flask":
     notice = _recovery_notice(studio_of(flask_app).workspace())
     if notice is not None:
         print(notice, flush=True)
+    if _NAMED_GRAPH:
+        print(_graph_address(served.host, served.port, _NAMED_GRAPH.pop()), flush=True)
     return mount_shell(flask_app, server, index=False)
 
 
@@ -303,19 +306,34 @@ def _report_kept(asked: List[_Unsaved]) -> None:
             print(f"Its unsaved work ({shown}) was not kept — the editor did not write it to {unsaved.file}.")
 
 
+def _server_of(folder: str) -> Optional[Dict[str, Any]]:  # a row of portail's running servers
+    """The running editor that serves ``folder`` (``""``: the current directory), or ``None``."""
+    identity = str(Path(folder).expanduser().resolve()) if folder else str(Path.cwd().resolve())
+    return next((server for server in serving.running_servers(SPEC) if server["identity"] == identity), None)
+
+
 def _notice_of_the_server_of(folder: str) -> None:
     """After a ``--background`` start: the line about unsaved work of the last session, asked of the server that now
     serves ``folder`` (its own output went nowhere)."""
-    identity = str(Path(folder).expanduser().resolve()) if folder else str(Path.cwd().resolve())
-    for server in serving.running_servers(SPEC):
-        if server["identity"] != identity:
-            continue
-        try:
-            notice = _recovery_notice(_ask(f"http://{server['host']}:{server['port']}/api/workspace"))
-        except (OSError, ValueError, KeyError, TypeError, http.client.HTTPException):
-            return
-        if notice is not None:
-            print(notice)
+    server = _server_of(folder)
+    if server is None:
+        return
+    try:
+        notice = _recovery_notice(_ask(f"http://{server['host']}:{server['port']}/api/workspace"))
+    except (OSError, ValueError, KeyError, TypeError, http.client.HTTPException):
+        return
+    if notice is not None:
+        print(notice)
+
+
+#: The graph a start named by its file (``streamstudio flow.yaml``), until its address is printed: by ``create_app``
+#: for a server this process runs (the port is settled by then), else by ``open`` once portail returns.
+_NAMED_GRAPH: List[str] = []
+
+
+def _graph_address(host: str, port: int, graph: str) -> str:
+    """The line naming the page that opens on ``graph`` — the address alone on it, so a terminal links all of it."""
+    return f"  http://{host}:{port}/?graph={urllib.parse.quote(graph, safe='')}"
 
 
 # =======================================================================================
@@ -346,8 +364,9 @@ def open_(
     asks whether to take the next free one; a port a program that is not the editor holds is refused.
 
     Args:
-        graph_dir: The folder whose *.yaml files are the graphs (default: the current directory). More can be opened
-            from anywhere with File → Open.
+        graph_dir: The folder whose *.yaml files are the graphs (default: the current directory), or one of its
+            graphs' files: the file's folder is served and the address that opens on that graph is printed. More
+            can be opened from anywhere with File → Open.
         port: Port the editor listens on (default: 8190).
         templates_dir: The folder holding the templates (default: ~/.streamstudio/templates, created on the first
             template saved).
@@ -356,7 +375,12 @@ def open_(
         browser: Open the editor's address in the browser: ``always``, ``new`` (only for a server started now) or
             ``never`` (the default).
     """
-    folder = str(Path(graph_dir).expanduser()) if graph_dir else ""
+    named = Path(graph_dir).expanduser() if graph_dir else None
+    del _NAMED_GRAPH[:]
+    if named is not None and named.suffix == ".yaml" and named.is_file():  # a graph's file: its folder, that graph
+        _NAMED_GRAPH.append(named.stem)
+        named = named.parent
+    folder = str(named) if named is not None else ""
     lifecycle.open(
         folder,
         auto_port=auto_port,
@@ -367,6 +391,9 @@ def open_(
     )
     if background:
         _notice_of_the_server_of(folder)
+    server = _server_of(folder) if _NAMED_GRAPH else None  # a server this process did not run: already there, or -b
+    if server is not None:
+        print(_graph_address(server["host"], server["port"], _NAMED_GRAPH.pop()))
 
 
 @app.command(name="stop", positionals=["target"])

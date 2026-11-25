@@ -418,7 +418,12 @@ arch: "A host mounts the editor through three methods"; pins `tests/test_host.py
   start and a restart); `list` is registered by portail; `stop` wraps portail's to say what was kept. There is no
   `--editor` and no second editor (deleted 2026-10-14): do not add a launcher, a converter command or a second
   server to this CLI. Folders are resolved to absolute paths once; `restart` checks the folder before it stops
-  anything. No help text names the removed editor or the workspace. A start opens no browser unless asked
+  anything. `open` also takes a graph's FILE (an existing `*.yaml`): its folder is served — the workspace stays a
+  folder, portail is handed nothing else — and one line names the page opened on that graph (`?graph=<stem>`), printed
+  by `cli.create_app` for a server this process runs, else by `open_` from the running server's port
+  (`cli._NAMED_GRAPH`); `--browser` still opens the base address.
+  (`tests/test_cli_editor.py::TestServingTheCanvas::test_a_graph_file_serves_its_folder_and_names_the_graphs_address`)
+  No help text names the removed editor or the workspace. A start opens no browser unless asked
   (`--browser` defaults to `never`). (`tests/test_cli_editor.py::TestTheCommands`, `::TestStopAndRestart`,
   `::TestWhatTheCliSaysAboutItself`)
 - **`stop`/`restart` find a server by what it ANSWERS** (`/api/meta` names `streamstudio`), by its port or its

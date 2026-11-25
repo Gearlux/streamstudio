@@ -252,6 +252,66 @@ class TestServingTheCanvas:
             _main(monkeypatch, "graphs", "--templates-dir", "tpl")
         create_app_mock.assert_called_once_with(tmp_path / "graphs", templates_dir=tmp_path / "tpl")
 
+    @pytest.mark.usefixtures("free")
+    @pytest.mark.parametrize("typed_from_its_folder", [True, False])
+    def test_a_graph_file_serves_its_folder_and_names_the_graphs_address(
+        self,
+        graph_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        typed_from_its_folder: bool,
+    ) -> None:
+        """Measured before: ``streamstudio convert.yaml``, typed in the graph's folder, was refused — ``workspace
+        folder convert.yaml does not exist``."""
+        (graph_dir / "my flow.yaml").write_text("flow: {}\n")
+        monkeypatch.chdir(graph_dir if typed_from_its_folder else tmp_path)
+        typed = "my flow.yaml" if typed_from_its_folder else str(graph_dir / "my flow.yaml")
+        with _serving(graph_dir) as create_app_mock:
+            _main(monkeypatch, typed)
+        create_app_mock.assert_called_once_with(graph_dir, templates_dir=None)
+        lines = capsys.readouterr().out.splitlines()
+        assert f"  http://{cli.STUDIO_HOST}:{cli.EDITOR_PORT}/?graph=my%20flow" in lines  # alone on its line
+
+    def test_a_graph_file_of_a_folder_already_served_names_the_graphs_address_there(
+        self,
+        graph_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        (graph_dir / "flow.yaml").write_text("flow: {}\n")
+        _running(monkeypatch, {9123: graph_dir})
+        with patch("streamstudio.app.create_app") as create_app_mock:
+            _main(monkeypatch, str(graph_dir / "flow.yaml"), "-p", "9123")
+        create_app_mock.assert_not_called()
+        assert f"  http://{cli.STUDIO_HOST}:9123/?graph=flow" in capsys.readouterr().out.splitlines()
+
+    def test_a_folder_names_no_graphs_address(
+        self,
+        graph_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        with _serving(graph_dir):
+            _main(monkeypatch, str(graph_dir))
+        assert "?graph=" not in capsys.readouterr().out
+
+    @pytest.mark.parametrize("name", ["nowhere.yaml", "notes.txt"])
+    def test_a_file_that_is_no_graph_file_there_is_refused(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        name: str,
+    ) -> None:
+        (tmp_path / "notes.txt").write_text("not a graph\n")
+        with patch("streamstudio.app.create_app") as create_app_mock:
+            with pytest.raises(SystemExit) as exit_info:
+                _main(monkeypatch, str(tmp_path / name))
+        assert exit_info.value.code == 1
+        assert f"{name} does not exist" in " ".join(capsys.readouterr().out.split())
+        create_app_mock.assert_not_called()
+
     def test_the_default_templates_folder_is_under_the_home_resolved_when_used(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
