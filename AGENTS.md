@@ -359,6 +359,20 @@ arch: "A host mounts the editor through three methods"; pins `tests/test_host.py
   `tests/test_canvas.py::TestTheSidebarsAreSizable`)
 - Shift+click ADDS a card to the selection (user answer "match", §6c), handled by a capture listener in
   `Canvas.tsx`. (`tests/test_canvas.py::TestShiftClickAdds`, `::TestShiftHeldWhileDragging`)
+- **A FULL run is one of the serving framework's jobs over recordstream's own hooks** (user approvals 2026-11-26):
+  `Studio.plan` / `run_all` / `job_list` / `stop_job` (`POST …/plan`, `…/run-all`, `GET api/jobs`, `POST
+  api/jobs/<job>/stop`; all in `TURN_FREE`, `_runnable` takes the lock itself to read and build). It builds the
+  graph's `runnable:` from the SAVED texts (`Document.unsaved_text` refuses — positions do not count) under the asked
+  scopes (`Document.load(scopes)`, `declared_scopes()`; an undeclared one is refused by name), answers
+  `recordstream.workflow.plan_of`, and starts `runnable.run()` as `Studio.jobs.start("run:<graph>", …)` — one per
+  graph, a second start answers the first. The count is `set_progress_callback`, the stop is `set_stop_request(lambda:
+  job.stop)`: never raise out of the progress callback (recordstream swallows it), never a thread kill, never a
+  subprocess or a second runner here. The page polls `api/jobs` once at its start and then only while a job runs
+  (`runall.POLL_MS`); a host's panel, `?embed` and the settings sheet never ask and show no button (`fullRuns`). The
+  run tab's part is `panels/RunAll.tsx`, the strip `JobBar` under the bar (`.app.with-strip` adds its row); both
+  buttons are greyed with the reason on a graph with no `runnable` node. `recordstream.workflow` is imported at the
+  call, so `import streamstudio.app` stays light. (`tests/test_run_all.py`, `tests/test_canvas.py::TestTheFullRun`,
+  `frontend/src/__tests__/runall.test.ts`)
 - **A traced entry's picture is recordstream's** (`Tracer.picture`; user pick A 2026-11-25): `Studio.picture` names the
   node as the document does and answers the PNG (`GET /api/runs/<run>/picture`, in `TURN_FREE`, `no-store`); the
   editor never renders or imports numpy / Pillow for it. The page shows it in the run tab only (`RunPanel`'s

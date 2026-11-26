@@ -89,6 +89,25 @@ button { font: inherit; }
 .size-edge-nodes { left: var(--nodes-width, 300px); }
 .size-edge-side { right: var(--side-width); }
 .app.settings-only .size-edge { display: none; }
+/* a full run: the strip under the bar (every tab) and the run tab's part (panels/RunAll.tsx) */
+.app.with-strip { grid-template-rows: 40px auto 1fr; }
+.job-strip { padding: 4px 12px; background: #1d2436; border-bottom: 1px solid var(--line); font-size: 12px; }
+.job-bar { display: flex; align-items: center; gap: 10px; }
+.job-bar button { background: #2a2a40; color: #eee; border: 1px solid #444; border-radius: 4px; padding: 3px 9px; font-size: 12px; cursor: pointer; }
+.job-bar button:disabled { opacity: .5; cursor: default; }
+.job-title { font-weight: 600; white-space: nowrap; }
+.job-track { flex: 1; min-width: 40px; height: 8px; border-radius: 4px; background: #111118; overflow: hidden; }
+.job-fill { display: block; height: 100%; background: var(--accent); }
+.job-count { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.run-all { display: flex; flex-direction: column; gap: 6px; }
+.run-all-why { padding: 0; }
+.run-plan { display: flex; flex-direction: column; gap: 6px; padding: 8px; border: 1px solid var(--line); border-radius: 6px; background: #14141c; }
+.run-scopes { display: flex; gap: 12px; align-items: center; font-size: 12px; }
+.run-scopes label { display: flex; gap: 4px; align-items: center; }
+.side pre.run-plan-lines { padding: 0; white-space: pre-wrap; }
+.job-ending { padding: 6px 8px; border-left: 3px solid #43a047; background: #142a16; font-size: 12px; }
+.job-ending.job-failed { border-left-color: #ff5252; background: #2a1414; color: #ff8a80; }
+.job-ending.job-stopped { border-left-color: #ffb300; background: #2a2414; }
 .canvas { position: relative; display: flex; flex-direction: column; min-width: 0; }
 .canvas .react-flow { flex: 1; }
 .empty-canvas { align-items: center; justify-content: center; }

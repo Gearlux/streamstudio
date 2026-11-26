@@ -94,6 +94,7 @@ from urllib.parse import urlencode
 import yaml
 from flask import Blueprint, Flask, Response, abort, current_app, g, request, send_from_directory
 from loggair import get_logger
+from portail.jobs import Job, Jobs
 from recordstream.core.stream import Stream
 from recordstream.flow import FlowGraph, Tracer
 from recordstream.items import Record
@@ -677,6 +678,8 @@ class Studio:
         self._paths: Dict[str, Path] = {}
         self._documents: Dict[str, Document] = {}
         self._runs: Dict[str, Run] = {}
+        # The full runs of this folder's graphs (`run_all`): started here, listed with their count, stopped by id.
+        self.jobs = Jobs()
         # The graphs a host ships (``EditorHost.shipped``), by list name: the file each is shipped in, while the
         # folder holds no file of that name (its entry in ``_paths`` is where the copy would be written).
         self._shipped: Dict[str, Path] = {}
@@ -1761,6 +1764,91 @@ class Studio:
         except RuntimeError as never_reached:  # the tracer's word for a side the run has not made (yet)
             raise ValueError(str(never_reached)) from never_reached
 
+    # -- the full run ------------------------------------------------------------------------
+
+    def _runnable(self, name: str, scopes: Sequence[str]) -> Tuple[Any, List[str]]:  # the built ``runnable:``
+        """The graph's ``runnable:`` built from its SAVED file under ``scopes``, and the scopes the graph declares.
+        Refused in words: unsaved text (the run would not be the file's), a scope the graph does not declare, no
+        ``runnable:``. The document is read and built in the editor's turn, like a trace's."""
+        with self.lock:
+            document = self.document(name)
+            where = document.path.name
+            if document.unsaved_text:
+                raise ValueError(
+                    f"{where} holds unsaved changes — save the graph first: a full run reads the saved file"
+                )
+            declared = document.declared_scopes()
+            for scope in scopes:
+                if scope not in declared:
+                    known = ", ".join(declared) or "none"
+                    raise ValueError(f"{where} declares no scope {scope!r} — its scopes are: {known}")
+            try:
+                built = document.load(list(scopes))
+            except Exception as exc:  # noqa: BLE001 — confluid's located refusal to build, answered in its words
+                raise ValueError(f"{document.path}: does not build: {type(exc).__name__}: {exc}") from exc
+        runnable = built.get("runnable") if isinstance(built, dict) else None
+        if runnable is None:
+            raise ValueError(
+                f"{where} has no runnable: — a full run runs the object under the top-level key 'runnable'"
+            )
+        return runnable, declared
+
+    def plan(self, name: str, scopes: Sequence[str] = ()) -> Dict[str, Any]:
+        """What a full run of the graph would do under ``scopes``, nothing changed — recordstream's plan of its
+        ``runnable:`` (``recordstream run --dry_run``'s) as data and as the lines that command prints, whether a run
+        would stop at a check, and the scopes the graph declares."""
+        from recordstream.workflow import plan_lines, plan_of  # at the call: the app's import stays light
+
+        runnable, declared = self._runnable(name, scopes)
+        plan = plan_of(runnable)
+        return {
+            "graph": name,
+            "declared": declared,
+            "scopes": list(scopes),
+            "plan": plan.to_dict(),
+            "lines": plan_lines(plan),
+            "would_stop": plan.would_stop,
+        }
+
+    def run_all(self, name: str, scopes: Sequence[str] = ()) -> Dict[str, Any]:
+        """Start the graph's ``runnable:`` over every record as ONE job, and answer the job — or the one already
+        running for this graph, starting nothing. The job counts the records through the runnable's own progress hook
+        and reads the stop between two records: what was written is kept."""
+        with self.lock:
+            held = self.jobs.running(f"run:{name}")
+        if held is not None:
+            return held.state()
+        runnable, _declared = self._runnable(name, scopes)
+        if not callable(getattr(runnable, "run", None)):
+            raise ValueError(f"{name}.yaml: its runnable ({type(runnable).__name__}) has no run()")
+
+        def work(job: Job) -> Dict[str, Any]:
+            def progressed(value: float, total: Optional[float], desc: str = "") -> None:
+                job.step(int(value), total=int(total) if total else None)
+
+            # recordstream's two hooks, by shape: the count per record, and the question it asks between records
+            for hook, handed in (("set_progress_callback", progressed), ("set_stop_request", lambda: job.stop)):
+                setter = getattr(runnable, hook, None)
+                if callable(setter):
+                    setter(handed)
+            runnable.run()
+            # A source that cannot say how many records it holds reports no count (recordstream's hook): say none.
+            if job.stop_asked:  # the run returned because it was asked to: it flushed its sink and kept its records
+                after = f" after {job.done} of {job.total} records" if job.total else ""
+                return {"message": f"{name}: stopped{after} — what was written is kept"}
+            return {"message": f"{name}: {job.done} records run" if job.total else f"{name}: run to its end"}
+
+        title = name if not scopes else f"{name} ({', '.join(scopes)})"
+        return self.jobs.start(f"run:{name}", title, work, detail={"graph": name, "scopes": list(scopes)}).state()
+
+    def job_list(self) -> List[Dict[str, Any]]:
+        """Every full run's state: the running ones first, then the ended ones newest first."""
+        return self.jobs.list()
+
+    def stop_job(self, job_id: str) -> Dict[str, Any]:
+        """Ask a full run to stop and answer it at once; it ends after the record in hand."""
+        return self.jobs.stop(job_id).state()
+
     def _new_run_id(self) -> str:
         while True:
             run_id = f"run_{secrets.token_hex(_RUN_ID_BYTES)}"
@@ -1931,6 +2019,10 @@ TURN_FREE = frozenset(
         "trace",
         "rerun",
         "run_picture",
+        "plan",
+        "run_all",
+        "jobs",
+        "stop_job",
     }
 )
 
@@ -1953,6 +2045,13 @@ def _field(body: Mapping[str, Any], key: str) -> Any:  # one required field of t
     if key not in body:
         raise ValueError(f"the request needs {key!r} (it has: {sorted(body)})")
     return body[key]
+
+
+def _names(body: Mapping[str, Any], key: str) -> List[str]:  # one list-of-names field, defaulting to []
+    value = body.get(key, [])
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ValueError(f"{key!r} must be a list of names, got {value!r}")
+    return value
 
 
 def _mapping(body: Mapping[str, Any], key: str) -> Dict[str, Any]:  # one JSON-object field, defaulting to {}
@@ -2381,6 +2480,22 @@ def editor_blueprint(
             raise ValueError(f"'record' must be an integer, got {record!r}")
         until = body.get("until")
         return jsonify(_studio().trace(name, record, None if until is None else str(until)))
+
+    @blueprint.post("/api/graphs/<name>/plan")
+    def plan(name: str) -> Response:
+        return jsonify(_studio().plan(name, _names(_body(), "scopes")))
+
+    @blueprint.post("/api/graphs/<name>/run-all")
+    def run_all(name: str) -> Response:
+        return jsonify(_studio().run_all(name, _names(_body(), "scopes")))
+
+    @blueprint.get("/api/jobs")
+    def jobs() -> Response:
+        return jsonify(_studio().job_list())
+
+    @blueprint.post("/api/jobs/<job>/stop")
+    def stop_job(job: str) -> Response:
+        return jsonify(_studio().stop_job(job))
 
     @blueprint.post("/api/runs/<run>/rerun")
     def rerun(run: str) -> Response:

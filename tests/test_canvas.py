@@ -6158,3 +6158,151 @@ class TestTheSidebarsAreSizable:
         opened.page.wait_for_selector('.app[data-graph="pane"][data-ready="true"] [data-settings]')
         assert opened.page.locator("[data-size-edge]").count() == 0
         assert opened.errors == []
+
+
+#: Lets a `TinyGatedSink`'s writes through — a test holds a full run at its first record with it.
+RUN_GATE = threading.Event()
+
+
+@configurable(category="source", group="canvas-test")
+class TinyRows:
+    """Five records that can be counted and indexed: what a full run walks."""
+
+    def __len__(self) -> int:
+        return 5
+
+    def __getitem__(self, index: int) -> Record:
+        return {"image": Image(np.full((2, 2), float(index), dtype=np.float32))}
+
+    def __iter__(self) -> Iterator[Record]:
+        return (self[index] for index in range(len(self)))
+
+
+@configurable(category="sink", group="canvas-test")
+class TinyGatedSink:
+    """Takes each record once ``RUN_GATE`` is set.
+
+    Args:
+        gated: Whether a write waits for the gate.
+    """
+
+    def __init__(self, gated: bool = False) -> None:
+        self.gated = gated
+
+    def write(self, record: Record) -> None:
+        if self.gated:
+            assert RUN_GATE.wait(timeout=20)
+
+    def flush(self) -> None:
+        pass
+
+
+def _convert_text(gated: bool) -> str:
+    return f"""\
+stop: 5
+
+small: !scope:small
+  stop: 2
+
+runnable: !class:recordstream.processing.DatasetProcessor
+  stop: !ref:stop
+  stream: !class:recordstream.core.stream.Stream
+    source: !class:{MOD}.TinyRows {{}}
+  sink: !class:{MOD}.TinyGatedSink {{gated: {str(gated).lower()}}}
+"""
+
+
+class TestTheFullRun:
+    """A graph that holds a ``runnable:`` is run WHOLE from the editor (user request 2026-11-25): the plan first,
+    then one job with its count and Stop — in the run tab, and in a strip under the bar in every tab."""
+
+    def test_the_plan_is_shown_a_scope_changes_it_and_the_run_ends_with_its_count(
+        self, open_graph: Callable[[str], Opened], graph_dir: Path
+    ) -> None:
+        (graph_dir / "convert.yaml").write_text(_convert_text(gated=False))
+        opened = open_graph("convert")
+        page = opened.page
+        open_run_tab(page)
+        page.locator('[data-action="plan"]').click()
+        page.locator('[data-run-all][data-plan="shown"]').wait_for()
+        assert (
+            "records: 5, start: 0, to_build: 5, sink: TinyGatedSink" in page.locator("[data-plan-lines]").inner_text()
+        )
+        page.locator('[data-scope="small"]').check()
+        page.wait_for_function("() => document.querySelector('[data-plan-lines]')?.innerText.includes('to_build: 2')")
+        page.locator('[data-scope="small"]').uncheck()
+        page.wait_for_function("() => document.querySelector('[data-plan-lines]')?.innerText.includes('to_build: 5')")
+        page.locator('[data-action="start-run"]').click()
+        ending = page.locator("[data-run-all] [data-job-ending]")
+        ending.wait_for()
+        assert ending.get_attribute("data-job-status") == "done"
+        assert ending.inner_text().startswith("convert: 5 records run (")
+        assert page.locator("[data-run-all]").get_attribute("data-plan") == "closed"
+        assert page.locator("[data-job-strip]").count() == 0  # the strip is there only while a run is going
+        assert opened.errors == []
+
+    def test_the_bars_button_opens_the_plan_and_the_strip_stops_the_run_from_another_tab(
+        self, open_graph: Callable[[str], Opened], graph_dir: Path
+    ) -> None:
+        (graph_dir / "convert.yaml").write_text(_convert_text(gated=True))
+        RUN_GATE.clear()
+        opened = open_graph("convert")
+        page = opened.page
+        try:
+            page.locator('button[data-command="run-all"]').click()
+            page.locator('[data-run-all][data-plan="shown"]').wait_for()  # the run tab opened on the plan
+            assert page.locator(".app").get_attribute("data-side-tab") == "run"
+            page.locator('[data-action="start-run"]').click()
+            page.locator('[data-run-all] [data-job-status="running"]').wait_for()
+            assert page.locator('button[data-command="run-all"]').is_disabled()  # one run at a time
+            page.locator('[data-tab="text"]').click()
+            strip = page.locator("[data-job-strip]")
+            strip.wait_for()
+            assert strip.locator(".job-title").inner_text() == "convert"
+            strip.locator('[data-action="stop-run"]').click()
+            page.wait_for_function(
+                "() => document.querySelector('[data-job-strip] [data-action=stop-run]')?.innerText === 'stopping…'"
+            )
+        finally:
+            RUN_GATE.set()
+        strip.wait_for(state="detached")
+        open_run_tab(page)
+        ending = page.locator("[data-run-all] [data-job-ending]")
+        ending.wait_for()
+        assert ending.get_attribute("data-job-status") == "stopped"
+        assert ending.inner_text().startswith("convert: stopped after 1 of 5 records — what was written is kept (")
+        assert opened.errors == []
+
+    def test_unsaved_changes_are_refused_in_the_plan(
+        self, open_graph: Callable[[str], Opened], graph_dir: Path
+    ) -> None:
+        (graph_dir / "convert.yaml").write_text(_convert_text(gated=False))
+        opened = open_graph("convert")
+        page = opened.page
+        api_put(
+            page.url.split("/?")[0],
+            "api/graphs/convert",
+            {"text": _convert_text(gated=False).replace("stop: 5", "stop: 4")},
+        )
+        open_run_tab(page)
+        page.locator('[data-action="plan"]').click()
+        refused = page.locator("[data-plan-error]")
+        refused.wait_for()
+        assert refused.inner_text() == (
+            "convert.yaml holds unsaved changes — save the graph first: a full run reads the saved file"
+        )
+        assert page.locator('[data-action="start-run"]').is_disabled()
+        assert opened.errors == [REFUSED_400]
+
+    def test_a_graph_without_a_runnable_greys_both_buttons_and_says_why(
+        self, open_graph: Callable[[str], Opened]
+    ) -> None:
+        opened = open_graph("pets")
+        page = opened.page
+        open_run_tab(page)
+        why = "this graph has no runnable: — a full run runs the object under that key"
+        assert page.locator('[data-action="plan"]').is_disabled()
+        assert page.locator('button[data-command="run-all"]').is_disabled()
+        assert page.locator('button[data-command="run-all"]').get_attribute("title") == why
+        assert page.locator(".run-all-why").inner_text() == why
+        assert opened.errors == []

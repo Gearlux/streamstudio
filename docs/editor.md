@@ -242,6 +242,24 @@ both ways; Escape closes it. After **rerun this node** the pictures of that step
 the canvas draws no card for (a step inside a subgraph whose steps are a `!ref:`); such a step shows its entries and
 pictures and has no rerun form. A row never changes the selection, which is where the next run pauses.
 
+**Running the whole graph.** Run and Step send ONE record through the graph. A graph that holds a `runnable:` — a
+conversion, a dataset build — is also run whole: **run all…** in the run tab, or **Run all…** in the bar, which opens
+the run tab on the same plan.
+
+1. The plan is shown first, and nothing runs yet: the checks a run makes, how many records it builds, the sink —
+   what `recordstream run <graph>.yaml --dry_run` prints. A graph that declares scopes (`smoke: !scope:smoke`) has a
+   tick box for each; ticking one shows the plan under it.
+2. **Start run** runs every record as one job of the editor. Its count (`312 of 807 records`) and **Stop** show in
+   the run tab and in a strip under the bar, in every tab.
+3. At the end the run tab says how it ended and how long it took: the records run, the error in words, or where it
+   was stopped.
+
+**Stop** ends the run after the record in hand. The sink is closed as at the end of a run, so what was written is
+kept. A full run reads the SAVED graph: with unsaved changes it is refused, and says to save first. One run of a
+graph goes at a time. The run lives in the editor: stopping or restarting the editor ends it. In a host's panel a
+full run is not offered. A source that cannot say how many records it holds runs without a count. The plan lists
+what the runnable itself reports — a sink that replaces its folder when a run starts may not say so there.
+
 **Save refuses to overwrite someone else's change.** When the file changed on disk since the editor read or wrote
 it, nothing is written:
 

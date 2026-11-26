@@ -607,3 +607,54 @@ export const rerun = (run: string, node: string, params: Record<string, Json>): 
 
 /** `GET api/runs/<run>`. */
 export const getRun = (run: string): Promise<Run> => call("GET", `api/runs/${encodeURIComponent(run)}`);
+
+/** One check of a plan: what a run checks before anything runs. */
+export type PlanCheck = { description: string; ok: boolean; detail: string };
+
+/** recordstream's plan of a runnable: what a run would do, nothing changed. */
+export type RunPlan = {
+  title: string;
+  checks: PlanCheck[];
+  actions: string[];
+  commands: string[][];
+  details: Record<string, Json>;
+  steps: RunPlan[];
+};
+
+/** `POST …/plan`: the plan of a full run under `scopes`, the lines `recordstream run --dry_run` prints for it,
+ * whether a run would stop at a check, and the scopes the graph declares. */
+export type PlanAnswer = {
+  graph: string;
+  declared: string[];
+  scopes: string[];
+  plan: RunPlan;
+  lines: string[];
+  would_stop: boolean;
+};
+
+/** One full run — a background job of the server: its count, and its ending once it ended. */
+export type Job = {
+  id: string;
+  key: string;
+  title: string;
+  unit: string;
+  done: number;
+  total: number | null;
+  message: string;
+  detail: { graph: string; scopes?: string[] };
+  status: "running" | "done" | "stopped" | "failed";
+  running: boolean;
+  stop: boolean;
+  error: string;
+  elapsed_s: number;
+};
+
+export const planRun = (name: string, scopes: string[]): Promise<PlanAnswer> =>
+  call("POST", `${graphPath(name)}/plan`, { scopes });
+
+export const runAll = (name: string, scopes: string[]): Promise<Job> =>
+  call("POST", `${graphPath(name)}/run-all`, { scopes });
+
+export const getJobs = (): Promise<Job[]> => call("GET", "api/jobs");
+
+export const stopJob = (job: string): Promise<Job> => call("POST", `api/jobs/${encodeURIComponent(job)}/stop`);

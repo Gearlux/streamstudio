@@ -28,6 +28,7 @@
  * `data-run-parent` (the subgraph it sits in) and `data-depth`. "step" goes through them in that order.
  */
 import { useEffect, useState } from "react";
+import type { ReactNode } from "react";
 import type { Run, TraceNode } from "../api";
 import { ParamWidget, valuesOf } from "../canvas/ParamWidget";
 import { filledLines, ranOn, type HostInfo } from "../host";
@@ -72,6 +73,8 @@ export interface RunPanelProps {
   onRun: () => void;
   onStep: () => void;
   onRerun: (node: string, params: Record<string, Json>) => void;
+  /** The full run's part of the tab (`RunAll`), or `null` where a full run is not offered (a host's panel). */
+  runAll: ReactNode;
 }
 
 export function RunPanel(props: RunPanelProps) {
@@ -105,6 +108,7 @@ export function RunPanel(props: RunPanelProps) {
           {next === undefined ? "step" : next === null ? "step to the end" : `step to ${next}`}
         </button>
       </div>
+      {props.runAll}
       {error && (
         <div className="run-error" data-run-error>
           {error}

@@ -107,6 +107,10 @@ import {
   type NodeSpec,
   type Run,
   type Template,
+  getJobs,
+  runAll as postRunAll,
+  stopJob as postStopJob,
+  type Job,
 } from "./api";
 import { addPlan, draggedWire } from "./cards";
 import { Canvas, type CanvasMenuRequest, type LayoutChange, type PaletteGesture } from "./canvas/Canvas";
@@ -192,6 +196,8 @@ import { NodesSidebar } from "./panels/NodesSidebar";
 import { RunPanel } from "./panels/RunPanel";
 import { SettingsForm } from "./panels/SettingsForm";
 import { SizeEdge } from "./panels/SizeEdge";
+import { JobBar, RunAll } from "./panels/RunAll";
+import { POLL_MS, firstRunning, latestFor } from "./runall";
 import { addedMember, beside, inputTarget, insertTarget, shiftsMembers, wireTarget, type InsertTarget } from "./oplists";
 import {
   answered as recoveryAnswered,
@@ -305,6 +311,9 @@ function Editor() {
     side: readWidth("side"),
   }));
   const [pageWidth, setPageWidth] = useState(() => window.innerWidth);
+  // the full runs of this folder's graphs (the server's jobs), and whether the bar asked the run tab for a plan
+  const [jobs, setJobs] = useState<Job[]>([]);
+  const [planAsked, setPlanAsked] = useState(false);
   useEffect(() => {
     const resized = (): void => setPageWidth(window.innerWidth);
     window.addEventListener("resize", resized);
@@ -2224,6 +2233,38 @@ function Editor() {
   const fromHost = graph !== null && host !== null && !hasOwnSource(graph.model);
   const targetShown: InsertTarget = graph ? insertTarget(shownView, shown, graph.kind, selectedAnchor(shownView, selection)) : { kind: "none" };
 
+  // The full runs: a standalone editor's own (a host runs its graphs itself). The page asks for the jobs once — a run
+  // started before a reload is still going — and then only while one runs.
+  const fullRuns = host === null && !embed && !settingsOnly;
+  const refreshJobs = useCallback(async () => {
+    try {
+      setJobs(await getJobs());
+    } catch {
+      // the next poll asks again
+    }
+  }, []);
+  useEffect(() => {
+    if (fullRuns) void refreshJobs();
+  }, [fullRuns, refreshJobs]);
+  const anyRunning = jobs.some((job) => job.running);
+  useEffect(() => {
+    if (!fullRuns || !anyRunning) return undefined;
+    const timer = window.setInterval(() => void refreshJobs(), POLL_MS);
+    return () => window.clearInterval(timer);
+  }, [fullRuns, anyRunning, refreshJobs]);
+  const heard = (job: Job): void => setJobs((held) => [job, ...held.filter((each) => each.id !== job.id)]);
+  const startAll = async (scopes: string[]): Promise<void> => {
+    if (graph !== null) heard(await postRunAll(graph.name, scopes));
+  };
+  const stopRun = (job: string): void => {
+    postStopJob(job).then(heard, (exc) => push("error", errorMessage(exc)));
+  };
+  const noRunnable =
+    graph !== null && !graph.model.nodes.some((node) => node.name === "runnable")
+      ? "this graph has no runnable: — a full run runs the object under that key"
+      : "";
+  const stripJob = fullRuns ? firstRunning(jobs) : undefined;
+
   // The sidebars' widths: a dragged one stays within the limits beside the other; one nobody dragged is the
   // stylesheet's (a host's panel has its own), so nothing of the layout changes until an edge is dragged.
   const nodesOpen = sidebar && !settingsOnly;
@@ -2246,7 +2287,7 @@ function Editor() {
   return (
     <EditorContext.Provider value={editor}>
       <div
-        className={`app${embed ? " embed" : ""}${settingsOnly ? " settings-only" : ""}`}
+        className={`app${embed ? " embed" : ""}${settingsOnly ? " settings-only" : ""}${stripJob ? " with-strip" : ""}`}
         data-embed={embed ? "true" : "false"}
         data-only={settingsOnly ? "settings" : ""}
         data-host={host?.name ?? ""}
@@ -2326,10 +2367,30 @@ function Editor() {
               </svg>
               Run
             </button>
+            {fullRuns && (
+              <button
+                type="button"
+                className="bar-button"
+                data-command="run-all"
+                disabled={graph === null || noRunnable !== "" || anyRunning}
+                title={noRunnable || "run every record of the saved graph — the plan is shown first"}
+                onClick={() => {
+                  setTab("run");
+                  setPlanAsked(true);
+                }}
+              >
+                Run all…
+              </button>
+            )}
             {/* ↻ and ⏻ of the standalone editor's own server: the serving framework's shell fills this (`shell.ts`) */}
             {ownServer && <span className="server-buttons" data-server-buttons ref={serverButtons} />}
           </div>
         </header>}
+        {stripJob && (
+          <div className="job-strip" data-job-strip>
+            <JobBar job={stripJob} onStop={stopRun} />
+          </div>
+        )}
         <main className={`body${nodesOpen ? " with-nodes" : ""}`} ref={body}>
           {nodesOpen && (
             <SizeEdge
@@ -2471,6 +2532,19 @@ function Editor() {
                 onRun={onRun}
                 onStep={onStep}
                 onRerun={(node, params) => void onRerun(node, params)}
+                runAll={
+                  fullRuns ? (
+                    <RunAll
+                      graph={graph.name}
+                      unavailable={noRunnable}
+                      job={latestFor(jobs, graph.name)}
+                      asked={planAsked}
+                      onAsked={() => setPlanAsked(false)}
+                      onStart={startAll}
+                      onStop={stopRun}
+                    />
+                  ) : null
+                }
               />
             )}
           </aside>

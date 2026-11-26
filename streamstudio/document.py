@@ -107,6 +107,7 @@ from confluid import (
 )
 from confluid.fluid import Fluid, Reference, Target
 from confluid.registry import resolve_class
+from confluid.scopes import discover_boolean_scopes
 from loggair import get_logger
 from recordstream.algorithm import Algorithm, algorithm_spec
 from recordstream.flow.graph import FlowGraph
@@ -1843,7 +1844,12 @@ _DISK_LOCK = threading.RLock()
 
 
 def _load_document(
-    path: Path, texts: Mapping[Path, str], *, build: bool = False, solidify: bool = False
+    path: Path,
+    texts: Mapping[Path, str],
+    *,
+    build: bool = False,
+    solidify: bool = False,
+    scopes: Optional[List[str]] = None,
 ) -> Tuple[Any, List[Path]]:
     """``confluid.load(until="document")`` of the graph as the FILE it is — its path — with every text the editor
     holds, the graph's own among them, handed over as ``texts=``. confluid parses a held text in place of the file
@@ -1864,11 +1870,15 @@ def _load_document(
     consumer loads to, and the only one where a top-level key is handed to a same-named constructor
     parameter. ``solidify=True`` adds the finish, which is what a RUN needs (:meth:`Document.load`).
 
+    ``scopes`` are the scopes the load runs under (``recordstream run --scope``'s): a full run's, never the model's.
+
     The load runs under :data:`_DISK_LOCK`: an included file the editor does not hold is read from disk, and a save
     (of another graph including the same file) is never read half-written."""
     until: Literal["objects", "document"] = "objects" if build else "document"  # ``solidify`` acts at "objects" only
     with _DISK_LOCK:
-        doc, paths = confluid.load(path.resolve(), until=until, solidify=solidify, return_paths=True, texts=texts)
+        doc, paths = confluid.load(
+            path.resolve(), until=until, solidify=solidify, return_paths=True, texts=texts, scopes=scopes
+        )
     return doc, [Path(p).resolve() for p in paths]
 
 
@@ -2857,13 +2867,29 @@ class Document:
         logger.debug(f"{key} changed on disk and the editor held nothing unsaved of it — read again")
         return True
 
-    def load(self) -> Any:  # the built document: a mapping of top-level objects, or the root object itself
+    def load(self, scopes: Optional[List[str]] = None) -> Any:  # the built document: a mapping of top-level
+        # objects, or the root object itself
         """The document BUILT from the texts the editor holds — saved or not, what the canvas shows — to
         the objects stage, solidified: what a run executes. Every call builds fresh objects (a run's ops
-        keep state), and a document that does not build raises confluid's own located error."""
+        keep state), and a document that does not build raises confluid's own located error. ``scopes`` are the
+        scopes a full run is asked under (``recordstream run --scope``'s); the canvas and the trace run under none."""
         entry, texts = _entry(self.path, self._texts, self._settings_in(self._texts))
-        built, _paths = _load_document(entry, texts, build=True, solidify=True)
+        built, _paths = _load_document(entry, texts, build=True, solidify=True, scopes=scopes)
         return built
+
+    def declared_scopes(self) -> List[str]:
+        """The scopes the graph declares by name (``smoke: !scope:smoke``), its included files' among them, sorted —
+        what a full run may be asked under."""
+        entry, texts = _entry(self.path, self._texts, self._settings_in(self._texts))
+        with _DISK_LOCK:
+            raw = confluid.load(entry.resolve(), until="raw", texts=texts)
+        return sorted(discover_boolean_scopes(raw))
+
+    @property
+    def unsaved_text(self) -> bool:
+        """Whether a TEXT the editor holds differs from its file — :attr:`dirty` without the positions and groups,
+        which no run reads."""
+        return any(self._saved.get(key) != text for key, text in self._texts.items())
 
     @property
     def text(self) -> str:
