@@ -4,7 +4,7 @@
  * (`POST …/run-all`), lists the jobs (`GET api/jobs`) and stops one (`POST api/jobs/<id>/stop`); the page polls the
  * list while a job runs. `panels/RunAll.tsx` draws the run tab's part, `App.tsx` the bar's button and the strip.
  */
-import type { Job } from "./api";
+import type { Job, RunPlan } from "./api";
 
 /** How often the page asks for the jobs while one runs, in milliseconds. */
 export const POLL_MS = 1000;
@@ -59,4 +59,11 @@ export function tickedScopes(declared: readonly string[], ticked: ReadonlySet<st
 export function jobTitle(job: Pick<Job, "detail">): string {
   const scopes = job.detail.scopes ?? [];
   return scopes.length === 0 ? job.detail.graph : `${job.detail.graph}, ${scopes.join(" + ")}`;
+}
+
+/** What a run would DELETE, by its plan: every `delete …` action of the plan and of the plans it holds, in order —
+ * the lines the page puts beside Start run. The words are the runnable's own; the page adds none. */
+export function deleteLines(plan: RunPlan): string[] {
+  const own = plan.actions.filter((action) => action.startsWith("delete "));
+  return [...own, ...plan.steps.flatMap(deleteLines)];
 }

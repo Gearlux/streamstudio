@@ -6184,10 +6184,15 @@ class TinyGatedSink:
 
     Args:
         gated: Whether a write waits for the gate.
+        deletes: A folder this sink says a run deletes; blank says nothing.
     """
 
-    def __init__(self, gated: bool = False) -> None:
+    def __init__(self, gated: bool = False, deletes: str = "") -> None:
         self.gated = gated
+        self.deletes = deletes
+
+    def planned_changes(self) -> List[str]:
+        return [f"delete {self.deletes} (2 files, 1.0K)"] if self.deletes else []
 
     def write(self, record: Record) -> None:
         if self.gated:
@@ -6271,6 +6276,34 @@ class TestTheFullRun:
         ending.wait_for()
         assert ending.get_attribute("data-job-status") == "stopped"
         assert ending.inner_text().startswith("convert: stopped after 1 of 5 records — what was written is kept (")
+        assert opened.errors == []
+
+    def test_what_the_run_deletes_is_said_above_start_run(
+        self, open_graph: Callable[[str], Opened], graph_dir: Path
+    ) -> None:
+        text = _convert_text(gated=False).replace("{gated: false}", "{gated: false, deletes: /data/train/images}")
+        (graph_dir / "convert.yaml").write_text(text)
+        opened = open_graph("convert")
+        page = opened.page
+        open_run_tab(page)
+        page.locator('[data-action="plan"]').click()
+        deletes = page.locator("[data-plan-deletes] li")
+        deletes.first.wait_for()
+        assert deletes.all_inner_texts() == ["delete /data/train/images (2 files, 1.0K)"]
+        box, start = page.locator("[data-plan-deletes]").bounding_box(), page.locator('[data-action="start-run"]')
+        assert box["y"] + box["height"] <= start.bounding_box()["y"]  # directly above the button that starts it
+        assert start.is_enabled()  # said, never refused: the run is the person's to start
+        assert opened.errors == []
+
+    def test_a_run_that_deletes_nothing_shows_no_such_lines(
+        self, open_graph: Callable[[str], Opened], graph_dir: Path
+    ) -> None:
+        (graph_dir / "convert.yaml").write_text(_convert_text(gated=False))
+        opened = open_graph("convert")
+        open_run_tab(opened.page)
+        opened.page.locator('[data-action="plan"]').click()
+        opened.page.locator('[data-run-all][data-plan="shown"]').wait_for()
+        assert opened.page.locator("[data-plan-deletes]").count() == 0
         assert opened.errors == []
 
     def test_unsaved_changes_are_refused_in_the_plan(

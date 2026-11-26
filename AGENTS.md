@@ -370,7 +370,9 @@ arch: "A host mounts the editor through three methods"; pins `tests/test_host.py
   subprocess or a second runner here. The page polls `api/jobs` once at its start and then only while a job runs
   (`runall.POLL_MS`); a host's panel, `?embed` and the settings sheet never ask and show no button (`fullRuns`). The
   run tab's part is `panels/RunAll.tsx`, the strip `JobBar` under the bar (`.app.with-strip` adds its row); both
-  buttons are greyed with the reason on a graph with no `runnable` node. `recordstream.workflow` is imported at the
+  buttons are greyed with the reason on a graph with no `runnable` node. The plan's `delete …` actions
+  (`runall.deleteLines`, the plan's and its steps') are repeated in amber above Start run (`data-plan-deletes`):
+  said, never a second confirm, and never computed by the editor — a sink says them (`planned_changes()`). `recordstream.workflow` is imported at the
   call, so `import streamstudio.app` stays light. (`tests/test_run_all.py`, `tests/test_canvas.py::TestTheFullRun`,
   `frontend/src/__tests__/runall.test.ts`)
 - **A traced entry's picture is recordstream's** (`Tracer.picture`; user pick A 2026-11-25): `Studio.picture` names the

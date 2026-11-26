@@ -12,7 +12,8 @@ All notable changes to this project are documented here. The format follows
   tick), **Start run** runs every record of the saved graph as one job, and its count and **Stop** show in the run
   tab and in a strip under the bar in every tab. Stop ends the run after the record in hand; what was written is
   kept. New routes: `POST /api/graphs/<name>/plan`, `POST /api/graphs/<name>/run-all`, `GET /api/jobs`,
-  `POST /api/jobs/<job>/stop`.
+  `POST /api/jobs/<job>/stop`. What the run deletes when it starts — the plan's `delete …` lines — is shown in amber
+  directly above **Start run**.
 - **The sidebars are sizable.** The edge of the Nodes sidebar and of the side panel that faces the canvas is dragged
   to change that sidebar's width, no narrower than 200 px and leaving the canvas 240 px; a double click on the edge
   puts the width back. The widths are remembered in the browser.

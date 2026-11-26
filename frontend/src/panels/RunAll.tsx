@@ -5,13 +5,14 @@
  *
  * Hooks: `data-run-all` (the section; `data-plan` = `closed` | `asking` | `shown` | `refused`),
  * `data-action="plan"`, `data-scope=<name>` (a scope's tick box), `data-plan-lines`, `data-plan-error`,
+ * `data-plan-deletes` (what the run deletes when it starts, above Start run),
  * `data-action="start-run"`, `data-action="close-plan"`, `data-job=<id>` with `data-job-status`, `data-job-count`,
  * `data-action="stop-run"`, `data-job-ending`.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { errorMessage, planRun } from "../api";
 import type { Job, PlanAnswer } from "../api";
-import { countLine, endingLine, fraction, jobTitle, tickedScopes } from "../runall";
+import { countLine, deleteLines, endingLine, fraction, jobTitle, tickedScopes } from "../runall";
 
 type Props = {
   graph: string;
@@ -150,6 +151,13 @@ export function RunAll({ graph, unavailable, job, asked, onAsked, onStart, onSto
             <pre className="run-plan-lines" data-plan-lines>
               {plan.lines.join("\n")}
             </pre>
+          )}
+          {plan !== null && error === null && deleteLines(plan.plan).length > 0 && (
+            <ul className="run-deletes" data-plan-deletes title="what this run deletes when it starts">
+              {deleteLines(plan.plan).map((line) => (
+                <li key={line}>{line}</li>
+              ))}
+            </ul>
           )}
           <div className="run-controls">
             <button

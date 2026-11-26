@@ -257,8 +257,11 @@ the run tab on the same plan.
 **Stop** ends the run after the record in hand. The sink is closed as at the end of a run, so what was written is
 kept. A full run reads the SAVED graph: with unsaved changes it is refused, and says to save first. One run of a
 graph goes at a time. The run lives in the editor: stopping or restarting the editor ends it. In a host's panel a
-full run is not offered. A source that cannot say how many records it holds runs without a count. The plan lists
-what the runnable itself reports — a sink that replaces its folder when a run starts may not say so there.
+full run is not offered. A source that cannot say how many records it holds runs without a count.
+
+**What a run deletes is said before it starts.** Every `delete …` line of the plan — a sink that replaces its
+folder says which, with the files and size it holds — is shown again in amber directly above **Start run**. The
+lines are the runnable's own; a sink that does not report what it replaces shows none.
 
 **Save refuses to overwrite someone else's change.** When the file changed on disk since the editor read or wrote
 it, nothing is written:

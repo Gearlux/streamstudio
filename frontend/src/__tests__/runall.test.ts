@@ -3,8 +3,8 @@
  * the strip are measured under playwright in `tests/test_canvas.py`.
  */
 import { describe, expect, it } from "vitest";
-import type { Job } from "../api";
-import { countLine, elapsedLine, endingLine, firstRunning, fraction, jobTitle, latestFor, runningFor, tickedScopes } from "../runall";
+import type { Job, RunPlan } from "../api";
+import { countLine, deleteLines, elapsedLine, endingLine, firstRunning, fraction, jobTitle, latestFor, runningFor, tickedScopes } from "../runall";
 
 const job = (over: Partial<Job> = {}): Job => ({
   id: "j1",
@@ -100,5 +100,34 @@ describe("the scopes", () => {
     expect(jobTitle(job())).toBe("g");
     expect(jobTitle(job({ detail: { graph: "g", scopes: ["smoke", "val"] } }))).toBe("g, smoke + val");
     expect(jobTitle(job({ detail: { graph: "g" } }))).toBe("g");
+  });
+});
+
+describe("what a run deletes", () => {
+  const plan = (actions: string[], steps: RunPlan[] = []): RunPlan => ({
+    title: "p",
+    checks: [],
+    actions,
+    commands: [],
+    details: {},
+    steps,
+  });
+
+  it("is every delete action of the plan, in order", () => {
+    expect(deleteLines(plan(["delete /d/train/images (2 files, 1.0K)", "create /d", "delete /d/train/labels (2 files, 90B)"]))).toEqual([
+      "delete /d/train/images (2 files, 1.0K)",
+      "delete /d/train/labels (2 files, 90B)",
+    ]);
+  });
+
+  it("includes the plans it holds", () => {
+    expect(deleteLines(plan(["delete /a (1 file, 1B)"], [plan(["run X"]), plan(["delete /b (3 files, 2B)"])]))).toEqual([
+      "delete /a (1 file, 1B)",
+      "delete /b (3 files, 2B)",
+    ]);
+  });
+
+  it("is nothing for a run that deletes nothing", () => {
+    expect(deleteLines(plan(["keep /d: it holds its marker"]))).toEqual([]);
   });
 });

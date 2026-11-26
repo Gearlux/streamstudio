@@ -105,6 +105,7 @@ button { font: inherit; }
 .run-scopes { display: flex; gap: 12px; align-items: center; font-size: 12px; }
 .run-scopes label { display: flex; gap: 4px; align-items: center; }
 .side pre.run-plan-lines { padding: 0; white-space: pre-wrap; }
+.run-deletes { margin: 0; padding: 6px 8px 6px 24px; border-left: 3px solid #ffb300; background: #2a2414; color: #ffd54f; font-size: 12px; overflow-wrap: anywhere; }
 .job-ending { padding: 6px 8px; border-left: 3px solid #43a047; background: #142a16; font-size: 12px; }
 .job-ending.job-failed { border-left-color: #ff5252; background: #2a1414; color: #ff8a80; }
 .job-ending.job-stopped { border-left-color: #ffb300; background: #2a2414; }
