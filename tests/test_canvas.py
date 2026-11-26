@@ -5969,3 +5969,132 @@ class TestAValueReadFromATopLevelKey:
         assert page.locator('[data-form-node="mask"] code[data-param="low_level"]').inner_text() == "level = 0.25"
         assert api_get(server, "api/graphs/knob")["model"]["problems"] == []
         assert opened.errors == []
+
+
+class TestThePicturesOfATracedNode:
+    """An entry that is a raster is shown as a picture under its summary (user pick A, 2026-11-25): what the node made
+    is open, the rest waits behind "show", and a click opens every pixel of it in a dialog."""
+
+    LOADED = "img => img.complete && img.naturalWidth"
+
+    def _inspect(self, open_graph: Callable[[str], Opened]) -> Opened:
+        opened = open_graph("pets")
+        page = opened.page
+        open_run_tab(page)
+        page.locator('[data-action="run"]').click()
+        wait_answers(page, 1)
+        page.locator(f'{node_root("stream.ops[1]")} .title').click()
+        page.locator('[data-inspect="stream.ops[1]"]').wait_for()
+        return opened
+
+    def _wait_loaded(self, page: Any, selector: str) -> int:
+        page.wait_for_function(
+            "s => { const i = document.querySelector(s); return i !== null && i.complete && i.naturalWidth > 0; }",
+            arg=selector,
+        )
+        return int(page.locator(selector).evaluate("img => img.naturalWidth"))
+
+    def test_what_the_node_made_is_shown_and_what_it_was_handed_waits_behind_show(
+        self, open_graph: Callable[[str], Opened]
+    ) -> None:
+        opened = self._inspect(open_graph)
+        page = opened.page
+        made = '[data-inspect="stream.ops[1]"] [data-summary="output"] img[data-picture="mask"]'
+        assert self._wait_loaded(page, made) == 4  # the 4 x 4 mask the threshold wrote
+        handed = page.locator('[data-inspect="stream.ops[1]"] [data-summary="input"]')
+        assert handed.locator("img").count() == 0
+        toggle = handed.locator('[data-picture-toggle="image"]')
+        assert toggle.inner_text() == "show"
+        toggle.click()
+        assert (
+            self._wait_loaded(page, '[data-inspect="stream.ops[1]"] [data-summary="input"] img[data-picture="image"]')
+            == 4
+        )
+        assert toggle.inner_text() == "hide"
+        toggle.click()
+        assert handed.locator("img").count() == 0
+        label = page.locator('[data-inspect="stream.ops[1]"] tr[data-side="input"][data-entry="class"]')
+        assert label.locator("[data-picture-toggle]").count() == 0  # a label has no picture
+        assert opened.errors == []
+
+    def test_a_click_on_a_picture_opens_every_pixel_of_it_in_a_dialog(
+        self, open_graph: Callable[[str], Opened]
+    ) -> None:
+        opened = self._inspect(open_graph)
+        page = opened.page
+        made = '[data-inspect="stream.ops[1]"] [data-summary="output"] img[data-picture="mask"]'
+        self._wait_loaded(page, made)
+        page.locator(made).click()
+        assert self._wait_loaded(page, '[data-dialog="picture"] [data-picture-full] img') == 4
+        assert "stream.ops[1] · output · mask" in page.locator('[data-dialog="picture"] .modal-title').inner_text()
+        page.keyboard.press("Escape")
+        page.wait_for_selector('[data-dialog="picture"]', state="detached")
+        assert opened.errors == []
+
+
+#: A subgraph whose steps are a top-level key (``steps: !ref:prep``): the run traces INTO it, the canvas draws no card
+#: for ``grey`` and ``mask``.
+REFSTEPS_TEXT = f"""\
+prep:
+  grey:
+    op: !class:recordstream.ops.numpy.Scale {{source_min: 0.0, source_max: 1.0, target_min: 0.0, target_max: 2.0}}
+  mask:
+    op: !class:recordstream.ops.numpy.Threshold {{low_level: 0.5}}
+    from: grey
+
+stream: !class:recordstream.core.stream.Stream
+  source: !class:{MOD}.TinySource {{size: 4}}
+  ops:
+    - !class:recordstream.flow.subgraph.Subgraph
+      steps: !ref:prep
+"""
+
+
+class TestARowOfTheRunTableInspectsItsStep:
+    """A click on a row of the run table opens that step's entry (user pick A, 2026-11-25) — with or without a card
+    on the canvas. Measured before: a step traced inside a subgraph whose steps are a ``!ref:`` had no card, so
+    nothing could open its entry."""
+
+    def _run(self, open_graph: Callable[[str], Opened], graph: str) -> Opened:
+        opened = open_graph(graph)
+        open_run_tab(opened.page)
+        opened.page.locator('[data-action="run"]').click()
+        wait_answers(opened.page, 1)
+        return opened
+
+    def test_a_row_opens_the_entry_of_a_step_that_has_a_card_without_selecting_the_card(
+        self, open_graph: Callable[[str], Opened]
+    ) -> None:
+        opened = self._run(open_graph, "pets")
+        page = opened.page
+        page.locator('[data-run-row="stream.ops[1]"]').click()
+        inspected = page.locator('[data-inspect="stream.ops[1]"]')
+        inspected.wait_for()
+        assert inspected.locator('tr[data-side="output"][data-entry="mask"] [data-field="type"]').inner_text() == "Mask"
+        assert inspected.locator("[data-rerun-form]").count() == 1  # it has a card: its values can be tried
+        assert page.locator('[data-run-row="stream.ops[1]"]').get_attribute("data-inspected") == "true"
+        assert selected_nodes(page) == []  # the selection is where the next run pauses: a row leaves it alone
+        assert page.locator('[data-action="run"]').inner_text() == "run"
+        assert opened.errors == []
+
+    def test_a_row_opens_the_entry_of_a_step_the_canvas_draws_no_card_for(
+        self, open_graph: Callable[[str], Opened], graph_dir: Path
+    ) -> None:
+        (graph_dir / "refsteps.yaml").write_text(REFSTEPS_TEXT)
+        opened = self._run(open_graph, "refsteps")
+        page = opened.page
+        rows = page.locator("[data-run-row]").evaluate_all("rs => rs.map(r => r.dataset.runRow)")
+        assert rows == ["stream.ops[0]", "stream.ops[0]/grey", "stream.ops[0]/mask"]
+        page.locator('[data-run-row="stream.ops[0]/mask"]').click()
+        inspected = page.locator('[data-inspect="stream.ops[0]/mask"]')
+        inspected.wait_for()
+        assert inspected.locator('tr[data-side="output"][data-entry="mask"] [data-field="type"]').inner_text() == "Mask"
+        page.wait_for_function(
+            "() => { const i = document.querySelector('[data-inspect] [data-summary=output] img[data-picture=mask]');"
+            " return i !== null && i.complete && i.naturalWidth === 4; }"
+        )
+        assert inspected.locator("[data-rerun-form]").count() == 0  # no card: nothing to try a value on
+        assert inspected.locator('[data-action="rerun"]').count() == 0
+        page.locator('[data-run-row="stream.ops[0]/grey"]').press("Enter")  # the keyboard opens a row too
+        page.locator('[data-inspect="stream.ops[0]/grey"]').wait_for()
+        assert opened.errors == []

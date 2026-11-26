@@ -1745,6 +1745,22 @@ class Studio:
         run.rerun(node, params)
         return run.to_dict()
 
+    def picture(self, run_id: str, node: str, entry: str, side: str = "output", width: Optional[int] = None) -> bytes:
+        """The entry ``entry`` of ``node``'s input or output in the run, as a PNG at most ``width`` pixels wide —
+        recordstream's picture of it (``Tracer.picture``: an image, a mask, a 2-D array of numbers, the snapshot's
+        boxes outlined over it), read from the run's own objects outside the editor's turn. An entry whose summary
+        carries no ``picture``, and a node the run has no such side of yet, are a ``ValueError`` in words; a run, a
+        node or an entry that is not there is a ``KeyError`` naming what is."""
+        if side not in ("input", "output"):
+            raise ValueError(f"'side' must be input or output, got {side!r}")
+        run = self.run(run_id)
+        try:
+            return run.tracer.picture(
+                run.engine_name(node), entry, "input" if side == "input" else "output", width=width
+            )
+        except RuntimeError as never_reached:  # the tracer's word for a side the run has not made (yet)
+            raise ValueError(str(never_reached)) from never_reached
+
     def _new_run_id(self) -> str:
         while True:
             run_id = f"run_{secrets.token_hex(_RUN_ID_BYTES)}"
@@ -1904,7 +1920,18 @@ def _statuses(tracer: Tracer) -> Dict[str, str]:
 #: keeps the run (:meth:`Studio.trace`): a run may take minutes. A route that reads the graph list or a document never
 #: joins.
 TURN_FREE = frozenset(
-    {"palette_route", "class_route", "types", "lookup", "hf_datasets", "hf_features", "hf_splits", "trace", "rerun"}
+    {
+        "palette_route",
+        "class_route",
+        "types",
+        "lookup",
+        "hf_datasets",
+        "hf_features",
+        "hf_splits",
+        "trace",
+        "rerun",
+        "run_picture",
+    }
 )
 
 
@@ -2363,6 +2390,21 @@ def editor_blueprint(
     @blueprint.get("/api/runs/<run>")
     def get_run(run: str) -> Response:
         return jsonify(_studio().run(run).to_dict())
+
+    @blueprint.get("/api/runs/<run>/picture")
+    def run_picture(run: str) -> Response:
+        """``?node=&entry=[&side=input|output][&width=N]`` → the PNG. Never kept by the browser: a rerun changes what
+        the same address answers."""
+        node, entry = request.args.get("node", ""), request.args.get("entry", "")
+        if not node or not entry:
+            raise ValueError(f"'{'entry' if node else 'node'}' is required")
+        asked = request.args.get("width")
+        if asked is not None and not asked.lstrip("-").isdigit():
+            raise ValueError(f"'width' must be a whole number of pixels, got {asked!r}")
+        png = _studio().picture(
+            run, node, entry, request.args.get("side", "output"), None if asked is None else int(asked)
+        )
+        return Response(png, mimetype="image/png", headers={"Cache-Control": "no-store"})
 
     return blueprint
 

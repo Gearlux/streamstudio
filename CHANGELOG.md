@@ -7,6 +7,10 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **A step's entries are shown as pictures in the run tab.** After a run, an image, a mask or a 2-D array of numbers
+  (a spectrogram) of the selected step is drawn under its line — what the step made at once, the rest behind
+  **show** — with the record's boxes outlined; a click opens every pixel of it in a dialog that scrolls. A click on
+  a row of the run table opens that step, also a step the canvas draws no card for.
 - **A setting read from a key at the top of the graph is a field** — `stop: !ref:limit` under `limit: 3` shows
   `limit = 3` on the card and in the settings tab, and the card is checked with that value. It was an open socket,
   and each such reference was listed as a problem (`names no node`). The field is not typed in: the key is changed in

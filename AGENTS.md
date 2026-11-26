@@ -352,6 +352,16 @@ arch: "A host mounts the editor through three methods"; pins `tests/test_host.py
 - ONE command table (`frontend/src/commands.ts`) drives the menu bar, the right-click menus and the keys.
 - Shift+click ADDS a card to the selection (user answer "match", §6c), handled by a capture listener in
   `Canvas.tsx`. (`tests/test_canvas.py::TestShiftClickAdds`, `::TestShiftHeldWhileDragging`)
+- **A traced entry's picture is recordstream's** (`Tracer.picture`; user pick A 2026-11-25): `Studio.picture` names the
+  node as the document does and answers the PNG (`GET /api/runs/<run>/picture`, in `TURN_FREE`, `no-store`); the
+  editor never renders or imports numpy / Pillow for it. The page shows it in the run tab only (`RunPanel`'s
+  `SummaryTable`), never on a card: open for what the node made (`run.pictureOpen`), behind "show" for the rest; the
+  toggle sits in the entry's empty value cell, so the table gains no column; the address carries the node's
+  generation so a rerun asks again (`run.pictureHref`); the enlarged one asks for no width. A ROW of the run table
+  opens its step's entry (`RunPanel`'s `onInspect` → the app's `inspected` name): never the selection, which is
+  where the next run pauses; a traced step with no card (`findNode` answers none — a subgraph whose `steps` are a
+  `!ref:`) gets its entries and pictures and no `RerunForm`. (`tests/test_canvas.py::TestARowOfTheRunTableInspectsItsStep`)
+  (`tests/test_run_picture.py`, `tests/test_canvas.py::TestThePicturesOfATracedNode`, `frontend/src/__tests__/run.test.ts`)
 - The page sends only what the person changed: a rerun sends only values that differ from the run's recorded params
   (`run.changedParams`), Set source… only values changed from the constructor's defaults.
 - **The first layout** stacks a column by `layout.card_height`, which must stay an UPPER bound of the drawn card;

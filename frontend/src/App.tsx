@@ -2408,7 +2408,9 @@ function Editor() {
                 record={record}
                 onRecord={setRecord}
                 until={until}
+                inspectedName={inspected}
                 inspected={inspectedNode}
+                onInspect={setInspected}
                 form={form}
                 busy={running}
                 host={host}

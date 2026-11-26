@@ -507,3 +507,14 @@ button { font: inherit; }
 .app.settings-only .settings .field select { font-size: inherit; font-family: inherit; }
 /* what the host measured for a setting (the `hints` host message), under its widget */
 .field .field-hint { grid-column: 2; color: var(--dim); font-size: .92em; margin-top: -1px; }
+/* a traced entry's picture: fitted to the panel under its summary row; every pixel of it in a dialog that scrolls */
+.summary .picture-toggle { padding: 0 6px; font-size: 11px; }
+.summary button.picture { display: block; width: 100%; padding: 0; border: 1px solid #2a2a36; background: #0d0d14; cursor: zoom-in; }
+.summary button.picture img { display: block; max-width: 100%; margin: 0 auto; image-rendering: pixelated; }
+.modal[data-dialog=picture] { width: calc(100vw - 48px); }
+.picture-full { overflow: auto; max-height: calc(100vh - 200px); background: #0d0d14; }
+.picture-full img { display: block; max-width: none; image-rendering: pixelated; }
+/* a row of the run table opens its step's entry */
+.run-nodes tr[data-run-row] { cursor: pointer; }
+.run-nodes tr[data-run-row]:hover td, .run-nodes tr[data-run-row]:focus-visible td { background: #26263a; }
+.run-nodes tr[data-inspected] td { background: #2a2a44; }

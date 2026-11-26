@@ -227,6 +227,16 @@ split or a range is a helper, not the run. Two streams that are both an end of t
 `graph.yaml: several streams draw records (['first', 'second']) and no node draws from either — tracing one of
 several is not supported`.
 
+**Inspecting a step.** After a run, select a card or click the step's row in the run table: the run tab shows what the step was handed (**input**) and what it
+handed on (**output**), an entry a line — its type, shape and range. An entry that is a picture (an image, a mask, a
+2-D array of numbers such as a spectrogram) has **show** / **hide** at the end of its line. What the step made — an
+output entry it changed or added — is shown at once, fitted to the panel; what it only passed on waits behind
+**show**. An array of numbers is drawn grey from its lowest to its highest value, and the boxes the step's record
+holds for a picture of that size are outlined on it. Click a picture for every pixel of it, in a dialog that scrolls
+both ways; Escape closes it. After **rerun this node** the pictures of that step are asked again. A row opens any step the run traced, also one
+the canvas draws no card for (a step inside a subgraph whose steps are a `!ref:`); such a step shows its entries and
+pictures and has no rerun form. A row never changes the selection, which is where the next run pauses.
+
 **Save refuses to overwrite someone else's change.** When the file changed on disk since the editor read or wrote
 it, nothing is written:
 
