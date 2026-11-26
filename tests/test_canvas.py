@@ -6098,3 +6098,63 @@ class TestARowOfTheRunTableInspectsItsStep:
         page.locator('[data-run-row="stream.ops[0]/grey"]').press("Enter")  # the keyboard opens a row too
         page.locator('[data-inspect="stream.ops[0]/grey"]').wait_for()
         assert opened.errors == []
+
+
+class TestTheSidebarsAreSizable:
+    """Each sidebar's edge that faces the canvas is dragged to change its width (user request 2026-11-26); the widths
+    are remembered in the browser and a double click puts one back. Measured before: 300 px and 380 px, fixed."""
+
+    @staticmethod
+    def _width(page: Any, selector: str) -> int:
+        return round(page.locator(selector).bounding_box()["width"])
+
+    @staticmethod
+    def _drag(page: Any, sidebar: str, by: int) -> None:
+        box = page.locator(f'[data-size-edge="{sidebar}"]').bounding_box()
+        x, y = box["x"] + box["width"] / 2, box["y"] + 300
+        page.mouse.move(x, y)
+        page.mouse.down()
+        page.mouse.move(x + by / 2, y)
+        page.mouse.move(x + by, y)
+        page.mouse.up()
+
+    def test_a_dragged_edge_changes_the_width_which_a_reload_keeps_and_a_double_click_puts_back(
+        self, open_graph: Callable[[str], Opened]
+    ) -> None:
+        opened = open_graph("pets")
+        page = opened.page
+        page.locator('button[data-command="toggle-nodes"]').click()
+        page.locator("[data-nodes-sidebar]").wait_for()
+        assert (self._width(page, "[data-nodes-sidebar]"), self._width(page, "aside.side")) == (300, 380)
+
+        self._drag(page, "nodes", 120)
+        self._drag(page, "side", -200)
+        assert (self._width(page, "[data-nodes-sidebar]"), self._width(page, "aside.side")) == (420, 580)
+        assert self._width(page, ".canvas") == 1400 - 420 - 580  # the canvas takes the rest
+
+        page.reload()
+        page.locator('.app[data-ready="true"]').wait_for()
+        page.locator("[data-nodes-sidebar]").wait_for()
+        assert (self._width(page, "[data-nodes-sidebar]"), self._width(page, "aside.side")) == (420, 580)
+
+        page.locator('[data-size-edge="side"]').dblclick()
+        page.locator('[data-size-edge="nodes"]').dblclick()
+        assert (self._width(page, "[data-nodes-sidebar]"), self._width(page, "aside.side")) == (300, 380)
+        assert page.evaluate("() => Object.keys(localStorage).filter(k => k.endsWith('.width'))") == []
+        assert opened.errors == []
+
+    def test_a_drag_stops_at_the_limits(self, open_graph: Callable[[str], Opened]) -> None:
+        opened = open_graph("pets")
+        page = opened.page
+        self._drag(page, "side", 350)  # narrower than a sidebar may be
+        assert self._width(page, "aside.side") == 200
+        self._drag(page, "side", -1300)  # wider than the canvas allows
+        assert self._width(page, "aside.side") == 1400 - 240
+        assert self._width(page, ".canvas") == 240
+        assert opened.errors == []
+
+    def test_the_settings_only_sheet_has_no_edge(self, browser: Any, hosted: Any) -> None:
+        opened = open_hosted(browser, hosted, "graph=pane&embed=1&only=settings")
+        opened.page.wait_for_selector('.app[data-graph="pane"][data-ready="true"] [data-settings]')
+        assert opened.page.locator("[data-size-edge]").count() == 0
+        assert opened.errors == []

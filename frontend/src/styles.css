@@ -81,8 +81,14 @@ button { font: inherit; }
 .add-node-list { max-height: 60vh; overflow-y: auto; }
 
 /* ---------------------------------------------------------------- the body */
-.body { display: grid; grid-template-columns: 1fr var(--side-width); min-height: 0; }
-.body.with-nodes { grid-template-columns: 300px 1fr var(--side-width); }
+.body { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) var(--side-width); min-height: 0; }
+.body.with-nodes { grid-template-columns: var(--nodes-width, 300px) minmax(0, 1fr) var(--side-width); }
+/* a sidebar's edge that faces the canvas: dragged, it changes the sidebar's width (panels/SizeEdge.tsx) */
+.size-edge { position: absolute; top: 0; bottom: 0; width: 7px; margin: 0 -3px; z-index: 5; cursor: col-resize; touch-action: none; }
+.size-edge:hover, .size-edge:active { background: var(--accent); opacity: .5; }
+.size-edge-nodes { left: var(--nodes-width, 300px); }
+.size-edge-side { right: var(--side-width); }
+.app.settings-only .size-edge { display: none; }
 .canvas { position: relative; display: flex; flex-direction: column; min-width: 0; }
 .canvas .react-flow { flex: 1; }
 .empty-canvas { align-items: center; justify-content: center; }

@@ -350,6 +350,13 @@ arch: "A host mounts the editor through three methods"; pins `tests/test_host.py
 - A gesture reads the selection from React Flow AT the gesture (`App.selectedNow`): the selection listener arrives one
   effect late.
 - ONE command table (`frontend/src/commands.ts`) drives the menu bar, the right-click menus and the keys.
+- **A sidebar's width is the person's, never the graph's** (user request 2026-11-26): the edge facing the canvas
+  (`panels/SizeEdge.tsx`) is dragged, the rule is `widths.ts` (`MIN_WIDTH`, `MIN_CANVAS`, the dragged sidebar gives
+  way to the other), the width is kept in `localStorage` and handed to the layout as `--nodes-width` /
+  `--side-width` on `.app`. `--side-width` is set ONLY once its edge was dragged — until then the stylesheet's value
+  stands (a host's panel has its own), so an undragged page is laid out as before. A double click forgets the width.
+  Nothing of it goes into the sidecar or a graph's file. (`frontend/src/__tests__/widths.test.ts`,
+  `tests/test_canvas.py::TestTheSidebarsAreSizable`)
 - Shift+click ADDS a card to the selection (user answer "match", §6c), handled by a capture listener in
   `Canvas.tsx`. (`tests/test_canvas.py::TestShiftClickAdds`, `::TestShiftHeldWhileDragging`)
 - **A traced entry's picture is recordstream's** (`Tracer.picture`; user pick A 2026-11-25): `Studio.picture` names the

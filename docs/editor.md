@@ -186,6 +186,11 @@ An item that cannot act is greyed — Save while nothing changed, Copy with noth
 while you type in a field. `Escape` closes an open menu; with none open, it goes up one subgraph level. The bar
 also has a **Nodes** button (the sidebar) and a green **▶ Run**.
 
+**The sidebars are sizable.** Drag the edge of the Nodes sidebar or of the side panel that faces the canvas to
+change its width — the pointer turns into a resize arrow over it. A sidebar is never narrower than 200 px and the
+canvas always keeps 240 px. Double-click the edge to put the width back. The widths are remembered in your browser;
+nothing of them is written into a graph's files.
+
 **A link opens a view.** The address follows what the page shows, so a reload or a shared link opens the same
 graph, subgraph level and side tab:
 

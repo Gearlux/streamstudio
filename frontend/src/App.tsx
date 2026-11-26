@@ -191,6 +191,7 @@ import type { CanvasNode, Form, Graph, GraphSummary, Json, Model, NewGraphKind, 
 import { NodesSidebar } from "./panels/NodesSidebar";
 import { RunPanel } from "./panels/RunPanel";
 import { SettingsForm } from "./panels/SettingsForm";
+import { SizeEdge } from "./panels/SizeEdge";
 import { addedMember, beside, inputTarget, insertTarget, shiftsMembers, wireTarget, type InsertTarget } from "./oplists";
 import {
   answered as recoveryAnswered,
@@ -206,6 +207,7 @@ import { addableSpecs } from "./sidebar";
 import { sourceSlots, type Slot } from "./slots";
 import { selectedAnchor, spotBeside, stepName, uniqueName } from "./steps";
 import { useToasts } from "./toast";
+import { clampWidth, initialWidth, MIN_WIDTH, readWidth, writeWidth, type Sidebar } from "./widths";
 import { Toasts } from "./Toasts";
 import { connectionEnds, deleteWires, drawWire, selectedWires, type Connected, type WireEnds } from "./wires";
 import "./styles.css";
@@ -297,6 +299,17 @@ function Editor() {
   const [running, setRunning] = useState(false);
   const [inspected, setInspected] = useState<string | undefined>(undefined);
   const [sidebar, setSidebar] = useState(readSidebar);
+  // a sidebar's width once the person dragged its edge (`null`: where it starts), and the page's width they fit in
+  const [widths, setWidths] = useState<Record<Sidebar, number | null>>(() => ({
+    nodes: readWidth("nodes"),
+    side: readWidth("side"),
+  }));
+  const [pageWidth, setPageWidth] = useState(() => window.innerWidth);
+  useEffect(() => {
+    const resized = (): void => setPageWidth(window.innerWidth);
+    window.addEventListener("resize", resized);
+    return () => window.removeEventListener("resize", resized);
+  }, []);
   // a host's panel starts without the minimap — its corner of a small canvas (View ▸ Minimap shows it)
   const [minimap, setMinimap] = useState(() => !embedFromSearch(window.location.search));
   const [menuOpen, setMenuOpen] = useState<MenuId | null>(null);
@@ -2211,6 +2224,25 @@ function Editor() {
   const fromHost = graph !== null && host !== null && !hasOwnSource(graph.model);
   const targetShown: InsertTarget = graph ? insertTarget(shownView, shown, graph.kind, selectedAnchor(shownView, selection)) : { kind: "none" };
 
+  // The sidebars' widths: a dragged one stays within the limits beside the other; one nobody dragged is the
+  // stylesheet's (a host's panel has its own), so nothing of the layout changes until an edge is dragged.
+  const nodesOpen = sidebar && !settingsOnly;
+  const sideWidth =
+    widths.side === null
+      ? initialWidth("side", embed)
+      : clampWidth(widths.side, pageWidth, nodesOpen ? MIN_WIDTH : 0);
+  const nodesWidth =
+    widths.nodes === null ? initialWidth("nodes", embed) : clampWidth(widths.nodes, pageWidth, sideWidth);
+  const dragWidth = (which: Sidebar, wanted: number): void => {
+    const other = which === "nodes" ? sideWidth : nodesOpen ? nodesWidth : 0;
+    setWidths((held) => ({ ...held, [which]: clampWidth(wanted, pageWidth, other) }));
+  };
+  const keepWidth = (which: Sidebar): void => writeWidth(which, which === "nodes" ? nodesWidth : sideWidth);
+  const resetWidth = (which: Sidebar): void => {
+    writeWidth(which, null);
+    setWidths((held) => ({ ...held, [which]: null }));
+  };
+
   return (
     <EditorContext.Provider value={editor}>
       <div
@@ -2227,7 +2259,10 @@ function Editor() {
         data-palette-ready={specs === null ? "false" : "true"}
         data-selection={selection.join(",")}
         data-recovery={recoveryPhase}
-        style={{ ["--nodes-width" as string]: sidebar ? "300px" : "0px" }}
+        style={{
+          ["--nodes-width" as string]: nodesOpen ? `${nodesWidth}px` : "0px",
+          ...(widths.side === null ? {} : { ["--side-width" as string]: `${sideWidth}px` }),
+        }}
       >
         {!settingsOnly && <header className="bar" ref={bar}>
           {/* in a host's panel the host's own page says what app this is: no second brand */}
@@ -2295,8 +2330,26 @@ function Editor() {
             {ownServer && <span className="server-buttons" data-server-buttons ref={serverButtons} />}
           </div>
         </header>}
-        <main className={`body${sidebar && !settingsOnly ? " with-nodes" : ""}`} ref={body}>
-          {sidebar && !settingsOnly && (
+        <main className={`body${nodesOpen ? " with-nodes" : ""}`} ref={body}>
+          {nodesOpen && (
+            <SizeEdge
+              sidebar="nodes"
+              width={nodesWidth}
+              onDrag={(wanted) => dragWidth("nodes", wanted)}
+              onDone={() => keepWidth("nodes")}
+              onReset={() => resetWidth("nodes")}
+            />
+          )}
+          {!settingsOnly && (
+            <SizeEdge
+              sidebar="side"
+              width={sideWidth}
+              onDrag={(wanted) => dragWidth("side", wanted)}
+              onDone={() => keepWidth("side")}
+              onReset={() => resetWidth("side")}
+            />
+          )}
+          {nodesOpen && (
             <NodesSidebar
               specs={addable}
               target={targetShown}

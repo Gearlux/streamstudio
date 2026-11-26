@@ -7,6 +7,9 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **The sidebars are sizable.** The edge of the Nodes sidebar and of the side panel that faces the canvas is dragged
+  to change that sidebar's width, no narrower than 200 px and leaving the canvas 240 px; a double click on the edge
+  puts the width back. The widths are remembered in the browser.
 - **A step's entries are shown as pictures in the run tab.** After a run, an image, a mask or a 2-D array of numbers
   (a spectrogram) of the selected step is drawn under its line — what the step made at once, the rest behind
   **show** — with the record's boxes outlined; a click opens every pixel of it in a dialog that scrolls. A click on
