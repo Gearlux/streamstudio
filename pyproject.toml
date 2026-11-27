@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "streamstudio"
-version = "0.1.0a1"
+version = "0.1.0a2"
 description = "A graph editor for recordstream pipelines written as confluid YAML."
 readme = "README.md"
 authors = [{ name = "Gert Behiels" }]

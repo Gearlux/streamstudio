@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.0a2] — 2026-11-27
+
 ### Added
 - **A graph is run whole from the editor.** A graph that holds a `runnable:` gets **run all…** in the run tab and
   **Run all…** in the bar: the plan is shown first (what `recordstream run --dry_run` prints, under the scopes you
