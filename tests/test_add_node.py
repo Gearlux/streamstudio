@@ -442,6 +442,22 @@ class TestTheWireDroppedOnEmptyCanvas:
         assert document.redo() is True
         assert document.text == OUTPUT_WIRED
 
+    def test_the_names_typed_into_the_new_card_are_written_as_a_list(self, tmp_path: Path) -> None:
+        """What the page's list field sends for ``cat, dog`` typed into ``names`` — a LIST — lands in the card's
+        empty braces, is the card's value again, and an emptied field is an empty list."""
+        document = _open(tmp_path, FILES)
+        document.add_node(OUTPUT, {}, wire=INTO_CLASSES)
+        names = document.model.node("class_names_output").params["names"]
+        assert names.type == "List[str]" and not names.spelled
+
+        document.set_param("class_names_output", "names", ["cat", "dog"])
+        assert f"class_names_output: !class:{OUTPUT} {{names: [cat, dog]}}" in document.text
+        assert document.model.node("class_names_output").params["names"].value == ["cat", "dog"]
+        assert document.check() == []
+
+        document.set_param("class_names_output", "names", [])
+        assert document.model.node("class_names_output").params["names"].value == []
+
     def test_out_of_an_output_it_goes_into_the_new_cards_first_input_that_takes_it(self, tmp_path: Path) -> None:
         document = _open(tmp_path, FILES)
         assert document.add_node(SCAN, {}, wire=("file_source", "stream", "", "")) == "class_names_scan"

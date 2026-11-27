@@ -2,7 +2,7 @@
  * The Nodes sidebar's pure half: the catalogue `GET api/palette` serves (every `@configurable` class the server can
  * describe) as a TREE of folders — by PACKAGE (the first segment of the class path, the thing a person knows a class
  * by), then by KIND in the order a pipeline is read (sources, ops, … values, contracts), then one folder per segment
- * of the class's `@configurable(group=...)` path (`group="fourier/numpy"`: waivefront ▸ Ops ▸ fourier ▸ numpy) —
+ * of the class's `@configurable(group=...)` path (`group="fourier/numpy"`: signals ▸ Ops ▸ fourier ▸ numpy) —
  * confluid's presentation group, which exists for exactly this nesting. Only non-empty folders exist. The search
  * narrows by every typed word, the chips say what an entry reads and writes, and the parameter rows are what its
  * hover card lists. `panels/NodesSidebar.tsx` draws it; `menu/AddNodeMenu.tsx` reuses the kind order and the search.
@@ -49,7 +49,7 @@ export const packageOf = (classPath: string): string => classPath.split(".")[0];
 export interface Folder {
   /** What its head shows: a group segment (`numpy`); for a kind, the kind (`op`). */
   name: string;
-  /** Its path from the package, `/`-joined (`waivefront/op/fourier/numpy`) — what the sidebar remembers it under. */
+  /** Its path from the package, `/`-joined (`signals/op/fourier/numpy`) — what the sidebar remembers it under. */
   key: string;
   /** Every class beneath it, at any depth. */
   count: number;

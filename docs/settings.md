@@ -104,6 +104,14 @@ alone after a setting, the graph after a change to the graph. Save As takes the 
 (`<new>.settings.yaml`, refused like the graph when a file is already there) and leaves the old settings file as it
 was. A field the `app:` block does NOT name (ticked in with *all parameters*) is a change to the graph itself.
 
+A host can put every setting back to the graph's own value at once with `Document.reset_settings()`: the settings
+file is emptied as one edit (Undo brings the values back), and the Save that follows removes the file.
+
+**Written by someone else.** While the editor holds nothing unsaved of a settings file, it reads the file again
+whenever another program wrote it — even when the graph itself holds unsaved work, a moved node say — so the form,
+a setting set and a reset all start from what the file holds. An unsaved change of the settings is never replaced:
+its Save is refused instead, like any file changed on disk.
+
 **Loading them together.** The two are ONE confluid document by confluid's own `include:` rule: the graph first, the
 settings below it, so a setting wins over what the graph spells. A host runs it with `load_graph` — the settings file
 may sit anywhere (a host keeps a shipped graph's in its own folder); nothing is written:
@@ -178,8 +186,11 @@ host lists the graph, say), and the editor's edits and saves leave its line as i
 A host that shows a graph's settings in a sheet of its own opens the page with `?only=settings` (beside `?embed=1`):
 no menus, no canvas, no tabs and no *all parameters* box — the `app:` fields alone, at the panel's full width — and
 every change is SAVED at once, so the host hears `saved` and re-runs what reads the graph. The save writes the
-settings file ALONE (`POST …/save {only: "settings"}`): a change of the graph itself that the editor holds unsaved in
-another view of the same graph stays unsaved there. Toasts and the restore question work as on the whole page.
+settings file ALONE: a change of the graph itself that the editor holds unsaved in another view of the same graph
+stays unsaved there. The change and its save go in one request (`POST …/param {…, save: "settings"}`); when the save
+is refused — another program wrote the file while another view holds an unsaved setting — the change is undone too,
+so the sheet shows what the editor holds and nothing of the change is kept. Toasts and the restore question work as on
+the whole page.
 
 ```html
 <iframe src="/studio/?graph=view_scan&embed=1&only=settings"></iframe>
@@ -200,7 +211,7 @@ A graph without an `app:` block says `This graph names no settings — it has no
 | … `input_feature` / `target_feature` | `hf_feature` — `GET /api/hf/features?path=<its dataset>` |
 | … `split` | `hf_split` — `GET /api/hf/splits?path=<its dataset>` |
 | … `metadata_features` | `hf_metadata` — the same columns, plus `*` (every other column) |
-| a parameter its class stamps with a tag (the class's widget stamp, `{"output_dir": "PLATFORM_DATASET_ID"}` — the attribute `streamstudio.palette.picker_of` reads) | the stamp, whatever the rules above say |
+| a parameter its class stamps with a tag (`__streamstudio_widget_params__ = {"output_dir": "PLATFORM_DATASET_ID"}` on the class) | the stamp, whatever the rules above say |
 | … a stamp an installed [plugin lists](#a-plugins-lists-beside-a-field) | the stamp and `lookup: true` — the plugin's list, `GET /api/lookups/<tag>?<the node's values>` |
 
 A picker fills the field; the field stays editable. The HuggingFace lookups never fail a request: no dataset, or
@@ -218,8 +229,16 @@ page's life; an empty list says why in its tooltip, in the server's words (`no d
 
 ## A plugin's lists beside a field
 
-A field its class stamps with a tag of its own (the widget stamp `streamstudio.palette.picker_of` reads, mapping a
-parameter to a tag: `{"dataset": "SHOP_DATASET"}`) is drawn as a plain text field — unless an installed plugin supplies
+A class names a picker tag of its own for a parameter in the class attribute `__streamstudio_widget_params__`:
+
+```python
+class ShopSource:
+    __streamstudio_widget_params__ = {"dataset": "SHOP_DATASET"}   # parameter -> tag
+
+    def __init__(self, project: str = "", dataset: str = "") -> None: ...
+```
+
+A field stamped with a tag the editor does not know is drawn as a plain text field — unless an installed plugin supplies
 a LIST for that tag. A plugin is a module an installed package names in the `streamstudio.plugins` entry-point group:
 
 ```toml
@@ -245,7 +264,9 @@ LOOKUPS = {"SHOP_DATASET": shop_datasets}
 The form marks the field `lookup: true` beside its `picker` tag, and the page puts a `list…` beside it, asked
 (`GET /api/lookups/SHOP_DATASET?project=store&dataset=…`) when the person points at it — with the node's current text,
 number and switch values, so a list can follow the field beside it (the versions of the dataset named there): a changed
-field asks again. A list never fails a request: a tag no plugin lists, a function that raises and one that takes longer
+field asks again. The page keeps a list's answer while it is open; the list's last entry, **↻ ask again**, asks the
+plugin again — for what changed since (a model packaged after the list was first opened, a dataset added). Picking it
+picks nothing, and the page never asks again unbidden. A list never fails a request: a tag no plugin lists, a function that raises and one that takes longer
 than 20 s (`streamstudio.lookups.TIMEOUT_S`) answer no names and say why (`{"names": [], "reason": "ConnectionError:
 …"}`). The plugins' lists are read once per process; a plugin that fails to import is skipped with a warning naming
 it. The group is read from installed metadata — reinstall an editable plugin after adding the entry point.

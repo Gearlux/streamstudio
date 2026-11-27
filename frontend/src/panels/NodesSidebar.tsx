@@ -1,7 +1,7 @@
 /**
  * The Nodes sidebar (View ▸ Nodes sidebar, the bar's Nodes button, key N): every class the catalogue describes
  * (`GET api/palette`) as a tree of folders that each fold — by PACKAGE, inside one by KIND (sources, ops, algorithms,
- * …), inside a kind by the class's `@configurable` group path (`group="fourier/numpy"`: ▸ waivefront ▸ Ops ▸ fourier
+ * …), inside a kind by the class's `@configurable` group path (`group="fourier/numpy"`: ▸ signals ▸ Ops ▸ fourier
  * ▸ numpy) — each folder only when it holds something, its sub-folders before the classes that sit in it directly
  * (`sidebar.groupSpecs`). A package that declares no group shows its classes straight under the kind. An entry shows the class name, its one-line description and coloured chips for what it
  * reads and what it writes (the socket colours the canvas uses); resting the pointer on it shows a card with the whole
@@ -21,7 +21,7 @@
  * all fit, it draws the ones that fit WHOLE and says how many it left out (`+36 more parameters`).
  *
  * Every folder starts folded; which ones are unfolded is remembered in this browser (`localStorage`, best effort), by
- * the folder's key — a package by its name, a deeper folder by its path (`waivefront/op/fourier`). A search unfolds
+ * the folder's key — a package by its name, a deeper folder by its path (`signals/op/fourier`). A search unfolds
  * every folder on the way to a match, and clearing it puts them back as they were. Hooks: `data-nodes-sidebar`,
  * `data-nodes-search`, `data-nodes-package` (+ `aria-expanded` on its head), `data-nodes-kind` and
  * `data-nodes-folder` (the key; + `aria-expanded` on its `.nodes-folder-head`), `data-nodes-entry` (+ `data-class`),

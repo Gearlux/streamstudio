@@ -40,6 +40,10 @@ button { font: inherit; }
 .bar-button:hover { background: #30304a; }
 .bar-button.on { background: #2c3263; border-color: var(--accent); }
 .bar-button.run { background: #2e7d32; border-color: #43a047; font-weight: 600; }
+/* ↻ and ⏻ of the standalone editor's server, drawn by the serving framework's shell: sized as the bar's own buttons */
+.server-buttons { display: inline-flex; align-items: center; gap: 6px; margin-left: 4px; }
+.server-buttons .portail-button { height: 26px; min-width: 28px; padding: 0 7px; background: var(--raised); color: var(--text); border: 1px solid var(--line-2); border-radius: 6px; font-size: 14px; line-height: 1; cursor: pointer; }
+.server-buttons .portail-button:hover { background: #30304a; }
 .bar-button.run:hover { background: #388e3c; }
 .bar-button:disabled { opacity: .45; cursor: default; }
 
@@ -77,8 +81,34 @@ button { font: inherit; }
 .add-node-list { max-height: 60vh; overflow-y: auto; }
 
 /* ---------------------------------------------------------------- the body */
-.body { display: grid; grid-template-columns: 1fr var(--side-width); min-height: 0; }
-.body.with-nodes { grid-template-columns: 300px 1fr var(--side-width); }
+.body { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) var(--side-width); min-height: 0; }
+.body.with-nodes { grid-template-columns: var(--nodes-width, 300px) minmax(0, 1fr) var(--side-width); }
+/* a sidebar's edge that faces the canvas: dragged, it changes the sidebar's width (panels/SizeEdge.tsx) */
+.size-edge { position: absolute; top: 0; bottom: 0; width: 7px; margin: 0 -3px; z-index: 5; cursor: col-resize; touch-action: none; }
+.size-edge:hover, .size-edge:active { background: var(--accent); opacity: .5; }
+.size-edge-nodes { left: var(--nodes-width, 300px); }
+.size-edge-side { right: var(--side-width); }
+.app.settings-only .size-edge { display: none; }
+/* a full run: the strip under the bar (every tab) and the run tab's part (panels/RunAll.tsx) */
+.app.with-strip { grid-template-rows: 40px auto 1fr; }
+.job-strip { padding: 4px 12px; background: #1d2436; border-bottom: 1px solid var(--line); font-size: 12px; }
+.job-bar { display: flex; align-items: center; gap: 10px; }
+.job-bar button { background: #2a2a40; color: #eee; border: 1px solid #444; border-radius: 4px; padding: 3px 9px; font-size: 12px; cursor: pointer; }
+.job-bar button:disabled { opacity: .5; cursor: default; }
+.job-title { font-weight: 600; white-space: nowrap; }
+.job-track { flex: 1; min-width: 40px; height: 8px; border-radius: 4px; background: #111118; overflow: hidden; }
+.job-fill { display: block; height: 100%; background: var(--accent); }
+.job-count { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.run-all { display: flex; flex-direction: column; gap: 6px; }
+.run-all-why { padding: 0; }
+.run-plan { display: flex; flex-direction: column; gap: 6px; padding: 8px; border: 1px solid var(--line); border-radius: 6px; background: #14141c; }
+.run-scopes { display: flex; gap: 12px; align-items: center; font-size: 12px; }
+.run-scopes label { display: flex; gap: 4px; align-items: center; }
+.side pre.run-plan-lines { padding: 0; white-space: pre-wrap; }
+.run-deletes { margin: 0; padding: 6px 8px 6px 24px; border-left: 3px solid #ffb300; background: #2a2414; color: #ffd54f; font-size: 12px; overflow-wrap: anywhere; }
+.job-ending { padding: 6px 8px; border-left: 3px solid #43a047; background: #142a16; font-size: 12px; }
+.job-ending.job-failed { border-left-color: #ff5252; background: #2a1414; color: #ff8a80; }
+.job-ending.job-stopped { border-left-color: #ffb300; background: #2a2414; }
 .canvas { position: relative; display: flex; flex-direction: column; min-width: 0; }
 .canvas .react-flow { flex: 1; }
 .empty-canvas { align-items: center; justify-content: center; }
@@ -214,6 +244,8 @@ button { font: inherit; }
 .gnode .note { padding: 3px 10px 5px; font-size: 10px; opacity: .55; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .gnode .react-flow__handle.socket { width: 10px; height: 10px; border: 1px solid #111; }
 .gnode .react-flow__handle.socket-param { width: 7px; height: 7px; opacity: .55; }
+/* a level drawn top to bottom: the input and output sockets sit on the card's edges, placed against the card */
+.gnode.down .row.in, .gnode.down .row.out { position: static; }
 
 /* wires: every edge is a wire of the document, coloured by its kind; a selected one (Delete takes it out) is bright */
 .react-flow__edge.wire .react-flow__edge-path { stroke: #9aa0b4; stroke-width: 1.6; }
@@ -312,11 +344,23 @@ button { font: inherit; }
 .button.icon { width: 30px; padding: 0; font-size: 15px; }
 
 /* the file dialog */
+/* The LIST gives way when the window is short, so the dialog never scrolls twice: the list is 300px tall while there is room
+   and shrinks to a few rows when the modal's `max-height` cuts in; the rest of the dialog keeps its size. Left as a fixed
+   300px, the box around it (`.modal-body`, which scrolls) overflowed below ~557px of window — a second scrollbar beside the
+   list's own (measured: body 398 in 361 at 520px). Only the extreme (a window under ~460px) leaves the box scrolling. */
+.modal[data-dialog="file"] .modal-body { display: flex; flex-direction: column; }
+.file-dialog { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.file-dialog > * { flex: none; }
 .file-path { display: flex; gap: 6px; }
+.file-places { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.file-place { height: 26px; padding: 0 10px; font-family: var(--mono); font-size: 12px; }
+.file-place[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+.file-new-folder { margin-top: 8px; }
 .file-path-input { flex: 1; padding: 6px 9px; background: #111118; color: var(--text); border: 1px solid var(--line-2); border-radius: 6px; font-family: var(--mono); font-size: 12px; outline: none; }
 .file-path-input:focus { border-color: var(--accent); }
 .file-error { margin-top: 8px; padding: 6px 9px; color: #ff8a80; background: #2a1414; border-left: 3px solid var(--danger); border-radius: 3px; font-size: 12px; }
-.file-list { list-style: none; margin: 8px 0 0; padding: 4px; height: 300px; overflow-y: auto; background: #15151d; border: 1px solid var(--line); border-radius: 8px; }
+.file-dialog > .file-list { flex: 0 1 300px; min-height: 84px; }
+.file-list { list-style: none; margin: 8px 0 0; padding: 4px; overflow-y: auto; background: #15151d; border: 1px solid var(--line); border-radius: 8px; }
 .file-entry { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 5px; cursor: default; font-size: 13px; }
 .file-entry:hover { background: #242434; }
 .file-entry[aria-selected=true] { background: var(--accent-strong); color: #fff; }
@@ -436,6 +480,19 @@ button { font: inherit; }
 .pair { display: flex; gap: 3px; min-width: 0; }
 .field .pair input[type=number] { flex: 1; width: auto; min-width: 0; }
 .gnode .row .pair input[type=number] { width: 58px; }
+/* three or four numbers on a card: narrower boxes, the row's height unchanged */
+.gnode .row .pair[data-pair-count="3"] input[type=number] { width: 44px; }
+.gnode .row .pair[data-pair-count="4"] input[type=number] { width: 36px; }
+/* names with a value each: one row per name (the settings form; a card shows the map read-only) */
+.map { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.map-row { display: flex; gap: 3px; min-width: 0; }
+.field .map-row input[type=text][data-map-name] { flex: 2; width: auto; min-width: 0; }
+.field .map-row input[type=text][data-map-value] { flex: 1; width: auto; min-width: 0; }
+.map-remove, .map-add { background: none; border: 1px solid #444; border-radius: 3px; color: #aaa; font-size: 11px; padding: 0 5px; cursor: pointer; }
+.map-remove:hover, .map-add:hover { color: #fff; border-color: #888; }
+.map-add { align-self: flex-start; padding: 1px 6px; }
+/* a row being typed that is no map yet: nothing is sent until it is */
+.map[data-map-waits] { border-left: 2px solid #b58900; padding-left: 4px; }
 /* a source slot's Set source… on a card: inside the row's height, so the card keeps its calibrated size (layout.py) */
 .gnode .row .set-slot { margin-left: auto; height: 16px; padding: 0 6px; background: #00897b33; color: #c8f2ec; border: 1px solid #26a69a; border-radius: 4px; font-size: 10px; line-height: 14px; cursor: pointer; }
 .gnode .row .set-slot:hover { background: #00897b; color: #fff; }
@@ -469,3 +526,21 @@ button { font: inherit; }
 .app.settings-only { grid-template-rows: 1fr; }
 .app.settings-only .body { grid-template-columns: 1fr; }
 .app.settings-only .side { border-left: 0; }
+/* inside a host's panel the form reads in the HOST's font (the `style` host message sets the two variables) */
+.app.settings-only .settings { font-size: var(--host-font-size, 12px); font-family: var(--host-font-family, inherit); }
+.app.settings-only .settings .field, .app.settings-only .settings .form-node h3,
+.app.settings-only .settings .field input[type=number], .app.settings-only .settings .field input[type=text],
+.app.settings-only .settings .field select { font-size: inherit; font-family: inherit; }
+/* what the host measured for a setting (the `hints` host message), under its widget */
+.field .field-hint { grid-column: 2; color: var(--dim); font-size: .92em; margin-top: -1px; }
+/* a traced entry's picture: fitted to the panel under its summary row; every pixel of it in a dialog that scrolls */
+.summary .picture-toggle { padding: 0 6px; font-size: 11px; }
+.summary button.picture { display: block; width: 100%; padding: 0; border: 1px solid #2a2a36; background: #0d0d14; cursor: zoom-in; }
+.summary button.picture img { display: block; max-width: 100%; margin: 0 auto; image-rendering: pixelated; }
+.modal[data-dialog=picture] { width: calc(100vw - 48px); }
+.picture-full { overflow: auto; max-height: calc(100vh - 200px); background: #0d0d14; }
+.picture-full img { display: block; max-width: none; image-rendering: pixelated; }
+/* a row of the run table opens its step's entry */
+.run-nodes tr[data-run-row] { cursor: pointer; }
+.run-nodes tr[data-run-row]:hover td, .run-nodes tr[data-run-row]:focus-visible td { background: #26263a; }
+.run-nodes tr[data-inspected] td { background: #2a2a44; }

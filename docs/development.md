@@ -127,3 +127,6 @@ build failed) until the next start, which checks again.
 
 The browser tests of the page (`tests/test_canvas.py`, headless chromium) run against the committed build; they skip
 only when `streamstudio/canvas/index.html` is absent, and the skip reason is that same build command.
+
+Plain `pytest` is the fast run. The slowest tests that import every installed package (the full catalogue) are marked
+`slow` and left out of it; `pytest -m slow` runs them, and `pytest -m ''` runs everything.

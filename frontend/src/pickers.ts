@@ -16,7 +16,7 @@
  *                                                                                       column but input/target) or
  *                                                                                       a column, appended
  *
- * — and a producer may name a picker of its own (`__taidal_widget_params__`); one the page does not know is a plain
+ * — and a producer may name a picker of its own (`__streamstudio_widget_params__`); one the page does not know is a plain
  * field. A picker only FILLS the field: the field stays free text (a Hub id that is not cached, a split slice like
  * `train[:90%]`, a folder typed by hand, `$DATA_ROOT/…`), and a pick is committed like a typed value.
  *
@@ -122,6 +122,18 @@ export function cachedLookup<T>(key: string, fetch: () => Promise<T>): Promise<T
 /** Forget every remembered lookup (a test's isolation). */
 export const forgetLookups = (): void => lookups.clear();
 
+/**
+ * Forget ONE remembered lookup, so the next ask of `key` asks the editor again — a plugin list's "↻ ask again": what the
+ * plugin lists can change while the page is open (a model packaged since, a dataset added on a platform), and a page an
+ * embedding host never reloads would otherwise keep its first answer.
+ */
+export const forgetLookup = (key: string): void => {
+  lookups.delete(key);
+};
+
+/** The value of a plugin list's "↻ ask again" entry — led by a NUL, so no name a list can hold is mistaken for it. */
+export const ASK_AGAIN = "\u0000ask-again";
+
 /** A `metadata_features` value as the columns it lists: `*` → `["*"]`, `"a, b"` → `["a", "b"]`, `null` → `[]`. */
 export function metadataList(value: Json | undefined): string[] {
   if (Array.isArray(value)) return value.filter((item): item is string => typeof item === "string");
@@ -143,6 +155,28 @@ export function parseMetadata(text: string): Json {
   if (columns.length === 0) return null;
   return columns.length === 1 && columns[0] === ALL_COLUMNS ? ALL_COLUMNS : columns;
 }
+
+/**
+ * May a `List[str]` value be typed as names separated by commas? — an unset one, or a list of names the text spells
+ * back as they are: text only, none empty, none holding a comma or a space at its ends. Any other value (a list of
+ * numbers or of lists, a name with a comma, a value that is no list) stays read-only: typed, it would come back changed.
+ */
+export function textListEditable(value: Json | undefined): boolean {
+  if (value === null || value === undefined) return true;
+  if (!Array.isArray(value)) return false;
+  return value.every((item) => typeof item === "string" && item !== "" && item === item.trim() && !item.includes(","));
+}
+
+/** The text a `List[str]` field shows: its names, comma-separated (nothing for an unset or empty list). */
+export const textListText = (value: Json | undefined): string =>
+  Array.isArray(value) ? value.filter((item): item is string => typeof item === "string").join(", ") : "";
+
+/** The list a typed `List[str]` text commits: the names between the commas, trimmed, an empty one dropped. */
+export const parseTextList = (text: string): string[] =>
+  text
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
 
 /** The value after "add column" picked `column`: `*` replaces the list; a column is appended (once; never after `*`). */
 export function withColumn(current: Json | undefined, column: string): Json {
@@ -183,8 +217,8 @@ export function browseStart(picker: "directory" | "file", value: string): string
  * into — measured before: the answer reset BOTH boxes, so the max box went back to 750000 and the next keys were
  * appended to it (`7` → `7500006` → … `75000061000`, refused, or written).
  */
-export function followPair(draft: [string, string], before: [string, string], truth: [string, string]): [string, string] {
-  return [draft[0] === before[0] ? truth[0] : draft[0], draft[1] === before[1] ? truth[1] : draft[1]];
+export function followPair<T extends string[]>(draft: T, before: T, truth: T): T {
+  return draft.map((text, i) => (text === before[i] ? truth[i] : text)) as T;
 }
 
 /** One end of a `(min, max)` pair: its JSON-schema word and bounds. */
@@ -203,25 +237,151 @@ const asObject = (value: Json | undefined): Record<string, Json> | undefined =>
  * The ComfyUI editor drew such a pair as two widgets, `deviation_hz__lo` / `__hi`; here it is one field of two numbers.
  */
 export function rangePair(schema: Record<string, Json>): [PairEnd, PairEnd] | undefined {
-  const arms = Array.isArray(schema.anyOf) ? schema.anyOf.map(asObject).filter((arm): arm is Record<string, Json> => arm !== undefined) : [schema];
-  for (const arm of arms) {
-    if (arm.type !== "array" || !Array.isArray(arm.prefixItems) || arm.prefixItems.length !== 2) continue;
+  const ends = tupleEnds(schema, 2);
+  return ends ? [ends[0], ends[1]] : undefined;
+}
+
+/** A schema's arms: the members of its `anyOf`, else the schema itself. */
+const armsOf = (schema: Record<string, Json>): Record<string, Json>[] =>
+  Array.isArray(schema.anyOf) ? schema.anyOf.map(asObject).filter((arm): arm is Record<string, Json> => arm !== undefined) : [schema];
+
+/** A schema's ONE arm beside `null`; `undefined` when it has none or several (a number OR a list of them). */
+function oneArm(schema: Record<string, Json>): Record<string, Json> | undefined {
+  const arms = armsOf(schema).filter((arm) => arm.type !== "null");
+  return arms.length === 1 ? arms[0] : undefined;
+}
+
+const numeric = (word: Json | undefined): word is "number" | "integer" => word === "number" || word === "integer";
+
+/**
+ * A fixed count of numbers' ends, when the schema is one (`Tuple[int, int, int]`: `{type: array, prefixItems: [{type:
+ * integer}, …]}`, also as one arm of an `anyOf`); `undefined` for anything else — a member that is no number, an open
+ * list. `count` asks for exactly that many (a `(min, max)` pair is two).
+ */
+export function tupleEnds(schema: Record<string, Json>, count?: number): PairEnd[] | undefined {
+  for (const arm of armsOf(schema)) {
+    if (arm.type !== "array" || !Array.isArray(arm.prefixItems) || arm.prefixItems.length === 0) continue;
+    if (count !== undefined && arm.prefixItems.length !== count) continue;
     const ends = arm.prefixItems.map(asObject);
-    if (ends.some((end) => end === undefined || (end.type !== "number" && end.type !== "integer"))) continue;
+    if (ends.some((end) => end === undefined || !numeric(end.type))) continue;
     return ends.map((end) => ({
       type: end!.type as "number" | "integer",
       ...(typeof end!.minimum === "number" ? { minimum: end!.minimum } : {}),
       ...(typeof end!.maximum === "number" ? { maximum: end!.maximum } : {}),
-    })) as [PairEnd, PairEnd];
+    }));
   }
   return undefined;
 }
 
-/** A pair's value as two numbers: the value when it is one, else the schema's default when that is one, else none. */
-export function pairValue(value: Json | undefined, fallback: Json | undefined): [number, number] | undefined {
+/**
+ * The number a field that takes a number OR text holds (`Union[float, str]`: `{anyOf: [{type: number}, {type:
+ * string}]}`, a number written with its unit — `2.5 MSa/s`, `30kHz` — beside a plain one), when the schema is one:
+ * `"number"` or `"integer"`, the number arm's word; `undefined` for anything else. Such a field is a TEXT box — a number
+ * box drops the unit, so `200 kSa/s` was saved as `200`.
+ */
+export function numberOrText(schema: Record<string, Json>): "number" | "integer" | undefined {
+  if (!Array.isArray(schema.anyOf)) return undefined;
+  const words = schema.anyOf.map(asObject).map((arm) => arm?.type);
+  if (!words.includes("string")) return undefined;
+  if (words.includes("number")) return "number";
+  return words.includes("integer") ? "integer" : undefined;
+}
+
+/** What a number-or-text field's typed text is sent as: the number when it is one its number arm takes, else the text. */
+export function numberOrTextValue(draft: string, kind: "number" | "integer"): Json {
+  const text = draft.trim();
+  const value = Number(text);
+  if (text === "" || !Number.isFinite(value) || (kind === "integer" && !Number.isInteger(value))) return draft;
+  return value;
+}
+
+/** A fixed count of numbers' value (two, a pair, unless told): the value when it is one, else the schema's default when that is one, else none. */
+export function pairValue(value: Json | undefined, fallback: Json | undefined, count = 2): number[] | undefined {
   for (const candidate of [value, fallback]) {
-    if (Array.isArray(candidate) && candidate.length === 2 && candidate.every((end) => typeof end === "number"))
-      return [candidate[0] as number, candidate[1] as number];
+    if (Array.isArray(candidate) && candidate.length === count && candidate.every((end) => typeof end === "number"))
+      return candidate as number[];
   }
   return undefined;
+}
+
+/**
+ * The kind of number a list holds (`List[float]`, `List[int]`: `{type: array, items: {type: number}}`, also beside
+ * `null`), when the schema is one; `undefined` for anything else — names, a fixed count (:func:`tupleEnds`), a list of
+ * lists, a number OR a list of them.
+ */
+export function numberList(schema: Record<string, Json>): "number" | "integer" | undefined {
+  const arm = oneArm(schema);
+  if (arm?.type !== "array" || arm.prefixItems !== undefined) return undefined;
+  const word = asObject(arm.items)?.type;
+  return numeric(word) ? word : undefined;
+}
+
+/** May a list of numbers be typed as numbers separated by commas? — an unset one, or a list of plain numbers. */
+export function numberListEditable(value: Json | undefined): boolean {
+  if (value === null || value === undefined) return true;
+  return Array.isArray(value) && value.every((item) => typeof item === "number" && Number.isFinite(item));
+}
+
+/** The text a list-of-numbers field shows: its numbers, comma-separated (nothing for an unset or empty list). */
+export const numberListText = (value: Json | undefined): string => (Array.isArray(value) ? value.join(", ") : "");
+
+/** One typed number of `kind`, or `undefined` when the text is none. */
+function typedNumber(text: string, kind: "number" | "integer"): number | undefined {
+  const value = Number(text);
+  return text.trim() === "" || !Number.isFinite(value) || (kind === "integer" && !Number.isInteger(value)) ? undefined : value;
+}
+
+/**
+ * The list a typed list-of-numbers text commits: the numbers between the commas; an empty box is an empty list.
+ * `undefined` when a piece is no number of `kind` (`1, two`, `1,,2`, a fraction among whole numbers): no list.
+ */
+export function parseNumberList(text: string, kind: "number" | "integer"): number[] | undefined {
+  if (text.trim() === "") return [];
+  const numbers = text.split(",").map((piece) => typedNumber(piece, kind));
+  return numbers.every((value): value is number => value !== undefined) ? numbers : undefined;
+}
+
+/** The kind of value a map of names holds: a number, a whole number or text. */
+export type MapKind = "number" | "integer" | "string";
+
+/**
+ * The kind of value each name of a map has (`Dict[str, int]`: `{type: object, additionalProperties: {type:
+ * integer}}`, also beside `null`), when the schema is one; `undefined` for anything else — an open map, a map of lists
+ * or of maps, a model with fields of its own.
+ */
+export function scalarMap(schema: Record<string, Json>): MapKind | undefined {
+  const arm = oneArm(schema);
+  if (arm?.type !== "object" || arm.properties !== undefined) return undefined;
+  const word = asObject(arm.additionalProperties)?.type;
+  return numeric(word) || word === "string" ? word : undefined;
+}
+
+/** May a map be edited as rows? — an unset one, or a map whose every value is of its one kind. */
+export function mapEditable(value: Json | undefined, kind: MapKind): boolean {
+  if (value === null || value === undefined) return true;
+  const map = asObject(value);
+  return map !== undefined && Object.values(map).every((item) => typeof item === (kind === "string" ? "string" : "number"));
+}
+
+/** A map's rows, a name and its value's text each, in the order written. */
+export const mapRows = (value: Json | undefined): [string, string][] =>
+  Object.entries(asObject(value) ?? {}).map(([name, item]) => [name, String(item)]);
+
+/**
+ * The map the rows commit: each name (trimmed) with its value of `kind`; a row left empty is no row. `undefined`
+ * while the rows are no map yet — a name without a value or a value without a name, a name twice, a value that is no
+ * number of `kind`.
+ */
+export function parseMapRows(rows: [string, string][], kind: MapKind): Record<string, Json> | undefined {
+  const map: Record<string, Json> = {};
+  for (const [typedName, typedValue] of rows) {
+    const name = typedName.trim();
+    const text = typedValue.trim();
+    if (name === "" && text === "") continue;
+    if (name === "" || text === "" || Object.prototype.hasOwnProperty.call(map, name)) return undefined;
+    const value = kind === "string" ? text : typedNumber(text, kind);
+    if (value === undefined) return undefined;
+    map[name] = value;
+  }
+  return map;
 }

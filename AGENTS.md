@@ -14,8 +14,8 @@ plugin lists (`lookups.py`) and the page build (`page.py`). A host app can mount
 
 Landed: phases 0–4 (`docs/rewrite.md`); the ComfyUI editor was deleted 2026-10-14, before the first release (user
 decision) — no module, test, command or document of it remains. Next: phase 5 (agent tools; root `TASKS.md`). Version
-`0.1.0a1`, not yet on PyPI (root `TASKS.md` "Publish streamstudio 0.1.0a1"); the repository stays private (user
-decision 2026-10-14).
+`0.1.0aN` (the version in `pyproject.toml`), on PyPI since 2026-10-15 (`pip install streamstudio`); the repository is
+public (user decision 2026-11-26).
 
 Invariants:
 - **The YAML document is the only truth** (§0); the canvas is a drawing of it.
@@ -47,6 +47,14 @@ Invariants:
   both); so a number node (recordstream's `Quantity`) is wired into a number setting and saved `<param>: !ref:<P>`
   (user pick 2026-10-09: any node whose result is a number). The output keeps the name `object`. (`tests/test_number_wires.py`)
   arch: "A value node that IS a number offers a number".
+- **A `!ref:` to a top-level PLAIN value is that value** (`stop: !ref:limit` under `limit: 3`; user pick A
+  2026-11-25): `_Builder.value_references` describes and builds the card with the value, and the parameter is a FIELD
+  carrying `Param.ref` (the key) — never a socket, never a wire, never a card for the key. `set_param` of such a field
+  is refused naming the key (the key may feed several parameters); the page shows `limit = 3` read-only
+  (`model.refLabel`). A root's and a subgraph marker's parameters, and a reference inside a list or a map, are not
+  read this way. A key that is not there stays a located problem. (`tests/test_value_references.py`,
+  `tests/test_canvas.py::TestAValueReadFromATopLevelKey`, `frontend/src/__tests__/model.test.ts`) arch: "A
+  reference to a top-level plain value is that value".
 - Parameter help comes from the class's docstring `Args:`, choices from a `Literal`, bounds from an `Interval` mark —
   never restated in the editor. (`tests/test_palette.py::TestAlgorithm::test_interval_and_literal_marks_reach_the_schema`)
 - **A short class name resolves one entry point at a time** (`document._import_until`). Never call
@@ -62,7 +70,9 @@ Invariants:
   writing nothing, when a file changed on disk since the editor read it (`CHANGED_ON_DISK`;
   `CHANGED_ON_DISK_INCLUDED` offers Revert only). arch: "Changes stay in the editor until Save". Five rules, each from
   a measured break:
-  1. The trace runs the in-memory document, never `confluid.load(path)`.
+  1. The trace runs the in-memory document, never `confluid.load(path)`. Of several streams with a source it runs
+     the one no other node reads as its `source` (`app._fed_stream`: a helper stream feeding a split or a range is
+     not the run); several ends are refused by name. (`tests/test_trace_stream.py`)
      (`tests/test_app.py::TestTrace::test_the_trace_runs_what_the_editor_shows_not_the_file_on_disk`)
   2. A read-only operation (Copy, Save as template) never holds an included file; when an edit first holds one,
      every older history entry gets the text it was read as.
@@ -76,7 +86,10 @@ Invariants:
 - A Save writes all of its YAML files or none (`Document._refuse_unwritable`), the graph's own file LAST; a file it
   cannot read is refused (`CANNOT_READ`); any `OSError` a route meets is a `400 {error}` naming the file.
   (`tests/test_app_save.py::TestASaveTheDiskRefusesWritesNothing`) The sidecar is not in the check yet (`TASKS.md`).
-- Only two gestures write without Save: File ▸ New… and Save as template….
+- Only three gestures write without Save: File ▸ New…, Save as template… and the file browser's New folder (a folder,
+  never a document; `Studio.new_folder`, user request 2026-10-28). The browser's shortcut buttons are the server's
+  (`Studio.places`, `PLACE_VARIABLES`); the page keeps no list of its own. (`tests/test_app_files.py::TestPlaces`,
+  `::TestNewFolder`, `tests/test_canvas.py::TestFileDialogPlacesAndNewFolder`)
 - **No graph exists only in the editor:** New… writes its starter at once through `Document.create` (`open(path,
   "x")`, never over an existing file), and every refusal comes before anything is written. Do not reintroduce a
   graph held only in memory, a first-write case in Save, or a "clear workspace" command. The page keeps no copy of the
@@ -86,7 +99,7 @@ Invariants:
   (SIGTERM, SIGHUP, Ctrl+C) and only when something is unsaved; it is merged into, never overwritten; an unreadable
   one is moved aside, never deleted; it is removed only by an answer (restore or discard). No graph opens before the
   question is answered; a tab of an earlier editor is refused `409` before anything changes; `GET /api/workspace`
-  never raises. `stop`/`restart` ask the editor first (at most `cli.ASK_TIMEOUT`) and never claim work was kept
+  never raises. `stop` asks every running editor first (at most `cli.ASK_TIMEOUT`) and never claims work was kept
   without reading the recovery file back. There is no periodic
   autosave — adding one is a decision for the user. (`tests/test_recovery.py`, `tests/test_recovery_process.py`,
   `tests/test_cli_editor.py::TestWhatStopSays`, `tests/test_canvas.py::TestUnsavedWorkOfTheLastSession`,
@@ -94,9 +107,11 @@ Invariants:
 - Every file name the editor writes into a served folder matches `.streamstudio-workspace*.json`, which every project
   holding editor graphs ignores.
   (`tests/test_recovery.py::TestWhatAStopKeeps::test_the_file_names_are_the_ones_git_ignores`)
-- **Agents and tests: never run `streamstudio stop` / `restart` without an explicit `--port`** — a bare one stops the
-  person's own editor on 8190. Tests bind port 0 and stop only the pid they started; recovery tests use temporary
-  folders. A harness that starts an editor as a child must reap it (psutil counts a zombie as alive; `TASKS.md`).
+- **Agents and tests: never run `streamstudio stop` / `restart` without naming a port or a folder** — a bare one
+  stops the person's own editor. The suite never reaches, starts or stops an editor of the operator's
+  (`tests/conftest.py::_no_live_server`, `::home`: no live request, no detached start, no look at port 8190, the state
+  folder under the test's tmp dir); a test that starts a real editor gives it a free port and a `HOME` of its own and
+  stops only the pid it started; recovery tests use temporary folders.
 
 ## Subgraphs, reuse, op lists
 
@@ -133,7 +148,9 @@ Invariants:
   is (it stops a host loading the graph; next section). The page narrows to the
   `app:` fields — a graph without an `app:` block shows none and says so — until *all parameters* is ticked.
   (`tests/test_app_form.py`, `frontend/src/__tests__/settings.test.ts`)
-- **Pickers are derived in `palette.picker_of`** (a stamp, then the HuggingFace names, then file/folder names). The
+- **Pickers are derived in `palette.picker_of`** (a stamp — the class attribute `__streamstudio_widget_params__`,
+  `palette._WIDGET_STAMP` — then the HuggingFace names, then file/folder names). No workspace or old project name in the
+  package (`tests/test_packaging.py::test_no_superseded_project_name_in_shipped_code`). The
   HuggingFace lookups are called through the package at call time so tests patch them; no test touches the network.
   (`tests/test_pickers.py`)
 - **A plugin's LIST beside a stamped field** (`lookups.py`, 2026-10-08): a `streamstudio.plugins` module's `LOOKUPS =
@@ -142,7 +159,10 @@ Invariants:
   error: no plugin, a raise and a list slower than `TIMEOUT_S` (a daemon thread) each answer `[]` with the reason. The
   table is read once per process (`_FOUND`) — like `catalogue.CATALOGUE`, it describes the installed packages, the same
   for every app a process mounts; tests replace `_FOUND`. A plugin that fails to import is a `warning`. The page sends
-  the node's text/number/switch values and keys its cache on all of them (`pickers.pluginLookupKey`). The canvas
+  the node's text/number/switch values and keys its cache on all of them (`pickers.pluginLookupKey`); the answer is
+  kept for the page's life and a plugin's list ends in "↻ ask again" (`pickers.ASK_AGAIN` → `forgetLookup`, user pick C
+  2026-10-16), never asked again unbidden — not on hover, not on a panel's open
+  (`tests/test_canvas.py::TestAPluginsListIsAskedAgainOnTheWord`). The canvas
   modules still name no vendor. (`tests/test_plugin_lookups.py`, `frontend/src/__tests__/{pickers,api}.test.ts`)
   arch: "A plugin supplies the list beside a field".
 - `POST …/slot` replaces one slot's value as one edit; a list slot or a typed parameter is refused.
@@ -161,8 +181,7 @@ arch: "A graph's settings live in a file of their own"; pins `tests/test_graph_s
   a class line only at its `settled` stage, after the `document` stage the model is derived at); the text tab shows
   the graph.
 - **Composition is confluid's `include:` rule and nothing else** — the held, never-written document
-  `include: [<graph>, <settings>]` (`settings.composed`), loaded with `texts=`. Root ruling "A configuration utility,
-  not a compiler": never a second precedence rule, a new spelling, or a walker into confluid for settings.
+  `include: [<graph>, <settings>]` (`settings.composed`), loaded with `texts=`.
 - **A setting names its node:** a flow step `flow.<step>.op.<param>`, a top-level object `<key>.<param>`, any other
   node `<Class>.<param>` only while that class is the node's alone (user pick); and a parameter ONE node of the whole
   drawing has may be written BARE (`floor_db: -60.0`, user question 2026-10-14) — confluid's own broadcast of a bare
@@ -176,6 +195,11 @@ arch: "A graph's settings live in a file of their own"; pins `tests/test_graph_s
 - **`app: {graph: settings-only}`** refuses every change but a setting: `@_structural` on each structural `Document`
   method refuses FIRST (before its own checks); `_commit` / `replace_text` refuse any other change of the graph
   (`_refuse_locked`). A new structural method gets `@_structural`. `GET …/app` answers `graph`.
+- **`Document.reset_settings()`** (2026-11-19) empties the settings file as ONE edit (undone like any) and answers
+  whether it held anything; a Save of a settings text holding nothing REMOVES the file (`Document._write`) — no file
+  is "no setting changed" on disk, for a host reading the folder too. The page offers no button of its own yet; a host
+  calls it under `Studio.lock`. (`tests/test_graph_settings.py::TestResettingTheSettings`,
+  `::TestAShippedGraph::test_a_reset_removes_the_folders_settings_file_and_tells_the_host`)
 - **Save As takes the held settings along** (`<new>.settings.yaml`, refused when one is there unasked); the old
   settings file stays. Removing or renaming a node a setting names is refused while the setting is there.
 
@@ -189,7 +213,11 @@ arch: "A host mounts the editor through three methods"; pins `tests/test_host.py
   file of it (`Studio._scan`), opened with `Document.open_shipped` (the shipped text, nothing unsaved). A settings
   change writes only the settings file into the folder; the first Save of a graph change writes the copy, which wins
   from then on. The shipped file is NEVER written; Revert reads it again. Answers carry `shipped`.
-  (`tests/test_graph_settings.py::TestAShippedGraph`)
+  (`tests/test_graph_settings.py::TestAShippedGraph`) Its relative `include:` entries are rebased from the shipped
+  file's folder to the host's (`rebase_includes` in `open_shipped`), so a shipped graph including a file shipped beside
+  it loads there and its saved copy keeps reaching it — never a second include search path
+  (`::TestAShippedGraphThatIncludesAFileShippedBesideIt`; measured before 2026-10-27: no node, every `app:` entry
+  refused).
 - **`folder()` is asked at EACH request** — never cache it. A moved folder rebases every held document WITH its
   unsaved texts and history (`Document.moved`); never re-open documents on a move. Relative includes follow the move
   (`document.follow_includes`).
@@ -198,8 +226,44 @@ arch: "A host mounts the editor through three methods"; pins `tests/test_host.py
 - `saved()` hears only document files actually written (never the sidecar), New… included. A host that raises does
   not undo the write. Every path handed to the host is spelled under `folder()` as the host spelled it
   (`Studio._spelled`).
-- A document holding nothing unsaved is re-read when its file changed on disk; a dirty one never is.
-- The host's stop calls `studio_of(app).stash()`.
+- A document holding nothing unsaved is re-read when its file changed on disk; a dirty one never is — but its
+  SETTINGS file is, while the editor holds nothing unsaved of THAT file (`Document.follow_settings`, called by
+  `Studio.document`, `set_param` of a setting and `reset_settings`): the text and its saved baseline become the
+  disk's, every undo/redo entry holding the old text holds the new one, and an unsaved settings edit is never
+  replaced (Save refuses then). Measured before 2026-11-19: a node moved on the canvas kept a settings text hours old,
+  the settings sheet's change was refused as changed on disk and kept, and its restore showed settings the file did
+  not hold. (`tests/test_graph_settings.py::TestTheSettingsFollowTheDisk`) arch: "A settings file the editor holds
+  nothing unsaved of follows the disk".
+- **The standalone page's ↻ and ⏻ are portail's shell, never buttons of the page's own** (`frontend/src/shell.ts`):
+  the page loads `portail/shell.js` from BESIDE itself (relative — a path proxy) and hands it the bar's
+  `[data-server-buttons]`; only a page that knows its workspace, is not `?embed`ded and has no host gets the slot
+  (`wantsServerButtons`). A shell that is not served leaves the bar without them. Never a stop or restart route of
+  the editor's own. (`frontend/src/__tests__/shell.test.ts`,
+  `tests/test_built_on_portail.py::TestTheStandaloneApp::test_the_pages_stop_and_restart_buttons_find_their_shell`)
+- **A `List[str]` setting is ONE text box of names separated by commas** (`ParamWidget`'s `TextListField`,
+  `pickers.parseTextList` / `textListEditable`): an emptied box is `[]`, a box left empty on a list the document
+  never set commits nothing, and a list the box cannot spell back (a name with a comma or outer spaces, numbers,
+  nested lists, a non-list value) stays read-only. **Three more containers of plain values have a field (user picks
+  2026-11-25), each decided from the parameter's SCHEMA in `pickers.ts`, never from a class or a name:** a list of
+  numbers ONE text box (`numberList` / `parseNumberList`; text that is no list of numbers goes back, nothing sent); a
+  fixed count of numbers that many boxes (`tupleEnds` — the `(min, max)` pair is the count of two, `PairWidget` draws
+  any count); names with a number or text each one ROW per name (`scalarMap` / `parseMapRows`, `MapField`), sent only
+  while the rows ARE a map — a half-typed row waits (`data-map-waits`). A map's rows need more than one line, so a
+  card passes `oneRow` and shows it read-only: never draw a field taller than one row on a card (`layout.card_height`).
+  A map's names stay in the order typed: `_yamltext.spell` and the routes' own `jsonify` (`app.py`) never sort —
+  Flask's `jsonify` would, by a setting that is the host's when the editor is mounted, so no route answers through it
+  (`tests/test_host.py::TestTheMount::test_a_map_set_through_the_mounted_editor_keeps_the_order_it_was_sent_in`). No other container gets a field. The palette's search
+  (`steps.searchMatches`) matches every word of the query. (`frontend/src/__tests__/pickers.test.ts`, `tests/test_canvas.py::TestContainersOfPlainValues`,
+  `steps.test.ts`, `tests/test_add_node.py::TestTheWireDroppedOnEmptyCanvas::test_the_names_typed_into_the_new_card_are_written_as_a_list`)
+- **A host's four calls are `streamstudio.app`'s** — `mount_editor(app, host, prefix)`, `editor_link(graph, tab, only,
+  prefix)` (relative; an unknown `tab` / `only` is a `ValueError` naming the known ones), `keep_unsaved_edits(app)` on
+  its stop (`studio_of(app).stash()`; no editor mounted answers `[]`, never an error) and `Studio.forget(name)` after
+  it replaced or removed a graph itself (unsaved edits go with it; the answer says so). A host never touches
+  `Studio._documents`. **A host's gesture that changes settings goes through `Studio.set_settings` /
+  `reset_settings`** (keys, one turn, saved-or-undone), never its own `set_param` loop plus `save`: two hosts'
+  loops had no undo, and a refused save left their edit held for the stop to keep
+  (`tests/test_graph_settings.py::TestAHostSetsSeveralSettings`). (`tests/test_host.py::TestMountEditor`, `::TestEditorLink`, `::TestKeepUnsavedEdits`,
+  `::TestForget`)
 - **One request at a time** (2026-10-13): every editor request holds `Studio.lock` (an `RLock`) — `_take_turn`, the
   blueprint's FIRST `before_request`, takes it and `_end_turn` (teardown) lets go, a refusal or a raise included;
   `stash()` takes it. A host that reads, changes and saves a document from its own route holds it across all three.
@@ -286,8 +350,41 @@ arch: "A host mounts the editor through three methods"; pins `tests/test_host.py
 - A gesture reads the selection from React Flow AT the gesture (`App.selectedNow`): the selection listener arrives one
   effect late.
 - ONE command table (`frontend/src/commands.ts`) drives the menu bar, the right-click menus and the keys.
+- **A sidebar's width is the person's, never the graph's** (user request 2026-11-26): the edge facing the canvas
+  (`panels/SizeEdge.tsx`) is dragged, the rule is `widths.ts` (`MIN_WIDTH`, `MIN_CANVAS`, the dragged sidebar gives
+  way to the other), the width is kept in `localStorage` and handed to the layout as `--nodes-width` /
+  `--side-width` on `.app`. `--side-width` is set ONLY once its edge was dragged — until then the stylesheet's value
+  stands (a host's panel has its own), so an undragged page is laid out as before. A double click forgets the width.
+  Nothing of it goes into the sidecar or a graph's file. (`frontend/src/__tests__/widths.test.ts`,
+  `tests/test_canvas.py::TestTheSidebarsAreSizable`)
 - Shift+click ADDS a card to the selection (user answer "match", §6c), handled by a capture listener in
   `Canvas.tsx`. (`tests/test_canvas.py::TestShiftClickAdds`, `::TestShiftHeldWhileDragging`)
+- **A FULL run is one of the serving framework's jobs over recordstream's own hooks** (user approvals 2026-11-26):
+  `Studio.plan` / `run_all` / `job_list` / `stop_job` (`POST …/plan`, `…/run-all`, `GET api/jobs`, `POST
+  api/jobs/<job>/stop`; all in `TURN_FREE`, `_runnable` takes the lock itself to read and build). It builds the
+  graph's `runnable:` from the SAVED texts (`Document.unsaved_text` refuses — positions do not count) under the asked
+  scopes (`Document.load(scopes)`, `declared_scopes()`; an undeclared one is refused by name), answers
+  `recordstream.workflow.plan_of`, and starts `runnable.run()` as `Studio.jobs.start("run:<graph>", …)` — one per
+  graph, a second start answers the first. The count is `set_progress_callback`, the stop is `set_stop_request(lambda:
+  job.stop)`: never raise out of the progress callback (recordstream swallows it), never a thread kill, never a
+  subprocess or a second runner here. The page polls `api/jobs` once at its start and then only while a job runs
+  (`runall.POLL_MS`); a host's panel, `?embed` and the settings sheet never ask and show no button (`fullRuns`). The
+  run tab's part is `panels/RunAll.tsx`, the strip `JobBar` under the bar (`.app.with-strip` adds its row); both
+  buttons are greyed with the reason on a graph with no `runnable` node. The plan's `delete …` actions
+  (`runall.deleteLines`, the plan's and its steps') are repeated in amber above Start run (`data-plan-deletes`):
+  said, never a second confirm, and never computed by the editor — a sink says them (`planned_changes()`). `recordstream.workflow` is imported at the
+  call, so `import streamstudio.app` stays light. (`tests/test_run_all.py`, `tests/test_canvas.py::TestTheFullRun`,
+  `frontend/src/__tests__/runall.test.ts`)
+- **A traced entry's picture is recordstream's** (`Tracer.picture`; user pick A 2026-11-25): `Studio.picture` names the
+  node as the document does and answers the PNG (`GET /api/runs/<run>/picture`, in `TURN_FREE`, `no-store`); the
+  editor never renders or imports numpy / Pillow for it. The page shows it in the run tab only (`RunPanel`'s
+  `SummaryTable`), never on a card: open for what the node made (`run.pictureOpen`), behind "show" for the rest; the
+  toggle sits in the entry's empty value cell, so the table gains no column; the address carries the node's
+  generation so a rerun asks again (`run.pictureHref`); the enlarged one asks for no width. A ROW of the run table
+  opens its step's entry (`RunPanel`'s `onInspect` → the app's `inspected` name): never the selection, which is
+  where the next run pauses; a traced step with no card (`findNode` answers none — a subgraph whose `steps` are a
+  `!ref:`) gets its entries and pictures and no `RerunForm`. (`tests/test_canvas.py::TestARowOfTheRunTableInspectsItsStep`)
+  (`tests/test_run_picture.py`, `tests/test_canvas.py::TestThePicturesOfATracedNode`, `frontend/src/__tests__/run.test.ts`)
 - The page sends only what the person changed: a rerun sends only values that differ from the run's recorded params
   (`run.changedParams`), Set source… only values changed from the constructor's defaults.
 - **The first layout** stacks a column by `layout.card_height`, which must stay an UPPER bound of the drawn card;
@@ -295,6 +392,11 @@ arch: "A host mounts the editor through three methods"; pins `tests/test_host.py
   card's rows or CSS re-runs the calibration and updates the constants in the same change. `layout.py` imports no
   document code. (`tests/test_layout.py::TestCardHeight`, `::TestTallCards`, `tests/test_canvas.py::TestFirstLayout`)
   arch: "The graph document is the truth", update 2026-10-01.
+- **A card's sockets follow the drawing** (`layout.runsDown` → `DownContext`): top and bottom on a level whose wires
+  mostly run down, the sides otherwise — read from the positions, never a stored direction; a card re-measures its
+  handles only when the direction turns, never on mount. (`frontend/src/__tests__/layout.test.ts`,
+  `tests/test_canvas.py::TestArrange::test_top_to_bottom_moves_the_sockets_to_the_top_and_bottom_edges_and_undo_moves_them_back`)
+  arch: "A card's sockets follow the drawing".
 - **The page is built at a server's START** (`streamstudio.page.ensure_page_built()`), by the CLI and by a host
   before it announces its server — **never from `create_app`, `editor_blueprint` or `page_blueprint`**. Tests replace
   it (`tests/conftest.py::page_checks`) and never run npm. npm, Node and the disk never stop a start.
@@ -313,11 +415,18 @@ arch: "A host mounts the editor through three methods"; pins `tests/test_host.py
   which asks the host; pickers come from `schema.picker`; HuggingFace lists are asked only when the person reaches
   for one. `?embed=1` removes chrome, never a function. The `state`/`saved`/`open`/`unavailable` messages are a
   contract with the hosts — change them only together. A host switches graphs with `open`, never by setting the
-  iframe's `src`. A gesture belongs to the graph it began on. An unknown `?graph=` opens nothing.
+  iframe's `src`. A gesture belongs to the graph it began on. An unknown `?graph=` opens nothing. **`state`'s
+  `asking`** (2026-11-10) is true while the recovery question waits for the person (`recovery.waitsForAnswer`): no
+  graph opens until it is answered, so a host covering its panel while a graph loads uncovers it then
+  (`tests/test_canvas.py::TestTheHostHearsAndFollows::test_the_host_hears_while_the_page_asks_about_kept_work_and_the_graph_once_answered`).
   **`commit`** (2026-10-08) is the host's second command: the page blurs the field being typed in (which writes it;
   on `?only=settings` saves it), waits for every write on its way (`writes`, filled by `commitParam`), and posts
   `committed` — a host READING what the page writes (a tool's run beside a settings panel) asks it first; never answer
   before the writes land. (`tests/test_canvas.py::TestTheHostHearsAndFollows::test_commit_writes_the_field_being_typed_in_and_answers_committed`)
+  **`hints`** and **`style`** (2026-10-28): `{graph, hints: {param: line}}` shows each line under the setting of that
+  name (`[data-field-hint]`), never written, the last sent standing; `{font_size_px?, font_family?}` sets the settings
+  form's font (`--host-font-size` / `--host-font-family`, `.app.settings-only .settings`), so a host's panel reads at
+  the host's size. (`frontend/src/__tests__/host.test.ts`, `tests/test_canvas.py::TestTheSettingsOnlyPage::test_the_host_sets_the_font_and_a_line_under_a_setting`)
   **`values`** (2026-10-08) is the third: `{graph, values}`, what the host RUNS that graph with over its settings (a
   pane's knobs, applied by name, never written) — the page keeps the last per graph and the settings form grays by it
   (`settings.offReason`); it never writes, saves or marks anything dirty. A field whose schema carries
@@ -332,9 +441,12 @@ arch: "A host mounts the editor through three methods"; pins `tests/test_host.py
   `frontend/src/__tests__/{host,link,pickers,slots}.test.ts`) arch: "The page in a host's panel".
 - **`?only=settings`** (a host's settings sheet, `link.onlyFromSearch`) renders the settings form and nothing else —
   no bar, canvas, Nodes sidebar, tabs or *all parameters* box (`SettingsForm fixed`) — and SAVES each change at once
-  (`App.commitParam`; user pick 2026-10-05), the settings file ALONE (`Document.save_settings`, `POST …/save {only:
-  "settings"}`): a change of the graph itself held in another view stays held (user pick 2026-10-05). Dialogs and toasts stay. (`tests/test_canvas.py::TestTheSettingsOnlyPage`,
-  `frontend/src/__tests__/{link,settings}.test.ts`)
+  (`App.commitParam`; user pick 2026-10-05), the settings file ALONE (`Document.save_settings`): a change of the graph
+  itself held in another view stays held (user pick 2026-10-05). The change and its save are ONE request (`POST
+  …/param {save: "settings"}`, `Studio.set_param`), and a refused save UNDOES the change before the answer, so nothing
+  of it stays held for a stop to keep — never a second request for the save (measured before 2026-11-21: a save
+  refused as changed on disk left the change held). Dialogs and toasts stay. (`tests/test_canvas.py::TestTheSettingsOnlyPage`,
+  `tests/test_graph_settings.py::TestASettingSavedAtOnce`, `frontend/src/__tests__/{api,link,settings}.test.ts`)
 - Dialogs take the keyboard and give it back (`Modal`).
 
 ### Testing the page
@@ -349,17 +461,33 @@ arch: "A host mounts the editor through three methods"; pins `tests/test_host.py
 
 ## The CLI
 
-- Three commands — `run` (the default), `stop`, `restart` — and one default port, `EDITOR_PORT` 8190. There is no
+- **The standalone editor is served by portail** (`cli.SPEC`, `workspace="folder"`): serving, `stop` / `restart` /
+  `list`, `--background`, the port probe, the pids of a stop and the signal handling are portail's — `cli.py` defines
+  none of them again and imports neither `psutil`, `socket` nor `signal`. A host mounting the editor gets no shell
+  route. (`tests/test_built_on_portail.py`) arch: "The standalone editor is served by portail".
+- Four commands — `open` (the default), `stop`, `restart`, `list` — and one default port, `EDITOR_PORT` 8190. `open`
+  and `restart` are the editor's own (they carry `--templates-dir`, which rides `Folder.options` into a background
+  start and a restart); `list` is registered by portail; `stop` wraps portail's to say what was kept. There is no
   `--editor` and no second editor (deleted 2026-10-14): do not add a launcher, a converter command or a second
-  server to this CLI. Folders are resolved to absolute paths once, in the CLI; `restart` checks the folder before it
-  stops anything. Every command a message prints must parse back. No help text names the removed editor or the
-  workspace. (`tests/test_cli_editor.py::TestTheCommands`, `::TestWhatTheCliSaysAboutItself`)
-- `stop`/`restart` target the process LISTENING on the port (`_studio_process`), never the launcher and never a pid
-  file; stop with `terminate()` plus a deterministic `wait`, never sleep-and-recheck. (`tests/test_cli_restart.py`)
-  arch: "The studio is addressed by its PORT".
-- A taken port is refused BEFORE any work: the probe binds with `SO_REUSEADDR`, the address is printed bare with
-  `print()` (clickable), and the suggested `--port N+1` command parses back. (`tests/test_cli_port.py`,
-  `tests/test_cli_editor.py::TestServingTheCanvas`)
+  server to this CLI. Folders are resolved to absolute paths once; `restart` checks the folder before it stops
+  anything. `open` also takes a graph's FILE (an existing `*.yaml`): its folder is served — the workspace stays a
+  folder, portail is handed nothing else — and one line names the page opened on that graph (`?graph=<stem>`), printed
+  by `cli.create_app` for a server this process runs, else by `open_` from the running server's port
+  (`cli._NAMED_GRAPH`). The browser opens on that graph (user request 2026-11-25): the `Folder` carries portail's
+  optional `page` (`?graph=<stem>`) and `open`'s `--browser`, left out, is `always` for a file and `never` for a
+  folder — decided in the body, the signature's default is blank; an explicit value wins. Never a wait-and-open
+  thread of the editor's own.
+  (`tests/test_cli_editor.py::TestServingTheCanvas::test_a_graph_file_serves_its_folder_and_names_the_graphs_address`)
+  No help text names the removed editor or the workspace. A start over a FOLDER opens no browser unless asked,
+  and `restart` none (`--browser never`). (`tests/test_cli_editor.py::TestTheCommands`, `::TestStopAndRestart`,
+  `::TestWhatTheCliSaysAboutItself`)
+- **`stop`/`restart` find a server by what it ANSWERS** (`/api/meta` names `streamstudio`), by its port or its
+  folder; a listener that does not answer as the editor is refused and never signalled.
+  (`tests/test_cli_restart.py`, real listeners)
+- `/api/workspace` stays the EDITOR's route (folder, session, recovery, host): portail's shell is mounted after the
+  editor's routes and leaves it. Its answer's `shell` says whether the shell is served, which is what the page's ⏻ / ↻ wait for.
+- The unsaved work is kept by `Hooks.leaving` (`cli._keep_unsaved_work`); the start's line about kept work is printed
+  by `cli.create_app`, and after a `--background` start it is asked of the new server.
 - The CLI is a liquifai app (`streamstudio.cli:app`, `strict_flags=True` — every command takes plain values, so a
   flag that reaches nothing is an error, refused before anything runs or stops). Do not restore argparse spellings:
   `-c`/`-s`/`-d`/`-h` are liquifai's, `-p` is `--port`. Command bodies coerce the string values themselves, and a
@@ -379,6 +507,8 @@ arch: "A host mounts the editor through three methods"; pins `tests/test_host.py
   guarded import stays undeclared. (`tests/test_packaging.py::test_module_scope_imports_are_declared_dependencies`)
 - No requirement, extras included, carries a URL — PyPI refuses it.
   (`tests/test_packaging.py::test_no_requirement_is_a_direct_url`)
+- Each release raises every workspace floor to the newest release and runs the suite there, and a dependent's next
+  release raises its `streamstudio>=` the same way (user choice 2026-11-26).
 - **No package that depends on streamstudio is one of its dependencies** — not even in an extra, not through another
   package (user ruling 2026-10-08: a domain depends on the editor, never the reverse). The walk reads INSTALLED
   metadata: reinstall a stale editable before trusting a pass. (`tests/test_dependencies.py`)

@@ -7,7 +7,18 @@
 import { describe, expect, it } from "vitest";
 import type { Run, TraceNode } from "../api";
 import type { ModelNode, Param } from "../model";
-import { changedParams, nextNode, plainParams, rerunSends, rerunStart, runRows, summaryCells } from "../run";
+import {
+  changedParams,
+  hasPicture,
+  nextNode,
+  pictureHref,
+  pictureOpen,
+  plainParams,
+  rerunSends,
+  rerunStart,
+  runRows,
+  summaryCells,
+} from "../run";
 import { searchMatches } from "../steps";
 
 const run = (paused: string | null, names = ["s.ops[0]", "s.ops[1]", "s.ops[2]"]): Run => ({
@@ -183,5 +194,40 @@ describe("searchMatches — the palette's text filter", () => {
     expect(searchMatches(spec, "numpy.thresh")).toBe(true);
     expect(searchMatches(spec, "THRESHOLD")).toBe(true);
     expect(searchMatches(spec, "gain")).toBe(false);
+  });
+});
+
+describe("pictures of a traced node's entries", () => {
+  it("an entry has one when the trace says so", () => {
+    expect(hasPicture({ type: "Image", shape: [4, 4], picture: true })).toBe(true);
+    expect(hasPicture({ type: "Label", value: "cat" })).toBe(false);
+    expect(hasPicture({ type: "Image", picture: "yes" })).toBe(false);
+    expect(hasPicture(null)).toBe(false);
+  });
+
+  it("the address is relative and names the node, the entry and the side", () => {
+    const href = pictureHref("run_1", "stream.ops[1]/grey", "image", "output", 0, 640);
+    expect(href.startsWith("api/runs/run_1/picture?")).toBe(true);
+    const query = new URLSearchParams(href.split("?")[1]);
+    expect(query.get("node")).toBe("stream.ops[1]/grey");
+    expect(query.get("entry")).toBe("image");
+    expect(query.get("side")).toBe("output");
+    expect(query.get("width")).toBe("640");
+  });
+
+  it("the enlarged picture asks for no width", () => {
+    expect(new URLSearchParams(pictureHref("run_1", "a", "image", "input", 0).split("?")[1]).has("width")).toBe(false);
+  });
+
+  it("a rerun changes the address, so the picture is asked again", () => {
+    expect(pictureHref("run_1", "a", "image", "output", 0, 640)).not.toBe(pictureHref("run_1", "a", "image", "output", 1, 640));
+    expect(pictureHref("run_1", "a", "image", "output", null, 640)).toBe(pictureHref("run_1", "a", "image", "output", 0, 640));
+  });
+
+  it("only what the node made is shown unasked: an output entry it changed or added", () => {
+    expect(pictureOpen(["image"], "output", "image")).toBe(true);
+    expect(pictureOpen(["image"], "output", "spectrogram")).toBe(false);
+    expect(pictureOpen(["image"], "input", "image")).toBe(false);
+    expect(pictureOpen(undefined, "output", "image")).toBe(false);
   });
 });

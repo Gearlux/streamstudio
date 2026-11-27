@@ -6,54 +6,75 @@ User-facing usage lives in the README and the topic pages beside this file (`edi
 `hosting.md`, `api.md`, `development.md`); agent-facing rules in `AGENTS.md` — this file answers
 "why does this mechanism exist?".
 
-## The studio is addressed by its PORT, not by a pid file (2026-08-26)
+## The standalone editor is served by portail (2026-11-24)
 
-**Context.** `stop` and `restart` need to find a running studio. The obvious mechanism is a pid file
-written at launch and removed at exit, and it is what most single-process servers do.
+**Context.** The editor's command line held its own serving code: a port probe, a per-process scan for the process
+listening on a port, a stop (SIGTERM, then a kill), and the signal handling that keeps unsaved work on the way out.
+Its `stop` ended WHATEVER listened on the port — it never asked what that program was — and there was no way to list
+running editors or to start one detached. portail, the framework a workspace web app is served by, holds all of this
+once: a server is found by what it answers (`/api/meta` names the app), and a listener that does not answer as the app
+is refused, never signalled.
 
-It does not fit here: the process that holds the port is not always the process anything recorded. A
-studio is started from a terminal, by a host app, or by a script, and a wrapper (a shell, a process
-manager) may stand between the one that wrote a pid file and the server that holds the port — so a
-pid file records whichever of them wrote it, and signalling that one does not free the port. Keeping
-a file in sync with a process that can be killed, crash, or be restarted by a third party is state
-that goes stale. Worse, a pid file only ever knows about studios THIS launcher started: a studio a
-host app spawned detached, or one a developer ran by hand, is exactly what a person reaches for
-`restart` to deal with.
+Measured before portail could serve the editor: it expected a workspace FILE (`open <folder>` was refused as
+`workspace file … does not exist`), its shell answered `/api/workspace` — the route the editor's page joins through,
+with another answer — and a detached start was rebuilt from the path and the port alone, losing `--templates-dir`.
+portail gained a folder workspace (`AppSpec(workspace="folder")`), serving options a workspace carries
+(`Served.options`) and a shell that leaves `/api/workspace` to an app that answers it.
 
-**Decision.** The port IS the identity. `_studio_process(port)` scans processes for the one listening
-on `127.0.0.1:<port>` and that process is the studio, whatever spawned it and whatever its ancestry.
-Nothing is written to disk, so there is no state to go stale.
+**Decision.** `cli.py` says who the editor is (`SPEC`), what it serves (`Folder`: the graph folder IS the workspace)
+and what is its own; everything else is portail's.
 
-The scan is per-process rather than whole-system because the whole-system call is privileged:
-`psutil.net_connections(kind='tcp')` raises `AccessDenied` for an ordinary user on macOS, while
-iterating processes and asking each for its own connections does not.
+- `open` (the default) and `restart` are the editor's commands, because they carry `--templates-dir`; they call
+  `Lifecycle.open` / `Lifecycle.restart` with `options={"templates_dir": …}`. `list` is registered by portail. `stop`
+  wraps portail's: it asks every running editor what it holds unsaved BEFORE the stop and, for each one gone
+  afterwards, reads the recovery file back and says where the work is.
+- The unsaved work is kept by `Hooks.leaving`; the page check runs in `Hooks.prepare` (the terminal) and
+  `Hooks.starting` (the serving process).
+- The standalone app is the editor's own Flask app with portail's shell mounted after its routes (`index=False`).
+  A host that mounts the editor's blueprint gets none of this.
 
 **Consequences.**
 
-- `stop` / `restart` work on any studio on that port — this launcher's, a host app's, a hand-run one.
-- No pid file, no lock file, no cleanup path, and no stale-state failure mode to reason about.
-- `psutil` is a hard dependency (imported at module scope by `cli.py`, declared in `pyproject.toml`).
-- The scan is O(processes) and touches every process the user owns. That is fine for a command a
-  human types; it would not be fine on a hot path, so do not reuse it as one.
-- Two studios on two ports are independent, which falls out for free: every command takes `--port`.
+- `stop` and `restart` never signal a program that is not the editor; a server is named by its port or its folder.
+- `list`, `--background`, `--auto-port` and `--browser` exist. Two editors on two ports are independent, and two on
+  one folder are told apart by their ports.
+- `psutil` is no longer a dependency; `portail` is.
+- The state folder `~/.streamstudio` holds portail's registry of running editors (`servers/`) and the folder served
+  last, beside the templates.
+- A restart of a port serves with the templates folder the running editor has.
+- The standalone page's ↻ and ⏻ are the shell's (the update below).
+
+**Update 2026-11-25 — the page's ↻ and ⏻ are portail's shell.** The page loads the shell's script from beside itself
+(`portail/shell.js`, a relative address, so it holds behind a path proxy) and hands it one slot in the bar, after
+**Run** (`frontend/src/shell.ts`). The shell draws the two buttons there, so ↻ is `streamstudio restart <port>` and ⏻
+is `streamstudio stop <port>`: the unsaved work is kept by the same `Hooks.leaving`, and every open tab is told.
+Tried on a real editor: ↻ came back under a new process id with the tab reloaded; ⏻ with one unsaved edit closed the
+tab, left the graph file as it was and wrote the edit into the folder's recovery file.
+
+The page asks for the script only where it is served. `GET /api/workspace` answers `shell: true` when the app routes
+`/portail/…`, and the slot exists only for a page that is not `?embed`ded and has no host (`wantsServerButtons`): in a
+host's panel the server is the host's, and stopping it is the host's button. Measured before the answer carried
+`shell`: the page asked for the script in every app, an app mounting the editor answered 404, the browser logged it,
+and 127 browser tests failed on their zero-console-errors gate.
+
+Rejected: a stop and a restart route of the editor's own (a second way out beside the one portail holds — the
+recovery file would be written by two paths); probing for the script with a request and ignoring the 404 (the
+console line is the browser's, a page cannot silence it); a build-time switch (one built page is served standalone
+and mounted). Pins: `frontend/src/__tests__/shell.test.ts`, `tests/test_built_on_portail.py`.
 
 **Example.**
 
-```python
-proc = _studio_process(8190)          # the LISTENER, whatever started it
-proc.terminate()                      # port measured free 64 ms later
-proc.wait(timeout=grace)              # deterministic; kill() only if it ignores SIGTERM
+```
+$ streamstudio graphs --port 8191 --background
+$ streamstudio list
+8191  /home/me/graphs  http://127.0.0.1:8191
+$ streamstudio stop 5432
+Error: port 5432 is held by something that is not streamstudio (pid 801 postgres) — not stopping it
 ```
 
-**What you may change.** Widen the match (a host other than loopback, a port range) inside
-`_studio_process`; make `grace` configurable if a slow shutdown ever needs it. Do not introduce a pid
-file, a lock file, or any launch-time state as a "faster" lookup — it would reintroduce exactly the
-staleness and the this-launcher-only blindness this avoids. Do not reach for the whole-system
-`net_connections()`; it is privileged, and the failure is a permission error rather than an empty
-result.
-
-**Update, 2026-10-14.** The decision is unchanged by the removal of the second editor, whose launcher started its
-server as a child: the owner of the port is the target, whatever started it.
+**What you may change.** What the editor's own commands take and say. Do not define a port probe, a process lookup, a
+stop or a signal handler in `cli.py` again (`tests/test_built_on_portail.py`), and do not answer `/api/meta` from the
+editor's blueprint — a host's app is the host's.
 
 ## The graph document is the truth; the canvas is derived and edits are located text patches (`streamstudio.document`, 2026-09-28)
 
@@ -335,7 +356,7 @@ edit (`modelToFlow`, node id = the document's node name), and each behaviour is 
 | groups | a parent node in the arrays | the sidecar's `groups:` block; the box derived from its members every draw |
 | undo/redo | snapshots of the two arrays | the document's text history on the server + the page's layout timeline |
 | copy/paste | a copy of array entries | `add_step` per copied node, with the values the document spells |
-| auto-layout | dagre over the arrays | dagre on the page (*arrange*) or the server's layering (*columns*), saved as positions |
+| auto-layout | dagre over the arrays | dagre on the page (*arrange* left to right, diagonally or top to bottom) or the server's layering (*columns*), saved as positions |
 | save/load | `toDoc`/`load`, a JSON of its own (round trip 2278 bytes in, 2278 out) | none — each route call saves the YAML; `serialize.ts` has no successor |
 
 **Consequences.** Measured, the prototype (685 lines, one generic node component, a synthetic catalogue): palette of
@@ -707,15 +728,11 @@ templates folder, not the one the person had asked for.
 **Decision.** (1) The app is declared with `strict_flags=True`: every command takes PLAIN values, there is no
 configuration document for an override to fall through to, so an option that names no parameter of the command is an
 error that names it (and the nearest declared parameter, when there is one) before anything starts. (2) The folders are
-resolved to absolute paths ONCE, in `_canvas_folders`, before any work — and before `restart` stops anything, so a
-folder that is not there is refused naming it while the running editor is still running. liquifai binds CLI values
-verbatim as strings, so they are coerced there; every graph path the editor then answers is absolute, and a path from
-`GET /api/graphs` can be sent back. (3) Every command a message prints must parse back: the busy-port hint
-(`_report_port_in_use`) prints the SAME folder and templates folder one port up, absolute, shell-quoted (`shlex.join`),
-the folder first because liquifai binds positionals up to the first flag; the address is printed bare with `print()` on
-a line of its own, so a terminal linkifies it. (4) A taken port is refused before any work, and asked again after the
-page was built (a build takes seconds, and another start may take the port meanwhile). (5) `stop` and `restart` default
-to the editor's port, 8190 (`EDITOR_PORT`), and find the server by that port ("The studio is addressed by its PORT");
+resolved to absolute paths ONCE, before any work (the graph folder as the command opens it, the templates folder in
+`cli.open_folder`) — and before `restart` stops anything, so a folder that is not there is refused naming it while the
+running editor is still running. liquifai binds CLI values verbatim as strings, so they are coerced there; every graph
+path the editor then answers is absolute, and a path from `GET /api/graphs` can be sent back. (3) `stop` and `restart`
+default to the running editor and find a server by what it answers ("The standalone editor is served by portail");
 the way out of a start keeps the person's unsaved work ("Unsaved work is kept in a hidden file of the served folder").
 
 Rejected: a lenient mode that warns (the warning is the thing a launcher cannot raise, having materialized nothing);
@@ -751,11 +768,10 @@ sorted(cli.app._commands)        # ['restart', 'run', 'stop']  — liquifai's re
 cli.EDITOR_PORT                  # 8190                        — the port all three default to
 ```
 
-**What you may change.** The port, the option spellings, the layout of the busy-port hint, the wording of the
-refusals. What must hold: an option no command declares is refused, never ignored; the folders are resolved once,
-before any work, and `restart` checks its folder before it stops anything; every command a message prints is one the
-CLI accepts (pinned by parsing it back). Pins: `tests/test_cli_editor.py::TestTheCommands`, `::TestServingTheCanvas`,
-`::TestStopAndRestart`, `tests/test_cli_port.py`.
+**What you may change.** The port, the option spellings, the wording of the editor's own lines. What must hold: an
+option no command declares is refused, never ignored; the folders are resolved once, before any work, and `restart`
+checks its folder before it stops anything. Pins: `tests/test_cli_editor.py::TestTheCommands`,
+`::TestServingTheCanvas`, `::TestStopAndRestart`.
 
 ## Unsaved work is kept in a hidden file of the served folder when the editor stops, and the PAGE asks what to do with it (`Studio.stash`, `GET /api/workspace`, 2026-09-29)
 
@@ -974,6 +990,38 @@ environment (no `NO_COLOR`, no colour setting). A host that mounts the editor pa
 `tests/test_lazy_package.py`,
 `tests/test_logflow_colorize_default.py::test_a_host_mounting_the_editor_keeps_its_environment_and_its_colors`.
 
+**Update 2026-11-25 — what a host CALLS is the editor's too.** The four methods are what the editor asks the host.
+The other direction — what a host calls on the editor — had no home: each host wrote it again. Measured across two
+hosts: both registered the two blueprints under a prefix and both built the panel's link by hand, each with its own
+arguments; one kept the unsaved work on its stop through a helper of its own, and the second imported that helper
+from the first — a host depending on another host for a call of the editor's; one dropped a graph it had replaced by
+reaching into `Studio._documents`; and both set several settings with a loop of `set_param` followed by `save`. The
+loops differed from the editor's own gesture in two ways that showed on screen: neither was one undo, and a save
+refused as changed on disk left the edit HELD, so the host's stop kept it and the next start offered to restore a
+change the person never saw land.
+
+So `streamstudio.app` holds the calls, and a host makes them and nothing lower:
+
+| call | what it replaces in a host |
+|---|---|
+| `mount_editor(app, host, prefix="/studio")` | registering `editor_blueprint` and `page_blueprint` by hand; answers the `Studio` |
+| `editor_link(graph, tab, only, prefix)` | a link built by hand; always relative, an unknown `tab` or `only` is a `ValueError` naming the known ones |
+| `keep_unsaved_edits(app)` | `studio_of(app).stash()` behind a check that an editor is mounted; no editor answers `[]` |
+| `Studio.forget(name)` | deleting from `Studio._documents`; answers whether unsaved edits went with it |
+| `Studio.settings(name)`, `set_settings(name, values)`, `reset_settings(name)` | the `set_param` loop plus `save` |
+
+`set_settings` is one turn of the editor (`Studio.lock` held across read, change and save), takes the settings by
+their keys, and a refused save undoes the change before it answers — the rule the page's own `?only=settings` change
+follows (`POST …/param {save: "settings"}`), now one implementation for the page and the hosts. An unknown key is a
+`ValueError` before anything changes.
+
+Rejected: a base class a host inherits (`EditorHost` is a Protocol so a host imports nothing to conform; a base class
+would turn four answers into a framework); a refusal from `forget` while the graph holds unsaved edits (the host
+calls it AFTER it replaced the file — refusing then leaves the editor showing a graph that is gone; the answer says
+what was lost and the host words it); keeping the helpers in the first host and importing them from there (the
+editor would depend on a package that depends on it). Pins: `tests/test_host.py::TestMountEditor`, `::TestEditorLink`,
+`::TestKeepUnsavedEdits`, `::TestForget`, `tests/test_graph_settings.py::TestAHostSetsSeveralSettings`.
+
 **What you may change.** What a host adds beyond the four methods, how a run labels the record, the fill rule's
 reach (into subgraphs, once the tracer exposes their ops). What must hold: the editor never caches the host's folder
 across requests; a moved folder keeps the held documents' edits and history; a host's record runs the held texts,
@@ -1014,8 +1062,17 @@ any window other than the parent, or another origin, is ignored.
 studio.src = "/studio/?graph=view_bte&tab=settings&embed=1";            // first open
 addEventListener("message", (e) => e.data?.type === "saved" && rerunPanes(e.data.path));
 studio.contentWindow.postMessage({target: "streamstudio", type: "open", graph: "view_fft", tab: "run"}, location.origin);
-// the page posts: {source: "streamstudio", type: "state", graph: "view_fft", dirty: false, unsaved: [], tab: "run"}
+// the page posts: {source: "streamstudio", type: "state", graph: "view_fft", dirty: false, unsaved: [], tab: "run",
+//                  asking: false}
 ```
+
+**Update 2026-11-10: `state` says when the page is ASKING.** No graph opens before the recovery question is answered
+("Unsaved work is kept in a hidden file"), and a host covering its panel until the graph it asked for shows (a veil
+reading `loading <graph>…`) could not tell that wait from a slow load: measured, a host's veil covered the question for good
+and the person saw nothing else. `state` now carries `asking` — true while the recovery dialog or its discard question
+is up (`recovery.waitsForAnswer`) — and a host uncovers the panel while it is. Rejected: a host uncovering whenever
+the page shows no graph (a normal first load would flash an empty editor for the seconds the catalogue takes), and a
+message of its own (`state` is already what a host follows, posted on every change).
 
 **Update 2026-10-01 (the review of the panel).** An `open` arrives while the person is doing something in the panel,
 with no click inside it — measured before: a value typed into `gain` and not left was committed into the NEXT graph's
@@ -1034,7 +1091,7 @@ it), and refusing it while a dialog is up (the host cannot see the panel's dialo
 Node was missing at the server's start, or the start's build failed — `/` answers a short page that says which and
 what to do. In a host's panel that page used to say nothing to its parent, and a host that covers its panel until
 the editor's first `state` (so a graph is never shown under another's name) covered it for good — measured: the
-panel read `loading sink…` over `The editor's page is not built and Node is not installed — run aisland setup`.
+panel read `loading sink…` over `The editor's page is not built and Node is not installed — run the workspace's setup`.
 That page now posts a fourth message, `{source: "streamstudio", type: "unavailable"}`, under the same rules (`?embed`
 only, its parent, same origin): no editor will answer here, so the host uncovers the page and, to show another graph,
 loads the frame again rather than posting `open`. Rejected: posting `state` from it (the host would then post `open`
@@ -1137,6 +1194,24 @@ asks for the catalogue at most once while an answer is on its way or has arrived
 `tests/test_short_name_lookup.py`, `tests/test_canvas.py::TestTheCatalogueIsAskedForOnFirstNeed`,
 `frontend/src/__tests__/catalogue.test.ts`.
 
+### Amended 2026-11-10: within each tier, a module named with the name's words goes first (`_shared_words`)
+
+**Context.** User report from a host: opening one graph's settings panel took long. The host's workspace type ships 48
+graphs, and the first `GET api/graphs` derives them all. Three keys (`ExportMask`, `MeasureRecordLevels`,
+`GeneratedSignals`) live in one sub-package of a top-level package the host had imported, and that package lists
+eight other heavy packages' entry points before them: in listed order deriving the 48 graphs took 15.2 s and imported
+8 600 modules.
+
+**Decision.** The two tiers stay (an imported package's entry points, then the rest); within each, the entry points
+whose module's own name shares the most words with the key go first — the key split at its capitals, the module's last
+component at `_`, each word compared by its stem (`generated` and `generate`, `levels` and `level`) — then the listed
+order. A hint only: a module named otherwise is still reached in its turn, and nothing is imported that the listed
+order would not reach.
+
+**Consequences.** The 48 graphs derive in 1.5 s, importing 140 modules, to the same nodes and problems as before (every
+graph compared). A key two entry points define still resolves to the first the walk imports, which may now be the one
+whose module carries the key's words. Pin: `tests/test_short_name_lookup.py::test_a_module_named_with_the_names_words_is_tried_first_within_its_tier`.
+
 ## The canvas page builds itself at a server's start when its source changed (`streamstudio.page.ensure_page_built`, 2026-10-02)
 
 **Context.** The page is TypeScript/React in `frontend/` (committed), built by `npm run build` into `frontend/dist`
@@ -1178,8 +1253,8 @@ cannot — the page in it is whatever the last build left.
 Rejected: **committing `dist`** (every page change becomes a second, generated diff that merges badly, and a commit
 that forgets it ships a page out of step with its routes — the very drift this removes; *reversed 2026-10-04* with a
 test that catches the forgotten commit and a binary merge rule — "The built page is committed inside the package"
-below); **building in `aisland
-setup`** (setup runs once per machine, not after each pull, so the stale page after a pull stays); **building by hand**
+below); **building in the workspace's setup
+command** (setup runs once per machine, not after each pull, so the stale page after a pull stays); **building by hand**
 (what existed — the measured stale page and placeholder); **building at app creation** (a test suite makes hundreds of
 apps and must never run npm); **deciding whether the PAGE is current by modification times instead of contents** (a
 branch switched away and back changes every time and nothing in the page). The install decision (item 3) does use
@@ -1222,7 +1297,7 @@ streamstudio: the editor's page changed since its last build — building it
 streamstudio: built the editor's page in 2.0 s
 # the next start: nothing
 # the same change, no Node on PATH: the server starts, and GET / answers
-The editor's page is out of date and Node is not installed — run aisland setup, then start this server again.
+The editor's page is out of date and Node is not installed — run the workspace's setup, then start this server again.
 ```
 
 **What you may change.** The list of inputs (as long as it covers everything the build reads — a missed input is a
@@ -1304,7 +1379,7 @@ Rejected, each measured or counted against the same consuming CI:
 **Consequences.** Measured 2026-10-04:
 - in a copy of the tree (`git ls-files -co`) with no Node on `PATH`, `streamstudio <graphs> --port 8194` printed
   nothing about the page and `GET /` served the committed `index.html` byte for byte — before, the same start printed
-  `streamstudio: the editor's page is not built and Node is not installed — run aisland setup` and served that line;
+  `streamstudio: the editor's page is not built and Node is not installed — run the workspace's setup` and served that line;
 - in the consuming app's CI mirror (streamstudio installed non-editable, `--no-deps`, from a copy), `web_dist()` named
   `…/site-packages/streamstudio/canvas`, `page.FRONTEND` did not exist, and the editor tests went from `30 passed, 10
   skipped` to `40 passed`;
@@ -1715,7 +1790,7 @@ Separately, a host that runs something with a graph's settings (a run button bes
 settings file while the field the person had just typed in was still being written: a field writes when it is LEFT, and
 pressing the host's button leaves it — measured, the run read the old value.
 
-**Decision.** (1) *The seam.* A producer stamps a class with `__taidal_widget_params__: Mapping[str, str]` (parameter
+**Decision.** (1) *The seam.* A producer stamps a class with `__streamstudio_widget_params__: Mapping[str, str]` (parameter
 name → opaque tag). `palette.picker_of` reads it FIRST — before the HuggingFace conventions and the file/folder name
 rules — and the form schema carries the tag verbatim as `picker`: there is no registry of tags, and the page draws the
 pickers it knows and a plain field for any other. A plugin is a module an installed package names in the
@@ -1747,7 +1822,7 @@ sends `commit` is unaffected. The lists are process-level state like the catalog
 # the producer stamps the parameter with a tag of its own
 @configurable(category="value")
 class ShopDataset:
-    __taidal_widget_params__ = {"name": "SHOP_DATASET"}
+    __streamstudio_widget_params__ = {"name": "SHOP_DATASET"}
     def __init__(self, name: str = "", project: str = ""): ...
 # palette.picker_of(ShopDataset, "name", str)  ->  "SHOP_DATASET"
 ```
@@ -1780,6 +1855,17 @@ group; `committed` is never posted before the writes land. Pins: `tests/test_plu
 
 **Update, 2026-10-14.** The stamp and the entry-point group, first decided on 2026-08-25, are decided here: a plugin
 supplies lists, and nothing else is read from its module.
+
+**Update, 2026-10-16: "↻ ask again".** A list's answer is kept for the page's life (`pickers.cachedLookup`), and a host
+that embeds the page re-targets it rather than reloading it (a reload of a page holding unsaved work asks "Leave
+site?"), so a list a plugin answers from the disk or a platform went stale: a model packaged after the list was first
+opened never showed until the host's whole page was reloaded. A plugin's list now ends in a "↻ ask again" entry
+(`pickers.ASK_AGAIN`, a NUL-led value no name can be); picking it forgets that one answer (`pickers.forgetLookup`) and
+asks the editor again, and picks nothing. Rejected (the user's pick between three): asking again every time the person
+reaches for a list — a platform list would ask a remote service on every hover; asking again on every panel open — a
+list would stay stale while the panel stays open. The HuggingFace lists keep their answer for the page's life (a column
+lookup can open a dataset). Pins: `frontend/src/__tests__/pickers.test.ts` (forgetLookup),
+`tests/test_canvas.py::TestAPluginsListIsAskedAgainOnTheWord`.
 
 ## A field another parameter does not ask for is grayed, by the value the HOST runs (`settings.offReason`, the `values` command, 2026-10-08)
 
@@ -1911,3 +1997,133 @@ with studio.lock:                       # the panel's request, if one is being s
 reentrant call goes away, which waits are `TURN_FREE`. What must hold: no editor request reads the graph list or a
 document without the lock; nothing waits on a process, a plugin or the network while holding it; a refusal and a raise
 let go of it; a host's read-change-save is one turn. Pins: `tests/test_studio_threads.py`.
+
+## The file browser's shortcut buttons and New folder are the server's (`Studio.places`, `Studio.new_folder`, 2026-10-28)
+
+**Context.** The file browser browses the machine the EDITOR runs on, starting in the graph folder; reaching a data
+or model folder meant typing its path. A run's outputs need a folder that is often not there yet, and the browser
+could only pick an existing one (user request 2026-10-28: shortcut buttons to `HOME`, `PROJECT_ROOT`, `DATA_ROOT`,
+`MODEL_ROOT`, … and a new folder for outputs).
+
+**Decision.** Every listing (`GET /api/files`) carries `places`: the graph folder as `Graphs`, then each of
+`PLACE_VARIABLES` — `HOME`, `PROJECT_ROOT`, `DATA_ROOT`, `MODEL_ROOT`, `RUN_DIR` — that the editor's environment sets
+to an absolute folder, resolved. The server decides because the folders are the editor's machine's, not the
+browser's; resolved so the page marks the button whose path equals the listing's `dir`. An unset, empty, relative or
+non-folder value is left out, never an error: a published editor runs where none is set. Riding on the listing costs
+a handful of `stat`s and no second request. `POST /api/files/folder {dir, name}` makes one folder (no parents) and
+answers its listing, so the page enters it with the answer it already draws. It is the third gesture that writes
+without Save — a folder holds no unsaved state. Rejected: a fixed list in the page (the variables are the server's);
+a `STREAMSTUDIO_PLACES` override (user choice 2026-10-28: a fixed list); every `*_ROOT`/`*_DIR` variable (it would
+offer `TMPDIR`-like folders nobody asked for).
+
+**Consequences.** A new shortcut is one entry in `PLACE_VARIABLES`. A name starting with `.` is refused because the
+browser hides it — a folder made and then invisible. The browser in a host's panel offers the same buttons, its
+`Graphs` being the host's folder.
+
+**Example.**
+
+```python
+studio.places()
+# [{'name': 'Graphs', 'path': '/home/me/graphs'}, {'name': 'HOME', 'path': '/home/me'},
+#  {'name': 'DATA_ROOT', 'path': '/data'}]
+studio.new_folder("$DATA_ROOT", "outputs")["dir"]   # '/data/outputs', made
+```
+
+**What you may change.** The variables and their order, the `Graphs` label, where the buttons sit. What must hold:
+the page draws only the server's list; a refused name makes nothing; New folder never makes parents. Pins:
+`tests/test_app_files.py::TestPlaces`, `::TestNewFolder`, `tests/test_canvas.py::TestFileDialogPlacesAndNewFolder`.
+
+## A card's sockets follow the drawing: top and bottom on a level whose wires run down (`layout.runsDown`, `DownContext`, 2026-11-08)
+
+**Context.** The page arranges a level three ways — left to right, diagonally, top to bottom (dagre over the measured
+cards, `layout.arrange`). A card drew its input sockets on its left and its outputs on its right, so after *Arrange
+top to bottom* every wire left one card sideways and curled back into the side of the card below it (seen on a
+six-step forked flow on a scratch editor). The user asked for the sockets to move to the top and bottom edges there.
+
+**Decision.** The direction is READ from the drawing, never stored: `layout.runsDown` calls a level down when more of
+its wires run down than across — a wire runs down when its target starts below its source's bottom by more than the
+two cards' horizontal gap (negative when they overlap). The canvas works it out from the sidecar's positions and the
+measured sizes (not the drag in progress, so the sockets turn on release) and hands it to every card through
+`DownContext`; a card then draws its input and output sockets on its top and bottom edges, spread in row order, and
+asks React Flow to measure its handles again only when the direction TURNS (re-measuring every card as it mounts held
+back the first fit of a host's panel and of a subgraph's inside). A parameter's small handle stays on its row.
+Rejected: a `directions:` block in the sidecar, set by the arrange that last ran — it needs a sidecar block, a route,
+the recovery file and an undo entry kind for state the positions already imply, and it would be wrong after the
+person drags the cards into another shape.
+
+**Consequences.** A reload, an undo and the next arrange turn the sockets with the cards for free; dragging most cards
+of a level into a column turns them too. The diagonal stays across because its step (`DIAGONAL_GAP`, 20 px) is smaller
+than a column's gap (dagre's `ranksep`, 80 px) — keep it smaller, or diagonal levels draw down. A wide fan-out can tie
+(its outer children sit beside the parent rather than under it); a tie is across.
+
+**What you may change.** The rule's threshold, the spread of the sockets on an edge. What must hold: no layout state
+outside the positions and groups; *Arrange top to bottom* yields a down level and the other two arranges an across one
+(`frontend/src/__tests__/layout.test.ts`, `runsDown`). Pins: `tests/test_canvas.py::TestArrange::test_top_to_bottom_moves_the_sockets_to_the_top_and_bottom_edges_and_undo_moves_them_back`.
+
+## A settings file the editor holds nothing unsaved of follows the disk (`Document.follow_settings`, 2026-11-19)
+
+**Context.** An annotaide workspace's detect pane showed `seed_margin_db` 0 dB in its settings panel while the
+settings file said 16 dB. The editor held the pane's graph with a node moved on its canvas: unsaved LAYOUT, so the
+document was dirty, and `Studio.document` re-reads only a document holding nothing unsaved. Its settings text and the
+baseline Save compares to stayed at what the file said hours earlier, while other programs wrote the file. The
+settings sheet's change — saved "at once" — then started from the old text and its save was refused as changed on
+disk; a reset refused the same way held an EMPTY settings text, the next change wrote one line over it
+(`ThresholdOverNoise.seed_margin_db: 10`), and the stop kept it as unsaved work. Its restore showed every other setting
+at the graph's default. Reproduced on a copy: a moved node, another program's write, a reset, one change → the held
+text one line, the baseline the old file, the disk untouched — the recovery file's exact shape.
+
+**Decision.** The settings file is the one text of a document that follows the disk on its own: whenever the editor
+holds nothing unsaved of it (not held, or held as its baseline) and the disk says otherwise, `follow_settings` takes
+the disk's text as both the held text and the baseline (a file gone is held no more), and every undo/redo entry that
+held the old text holds the new one — what the file said before those edits is what it says now, so an undo never
+brings old settings back. It runs at every `Studio.document` (each request, a restored document included) and at the
+start of `set_param` of a setting and of `reset_settings`, for a host holding the document between requests. An
+unsaved settings edit is never replaced: Save's changed-on-disk refusal stays the answer to two writers.
+
+**Rejected.** Re-reading the whole dirty document: it would drop the moved node and the history. A per-line three-way
+merge of the settings at Save: right in most cases, but it decides a conflict for the person; the refusal remains for
+the case where the editor holds an unsaved settings edit.
+
+**Pins.** `tests/test_graph_settings.py::TestTheSettingsFollowTheDisk`; annotaide's
+`tests/test_settings_survive_restart.py` drives it through a mounted editor.
+
+**Update 2026-11-21 — the settings sheet's change and its save are one request.** The refusal that stays (an unsaved
+settings edit of another view, a file another program wrote) still left the SHEET's change held: the page set it in
+one request and saved in a second, and a refused save showed an error and kept the change, for the stop to keep as
+unsaved work. Now `POST …/param {save: "settings"}` (`Studio.set_param`) sets and saves in the same turn of
+`Studio.lock`, and a refused save undoes the change before it raises — what annotaide's own settings path does
+(`_save_settings_or_undo`). Rejected: the page sending Undo after the refusal — a third request, and another view's
+edit landing between the save and the Undo would be the one undone. Pins:
+`tests/test_graph_settings.py::TestASettingSavedAtOnce`,
+`tests/test_canvas.py::TestTheSettingsOnlyPage::test_a_change_whose_save_is_refused_is_not_kept_and_the_form_shows_what_is`.
+
+## A reference to a top-level plain value is that value (`_Builder.value_references`, `Param.ref`, 2026-11-25)
+
+**Context.** A graph keeps its knobs at the top (`limit: 3`, `split_name: train`) and hands each to the parameters
+that use it (`stop: !ref:limit`), so a scope replaces one key. The model knew a `!ref:` only as a wire from a card:
+any reference made its parameter a slot (`_slot_sockets`), a marker holding one was never built (`_build`), and
+`resolve_references` reported a target that is no node. Measured 2026-11-25 on a conversion graph with nine such
+references: nine problems (`source.stop: !ref:limit names no node`), nine open `*` sockets where fields belong, and
+no card holding one built. With the nine values written in place of their references the same graph derived ten nodes
+and no problem.
+
+**Decision.** Before a marker is described, a parameter filled by `!ref:<key>` where `<key>` is a top-level key
+holding a plain value (nothing of a class inside; never `flow`, `outputs`, `app`, `include`, …) is described and
+built with that value (`_Builder.value_references`). It is a parameter of the node again, carrying `Param.ref`, the
+key. Every level reads the root's keys, as every level hands its references to the root. `set_param` of such a field
+is refused, naming the key: the key may feed several parameters (one split name fed a view and a sink), and replacing
+one reference by a literal would silently cut that parameter loose. The page shows `limit = 3` in place of a box
+(`model.refLabel`), with the reason as its title. The value is the document's own, before any scope: the model is
+derived at confluid's `document` stage.
+
+**Rejected.** A card per referenced key, wired to its users (option B, shown to the user as a drawing): nine more
+cards on a graph of ten, and add, rename, delete and wiring rules for a card that is no object. Editing the key from
+the field: one field would change another card's setting.
+
+**Consequences.** A reference to a key that is not there says `names no node and no top-level value`; a plain value
+named where a card is wired (a slot by name or by annotation, a list member) says `names the top-level value <key>,
+and a card is wired here`. A root's `delivered:` and a subgraph marker are read as before.
+
+**What you may change.** The label's wording. What must hold: the parameter stays a field and is never drawn as a
+wire; the editor never replaces the reference by a literal. Pins: `tests/test_value_references.py`,
+`tests/test_canvas.py::TestAValueReadFromATopLevelKey`.

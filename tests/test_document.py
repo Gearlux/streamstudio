@@ -1714,6 +1714,14 @@ class TestPatcher:
         with pytest.raises(ValueError, match="no YAML node starts at"):
             YamlText("a: 1\n").set_kwarg(7, 7, "x", 1)
 
+    def test_a_text_holding_no_document_has_no_root_and_no_nodes(self) -> None:
+        from streamstudio._yamltext import YamlText
+
+        text = YamlText("# only a comment\n")
+        assert text.root is None and text.nodes() == []
+        with pytest.raises(ValueError, match="no YAML node starts at 1:1"):
+            text.node_at(1, 1)
+
     def test_spellings(self) -> None:
         from streamstudio._yamltext import spell
 
@@ -1724,6 +1732,7 @@ class TestPatcher:
         assert spell(True) == "true"
         assert spell([1, 2]) == "[1, 2]"
         assert spell({"a": 1}) == "{a: 1}"
+        assert spell({"dog": 1, "cat": 0}) == "{dog: 1, cat: 0}"  # a map keeps the order it was given in
         assert spell("$DATA_ROOT/x") == "$DATA_ROOT/x"
 
 

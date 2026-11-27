@@ -163,7 +163,7 @@ class TestLayeredLayout:
 
 
 #: Cards the page DREW, measured 2026-10-01 (headless chromium, 1400x900, the React Flow node's height at zoom 1) on
-#: every graph of a scratch copy of the waivefront annotation panes, the annotaide workspace templates and a
+#: every graph of a scratch copy of a signal project's annotation panes, the annotaide workspace templates and a
 #: one-subgraph flow — 197 cards. ``card_height`` is EXACT on 195 of them and 1 px over on the two boundary pills.
 MEASURED = [
     pytest.param(card("known", 1, 10, 3), 373, id="bte_view known: 1 input, 10 parameters, 3 outputs"),

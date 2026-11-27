@@ -107,6 +107,7 @@ from confluid import (
 )
 from confluid.fluid import Fluid, Reference, Target
 from confluid.registry import resolve_class
+from confluid.scopes import discover_boolean_scopes
 from loggair import get_logger
 from recordstream.algorithm import Algorithm, algorithm_spec
 from recordstream.flow.graph import FlowGraph
@@ -126,6 +127,7 @@ from streamstudio.settings import (
     declared_settings,
     graph_mode,
     graph_name,
+    is_settings_file,
     read_settings,
     set_setting,
 )
@@ -281,6 +283,8 @@ class Param:
         schema: The JSON-schema fragment ``confluid.to_pydantic`` gives this parameter (enum, bounds, …).
         spelled: Whether the document spells the parameter (an unspelled one is INSERTED by ``set_param``).
         required: A parameter with no default, or declared ``Mandatory``.
+        ref: The top-level key the document reads the value from (``stop: !ref:limit`` → ``limit``, ``value`` that
+            key's plain value); blank for a value spelled in place. Such a field is never set from the form.
     """
 
     name: str
@@ -291,6 +295,7 @@ class Param:
     schema: Dict[str, Any] = field(default_factory=dict)
     spelled: bool = False
     required: bool = False
+    ref: str = ""
 
 
 @dataclass
@@ -666,12 +671,18 @@ def _import_until(name: str) -> Any:
 
     Measured 2026-10-02: importing all of them on the first miss (``confluid.load_configurables``)
     made the first graph list of an editor mounted in a fresh host app take 13.9 s (6.0 s on a warm
-    disk cache) — for one key, ``AnnotationUpdateSink``, whose module (``waivefront.sinks``) was not
+    disk cache) — for one key, ``AnnotationUpdateSink``, whose module (a domain package's ``sinks``) was not
     imported yet; the other entry points brought torch, transformers and the detection backends with
     them. This walk finds it after 15 of the 127 and the list takes 1.1 s. So:
 
     * the entry points of a package that is imported already go first (its dependencies are loaded,
-      so they are cheap — and the key usually lives there), then the rest in their listed order;
+      so they are cheap — and the key usually lives there), then the rest; within each, the entry points whose
+      module's own name shares a word with the name go first, the most words first (``ExportMask`` →
+      ``….export_mask``, words compared by their stem), then the listed order (:func:`_shared_words`).
+      Measured 2026-11-10: the 48 graphs of a host's workspace type named ``ExportMask``,
+      ``MeasureRecordLevels`` and ``GeneratedSignals``, and in listed order the walk imported eight other
+      packages of the same imported top-level package first — 15.2 s and 8 600 modules to derive them all,
+      1.5 s and 140 modules with the ranking;
     * each is loaded with ``EntryPoint.load()``, also when its module is in ``sys.modules`` already:
       that costs nothing for a module that is imported, and it WAITS for one another thread is still
       importing — Python lists a module in ``sys.modules`` before its body runs, and the catalogue
@@ -687,8 +698,8 @@ def _import_until(name: str) -> Any:
     entry point off the list), so walking on would answer "cannot resolve", or import an entry point
     nobody needs.
 
-    Known limit: a name two entry points define (``FourierOp``: ``waivefront.fourier`` and
-    ``waivefront.fourier_torch``) resolves to the first one the walk imports, because the second is
+    Known limit: a name two entry points define (``FourierOp``: a package's ``fourier`` and
+    ``fourier_torch`` modules) resolves to the first one the walk imports, because the second is
     not imported yet; once the catalogue has imported everything the name is ambiguous and resolves
     to nothing, which is what a run (``strict``) refuses.
 
@@ -705,7 +716,8 @@ def _import_until(name: str) -> Any:
             _pending_entry_points = list(importlib.metadata.entry_points(group=_CONFIGURABLES))
         pending = _pending_entry_points
         imported = [ep for ep in pending if ep.module.split(".")[0] in sys.modules]
-        order = imported + [ep for ep in pending if ep.module.split(".")[0] not in sys.modules]
+        others = [ep for ep in pending if ep.module.split(".")[0] not in sys.modules]
+        order = [ep for tier in (imported, others) for ep in sorted(tier, key=lambda ep: -_shared_words(name, ep))]
         for ep in order:
             pending.remove(ep)
             try:
@@ -717,6 +729,24 @@ def _import_until(name: str) -> Any:
             if found is not None:
                 return found
     return None
+
+
+def _shared_words(name: str, entry_point: importlib.metadata.EntryPoint) -> int:
+    """How many words of the class name ``name`` (``MeasureRecordLevels`` → measure, record, levels) the entry point's
+    module's own name holds (``package.record_levels`` → record, levels: 2), each compared by its stem
+    (``GeneratedSignals`` shares ``generat`` with ``package.generate``) — the walk's hint where a name lives, never a
+    rule: a module named otherwise is still reached in its turn."""
+    words = {_stem(word) for word in re.findall(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|[0-9]+", name)}
+    return len(words & {_stem(word) for word in entry_point.module.rpartition(".")[2].split("_")})
+
+
+def _stem(word: str) -> str:
+    """``word`` in lower case without one ending ``-ing``, ``-ed``, ``-es``, ``-s`` or ``-e`` (files, file → fil)."""
+    word = word.lower()
+    for ending in ("ing", "ed", "es", "s", "e"):
+        if word.endswith(ending) and len(word) > len(ending) + 2:
+            return word[: -len(ending)]
+    return word
 
 
 def _registered(name: str) -> Any:
@@ -1118,6 +1148,8 @@ class _Derivation(NamedTuple):
 
 #: A ``!ref:`` still to be wired: (target node, target socket, the reference, the wire kind).
 _Pending = Tuple[str, str, Reference, WireKind]
+#: What a key that is no parameter of a node answers where a parameter is asked for.
+_NO_PARAM = Param("", ANY, None, None)
 
 
 class _Builder:
@@ -1130,11 +1162,20 @@ class _Builder:
         pending: The root's list of ``!ref:`` still to wire. A reference names a TOP-LEVEL key, which an
             inside may use too, so every level hands its references to the root, which resolves them once
             every level's nodes exist.
+        values: The root's top-level PLAIN values by key (``limit: 3`` — nothing of a class inside), which a
+            parameter of any level may read with ``!ref:<key>`` (:meth:`value_references`).
     """
 
-    def __init__(self, path: Path, prefix: str = "", pending: Optional[List[_Pending]] = None) -> None:
+    def __init__(
+        self,
+        path: Path,
+        prefix: str = "",
+        pending: Optional[List[_Pending]] = None,
+        values: Optional[Dict[str, Any]] = None,
+    ) -> None:
         self.path = path
         self.prefix = prefix
+        self.values: Dict[str, Any] = {} if values is None else values
         self.model = Model()
         self.instances: Dict[str, Any] = {}
         self.declarations: Dict[str, _Declaration] = {}
@@ -1154,6 +1195,11 @@ class _Builder:
         if isinstance(doc, Target):
             self.add_marker(self.path.stem, doc)
         elif isinstance(doc, dict):
+            self.values.update(
+                (str(key), value)
+                for key, value in doc.items()
+                if str(key) not in _TOP_LEVEL_NOT_NODES and not _holds_fluid(value)
+            )
             for key, value in doc.items():
                 key = str(key)
                 if key == "flow" and isinstance(value, dict):
@@ -1220,7 +1266,7 @@ class _Builder:
         line (a refused ``Literal`` of an inner op, an inner ``from:`` naming a step outside) would otherwise
         be reported twice, once at the inner node and once at the subgraph (measured: both messages)."""
         steps, result = kwargs.get("steps"), kwargs.get("result")
-        child = _Builder(self.path, prefix=node.name + SEPARATOR, pending=self.pending)
+        child = _Builder(self.path, prefix=node.name + SEPARATOR, pending=self.pending, values=self.values)
         child.derive_inside(
             steps if isinstance(steps, dict) else {}, result if isinstance(result, str) else "", node.source_file
         )
@@ -1263,7 +1309,11 @@ class _Builder:
             self.problem(f"{name}: cannot resolve the class {str(marker.target)!r} at {loc}", loc)
             return node
         kind = _kind_of(cls)
-        described = _describe(cls, kind, kwargs, marker)
+        read = self.value_references(kind, kwargs)
+        described = _describe(cls, kind, {**kwargs, **{param: self.values[key] for param, key in read.items()}}, marker)
+        for param, key in read.items():
+            if param in described.params:
+                described.params[param] = replace(described.params[param], ref=key)
         node = Node(
             name, _dotted(cls), kind, described.params, described.inputs, described.outputs, loc, self.file_of(loc)
         )
@@ -1284,11 +1334,26 @@ class _Builder:
             return node
         members: List[str] = []
         for key, value in kwargs.items():
-            self.wire_value(node, key, value, kind, members)
+            if not node.params.get(key, _NO_PARAM).ref:  # a value read from a key is the field's, never a wire
+                self.wire_value(node, key, value, kind, members)
         if kind == "engine" and members:
             self.streams.append((name, members))
             self.chain(members)
         return node
+
+    def value_references(self, kind: NodeKind, kwargs: Dict[str, Any]) -> Dict[str, str]:
+        """The parameters the document fills with ``!ref:<key>`` where ``<key>`` is a top-level plain value, each by
+        its key — the knobs a graph keeps at its top (``stop: !ref:limit`` under ``limit: 3``). Such a parameter is
+        described and built with the VALUE: a field of the card, not a slot waiting for a card (measured before: an
+        open ``*`` socket, a card never built, and ``names no node`` for each). A root and a subgraph marker have
+        none: their parameters are slots and steps."""
+        if kind in ("contract", "subgraph"):
+            return {}
+        return {
+            param: str(value.target)
+            for param, value in kwargs.items()
+            if isinstance(value, Reference) and str(value.target) in self.values
+        }
 
     def wire_value(self, node: Node, key: str, value: Any, kind: NodeKind, members: List[str]) -> None:
         """A nested marker, a reference, or a container of them under ``key`` → child nodes and wires."""
@@ -1377,8 +1442,13 @@ class _Builder:
             target = self.model.node(target_name)
             wanted = str(ref.target)
             if wanted not in names:
+                what = (
+                    f"names the top-level value {wanted}, and a card is wired here"
+                    if wanted in self.values
+                    else "names no node and no top-level value"
+                )
                 self.problem(
-                    f"{target_name}.{socket}: !ref:{wanted} names no node at {target.loc} (the nodes are: {names})",
+                    f"{target_name}.{socket}: !ref:{wanted} {what} at {target.loc} (the nodes are: {names})",
                     target.loc,
                 )
                 continue
@@ -1774,7 +1844,12 @@ _DISK_LOCK = threading.RLock()
 
 
 def _load_document(
-    path: Path, texts: Mapping[Path, str], *, build: bool = False, solidify: bool = False
+    path: Path,
+    texts: Mapping[Path, str],
+    *,
+    build: bool = False,
+    solidify: bool = False,
+    scopes: Optional[List[str]] = None,
 ) -> Tuple[Any, List[Path]]:
     """``confluid.load(until="document")`` of the graph as the FILE it is — its path — with every text the editor
     holds, the graph's own among them, handed over as ``texts=``. confluid parses a held text in place of the file
@@ -1795,11 +1870,15 @@ def _load_document(
     consumer loads to, and the only one where a top-level key is handed to a same-named constructor
     parameter. ``solidify=True`` adds the finish, which is what a RUN needs (:meth:`Document.load`).
 
+    ``scopes`` are the scopes the load runs under (``recordstream run --scope``'s): a full run's, never the model's.
+
     The load runs under :data:`_DISK_LOCK`: an included file the editor does not hold is read from disk, and a save
     (of another graph including the same file) is never read half-written."""
     until: Literal["objects", "document"] = "objects" if build else "document"  # ``solidify`` acts at "objects" only
     with _DISK_LOCK:
-        doc, paths = confluid.load(path.resolve(), until=until, solidify=solidify, return_paths=True, texts=texts)
+        doc, paths = confluid.load(
+            path.resolve(), until=until, solidify=solidify, return_paths=True, texts=texts, scopes=scopes
+        )
     return doc, [Path(p).resolve() for p in paths]
 
 
@@ -2615,10 +2694,15 @@ class Document:
     def open_shipped(cls, path: Union[str, Path], shipped: Union[str, Path], *, history_depth: int = 50) -> "Document":
         """The graph ``path`` — a file NOT written yet — as a host ships it, in ``shipped``: it holds the shipped text
         as the graph's and nothing unsaved, so a Save writes the graph only once it was changed (the COPY), and the
-        settings file beside ``path`` from the first setting changed. ``shipped`` itself is never written."""
+        settings file beside ``path`` from the first setting changed. ``shipped`` itself is never written. Its relative
+        ``include:`` entries are rebased to name, from ``path``'s folder, the files they name beside ``shipped``
+        (:func:`rebase_includes`): confluid reads an include beside the document, and the folder holds no copy of a
+        file shipped with it (measured before 2026-10-27: a shipped graph including a pane shipped beside it loaded
+        no node — ``includes pane_view.yaml: Not found``)."""
         given = Path(path)
         with _DISK_LOCK:
-            texts = {given.resolve(): Path(shipped).read_text()}
+            text = rebase_includes(Path(shipped).read_text(), Path(shipped).parent, given.parent)
+            texts = {given.resolve(): text}
             texts.update(_settings_texts(given))
         return cls(given, texts, history_depth=history_depth, shipped=Path(shipped))
 
@@ -2739,13 +2823,73 @@ class Document:
                     return True
         return False
 
-    def load(self) -> Any:  # the built document: a mapping of top-level objects, or the root object itself
+    def follow_settings(self) -> bool:
+        """Take the SETTINGS file's text from disk when the editor holds nothing unsaved of it and the disk says
+        something else — whatever else the document holds unsaved (a moved node, an edit of the graph). Answers
+        whether it changed anything; never raises (a file that cannot be read is left as held).
+
+        The settings text becomes what the disk holds — and its saved baseline too, so a Save compares to it; a file
+        gone from disk is held no more (the graph alone is loaded) — and every undo/redo entry that held the old text
+        (or, for a file not held before, none) holds the new one: what the file said before those edits is what it
+        says now, so an undo past them never brings the old settings back. An UNSAVED settings edit is never replaced:
+        Save's changed-on-disk refusal decides then.
+
+        Why (measured 2026-11-19, the RFUAV detect pane): a document dirty only by a moved node is never read again
+        (``streamstudio.app.Studio.document``), so its settings text and baseline stayed hours old while another
+        program wrote the file; the settings sheet's change then started from the old text, its save was refused as
+        changed on disk, and the stop kept it as unsaved work — whose restore showed settings the file did not hold.
+        """
+        key = self.settings_path.resolve()
+        old = self._texts.get(key)
+        if old is not None and self._saved.get(key) != old:
+            return False  # an unsaved settings edit: never replaced, Save refuses over a changed file
+        with _DISK_LOCK:
+            try:
+                disk: Optional[str] = key.read_text() if key.is_file() else None
+            except (OSError, UnicodeDecodeError):
+                return False
+        if disk == old:
+            return False
+        if disk is None:
+            self._texts.pop(key)
+            self._saved.pop(key, None)
+        else:
+            self._texts[key] = disk
+            self._saved[key] = disk
+        self._read.pop(key, None)
+        for entry in (*self._history, *self._redo):
+            if entry.texts.get(key) != old:
+                continue  # an older settings text — what an edit since replaced, kept for its undo
+            if disk is None:
+                entry.texts.pop(key, None)
+            else:
+                entry.texts[key] = disk
+        logger.debug(f"{key} changed on disk and the editor held nothing unsaved of it — read again")
+        return True
+
+    def load(self, scopes: Optional[List[str]] = None) -> Any:  # the built document: a mapping of top-level
+        # objects, or the root object itself
         """The document BUILT from the texts the editor holds — saved or not, what the canvas shows — to
         the objects stage, solidified: what a run executes. Every call builds fresh objects (a run's ops
-        keep state), and a document that does not build raises confluid's own located error."""
+        keep state), and a document that does not build raises confluid's own located error. ``scopes`` are the
+        scopes a full run is asked under (``recordstream run --scope``'s); the canvas and the trace run under none."""
         entry, texts = _entry(self.path, self._texts, self._settings_in(self._texts))
-        built, _paths = _load_document(entry, texts, build=True, solidify=True)
+        built, _paths = _load_document(entry, texts, build=True, solidify=True, scopes=scopes)
         return built
+
+    def declared_scopes(self) -> List[str]:
+        """The scopes the graph declares by name (``smoke: !scope:smoke``), its included files' among them, sorted —
+        what a full run may be asked under."""
+        entry, texts = _entry(self.path, self._texts, self._settings_in(self._texts))
+        with _DISK_LOCK:
+            raw = confluid.load(entry.resolve(), until="raw", texts=texts)
+        return sorted(discover_boolean_scopes(raw))
+
+    @property
+    def unsaved_text(self) -> bool:
+        """Whether a TEXT the editor holds differs from its file — :attr:`dirty` without the positions and groups,
+        which no run reads."""
+        return any(self._saved.get(key) != text for key, text in self._texts.items())
 
     @property
     def text(self) -> str:
@@ -2832,9 +2976,15 @@ class Document:
         found = self.model.node(node)
         if param not in found.params:
             raise ValueError(f"{node} has no parameter {param!r} (its parameters are: {list(found.params)})")
+        knob = found.params[param].ref
+        if knob:
+            raise ValueError(
+                f"{node}.{param} is the value of the top-level key {knob} (!ref:{knob}) — change {knob} in the text tab"
+            )
         settings = self.declared()
         setting = settings.field(node, param)
         if setting is not None:
+            self.follow_settings()  # a change starts from what the file holds, unless an unsaved one is held
             key = self.settings_path.resolve()
             current = self._text_of(key) if key in self._texts or key.is_file() else ""
             self._commit({key: set_setting(current, setting, value)}, f"{node}.{param} = {value!r}", found.loc)
@@ -2848,6 +2998,20 @@ class Document:
         key = Path(file).resolve()
         patched = YamlText(self._text_of(key)).set_kwarg(line, col, param, value)
         self._commit({key: patched}, f"{node}.{param} = {value!r}", found.loc)
+
+    def reset_settings(self) -> bool:
+        """Every setting back to the value the graph itself gives its node: the settings file emptied as ONE edit,
+        held until Save — which then REMOVES the file (a settings file holding nothing is no file, :meth:`_write`) —
+        and undone like any other edit. Answers whether the settings held anything to reset (``False`` changes
+        nothing). Refused, changing nothing, when the graph without its settings gains a problem (the edit's own
+        check)."""
+        self.follow_settings()
+        key = self.settings_path.resolve()
+        current = self._text_of(key) if key in self._texts or key.is_file() else ""
+        if not current.strip():
+            return False
+        self._commit({key: ""}, "every setting back to the graph's own value", "")
+        return True
 
     @_structural
     def set_slot(self, node: str, slot: str, class_path: str, params: Dict[str, Any]) -> str:
@@ -4038,8 +4202,15 @@ class Document:
     def _write(key: Path, text: str) -> None:
         """Write one file, refused in words naming it when the disk says no (``<path> cannot be written: No such file
         or directory``) — never a bare ``OSError`` (measured before: a Save into a folder moved away was an HTML 500).
+
+        A graph's SETTINGS file whose text holds nothing (every setting reset, :meth:`Document.reset_settings`) is
+        REMOVED instead: no file is what "no setting changed" is on disk, for the editor and for a host reading the
+        folder alike.
         """
         try:
+            if not text.strip() and is_settings_file(key):
+                key.unlink(missing_ok=True)
+                return
             key.write_text(text)
         except OSError as exc:
             raise ValueError(f"{key} cannot be written: {exc.strerror or exc}") from None

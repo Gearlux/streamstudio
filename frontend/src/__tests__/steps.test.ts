@@ -11,6 +11,7 @@ import {
   isAnchor,
   paletteMatches,
   recordPredecessor,
+  searchMatches,
   selectedAnchor,
   spotBeside,
   stepAnchor,
@@ -81,6 +82,32 @@ describe("paletteMatches", () => {
     expect(paletteMatches(threshold, { type: "Op", side: "outputs" }, types)).toBe(true);
   });
   it("caps the rendered rows at 200", () => expect(PALETTE_ROWS).toBe(200));
+});
+
+describe("searchMatches — the palette's text filter", () => {
+  const names = spec("recordstream.ops.contract.ClassNamesOutput");
+  const read = spec("recordstream.ops.image.ReadImage");
+
+  it("a part of the class name or of its path, whatever the case", () => {
+    expect(searchMatches(names, "ClassNames")).toBe(true);
+    expect(searchMatches(names, "classnames")).toBe(true);
+    expect(searchMatches(names, "ops.contract")).toBe(true);
+    expect(searchMatches(names, "")).toBe(true);
+    expect(searchMatches(names, "   ")).toBe(true);
+  });
+
+  it("several words: each is looked for on its own, in any order", () => {
+    expect(searchMatches(names, "class names")).toBe(true);
+    expect(searchMatches(names, "names class")).toBe(true);
+    expect(searchMatches(read, "read image")).toBe(true);
+    expect(searchMatches(names, "contract names")).toBe(true); // one word in the path, one in the name
+  });
+
+  it("CON: every word must be there", () => {
+    expect(searchMatches(names, "class image")).toBe(false);
+    expect(searchMatches(read, "write image")).toBe(false);
+    expect(searchMatches(names, "nonesuch")).toBe(false);
+  });
 });
 
 describe("stepName", () => {

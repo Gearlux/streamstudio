@@ -1,29 +1,36 @@
 """The ``streamstudio`` command: serve the graph editor over a folder of YAML graphs.
 
-* ``run`` (the default — bare ``streamstudio``): the editor (``docs/rewrite.md``) over the confluid documents of a
-  folder — ``streamstudio [graph_dir] [--port 8190] [--templates-dir DIR]``, the Flask app of :mod:`streamstudio.app`,
-  standalone (a consuming Flask app mounts the same blueprint instead). A taken port is refused before any work.
-* ``stop`` / ``restart``: the server on the port. The editor stops by the same way out for SIGTERM (what they send) as
-  for Ctrl+C, keeping its unsaved work in the folder's hidden ``.streamstudio-workspace.json``; ``stop`` names what was
+Serving, ``stop``, ``restart`` and ``list`` are portail's — the framework a workspace web app is served by. This module
+says who the editor is (:data:`SPEC`), what it serves (a :class:`Folder` of graphs) and what is its own:
+
+* ``open`` (the default — bare ``streamstudio``): the editor (``docs/rewrite.md``) over the confluid documents of a
+  folder — ``streamstudio [graph_dir | graph.yaml] [--port 8190] [--templates-dir DIR] [--background]``, the Flask
+  app of :mod:`streamstudio.app`, standalone (a consuming Flask app mounts the same blueprint instead).
+* ``stop [folder | port] [--all]`` / ``restart [folder | port]``: a server of the editor, found by what it answers —
+  never a program that is not the editor. The editor stops by the same way out for SIGTERM (what they send) as for
+  Ctrl+C, keeping its unsaved work in the folder's hidden ``.streamstudio-workspace.json``; ``stop`` names what was
   kept, and the next start offers it.
+* ``list``: every running editor, its port, its folder and its address.
 """
 
 import http.client
 import json
 import os
-import shlex
-import signal
-import socket
 import sys
+import urllib.parse
 import urllib.request
 from datetime import datetime
 from pathlib import Path
-from types import FrameType
-from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional, Set
 
-import psutil
 from liquifai import LiquifyApp
 from loggair import get_logger
+from portail import AppSpec, Hooks, Served, serving
+from portail.cli import add_lifecycle_commands
+from portail.serving import BrowserChoice, Server
+
+if TYPE_CHECKING:
+    from flask import Flask
 
 logger = get_logger(__name__)
 
@@ -31,7 +38,7 @@ STUDIO_HOST = "127.0.0.1"
 #: The editor's default port.
 EDITOR_PORT = 8190
 #: How long ``stop`` / ``restart`` wait for the editor to say which graphs hold unsaved work before stopping it anyway
-#: (seconds). It answers in milliseconds; something on the port that is not the editor may not answer.
+#: (seconds). It answers in milliseconds.
 ASK_TIMEOUT = 5.0
 
 
@@ -46,65 +53,48 @@ app = LiquifyApp(
 )
 
 
-def _port_in_use(port: int, host: str = STUDIO_HOST) -> bool:
-    """True when something already listens on ``host:port``.
+# =======================================================================================
+# What the editor serves
+# =======================================================================================
 
-    Probed by BINDING rather than connecting: a connect test cannot tell "nothing is listening"
-    apart from "listening but not accepting yet", and a refused connection is the same errno as a
-    host that is simply slow. ``SO_REUSEADDR`` IS set on purpose — on this platform family it lets a
-    bind succeed beside a socket left in ``TIME_WAIT`` (a studio killed seconds ago, whose port is
-    genuinely free) while still failing against a live LISTENING socket, which is the only state we
-    mean to report. Pins: ``tests/test_cli_port.py`` (both directions, against a real socket).
+
+class Folder:
+    """A folder of graphs as portail serves it (its ``Served``): the folder IS the workspace — there is no workspace
+    file.
+
+    Args:
+        path: The folder, absolute.
+        templates_dir: The templates folder, absolute — ``""``: the default (``~/.streamstudio/templates``). The one
+            serving option of the editor's own: a background start and a restart serve with it again.
     """
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            probe.bind((host, port))
-        except OSError:
-            return True
-    return False
+
+    def __init__(self, path: str, templates_dir: str = "") -> None:
+        self.host = STUDIO_HOST
+        self.port = EDITOR_PORT
+        self.path = path
+        self.template = ""
+        self.title = Path(path).name or path
+        self.options: Dict[str, str] = {"templates_dir": templates_dir} if templates_dir else {}
+        #: What the browser's tab opens on (portail's optional ``page``): the graph a start named by its file.
+        self.page = _graph_page(_NAMED_GRAPH[0]) if _NAMED_GRAPH else ""
+
+    def state_dir(self) -> Path:
+        """The folder itself: the recovery file is kept there."""
+        return Path(self.path)
+
+    def info(self) -> Dict[str, Any]:  # JSON-safe, what ``/api/meta`` answers under ``workspace``
+        return {"path": self.path, "template": "", "state_dir": self.path, "options": dict(self.options)}
 
 
-def _studio_process(port: int, host: str = STUDIO_HOST) -> Optional[psutil.Process]:
-    """The process LISTENING on ``host:port``, or ``None``.
-
-    Located per-process on purpose: the whole-system ``psutil.net_connections()`` raises
-    ``AccessDenied`` for an unprivileged caller on macOS, while asking each process for its own
-    connections needs no privileges for processes you own. The port OWNER is the target, whatever started it — a
-    terminal, a host app, a script.
-    """
-    for proc in psutil.process_iter(["pid"]):
-        try:
-            for conn in proc.net_connections(kind="tcp"):
-                if conn.status == psutil.CONN_LISTEN and conn.laddr and conn.laddr.port == port:
-                    return proc
-        except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess):
-            continue  # someone else's process, or one that died mid-scan
-    return None
+def open_folder(path: str, templates_dir: str = "") -> Folder:
+    """The graph folder ``path`` (absolute — portail resolved it and refused one that is not there), served with
+    ``templates_dir`` (resolved here, ONCE: every path the editor answers is then absolute)."""
+    return Folder(path, str(Path(templates_dir).expanduser().resolve()) if templates_dir else "")
 
 
-def _stop_studio(port: int, grace: float = 10.0) -> Optional[int]:
-    """Stop the studio holding ``port``; return the pid stopped, or ``None`` if nothing was there.
-
-    ``terminate()`` then a DETERMINISTIC ``wait()`` — never a sleep-and-recheck. A clean studio frees
-    the port in well under a second (measured 64 ms); ``grace`` seconds later a process that ignored
-    the signal is killed outright, which is the only way to hand the port to the relaunch.
-    """
-    proc = _studio_process(port)
-    if proc is None:
-        return None
-    pid = int(proc.pid)  # psutil types .pid loosely; the caller and every message want a plain int
-    try:
-        proc.terminate()
-        try:
-            proc.wait(timeout=grace)
-        except psutil.TimeoutExpired:
-            logger.warning(f"StreamStudio (pid {pid}) ignored SIGTERM after {grace}s — killing it.")
-            proc.kill()
-            proc.wait(timeout=grace)
-    except psutil.NoSuchProcess:  # exited between the scan and the signal
-        pass
-    return pid
+def open_here() -> Folder:
+    """What a bare ``streamstudio`` serves: the folder it is typed in."""
+    return Folder(str(Path.cwd().resolve()))
 
 
 def _shown(path: Path, folder: Path) -> str:
@@ -115,134 +105,6 @@ def _shown(path: Path, folder: Path) -> str:
         return os.path.relpath(path, folder)
     except ValueError:  # pragma: no cover - Windows: another drive has no relative path
         return str(path)
-
-
-class _Unsaved(NamedTuple):
-    """What a canvas editor said before it was stopped: the folder it serves (its recovery file is there, and a
-    ``restart`` without a folder serves it again) and the files of the graphs holding unsaved work."""
-
-    folder: Path
-    paths: List[Path]
-
-    @property
-    def file(self) -> Path:
-        """The recovery file the editor's stop writes."""
-        from streamstudio.app import RECOVERY_FILE  # ~20 ms (measured): importing the package loads what the app needs
-
-        return self.folder / RECOVERY_FILE
-
-    @property
-    def names(self) -> List[str]:
-        """The files as a message names them (:func:`_shown`)."""
-        return [_shown(path, self.folder) for path in self.paths]
-
-
-def _get_json(url: str) -> Any:  # the route's JSON answer, of any shape
-    with urllib.request.urlopen(url, timeout=ASK_TIMEOUT) as response:
-        return json.loads(response.read())
-
-
-def _unsaved_work(port: int) -> Optional[_Unsaved]:
-    """Ask the canvas editor on ``port`` — ``GET /api/workspace`` (its folder) and ``GET /api/graphs`` (``dirty``
-    per graph) — which graphs hold unsaved work; ``None`` when nothing there answers like a canvas editor (nothing
-    listening, another program), so the stop goes on and says nothing extra. Best effort: ANY
-    failure to get that answer is "nothing extra" — measured before, a listener that answered with an SSH banner
-    (``http.client.BadStatusLine``) crashed ``stop`` with a traceback and left the listener running."""
-    base = f"http://{STUDIO_HOST}:{port}"
-    try:
-        workspace, graphs = _get_json(f"{base}/api/workspace"), _get_json(f"{base}/api/graphs")
-    except (OSError, ValueError, http.client.HTTPException):  # refused, timed out, HTTP error; not JSON; not HTTP
-        return None
-    if not isinstance(workspace, dict) or not isinstance(workspace.get("folder"), str) or not isinstance(graphs, list):
-        return None
-    paths = [
-        Path(str(entry["path"]))
-        for entry in graphs
-        if isinstance(entry, dict) and entry.get("dirty") is True and "path" in entry
-    ]
-    return _Unsaved(Path(workspace["folder"]), paths)
-
-
-def _kept_in(file: Path) -> Set[Path]:
-    """The files of the graphs a recovery file holds, resolved — empty when it is not there or cannot be read."""
-    try:
-        data = json.loads(file.read_text(encoding="utf-8"))
-        return {Path(str(entry["path"])).resolve() for entry in data["graphs"]}
-    except (OSError, ValueError, KeyError, TypeError):  # absent, unreadable, not JSON, not the editor's shape
-        return set()
-
-
-def _report_stopped(port: int, pid: Optional[int], unsaved: Optional[_Unsaved] = None) -> None:
-    """Say what was stopped, in the same plain voice as the port-in-use message — and, for a canvas editor that
-    held unsaved work, where that work is now: checked in the recovery file its stop wrote, never assumed."""
-    if pid is None:
-        print(f"Nothing is listening on port {port} — no StreamStudio to stop.")
-        return
-    line = f"Stopped StreamStudio on port {port} (pid {pid})."
-    if unsaved is not None and unsaved.paths:
-        shown = ", ".join(unsaved.names)
-        if {path.resolve() for path in unsaved.paths} <= _kept_in(unsaved.file):
-            line += f" Its unsaved work ({shown}) is kept in {unsaved.file} — the next start asks what to do."
-        else:
-            line += f" Its unsaved work ({shown}) was not kept — the editor did not write it to {unsaved.file}."
-    print(line)
-
-
-def _stop_and_report(port: int) -> Optional[_Unsaved]:
-    """``stop`` and the first half of ``restart``: ask the editor what it holds unsaved, stop the server on ``port``,
-    say what happened; answer what the editor said (its folder is what a ``restart`` without one serves again)."""
-    unsaved = _unsaved_work(port)
-    _report_stopped(port, _stop_studio(port), unsaved)
-    return unsaved
-
-
-def _report_port_in_use(port: int, graph_dir: Path, templates_dir: Optional[Path] = None) -> None:
-    """Say what holds the port and hand over a clickable way in, then stop the start.
-
-    Printed PLAIN (not through loggair) and on its own line: a terminal linkifies a bare ``http://`` URL, and a log
-    prefix in front of it buries the one thing the reader came for.
-
-    The suggested command serves the SAME folder and templates folder elsewhere, in the order the CLI accepts
-    (absolute, shell-quoted, the folder first — liquifai binds positionals up to the first flag). Measured before: the
-    suggestion was ``streamstudio --port 8195``, which served the CURRENT directory with the default templates folder.
-    """
-    print(f"Port {port} is already in use — StreamStudio may already be running there.")
-    print()
-    print(f"    Open it:  http://{STUDIO_HOST}:{port}")
-    print()
-    words = ["streamstudio", str(graph_dir)]
-    words += ["--templates-dir", str(templates_dir)] if templates_dir is not None else []
-    words += ["--port", str(port + 1)]
-    print(f"If that is a different program, run StreamStudio elsewhere:  {shlex.join(words)}")
-
-
-def _canvas_folders(graph_dir: Optional[Path], templates_dir: Optional[Path]) -> Tuple[Path, Optional[Path]]:
-    """The canvas editor's graph folder (default: the current directory) and templates folder, ABSOLUTE — a
-    folder that is not there is refused naming it.
-
-    Resolved ONCE, here: every graph path the editor answers is then absolute, so a path from ``GET
-    /api/graphs`` can be sent back, and every dialog opens in the graph folder (measured before, from
-    ``streamstudio graphs``: the list said ``graphs/chain.yaml`` and the file browser looked in
-    ``graphs/graphs``; from ``streamstudio .`` both dialogs opened on ``/``). liquifai binds CLI values
-    VERBATIM as strings, so they are coerced here too."""
-    directory = (Path(graph_dir) if graph_dir is not None else Path.cwd()).expanduser().resolve()
-    templates = Path(templates_dir).expanduser().resolve() if templates_dir is not None else None
-    if not directory.is_dir():
-        raise SystemExit(f"Graph directory not found: {directory}")
-    return directory, templates
-
-
-#: The signals that end the canvas editor the way Ctrl+C (SIGINT) does, so its unsaved work is kept: SIGTERM (what
-#: ``stop`` and ``restart`` send) and SIGHUP (the terminal window it runs in was closed — POSIX only, hence the
-#: lookup). Measured before 2026-09-30: SIGHUP ended the editor at once (exit code -1) and the unsaved edit was gone.
-_WAYS_OUT: Tuple[signal.Signals, ...] = tuple(
-    getattr(signal, name) for name in ("SIGTERM", "SIGHUP") if hasattr(signal, name)
-)
-
-
-def _interrupt(signum: int, frame: Optional[FrameType]) -> None:
-    """SIGTERM or SIGHUP handled like Ctrl+C: the server stops serving and the editor takes the same way out."""
-    raise KeyboardInterrupt
 
 
 def _say(line: str) -> None:
@@ -286,55 +148,40 @@ def _recovery_notice(workspace: Dict[str, Any]) -> Optional[str]:  # GET /api/wo
     return f"Unsaved work from the last session ({when}): {names} — the page asks whether to restore it."
 
 
-def _serve_canvas(graph_dir: Optional[Path], port: int, templates_dir: Optional[Path]) -> None:
-    """Serve the canvas editor over ``graph_dir`` (default: the current directory) on ``port``.
+# =======================================================================================
+# Who the editor is: the spec and its hooks
+# =======================================================================================
 
-    The way OUT is the point of the shape (the user's item 1, 2026-09-29): Ctrl+C (SIGINT), SIGTERM — what ``stop``
-    and ``restart`` send — and SIGHUP — the terminal window closed (2026-09-30) — all end ``app.run`` the same way,
-    and the ``finally`` keeps the unsaved work in the folder's recovery file (``Studio.stash``) before the process
-    exits. Measured before: SIGTERM ended the process at once (exit -15), SIGHUP too (exit -1), and every unsaved edit
-    was gone. A kill -9 or a crash still cannot keep anything.
+#: The Flask app of each folder this process serves, by the folder object's id — what the way out keeps the work of.
+_APPS: Dict[int, "Flask"] = {}
 
-    Before it serves — after a taken port was refused — the start builds the canvas page when its source changed
-    since its last build (``streamstudio.page.ensure_page_built``; silent when it did not), then asks for the port
-    again: another start may have taken it while the page was built.
-    """
-    directory, templates = _canvas_folders(graph_dir, templates_dir)
-    if _port_in_use(port):
-        _report_port_in_use(port, directory, templates)
-        raise SystemExit(1)
-    # Imported here, not at module top: the app pulls in the document model and the palette, which `stop` has no
-    # use for.
-    from streamstudio.app import create_app, ensure_page_built, studio_of
 
-    # The page is checked HERE, at the start, never when an app is made: when its source changed since its last
-    # build it is built now (a line says so), and without Node or with a failing build the server still starts.
+def _page_checked(_: Served) -> None:
+    """The page is checked at a START, never when an app is made: when its source changed since its last build it is
+    built now (a line says so), and without Node or with a failing build the server still starts. The outcome is handed
+    to the serving process (a ``--background`` child) through the environment."""
+    from streamstudio.app import ensure_page_built, page_check_environment
+
     ensure_page_built()
-    # Asked again after the check: a build takes seconds (about a minute for the first install), and another start may
-    # have taken the port meanwhile — measured before: the second of two starts on one port passed the first probe
-    # during a 5 s build and died in werkzeug's words, "Address already in use".
-    if _port_in_use(port):
-        _report_port_in_use(port, directory, templates)
-        raise SystemExit(1)
-    app = create_app(directory, templates_dir=templates)
-    studio = studio_of(app)
-    notice = _recovery_notice(studio.workspace())
-    if notice is not None:
-        print(notice, flush=True)
-    previous = {signum: signal.signal(signum, _interrupt) for signum in _WAYS_OUT}
+    os.environ.update(page_check_environment())
+
+
+def _keep_unsaved_work(served: Served) -> None:
+    """The way out — Ctrl+C, SIGTERM (what ``stop`` and ``restart`` send), SIGHUP (the terminal window closed): keep
+    the unsaved work in the folder's recovery file (``Studio.stash``) and say so. Measured before the editor took this
+    way out: SIGTERM ended the process at once and every unsaved edit was gone. A kill -9 or a crash still cannot keep
+    anything."""
+    from streamstudio.app import studio_of
+
+    flask_app = _APPS.pop(id(served), None)
+    if flask_app is None:
+        return
+    studio = studio_of(flask_app)
     try:
-        app.run(host=STUDIO_HOST, port=port)
-    except KeyboardInterrupt:
-        pass  # a signal outside werkzeug's serve loop (which returns quietly on one): the same way out
-    finally:
-        try:
-            kept = studio.stash()
-        except OSError as exc:
-            _say(f"Unsaved work could not be kept in {studio.recovery_path}: {exc.strerror or exc}")
-            kept = []
-        finally:
-            for signum, handler in previous.items():
-                signal.signal(signum, handler)
+        kept = studio.stash()
+    except OSError as exc:
+        _say(f"Unsaved work could not be kept in {studio.recovery_path}: {exc.strerror or exc}")
+        kept = []
     if kept:
         names = ", ".join(_shown(Path(path), studio.graph_dir) for path in kept)
         _say(f"Unsaved work ({names}) is kept in {studio.recovery_path} — the next start asks what to do.")
@@ -345,59 +192,258 @@ def _serve_canvas(graph_dir: Optional[Path], port: int, templates_dir: Optional[
             _terminal_gone()
 
 
+SPEC = AppSpec(
+    name="streamstudio",
+    cli_module="streamstudio.cli",
+    default_port=EDITOR_PORT,
+    default_host=STUDIO_HOST,
+    workspace="folder",
+    hooks=Hooks(prepare=_page_checked, leaving=_keep_unsaved_work),
+)
+
+
+def create_app(server: Server) -> "Flask":
+    """The standalone editor's Flask app for ``server``, portail's shell mounted in it (``/api/meta`` names the app;
+    ``/api/workspace`` stays the editor's). Prints the line about unsaved work of the last session."""
+    # Imported here, not at module top: the app pulls in the document model and the palette, which `stop` and `list`
+    # have no use for.
+    from portail.web import mount_shell
+
+    from streamstudio.app import create_app as editor_app
+    from streamstudio.app import studio_of
+
+    served = server.served
+    templates = serving.options_of(served).get("templates_dir")
+    flask_app = editor_app(Path(served.path), templates_dir=Path(templates) if templates else None)
+    _APPS[id(served)] = flask_app
+    notice = _recovery_notice(studio_of(flask_app).workspace())
+    if notice is not None:
+        print(notice, flush=True)
+    if _NAMED_GRAPH:
+        print(_graph_address(served.host, served.port, _NAMED_GRAPH.pop()), flush=True)
+    return mount_shell(flask_app, server, index=False)
+
+
+def server_of(folder: Served) -> Server:
+    """The portail server of a folder — ``server_of(open_folder(path)).serve()`` is what the command line does."""
+    return Server(SPEC, folder, create_app)
+
+
+# =======================================================================================
+# What stop and restart say about unsaved work
+# =======================================================================================
+
+
+class _Unsaved(NamedTuple):
+    """What an editor said before it was stopped: the port it served on, the folder it serves (its recovery file is
+    there) and the files of the graphs holding unsaved work."""
+
+    port: int
+    folder: Path
+    paths: List[Path]
+
+    @property
+    def file(self) -> Path:
+        """The recovery file the editor's stop writes."""
+        from streamstudio.app import RECOVERY_FILE  # ~20 ms (measured): importing the package loads what the app needs
+
+        return self.folder / RECOVERY_FILE
+
+    @property
+    def names(self) -> List[str]:
+        """The files as a message names them (:func:`_shown`)."""
+        return [_shown(path, self.folder) for path in self.paths]
+
+
+def _ask(url: str) -> Any:  # the route's JSON answer, of any shape
+    with urllib.request.urlopen(url, timeout=ASK_TIMEOUT) as response:
+        return json.loads(response.read())
+
+
+def _unsaved_work(port: int) -> Optional[_Unsaved]:
+    """Ask the editor on ``port`` — ``GET /api/workspace`` (its folder) and ``GET /api/graphs`` (``dirty`` per graph)
+    — which graphs hold unsaved work; ``None`` when it does not answer like an editor, so the stop goes on and says
+    nothing extra. Best effort: ANY failure to get that answer is "nothing extra"."""
+    base = f"http://{STUDIO_HOST}:{port}"
+    try:
+        workspace, graphs = _ask(f"{base}/api/workspace"), _ask(f"{base}/api/graphs")
+    except (OSError, ValueError, http.client.HTTPException):  # refused, timed out, HTTP error; not JSON; not HTTP
+        return None
+    if not isinstance(workspace, dict) or not isinstance(workspace.get("folder"), str) or not isinstance(graphs, list):
+        return None
+    paths = [
+        Path(str(entry["path"]))
+        for entry in graphs
+        if isinstance(entry, dict) and entry.get("dirty") is True and "path" in entry
+    ]
+    return _Unsaved(port, Path(workspace["folder"]), paths)
+
+
+def _kept_in(file: Path) -> Set[Path]:
+    """The files of the graphs a recovery file holds, resolved — empty when it is not there or cannot be read."""
+    try:
+        data = json.loads(file.read_text(encoding="utf-8"))
+        return {Path(str(entry["path"])).resolve() for entry in data["graphs"]}
+    except (OSError, ValueError, KeyError, TypeError):  # absent, unreadable, not JSON, not the editor's shape
+        return set()
+
+
+def _asked_before_the_stop() -> List[_Unsaved]:
+    """What every running editor holds unsaved, asked BEFORE anything is stopped (a stopped one cannot answer)."""
+    asked = [_unsaved_work(int(server["port"])) for server in serving.running_servers(SPEC)]
+    return [unsaved for unsaved in asked if unsaved is not None and unsaved.paths]
+
+
+def _report_kept(asked: List[_Unsaved]) -> None:
+    """For each editor that held unsaved work and is gone now: where that work is — checked in the recovery file its
+    stop wrote, never assumed."""
+    still = {int(server["port"]) for server in serving.running_servers(SPEC)}
+    for unsaved in asked:
+        if unsaved.port in still:
+            continue
+        shown = ", ".join(unsaved.names)
+        if {path.resolve() for path in unsaved.paths} <= _kept_in(unsaved.file):
+            print(f"Its unsaved work ({shown}) is kept in {unsaved.file} — the next start asks what to do.")
+        else:
+            print(f"Its unsaved work ({shown}) was not kept — the editor did not write it to {unsaved.file}.")
+
+
+def _server_of(folder: str) -> Optional[Dict[str, Any]]:  # a row of portail's running servers
+    """The running editor that serves ``folder`` (``""``: the current directory), or ``None``."""
+    identity = str(Path(folder).expanduser().resolve()) if folder else str(Path.cwd().resolve())
+    return next((server for server in serving.running_servers(SPEC) if server["identity"] == identity), None)
+
+
+def _notice_of_the_server_of(folder: str) -> None:
+    """After a ``--background`` start: the line about unsaved work of the last session, asked of the server that now
+    serves ``folder`` (its own output went nowhere)."""
+    server = _server_of(folder)
+    if server is None:
+        return
+    try:
+        notice = _recovery_notice(_ask(f"http://{server['host']}:{server['port']}/api/workspace"))
+    except (OSError, ValueError, KeyError, TypeError, http.client.HTTPException):
+        return
+    if notice is not None:
+        print(notice)
+
+
+#: The graph a start named by its file (``streamstudio flow.yaml``), until its address is printed: by ``create_app``
+#: for a server this process runs (the port is settled by then), else by ``open`` once portail returns.
+_NAMED_GRAPH: List[str] = []
+
+
+def _graph_page(graph: str) -> str:
+    """The part of the editor's address that opens on ``graph``."""
+    return f"?graph={urllib.parse.quote(graph, safe='')}"
+
+
+def _graph_address(host: str, port: int, graph: str) -> str:
+    """The line naming the page that opens on ``graph`` — the address alone on it, so a terminal links all of it."""
+    return f"  http://{host}:{port}/{_graph_page(graph)}"
+
+
 # =======================================================================================
 # Commands
 # =======================================================================================
 
+lifecycle = add_lifecycle_commands(
+    app, SPEC, open_file=open_folder, open_empty=open_here, create_app=create_app, commands=("list",)
+)
 
-@app.command(default=True, positionals=["graph_dir"], short={"p": "port"})
-def run(graph_dir: Optional[Path] = None, port: Optional[int] = None, templates_dir: Optional[Path] = None) -> None:
+
+def _options(templates_dir: str) -> Dict[str, str]:
+    return {"templates_dir": templates_dir} if templates_dir else {}
+
+
+@app.command(name="open", default=True, positionals=["graph_dir"], short={"p": "port", "b": "background"})
+def open_(
+    graph_dir: str = "",
+    port: int = 0,
+    templates_dir: str = "",
+    auto_port: bool = False,
+    background: bool = False,
+    browser: str = "",
+) -> None:
     """Serve the editor over a folder of graphs (the default command).
 
+    A folder already being served is not started twice: its address is printed. A port another folder is served on
+    asks whether to take the next free one; a port a program that is not the editor holds is refused.
+
     Args:
-        graph_dir: The folder whose *.yaml files are the graphs (default: the current directory). More can be opened
-            from anywhere with File → Open.
-        port: Port the editor listens on (default: 8190). A port already in use is refused before any work, with the
-            address of what is there printed as a clickable URL.
+        graph_dir: The folder whose *.yaml files are the graphs (default: the current directory), or one of its
+            graphs' files: the file's folder is served and the address that opens on that graph is printed. More
+            can be opened from anywhere with File → Open.
+        port: Port the editor listens on (default: 8190).
         templates_dir: The folder holding the templates (default: ~/.streamstudio/templates, created on the first
             template saved).
+        auto_port: Take the next free port without asking when the port is taken.
+        background: Serve detached and return once the editor answers (``streamstudio stop`` stops it).
+        browser: Open the editor in the browser: ``always``, ``new`` (only for a server started now) or ``never``.
+            Left out, a graph's file opens its tab (``always``, on that graph) and a folder opens none (``never``).
     """
-    _serve_canvas(graph_dir, int(port) if port is not None else EDITOR_PORT, templates_dir)
+    named = Path(graph_dir).expanduser() if graph_dir else None
+    del _NAMED_GRAPH[:]
+    if named is not None and named.suffix == ".yaml" and named.is_file():  # a graph's file: its folder, that graph
+        _NAMED_GRAPH.append(named.stem)
+        named = named.parent
+    folder = str(named) if named is not None else ""
+    lifecycle.open(
+        folder,
+        auto_port=auto_port,
+        port=port,
+        background=background,
+        browser=browser or ("always" if _NAMED_GRAPH else "never"),
+        options=_options(templates_dir),
+    )
+    if background:
+        _notice_of_the_server_of(folder)
+    server = _server_of(folder) if _NAMED_GRAPH else None  # a server this process did not run: already there, or -b
+    if server is not None:
+        print(_graph_address(server["host"], server["port"], _NAMED_GRAPH.pop()))
 
 
-@app.command(short={"p": "port"})
-def stop(port: Optional[int] = None) -> None:
-    """Stop the StreamStudio server listening on the port.
+@app.command(name="stop", positionals=["target"])
+def stop(target: str = "", all: bool = False) -> None:
+    """Stop running StreamStudio server(s).
 
-    An idle port is not an error — it reports that nothing was there. The editor keeps its unsaved work in its
-    folder's hidden .streamstudio-workspace.json as it stops, and the message names the files kept there.
+    Names one by its folder or its port; with none named, the running one (several: asked, or --all). A port a
+    program that is not the editor holds is refused, never stopped. The editor keeps its unsaved work in its folder's
+    hidden .streamstudio-workspace.json as it stops, and the message names the files kept there.
 
     Args:
-        port: Port whose server to stop (default: 8190).
+        target: The folder or the port of the server to stop (default: the running one).
+        all: Stop every running StreamStudio server.
     """
-    _stop_and_report(int(port) if port is not None else EDITOR_PORT)
+    asked = _asked_before_the_stop()
+    lifecycle.stop(target, all=all)
+    _report_kept(asked)
 
 
-@app.command(positionals=["graph_dir"], short={"p": "port"})
-def restart(graph_dir: Optional[Path] = None, port: Optional[int] = None, templates_dir: Optional[Path] = None) -> None:
-    """Stop the server on the port (if any), then serve the editor again.
+@app.command(name="restart", positionals=["target"], short={"p": "port", "b": "background"})
+def restart(
+    target: str = "",
+    port: int = 0,
+    templates_dir: str = "",
+    background: bool = False,
+    browser: BrowserChoice = "never",
+) -> None:
+    """Stop the server (if any), then serve the editor over the same folder again.
 
-    A graph folder that is not there is refused before anything is stopped. The editor keeps its unsaved work as it
-    stops, and the new one offers it on its page.
+    A folder that is not there is refused before anything is stopped. The editor keeps its unsaved work as it stops,
+    and the new one offers it on its page.
 
     Args:
-        graph_dir: The folder of graphs (default: the folder the running editor serves, else the current directory).
-        port: Port whose server to restart (default: 8190).
-        templates_dir: The templates folder (default: ~/.streamstudio/templates).
+        target: The folder or the port of the server to restart (default: the folder served last).
+        port: Port to serve on again (default: the one it ran on).
+        templates_dir: The templates folder (default: the one the running server has).
+        background: Serve detached and return once the editor answers.
+        browser: Open the editor's address in the browser: ``always``, ``new`` or ``never`` (the default).
     """
-    _canvas_folders(graph_dir, templates_dir)  # a folder that is not there is refused BEFORE the editor is stopped
-    target = int(port) if port is not None else EDITOR_PORT
-    stopped = _stop_and_report(target)
-    if graph_dir is None and stopped is not None:
-        # the SAME workspace (R6): the folder the stopped editor served, so its start offers the work it kept there —
-        # measured before, a restart typed in another folder served that one, and the kept work waited unseen
-        graph_dir = stopped.folder
-    _serve_canvas(graph_dir, target, templates_dir)
+    named = str(Path(target).expanduser()) if target and not target.isdigit() else target
+    lifecycle.restart(named, port=port, background=background, browser=browser, options=_options(templates_dir))
+    if background:
+        _notice_of_the_server_of(named if named and not named.isdigit() else serving.last_spec(SPEC)[len("file:") :])
 
 
 def main() -> None:

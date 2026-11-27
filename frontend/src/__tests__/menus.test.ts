@@ -122,9 +122,18 @@ describe("barMenus", () => {
 });
 
 describe("paneMenu — right-click on empty canvas", () => {
-  it("lists Add Node ▸, Add Group, Paste, Insert template ▸, Insert steps file…, Arrange", () => {
+  it("lists Add Node ▸, Add Group, Paste, Insert template ▸, Insert steps file…, the three Arranges", () => {
     const entries = paneMenu({ ...context(), addNode: () => null, addGroup: vi.fn(), insertStepsFile: vi.fn() });
-    expect(labels(entries)).toEqual(["Add Node", "Add Group", "Paste", "Insert template", "Insert steps file…", "Arrange"]);
+    expect(labels(entries)).toEqual([
+      "Add Node",
+      "Add Group",
+      "Paste",
+      "Insert template",
+      "Insert steps file…",
+      "Arrange left to right",
+      "Arrange diagonally",
+      "Arrange top to bottom",
+    ]);
     expect(submenu(entries, "Add Node").panel).toBeTypeOf("function");
   });
 });

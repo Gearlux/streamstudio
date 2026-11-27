@@ -31,10 +31,14 @@
  * `data-kind`, a widget by `data-param`, the rename field by `data-rename`, a subgraph's open button by
  * `data-open-subgraph` and its step list by `data-inner-steps`, a source slot's Set source… button by `data-set-slot`
  * (`slots.ts` — a source goes into a slot as a class and its values, never as a drawn wire).
+ *
+ * On a level drawn top to bottom (`DownContext`, `layout.runsDown`) the input and output sockets leave their rows for
+ * the card's top and bottom edges, spread evenly across it in row order (`down` on the card); a parameter's small
+ * handle stays on its row, on the left.
  */
-import { useEffect, useState, type KeyboardEvent } from "react";
-import { Handle, Position, type NodeProps } from "@xyflow/react";
-import { useEditor } from "../context";
+import { useContext, useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { Handle, Position, useUpdateNodeInternals, type NodeProps } from "@xyflow/react";
+import { DownContext, useEditor } from "../context";
 import { hostCardTitle } from "../host";
 import { isBoundary, levelOfNode, renamedTo, shortName } from "../levels";
 import {
@@ -80,10 +84,21 @@ export function GenericNodeView({ data, selected }: NodeProps<GenericNode>) {
   const status = run?.statuses[node.name];
   const traced = status === undefined ? undefined : run?.trace.nodes.find((entry) => entry.node === node.name);
   const generation = run?.generations[node.name];
+  const down = useContext(DownContext);
+  const updateNodeInternals = useUpdateNodeInternals();
+  // the handles moved: React Flow measures them again — only on a TURN, never as a card mounts (measured: re-measuring
+  // every card on mount held back the first fit of a host's panel and of a subgraph's inside)
+  const drawnDown = useRef(down);
+  useEffect(() => {
+    if (drawnDown.current === down) return;
+    drawnDown.current = down;
+    updateNodeInternals(node.name);
+  }, [down, node.name, updateNodeInternals]);
+  const edge = (index: number, count: number) => (down ? { index, count } : undefined);
 
   return (
     <div
-      className={`gnode kind-${node.kind}${selected ? " selected" : ""}${status ? ` run-${status.replace(" ", "-")}` : ""}`}
+      className={`gnode kind-${node.kind}${down ? " down" : ""}${selected ? " selected" : ""}${status ? ` run-${status.replace(" ", "-")}` : ""}`}
       data-node={node.name}
       data-kind={node.kind}
       data-class={node.class_path}
@@ -107,9 +122,16 @@ export function GenericNodeView({ data, selected }: NodeProps<GenericNode>) {
           {generation !== undefined && generation !== null && <span className="gen">gen {generation}</span>}
         </div>
       )}
-      {node.inputs.map((socket) => (
+      {node.inputs.map((socket, index) => (
         <div className="row in" key={`in:${socket.name}`}>
-          <SocketHandle node={node} kind="in" name={socket.name} type={socket.type} doc={socket.doc} />
+          <SocketHandle
+            node={node}
+            kind="in"
+            name={socket.name}
+            type={socket.type}
+            doc={socket.doc}
+            edge={edge(index, node.inputs.length)}
+          />
           <span className="label">
             {socket.name}
             {requiredMark(socket) && <b title="an input nothing may leave unwired">{requiredMark(socket)}</b>}
@@ -147,16 +169,24 @@ export function GenericNodeView({ data, selected }: NodeProps<GenericNode>) {
             schema={{ ...param.schema, ...(schemas[param.name] ?? {}) }}
             onCommit={(value) => setParam(node.name, param.name, value)}
             values={values}
+            oneRow
           />
         </div>
       ))}
-      {node.outputs.map((socket) => (
+      {node.outputs.map((socket, index) => (
         <div className="row out" key={`out:${socket.name}`}>
           <span className="label">
             <i>{socket.type}</i>
             {socket.name}
           </span>
-          <SocketHandle node={node} kind="out" name={socket.name} type={socket.type} doc={socket.doc} />
+          <SocketHandle
+            node={node}
+            kind="out"
+            name={socket.name}
+            type={socket.type}
+            doc={socket.doc}
+            edge={edge(index, node.outputs.length)}
+          />
         </div>
       ))}
       {node.note && (
@@ -252,21 +282,28 @@ interface SocketHandleProps {
   type: string;
   doc: string;
   small?: boolean;
+  /** On a card drawn top to bottom: the socket's place among its side's, spread across the top or bottom edge. */
+  edge?: { index: number; count: number };
 }
 
-/** A typed handle: `in:<name>` on the left, `out:<name>` on the right, coloured by type, described by `data-*`. */
-function SocketHandle({ node, kind, name, type, doc, small }: SocketHandleProps) {
+/**
+ * A typed handle: `in:<name>` on the left, `out:<name>` on the right — on the top and bottom edges when `edge` is given —
+ * coloured by type, described by `data-*`.
+ */
+function SocketHandle({ node, kind, name, type, doc, small, edge }: SocketHandleProps) {
+  const side = edge === undefined ? (kind === "in" ? Position.Left : Position.Right) : kind === "in" ? Position.Top : Position.Bottom;
+  const across = edge === undefined ? {} : { left: `${((edge.index + 1) / (edge.count + 1)) * 100}%` };
   return (
     <Handle
       type={kind === "in" ? "target" : "source"}
-      position={kind === "in" ? Position.Left : Position.Right}
+      position={side}
       id={handleId(kind, name)}
       className={small ? "socket socket-param" : "socket"}
       data-node={node.name}
       data-socket={name}
       data-type={type}
       data-kind={kind}
-      style={{ background: socketColor(type) }}
+      style={{ background: socketColor(type), ...across }}
       title={`${name}: ${type}${doc ? ` — ${doc}` : ""}`}
     />
   );

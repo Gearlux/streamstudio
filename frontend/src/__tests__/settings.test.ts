@@ -31,13 +31,13 @@ const node = (name: string, classPath: string, params: Param[]): ModelNode => ({
   alias_of: "",
 });
 
-const REFUSE = node("refuse", "waivefront.processing.RefuseLargeWindow", [param("max_band_hz", 2e7), param("max_duration_s", 0.1)]);
-const CLASSIFY = node("classify", "waivefront.processing.bluetooth_nodes.ClassifyBluetooth", [
+const REFUSE = node("refuse", "signals.processing.RefuseLargeWindow", [param("max_band_hz", 2e7), param("max_duration_s", 0.1)]);
+const CLASSIFY = node("classify", "signals.processing.bluetooth_nodes.ClassifyBluetooth", [
   param("line_db", 5),
   param("deviation_hz", [100000, 750000], "object"),
   param("requires", "ble", "string"), // the gate: on the model, never in a form
 ]);
-const TUNE = node("prep/tune", "waivefront.processing.TuneToBand", [param("width_hz", 2e6)]);
+const TUNE = node("prep/tune", "signals.processing.TuneToBand", [param("width_hz", 2e6)]);
 
 const MODEL: Model = {
   nodes: [REFUSE, node("prep", "recordstream.flow.subgraph.Subgraph", [param("result", "tune", "string")]), CLASSIFY],

@@ -147,3 +147,41 @@ export function summaryCells(summary: Record<string, unknown>): SummaryCells {
   const value = summary.value !== undefined ? text(summary.value) : summary.repr !== undefined ? text(summary.repr) : "";
   return { type: text(summary.type), shape, dtype: text(summary.dtype), range, value };
 }
+
+/** Which side of a traced node an entry is read on. */
+export type Side = "input" | "output";
+
+/** Whether the trace says this value has a picture (`picture: true` in its summary — an image, a mask, a 2-D array). */
+export const hasPicture = (summary: unknown): boolean =>
+  typeof summary === "object" && summary !== null && (summary as Record<string, unknown>).picture === true;
+
+/** The widest a picture is asked for to fit the run panel; the enlarged one is asked for with no width (every pixel). */
+export const PANEL_PICTURE_WIDTH = 640;
+
+/**
+ * The address of an entry's picture (`GET api/runs/<run>/picture`) — relative, like every address of the page.
+ * `generation` is the node's generation in the run: a rerun recomputes the node under the SAME run and names, so the
+ * address must change for the picture to be asked again.
+ */
+export function pictureHref(
+  run: string,
+  node: string,
+  entry: string,
+  side: Side,
+  generation: number | null | undefined,
+  width?: number,
+): string {
+  const query = new URLSearchParams({ node, entry, side });
+  if (width !== undefined) query.set("width", String(width));
+  query.set("generation", String(generation ?? 0));
+  return `api/runs/${encodeURIComponent(run)}/picture?${query.toString()}`;
+}
+
+/**
+ * Whether an entry's picture is shown before anyone asks: what the node MADE — an output entry it changed or added
+ * (`changed`: the traced node's own list).
+ * Every other pictured entry (its inputs, the entries it passed on) waits behind "show": one spectrogram passed along
+ * ten steps is not loaded ten times.
+ */
+export const pictureOpen = (changed: unknown, side: Side, entry: string): boolean =>
+  side === "output" && Array.isArray(changed) && changed.includes(entry);

@@ -146,7 +146,7 @@ describe("ranOn — what the run panel says ran", () => {
 });
 
 describe("the panel's messages — posted to the host", () => {
-  it("state: the graph, its dirt, every unsaved graph, the tab", () => {
+  it("state: the graph, its dirt, every unsaved graph, the tab, and whether the page waits for an answer", () => {
     expect(stateMessage("view_bte", true, ["view_bte", "source"], "settings")).toEqual({
       source: MESSAGE_SOURCE,
       type: "state",
@@ -154,7 +154,9 @@ describe("the panel's messages — posted to the host", () => {
       dirty: true,
       unsaved: ["view_bte", "source"],
       tab: "settings",
+      asking: false,
     });
+    expect(stateMessage("", false, [], "text", true)).toMatchObject({ graph: "", asking: true });
   });
 
   it("saved: the graph and the file written", () => {
@@ -222,5 +224,39 @@ describe("values — what the host runs a graph with over its settings (a pane's
     expect(parseHostCommand({ target: "streamstudio", type: "values", graph: "", values: {} })).toBeUndefined();
     expect(parseHostCommand({ target: "streamstudio", type: "values", graph: "g" })).toBeUndefined();
     expect(parseHostCommand({ target: "streamstudio", type: "values", graph: "g", values: ["cfar"] })).toBeUndefined();
+  });
+});
+
+describe("hints — a line the host shows under each setting (what it measured for it)", () => {
+  it("names the graph and a line per setting, dropping what is no line", () => {
+    expect(
+      parseHostCommand({ target: "streamstudio", type: "hints", graph: " export_wlan ", hints: { level_db: "measured 14.6 dB", gain_imbalance_db: 3, seed: "" } }),
+    ).toEqual({ type: "hints", graph: "export_wlan", hints: { level_db: "measured 14.6 dB" } });
+    expect(parseHostCommand({ target: "streamstudio", type: "hints", graph: "g", hints: {} })).toEqual({ type: "hints", graph: "g", hints: {} });
+  });
+
+  it("CON: from anyone but a host, without a graph, or with hints that are no map — no command", () => {
+    expect(parseHostCommand({ source: "streamstudio", type: "hints", graph: "g", hints: {} })).toBeUndefined();
+    expect(parseHostCommand({ target: "streamstudio", type: "hints", graph: "", hints: {} })).toBeUndefined();
+    expect(parseHostCommand({ target: "streamstudio", type: "hints", graph: "g", hints: ["x"] })).toBeUndefined();
+  });
+});
+
+describe("style — the host page's font, which the settings form takes", () => {
+  it("takes a size in pixels and a family, each optional", () => {
+    expect(parseHostCommand({ target: "streamstudio", type: "style", font_size_px: 13, font_family: "-apple-system, sans-serif" })).toEqual({
+      type: "style",
+      fontSizePx: 13,
+      fontFamily: "-apple-system, sans-serif",
+    });
+    expect(parseHostCommand({ target: "streamstudio", type: "style", font_size_px: 13 })).toEqual({ type: "style", fontSizePx: 13 });
+    expect(parseHostCommand({ target: "streamstudio", type: "style" })).toEqual({ type: "style" });
+  });
+
+  it("CON: a size that is no number of pixels a page reads at, or an empty family — no command", () => {
+    expect(parseHostCommand({ target: "streamstudio", type: "style", font_size_px: "13px" })).toBeUndefined();
+    expect(parseHostCommand({ target: "streamstudio", type: "style", font_size_px: 200 })).toBeUndefined();
+    expect(parseHostCommand({ target: "streamstudio", type: "style", font_family: " " })).toBeUndefined();
+    expect(parseHostCommand({ source: "streamstudio", type: "style", font_size_px: 13 })).toBeUndefined();
   });
 });

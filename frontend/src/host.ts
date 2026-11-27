@@ -14,20 +14,27 @@
  *
  * **The panel's messages** (`?embed=1` only, `link.ts`): the page posts to `window.parent`, same origin only —
  *
- *     {source: "streamstudio", type: "state", graph, dirty, unsaved: [...], tab}   on every change of these
- *     {source: "streamstudio", type: "saved", graph, path}                         after a Save / Save As wrote it
+ *     {source: "streamstudio", type: "state", graph, dirty, unsaved: [...], tab, asking}   on every change of these
+ *     {source: "streamstudio", type: "saved", graph, path}                                 after a Save / Save As wrote it
  *
  * — so a host can warn before it closes a panel holding unsaved work, and re-run its panes the moment a graph is saved
- * — and takes these commands from it:
+ * — and takes these commands from it. `asking` is true while the page asks the person about the unsaved work of the
+ * last session (`recovery.ts`): no graph opens until it is answered, so a host covering the panel while a graph loads
+ * must uncover it then, or the question is never seen.
  *
  *     {target: "streamstudio", type: "open", graph: "view_bte", tab?: "settings", level?: "prep"}
  *     {target: "streamstudio", type: "commit"}
  *     {target: "streamstudio", type: "values", graph: "view_detect", values: {rule: "cfar"}}
+ *     {target: "streamstudio", type: "hints", graph: "export_wlan", hints: {level_db: "measured 14.6 dB"}}
+ *     {target: "streamstudio", type: "style", font_size_px: 13, font_family: "-apple-system, sans-serif"}
  *
  * `open` shows that graph (and tab) without reloading the page — a reload of a page holding unsaved work asks
  * "Leave site?" first. `commit` writes the field being typed in (`CommitCommand`). `values` says what the host RUNS
  * the graph with over its settings — a pane's knobs, which the host applies by name and never writes — so the
  * settings form grays out what that run does not read (`settings.offReason`): the knob's rule, not the graph's.
+ * `hints` gives a line to show under a setting, by parameter name (what the host measured for it: an export's level in
+ * the box) — shown, never written; the hints it sent last stand until it sends others. `style` hands the settings form
+ * the host page's font, so a panel inside the host reads at the host's size.
  *
  * When there is no page to show — not built, no Node at the server's start, a failed build — the server answers a
  * short page of its own instead, which posts `{source: "streamstudio", type: "unavailable"}` (`app._TELL_THE_HOST`):
@@ -137,6 +144,8 @@ export interface StateMessage {
   /** Every listed graph holding unsaved changes — what closing the panel would leave unsaved. */
   unsaved: string[];
   tab: SideTab;
+  /** The page asks the person about the last session's unsaved work: no graph opens until it is answered. */
+  asking: boolean;
 }
 
 /** A Save or Save As wrote `path` (the graph's file). */
@@ -157,13 +166,14 @@ export interface CommittedMessage {
 
 export type PageMessage = StateMessage | SavedMessage | CommittedMessage;
 
-export const stateMessage = (graph: string, dirty: boolean, unsaved: string[], tab: SideTab): StateMessage => ({
+export const stateMessage = (graph: string, dirty: boolean, unsaved: string[], tab: SideTab, asking = false): StateMessage => ({
   source: MESSAGE_SOURCE,
   type: "state",
   graph,
   dirty,
   unsaved,
   tab,
+  asking,
 });
 
 export const savedMessage = (graph: string, path: string): SavedMessage => ({ source: MESSAGE_SOURCE, type: "saved", graph, path });
@@ -196,7 +206,24 @@ export interface ValuesCommand {
   values: Record<string, Json>;
 }
 
-export type HostCommand = OpenCommand | CommitCommand | ValuesCommand;
+/**
+ * A line the host shows under each of `graph`'s settings, by parameter name (`{level_db: "measured 14.6 dB"}`) — what
+ * it measured for that setting; `{}` shows none. Shown only, never written.
+ */
+export interface HintsCommand {
+  type: "hints";
+  graph: string;
+  hints: Record<string, string>;
+}
+
+/** The host page's font, which the settings form takes — each part optional, a part left out keeps the page's own. */
+export interface StyleCommand {
+  type: "style";
+  fontSizePx?: number;
+  fontFamily?: string;
+}
+
+export type HostCommand = OpenCommand | CommitCommand | ValuesCommand | HintsCommand | StyleCommand;
 
 /**
  * The command in a message posted to the page, or `undefined` for anything else — another sender's message, a typo'd
@@ -208,6 +235,25 @@ export function parseHostCommand(data: unknown): HostCommand | undefined {
   if (isObject(data) && data.target === MESSAGE_SOURCE && data.type === "values") {
     if (typeof data.graph !== "string" || data.graph.trim() === "" || !isObject(data.values)) return undefined;
     return { type: "values", graph: data.graph.trim(), values: data.values as Record<string, Json> };
+  }
+  if (isObject(data) && data.target === MESSAGE_SOURCE && data.type === "hints") {
+    if (typeof data.graph !== "string" || data.graph.trim() === "" || !isObject(data.hints)) return undefined;
+    const hints: Record<string, string> = {};
+    for (const [name, line] of Object.entries(data.hints)) if (typeof line === "string" && line !== "") hints[name] = line;
+    return { type: "hints", graph: data.graph.trim(), hints };
+  }
+  if (isObject(data) && data.target === MESSAGE_SOURCE && data.type === "style") {
+    const command: StyleCommand = { type: "style" };
+    const size = data.font_size_px;
+    if (size !== undefined) {
+      if (typeof size !== "number" || !Number.isFinite(size) || size < 6 || size > 48) return undefined;
+      command.fontSizePx = size;
+    }
+    if (data.font_family !== undefined) {
+      if (typeof data.font_family !== "string" || data.font_family.trim() === "") return undefined;
+      command.fontFamily = data.font_family;
+    }
+    return command;
   }
   if (!isObject(data) || data.target !== MESSAGE_SOURCE || data.type !== "open") return undefined;
   if (typeof data.graph !== "string" || data.graph.trim() === "") return undefined;

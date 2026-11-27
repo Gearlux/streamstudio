@@ -44,7 +44,7 @@ import threading
 import time
 import urllib.request
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Mapping, NamedTuple, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Mapping, NamedTuple, Optional, Sequence, Tuple
 
 import numpy as np
 import pytest
@@ -58,6 +58,7 @@ import streamstudio
 from streamstudio import layout
 from streamstudio.app import (
     EXTENSION,
+    PLACE_VARIABLES,
     RECOVERY_FILE,
     HostRecord,
     Studio,
@@ -114,6 +115,23 @@ class TinySource:
             yield {"image": image, "class": Label("cat" if index == 0 else "dog")}
 
 
+@configurable(category="source", group="canvas-test")
+class ListedSource:
+    """A source whose model comes from a plugin's list (the field is stamped with the list's tag).
+
+    Args:
+        model: A model the plugin lists.
+    """
+
+    __streamstudio_widget_params__ = {"model": "CANVAS_MODELS"}
+
+    def __init__(self, model: str = "") -> None:
+        self.model = model
+
+    def __iter__(self) -> Iterator[Record]:
+        return iter([])
+
+
 @configurable(category="op", group="canvas-test")
 class TinyGain:
     """Scale the image entry — declares its interface by NAME.
@@ -130,6 +148,36 @@ class TinyGain:
 
     def __call__(self, record: Record) -> Record:
         return {**record, "image": record["image"] * self.gain}
+
+
+@configurable(category="op", group="canvas-test")
+class TinyShapes:
+    """Keep the record — an op whose settings are CONTAINERS of plain values: what the settings form has a field for.
+
+    Args:
+        rates_hz: A list of numbers.
+        shape: Three whole numbers.
+        label_to_index: A whole number per name.
+        windows: A list of lists, which no field spells.
+    """
+
+    consumes = {"image": "Image"}
+    produces = {"image": "Image"}
+
+    def __init__(
+        self,
+        rates_hz: Sequence[float] = (1200.0, 2400.0),
+        shape: Tuple[int, int, int] = (3, 224, 224),
+        label_to_index: Optional[Dict[str, int]] = None,
+        windows: Optional[List[List[float]]] = None,
+    ) -> None:
+        self.rates_hz = list(rates_hz)
+        self.shape = tuple(shape)
+        self.label_to_index = dict(label_to_index or {})
+        self.windows = windows
+
+    def __call__(self, record: Record) -> Record:
+        return record
 
 
 @configurable(category="op", group="canvas-test")
@@ -258,6 +306,14 @@ flow:
   count:
     op: !class:{MOD}.TinyCount {{keys: {{label: image}}}}
     from: decode
+"""
+
+#: One op whose settings are containers of plain values (:class:`TinyShapes`), one of them set.
+SHAPES_TEXT = f"""\
+stream: !class:recordstream.core.stream.Stream
+  source: !class:{MOD}.TinySource {{size: 2}}
+  ops:
+    - !class:{MOD}.TinyShapes {{label_to_index: {{cat: 0, dog: 1}}}}
 """
 
 DOCUMENTS = {"pets": PETS_TEXT, "wires": WIRES_TEXT, "clip": CLIP_TEXT, "mismatch": MISMATCH_TEXT}
@@ -399,11 +455,17 @@ def wait_ready(page: Any, name: str) -> None:
     page.wait_for_selector(f'.canvas[data-graph="{name}"][data-initialized="true"]')
 
 
+#: How long the page may wait for the catalogue. The FIRST ask of a test process builds it — a helper process importing
+#: every installed package, 20-28 s on the development machine when idle, past the 30 s default under load — so a test
+#: run alone (or one whose earlier test did not build it) waits that long; every later ask answers at once.
+COLD_CATALOGUE_MS = 120_000
+
+
 def wait_palette_loaded(page: Any) -> None:
     """The page asks ``GET api/palette`` on FIRST NEED — when the Nodes sidebar, Add Node ▸, the palette or Set source…
     is first shown, never as it opens; ``data-palette-ready`` says the catalogue has arrived. Call it right after the
     gesture that shows one of them, so what the test reads next is the whole catalogue."""
-    page.wait_for_selector('.app[data-palette-ready="true"]')
+    page.wait_for_selector('.app[data-palette-ready="true"]', timeout=COLD_CATALOGUE_MS)
 
 
 def box_select(page: Any, *names: str) -> None:
@@ -803,6 +865,63 @@ class TestWidgets:
         assert served == document.text == (graph_dir / "pets.yaml").read_text()
         assert document.model.node("stream.ops[1]").params["low_level"].value == 0.75
         assert document.check() == []
+
+
+class TestAPluginsListIsAskedAgainOnTheWord:
+    """A plugin's list is asked once per page; the list's last entry, "↻ ask again", asks it again — a model packaged
+    after the list was first opened shows only then. Measured before: the page kept the first answer until it was
+    reloaded, and an annotation workspace never reloads its settings panel."""
+
+    def test_ask_again_shows_what_the_plugin_lists_now_and_picks_nothing(
+        self,
+        open_graph: Callable[[str], Opened],
+        server: str,
+        graph_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from streamstudio import lookups, palette
+
+        models = ["$RUN_DIR/a/package"]
+        asked: List[str] = []
+
+        def list_models(values: Mapping[str, str]) -> Tuple[List[str], str]:
+            asked.append("asked")
+            return list(models), ""
+
+        monkeypatch.setattr(lookups, "_FOUND", {"CANVAS_MODELS": list_models})
+        monkeypatch.setattr(palette, "_cache", None)
+        monkeypatch.setattr(palette, "_cache_scanned", False)
+        monkeypatch.setattr(palette, "_index", {})  # the classes `spec_for` described one by one
+        (graph_dir / "listed.yaml").write_text(f"source:\n  _target_: {MOD}.ListedSource\n")
+        opened = open_graph("listed")
+        page = opened.page
+        picker = page.locator(f'{node_root("source")} select[data-picker="plugin"][data-picker-for="model"]')
+        offered = "os => os.filter(o => !o.disabled).map(o => o.value)"
+
+        picker.hover()
+        page.wait_for_selector(f'{node_root("source")} select[data-picker-for="model"][data-picker-state="ready"]')
+        assert picker.locator("option").evaluate_all(offered) == ["", "$RUN_DIR/a/package", "\u0000ask-again"]
+        assert picker.locator("option").evaluate_all("os => os.map(o => o.textContent)")[-1] == "↻ ask again"
+
+        models.append("$RUN_DIR/b/package")  # packaged while the page is open
+        page.locator(node_root("source")).hover()
+        picker.hover()
+        assert picker.get_attribute("data-picker-count") == "1", "reaching for it again keeps the page's answer"
+
+        picker.select_option("\u0000ask-again")
+        page.wait_for_selector(
+            f'{node_root("source")} select[data-picker-for="model"][data-picker-state="ready"][data-picker-count="2"]'
+        )
+        assert picker.locator("option").evaluate_all(offered) == [
+            "",
+            "$RUN_DIR/a/package",
+            "$RUN_DIR/b/package",
+            "\u0000ask-again",
+        ]
+        assert asked == ["asked", "asked"]
+        assert page.locator(".app").get_attribute("data-saves") == "0", "asking again picks nothing"
+        assert "$RUN_DIR" not in api_get(server, "api/graphs/listed")["text"]
+        assert opened.errors == []
 
 
 # ------------------------------------------------------------------------------------------------
@@ -1389,6 +1508,34 @@ def overlap(a: Dict[str, float], b: Dict[str, float]) -> bool:
     )
 
 
+#: Resolves once the viewport's transform has not changed for 5 frames in a row. An arrange — and its undo — ends in a
+#: fit ANIMATED over 200 ms, and boxes read one call at a time while it runs are read at different zooms (measured
+#: 2026-11-10 on a loaded machine: a socket at 1.15 of its card's width, a column's centres 12-122 px apart).
+VIEW_STILL = """() => new Promise((done) => {
+  const read = () => document.querySelector('.react-flow__viewport').style.transform;
+  let last = read(), still = 0;
+  const tick = () => {
+    const now = read();
+    still = now === last ? still + 1 : 0;
+    last = now;
+    if (still >= 5) done(true); else requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+})"""
+
+
+def wait_view_still(page: Any) -> None:
+    page.wait_for_function(VIEW_STILL)
+
+
+#: True once gain's record input socket is within 8 px of its card's ``top`` or ``left`` edge (the argument).
+GAINS_INPUT_NEAR = """(edge) => {
+  const h = document.querySelector('.react-flow__handle[data-node="gain"][data-socket="record"][data-kind="in"]');
+  const c = h && h.closest('.react-flow__node');
+  return !!c && Math.abs(h.getBoundingClientRect()[edge] - c.getBoundingClientRect()[edge]) < 8;
+}"""
+
+
 class TestArrange:
     def test_arrange_lays_the_chain_out_left_to_right_and_saves_it_and_ctrl_z_puts_it_back(
         self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path
@@ -1398,6 +1545,7 @@ class TestArrange:
         before = api_get(server, "api/graphs/wires")["positions"]
         menu_command(page, "view", "arrange")
         wait_saves(page, 1)
+        wait_view_still(page)
         placed = api_get(server, "api/graphs/wires")["positions"]
         xs = [placed[name][0] for name in ("decode", "gain", "boost", "count")]
         assert xs == sorted(xs) and len(set(xs)) == 4, placed
@@ -1412,6 +1560,67 @@ class TestArrange:
         page.keyboard.press("Control+z")  # an arrange is a layout change: the page writes the old places back
         wait_saves(page, 3)
         assert api_get(server, "api/graphs/wires")["positions"] == before
+        assert opened.errors == []
+
+    @pytest.mark.parametrize("command", ["arrange-diagonal", "arrange-down"])
+    def test_diagonal_and_top_to_bottom_step_the_chain_down_and_save_it(
+        self, open_graph: Callable[[str], Opened], server: str, command: str
+    ) -> None:
+        opened = open_graph("wires")
+        page = opened.page
+        menu_command(page, "view", command)
+        wait_saves(page, 1)
+        wait_view_still(page)
+        placed = api_get(server, "api/graphs/wires")["positions"]
+        chain = [placed[name] for name in ("decode", "gain", "boost", "count")]
+        ys = [y for _x, y in chain]
+        assert ys == sorted(ys) and len(set(ys)) == 4, placed  # each step below the one before
+        xs = [x for x, _y in chain]
+        if command == "arrange-diagonal":
+            assert xs == sorted(xs) and len(set(xs)) == 4, placed  # ... and right of it
+        for name in WIRES_NODES:
+            assert node_translate(page, name) == tuple(placed[name]), name
+        drawn = node_boxes(page, *WIRES_NODES)
+        if command == "arrange-down":  # the one-input chain is one column (count sits between boost and <host>)
+            centres = [drawn[name]["x"] + drawn[name]["width"] / 2 for name in ("decode", "gain", "boost")]
+            assert max(centres) - min(centres) <= 10, drawn
+        boxes = list(drawn.values())
+        assert not any(overlap(a, b) for i, a in enumerate(boxes) for b in boxes[i + 1 :])
+        assert opened.errors == []
+
+    def test_top_to_bottom_moves_the_sockets_to_the_top_and_bottom_edges_and_undo_moves_them_back(
+        self, open_graph: Callable[[str], Opened]
+    ) -> None:
+        opened = open_graph("wires")
+        page = opened.page
+        assert page.locator(".canvas").get_attribute("data-direction") == "across"
+
+        def sockets() -> Dict[str, Tuple[float, float]]:
+            """Where gain's record sockets are, against its card: (x, y) of each centre, 0..1 across and down."""
+            card = node_boxes(page, "gain")["gain"]
+            found = {}
+            for kind in ("in", "out"):
+                x, y = centre(handle(page, "gain", "record", kind).bounding_box())
+                found[kind] = ((x - card["x"]) / card["width"], (y - card["y"]) / card["height"])
+            return found
+
+        beside = sockets()
+        assert beside["in"][0] < 0.05 and beside["out"][0] > 0.95, beside  # on the left and right edges
+        menu_command(page, "view", "arrange-down")
+        wait_saves(page, 1)
+        page.wait_for_selector('.canvas[data-direction="down"]')
+        page.wait_for_function(GAINS_INPUT_NEAR, arg="top")
+        wait_view_still(page)
+        edges = sockets()
+        assert edges["in"][1] < 0.05 and edges["out"][1] > 0.95, edges  # on the top and bottom edges
+        assert 0.05 < edges["in"][0] < 0.95 and 0.05 < edges["out"][0] < 0.95, edges
+        page.keyboard.press("Control+z")  # the places go back, and the sockets with them
+        wait_saves(page, 2)
+        page.wait_for_selector('.canvas[data-direction="across"]')
+        page.wait_for_function(GAINS_INPUT_NEAR, arg="left")
+        wait_view_still(page)
+        back = sockets()
+        assert back["in"][0] < 0.05 and back["out"][0] > 0.95, back
         assert opened.errors == []
 
     def test_the_server_layout_button_writes_the_documents_layered_layout(
@@ -1696,6 +1905,101 @@ class TestRunPanel:
         assert page.locator("[data-run-error]").inner_text() == NO_SOURCE
         assert run_statuses(page, *WIRES_NODES) == {name: "" for name in WIRES_NODES}
         assert opened.errors == [REFUSED_400]
+
+
+class TestContainersOfPlainValues:
+    """A list of numbers is ONE text box, a fixed count of numbers that many boxes, names with a value each one row
+    per name (the user's picks 2026-11-25: 1 A, 2 B, 3 C) — and each writes the document's own spelling."""
+
+    SHAPES = '[data-form-node="stream.ops[0]"]'
+
+    @pytest.fixture(autouse=True)
+    def _the_shapes_graph(self, graph_dir: Path) -> None:
+        (graph_dir / "shapes.yaml").write_text(SHAPES_TEXT)
+
+    def _open(self, open_graph: Callable[[str], Opened]) -> Opened:
+        opened = open_graph("shapes")
+        opened.page.locator('[data-tab="settings"]').click()
+        opened.page.locator("[data-settings-all]").check()
+        opened.page.wait_for_selector('[data-settings][data-settings-mode="all"]')
+        return opened
+
+    def _params(self, server: str) -> Dict[str, Any]:
+        nodes = api_get(server, "api/graphs/shapes")["model"]["nodes"]
+        shapes = next(node for node in nodes if node["name"] == "stream.ops[0]")
+        return {name: param["value"] for name, param in shapes["params"].items()}
+
+    def test_a_list_of_numbers_is_typed_with_commas_and_text_that_is_no_number_goes_back(
+        self, open_graph: Callable[[str], Opened], server: str
+    ) -> None:
+        opened = self._open(open_graph)
+        page = opened.page
+        box = page.locator(f'{self.SHAPES} input[data-param="rates_hz"][data-list="number"]')
+        assert box.input_value() == "1200, 2400"  # the document sets none: the constructor's default, shown
+        set_widget(page, self.SHAPES, "rates_hz", "1200, 4800.5")
+        wait_saves(page, 1)
+        assert self._params(server)["rates_hz"] == [1200, 4800.5]
+        assert "rates_hz: [1200, 4800.5]" in api_get(server, "api/graphs/shapes")["text"]
+        set_widget(page, self.SHAPES, "rates_hz", "1200, fast")
+        assert box.input_value() == "1200, 4800.5"  # no list of numbers: nothing sent, the value back
+        assert self._params(server)["rates_hz"] == [1200, 4800.5]
+        assert opened.errors == []
+
+    def test_three_numbers_are_three_boxes_committed_together(
+        self, open_graph: Callable[[str], Opened], server: str
+    ) -> None:
+        opened = self._open(open_graph)
+        page = opened.page
+        shape = page.locator(f'{self.SHAPES} [data-param="shape"][data-pair-count="3"]')
+        ends = [shape.locator(f'[data-pair-end="{place}"]') for place in ("1", "2", "3")]
+        assert [end.input_value() for end in ends] == ["3", "224", "224"]  # the default, shown
+        ends[1].fill("128")
+        ends[1].press("Enter")
+        wait_saves(page, 1)
+        assert self._params(server)["shape"] == [3, 128, 224]
+        assert opened.errors == []
+
+    def test_names_with_a_value_each_are_rows_that_add_change_and_remove(
+        self, open_graph: Callable[[str], Opened], server: str
+    ) -> None:
+        opened = self._open(open_graph)
+        page = opened.page
+        field = page.locator(f'{self.SHAPES} [data-param="label_to_index"][data-map="integer"]')
+        rows = field.locator("[data-map-row]")
+        read = "rs => rs.map(r => [...r.querySelectorAll('input')].map(i => i.value))"
+        assert rows.evaluate_all(read) == [["cat", "0"], ["dog", "1"]]
+
+        field.locator("[data-map-add]").click()
+        new = rows.nth(2)
+        new.locator("[data-map-name]").fill("bird")
+        new.locator("[data-map-name]").press("Enter")  # a name without its value: no map yet, nothing sent
+        assert field.get_attribute("data-map-waits") == "true"
+        assert self._params(server)["label_to_index"] == {"cat": 0, "dog": 1}
+        new.locator("[data-map-value]").fill("2")
+        new.locator("[data-map-value]").press("Enter")
+        wait_saves(page, 1)
+        # the names stay in the order typed: in the answer, in the document and in the rows
+        assert list(self._params(server)["label_to_index"].items()) == [("cat", 0), ("dog", 1), ("bird", 2)]
+        assert "label_to_index: {cat: 0, dog: 1, bird: 2}" in api_get(server, "api/graphs/shapes")["text"]
+        assert rows.evaluate_all(read) == [["cat", "0"], ["dog", "1"], ["bird", "2"]]
+        assert field.get_attribute("data-map-waits") is None
+
+        rows.nth(0).locator("[data-map-remove]").click()  # cat
+        wait_saves(page, 2)
+        assert list(self._params(server)["label_to_index"].items()) == [("dog", 1), ("bird", 2)]
+        assert rows.evaluate_all(read) == [["dog", "1"], ["bird", "2"]]
+        assert opened.errors == []
+
+    def test_a_list_of_lists_stays_read_only_and_a_card_shows_a_map_read_only(
+        self, open_graph: Callable[[str], Opened]
+    ) -> None:
+        opened = self._open(open_graph)
+        page = opened.page
+        assert page.locator(f'{self.SHAPES} code.ro[data-param="windows"]').count() == 1
+        card = page.locator(node_root("stream.ops[0]"))
+        assert card.locator('code.ro[data-param="label_to_index"]').count() == 1  # one row per parameter on a card
+        assert card.locator("[data-map-row]").count() == 0
+        assert opened.errors == []
 
 
 # ------------------------------------------------------------------------------------------------
@@ -2919,6 +3223,121 @@ class TestFileDialogPath:
         left, width, shown = field.evaluate("e => [e.scrollLeft, e.scrollWidth, e.clientWidth]")
         assert width > shown  # the path is longer than the field
         assert left + shown >= width - 1  # scrolled to its end: "…/graphs" is what shows
+        assert opened.errors == []
+
+
+class TestFileDialogPlacesAndNewFolder:
+    """The dialog's shortcut buttons — the graph folder and each place variable set to a folder — and its New folder
+    (user request 2026-10-28)."""
+
+    @pytest.fixture
+    def places(self, tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> Path:
+        for variable in PLACE_VARIABLES:
+            monkeypatch.delenv(variable, raising=False)
+        data = tmp_path_factory.mktemp("data_root").resolve()
+        monkeypatch.setenv("DATA_ROOT", str(data))
+        return data
+
+    def test_a_place_button_lists_its_folder_and_is_marked_while_it_is_shown(
+        self, open_graph: Callable[[str], Opened], graph_dir: Path, places: Path
+    ) -> None:
+        (places / "captures").mkdir()
+        opened = open_graph("wires")
+        page = opened.page
+        menu_command(page, "file", "open")
+        page.wait_for_selector(f'[data-file-mode="open"][data-file-dir="{graph_dir.resolve()}"]')
+        buttons = page.locator("[data-file-place]").evaluate_all("bs => bs.map(b => [b.dataset.filePlace, b.title])")
+        assert buttons == [["Graphs", str(graph_dir.resolve())], ["DATA_ROOT", str(places)]]
+        assert page.locator('[data-file-place="Graphs"]').get_attribute("aria-pressed") == "true"
+        page.locator('[data-file-place="DATA_ROOT"]').click()
+        page.wait_for_selector(f'[data-file-dir="{places}"]')
+        assert page.locator("[data-file-path]").input_value() == str(places)
+        assert page.locator("[data-file-entry]").evaluate_all("es => es.map(e => e.dataset.fileEntry)") == ["captures"]
+        assert page.locator('[data-file-place="DATA_ROOT"]').get_attribute("aria-pressed") == "true"
+        assert page.locator('[data-file-place="Graphs"]').get_attribute("aria-pressed") == "false"
+        page.locator('[data-file-place="Graphs"]').click()
+        page.wait_for_selector(f'[data-file-dir="{graph_dir.resolve()}"]')
+        assert opened.errors == []
+
+    def test_open_offers_no_new_folder(self, open_graph: Callable[[str], Opened], graph_dir: Path) -> None:
+        opened = open_graph("wires")
+        page = opened.page
+        menu_command(page, "file", "open")
+        page.wait_for_selector(f'[data-file-mode="open"][data-file-dir="{graph_dir.resolve()}"]')
+        assert page.locator("[data-file-new-folder]").count() == 0
+        assert opened.errors == []
+
+    def test_save_as_makes_a_new_folder_enters_it_and_saves_there(
+        self, open_graph: Callable[[str], Opened], graph_dir: Path, places: Path
+    ) -> None:
+        opened = open_graph("pets")
+        page = opened.page
+        menu_command(page, "file", "save-as")
+        page.wait_for_selector(f'[data-file-mode="save"][data-file-dir="{graph_dir.resolve()}"]')
+        page.locator('[data-file-place="DATA_ROOT"]').click()
+        page.wait_for_selector(f'[data-file-dir="{places}"]')
+        page.locator("[data-file-new-folder]").click()
+        page.locator("[data-file-new-folder-name]").fill("outputs")
+        page.locator("[data-file-new-folder-name]").press("Enter")
+        page.wait_for_selector(f'[data-file-dir="{places / "outputs"}"]')
+        assert (places / "outputs").is_dir()
+        assert page.locator("[data-file-new-folder-name]").count() == 0  # the name field closes once it is made
+        assert page.locator("[data-file-name]").input_value() == "pets.yaml"  # the typed file name survives
+        page.locator("[data-file-confirm]").click()
+        wait_ready(page, "pets")
+        assert (places / "outputs" / "pets.yaml").read_text() == PETS_TEXT
+        assert opened.errors == []
+
+    def test_a_refused_name_says_why_and_makes_nothing(
+        self, open_graph: Callable[[str], Opened], graph_dir: Path, places: Path
+    ) -> None:
+        (places / "outputs").mkdir()
+        opened = open_graph("wires")
+        page = opened.page
+        open_new(page, "pipeline")
+        page.locator("[data-new-browse]").click()
+        page.wait_for_selector('[data-dialog="file"] [data-file-mode="folder"]')
+        page.locator('[data-file-place="DATA_ROOT"]').click()
+        page.wait_for_selector(f'[data-file-dir="{places}"]')
+        page.locator("[data-file-new-folder]").click()
+        page.locator("[data-file-new-folder-name]").fill("outputs")
+        page.locator("[data-file-new-folder-name]").press("Enter")
+        page.wait_for_selector(".file-error")
+        assert page.locator(".file-error").inner_text() == f"{places / 'outputs'} already exists — pick another name"
+        assert page.locator("[data-file-dir]").get_attribute("data-file-dir") == str(places)
+        assert page.locator("[data-file-new-folder-name]").input_value() == "outputs"  # kept to correct
+        page.locator("[data-file-new-folder-name]").press("Escape")
+        assert page.locator("[data-file-new-folder-name]").count() == 0
+        page.locator('[data-dialog="file"]').wait_for()  # Escape closed the name field, not the dialog
+        assert sorted(child.name for child in places.iterdir()) == ["outputs"]
+        assert opened.errors == [REFUSED_400]
+
+    @pytest.mark.parametrize("mode", ["open", "save"])
+    def test_a_long_folder_in_a_short_window_scrolls_the_list_alone(
+        self, open_graph: Callable[[str], Opened], graph_dir: Path, mode: str
+    ) -> None:
+        """The list gives up height when the window is short; the box around it never scrolls beside it (two
+        scrollbars)."""
+        for index in range(80):
+            (graph_dir / f"folder_{index:03d}").mkdir()
+        opened = open_graph("pets")
+        page = opened.page
+        menu_command(page, "file", "open" if mode == "open" else "save-as")
+        page.wait_for_selector(f'[data-file-mode="{mode}"][data-file-dir="{graph_dir.resolve()}"]')
+        page.wait_for_selector("[data-file-entry]")
+        if mode == "save":
+            page.locator("[data-file-new-folder]").click()  # the dialog at its tallest: a name field beside the list
+            page.locator("[data-file-new-folder-name]").wait_for()
+        scrolls = "el => el.scrollHeight > el.clientHeight + 1"
+        roomy = page.locator(".file-list").bounding_box()["height"]
+        assert page.locator(".file-list").evaluate(scrolls)
+        assert not page.locator('[data-dialog="file"] .modal-body').evaluate(scrolls)
+        page.set_viewport_size({"width": 1400, "height": 520})
+        assert page.locator(".file-list").evaluate(scrolls)
+        assert not page.locator('[data-dialog="file"] .modal-body').evaluate(scrolls)
+        assert page.locator(".file-list").bounding_box()["height"] < roomy  # it is the list that gave way
+        confirm = page.locator("[data-file-confirm]").bounding_box()
+        assert confirm["y"] + confirm["height"] <= 520  # the dialog still fits the window
         assert opened.errors == []
 
 
@@ -4661,6 +5080,7 @@ class TestTheHostHearsAndFollows:
             "dirty": False,
             "unsaved": [],
             "tab": "text",
+            "asking": False,
         }
 
         widget = frame.locator(f'{node_root("gain")} input[data-param="gain"]')
@@ -4719,6 +5139,39 @@ class TestTheHostHearsAndFollows:
         assert again.page.locator(".app").get_attribute("data-dirty") == "true"
         assert (hosted.folder / "pane.yaml").read_text() == HOST_PANE_TEXT
         assert again.errors == []
+
+    def test_the_host_hears_while_the_page_asks_about_kept_work_and_the_graph_once_answered(
+        self, browser: Any, hosted: Hosted, templates_dir: Path
+    ) -> None:
+        """No graph opens before the recovery question is answered, so a host covering its panel until the graph it
+        asked for shows must learn the page is ASKING — measured before: a host's "loading pane…" veil covered the
+        question for good, and the person saw nothing else."""
+        opened = open_hosted(browser, hosted, "graph=pane&embed=1")
+        wait_ready(opened.page, "pane")
+        set_widget(opened.page, node_root("gain"), "gain", "8")
+        wait_saves(opened.page, 1)
+        opened.page.close()
+        studio_of(hosted.app).stash()  # the host's stop keeps the unsaved work
+        hosted.app.extensions[EXTENSION] = Studio(host=hosted.host, templates_dir=templates_dir)  # the next start
+
+        page = browser.new_page(viewport={"width": 1400, "height": 900})
+        errors: List[str] = []
+        page.on("pageerror", lambda exc: errors.append(f"pageerror: {exc}"))
+        page.on("console", lambda msg: errors.append(f"console.error: {msg.text}") if msg.type == "error" else None)
+        page.goto(hosted.url)
+        page.wait_for_function("() => window.received.some(m => m.type === 'state' && m.asking)")
+        frame = page.frame_locator("#studio")
+        frame.locator('.app[data-recovery="asking"] [data-dialog="recovery"]').wait_for()
+        asking = page.evaluate("window.received.filter(m => m.type === 'state').pop()")
+        assert asking["asking"] is True and asking["graph"] == ""
+
+        frame.locator('[data-recovery-action="restore"]').click()
+        page.wait_for_function(
+            "() => { const s = window.received.filter(m => m.type === 'state').pop();"
+            " return s.graph === 'pane' && s.asking === false; }"
+        )
+        page.close()
+        assert errors == []
 
 
 # ------------------------------------------------------------------------------------------------
@@ -5176,13 +5629,88 @@ class TestTheSettingsOnlyPage:
         sections = page.locator("[data-form-node]").evaluate_all("ss => ss.map(s => s.dataset.formNode)")
         assert sections == ["band", "gain", "boost"]  # TinyGain's two nodes, each by its name
         set_widget(page, '[data-form-node="gain"]', "gain", "5.5")
-        wait_saves(page, 2)  # the setting, then the Save the page sends right after it
+        wait_saves(page, 1)  # the setting and its Save, one request (`save: "settings"`)
         assert root.get_attribute("data-dirty") == "false"
         assert (hosted.folder / "pane.settings.yaml").read_text() == "flow.gain.op.gain: 5.5\n"
         assert (hosted.folder / "pane.yaml").read_text() == HOST_PANE_TEXT
         assert hosted.host.saves == [[(hosted.folder / "pane.settings.yaml").resolve()]]
         shown = page.locator('[data-form-node="gain"] input[data-param="gain"]').input_value()
         assert float(shown) == 5.5
+        assert opened.errors == []
+
+    def test_a_change_whose_save_is_refused_is_not_kept_and_the_form_shows_what_is(
+        self, browser: Any, hosted: Hosted
+    ) -> None:
+        """A save refused as changed on disk keeps nothing of the sheet's change: the server undoes it in the same
+        request, so a stop never keeps it as unsaved work. The refusal needs an unsaved settings change of another view
+        (the editor's own tab) while another program writes the file. Measured before 2026-11-21: the change stayed
+        held after the refusal, and the next stop kept it."""
+        settings = hosted.folder / "pane.settings.yaml"
+        settings.write_text("flow.gain.op.gain: 4.0\n")
+        opened = open_hosted(browser, hosted, "graph=pane&embed=1&only=settings")
+        page = opened.page
+        page.wait_for_selector('.app[data-graph="pane"][data-ready="true"] [data-settings]')
+        studio = studio_of(hosted.app)
+        api_post(f"{hosted.url}{STUDIO}", "api/graphs/pane/param", {"node": "boost", "param": "gain", "value": 9.0})
+        with studio.lock:
+            held = studio.document("pane").held()  # the other view's change, unsaved
+        settings.write_text("flow.gain.op.gain: 6.0\n")  # another program
+
+        set_widget(page, '[data-form-node="gain"]', "gain", "5.5")
+
+        assert "changed on disk" in page.locator('[data-toast="error"]').inner_text()
+        with studio.lock:
+            assert studio.document("pane").held() == held, "only the other view's change is held"
+        assert settings.read_text() == "flow.gain.op.gain: 6.0\n" and hosted.host.saves == []
+        page.wait_for_function(
+            """() => Number(document.querySelector('[data-form-node="gain"] input[data-param="gain"]').value) === 4"""
+        )
+        assert opened.errors == [REFUSED_400]
+
+    def test_the_host_sets_the_font_and_a_line_under_a_setting(self, browser: Any, hosted: Hosted) -> None:
+        """``style`` hands the form the host page's font; ``hints`` a line under a setting (what the host measured for
+        it) — shown, never written."""
+        opened = open_hosted(browser, hosted, "graph=pane&embed=1&only=settings")
+        page = opened.page
+        page.wait_for_selector('.app[data-graph="pane"][data-ready="true"] [data-settings]')
+        before = page.locator('[data-form-node="gain"] .field').first.evaluate("e => getComputedStyle(e).fontSize")
+        assert before == "12px"
+        page.evaluate(
+            "() => { window.postMessage({target: 'streamstudio', type: 'style', font_size_px: 15}, location.origin);"
+            " window.postMessage({target: 'streamstudio', type: 'hints', graph: 'pane',"
+            " hints: {gain: 'measured 3.2 dB'}}, location.origin); }"
+        )
+        page.wait_for_selector('[data-form-node="gain"] [data-field-hint="gain"]')
+        assert page.locator('[data-form-node="gain"] [data-field-hint="gain"]').inner_text() == "measured 3.2 dB"
+        size = page.locator('[data-form-node="gain"] .field').first.evaluate("e => getComputedStyle(e).fontSize")
+        widget = page.locator('[data-form-node="gain"] input[data-param="gain"]').evaluate(
+            "e => getComputedStyle(e).fontSize"
+        )
+        assert (size, widget) == ("15px", "15px")
+        assert not (hosted.folder / "pane.settings.yaml").exists(), "a hint is never written"
+        assert opened.errors == []
+
+    def test_a_number_written_with_its_unit_is_typed_and_saved_as_written(self, browser: Any, hosted: Hosted) -> None:
+        """A setting that takes a number OR text (``Union[float, str]``: recordstream's ``Quantity.value``) is a text
+        box: ``2.5 MSa/s`` is saved as typed, unit and all (a number box saved ``200 kSa/s`` as ``200``), and a plain
+        number as a number."""
+        (hosted.folder / "rate.yaml").write_text(
+            f"rate_value: !class:recordstream.quantity.Quantity\n  value: '0'\n  kind: rate\n"
+            f"flow:\n  gain:\n    op: !class:{MOD}.TinyGain {{gain: 2.0}}\noutputs: gain\n"
+            "app:\n  inputs:\n    - [Quantity, value]\n"
+        )
+        opened = open_hosted(browser, hosted, "graph=rate&embed=1&only=settings")
+        page = opened.page
+        page.wait_for_selector('.app[data-graph="rate"][data-ready="true"] [data-settings]')
+        widget = page.locator('[data-form-node="rate_value"] input[data-param="value"]')
+        assert widget.get_attribute("type") == "text"
+        set_widget(page, '[data-form-node="rate_value"]', "value", "2.5 MSa/s")
+        wait_saves(page, 1)
+        assert (hosted.folder / "rate.settings.yaml").read_text() == "rate_value.value: 2.5 MSa/s\n"
+        assert widget.input_value() == "2.5 MSa/s"
+        set_widget(page, '[data-form-node="rate_value"]', "value", "250000")
+        wait_saves(page, 2)
+        assert (hosted.folder / "rate.settings.yaml").read_text() == "rate_value.value: 250000\n"
         assert opened.errors == []
 
     def test_a_graph_with_no_settings_says_so_and_offers_no_tick_box(self, browser: Any, hosted: Hosted) -> None:
@@ -5409,4 +5937,405 @@ class TestACardOfItsOwn:
         wait_saves(page, 2)
         wait_edges(page, 5)
         assert api_get(server, "api/graphs/files")["text"] == FILES_TEMPLATE_TEXT
+        assert opened.errors == []
+
+
+#: A knob at the top of the graph, read by a card's parameter.
+KNOB_TEXT = """\
+level: 0.25
+mask: !class:recordstream.ops.numpy.Threshold
+  low_level: !ref:level
+"""
+
+
+class TestAValueReadFromATopLevelKey:
+    """``low_level: !ref:level`` under ``level: 0.25`` is a field naming the key and its value, not typed in — on the
+    card and in the settings tab. Measured before: an open socket, and ``names no node`` in the problems."""
+
+    def test_the_field_names_the_key_and_its_value_and_is_not_a_box(
+        self, open_graph: Callable[[str], Opened], server: str, graph_dir: Path
+    ) -> None:
+        (graph_dir / "knob.yaml").write_text(KNOB_TEXT)
+        opened = open_graph("knob")
+        page = opened.page
+        on_card = page.locator('.react-flow__node[data-id="mask"] code[data-param="low_level"]')
+        assert on_card.inner_text() == "level = 0.25"
+        assert on_card.get_attribute("data-ref") == "level"
+        assert on_card.get_attribute("title") == "set by the top-level key level — change it in the text tab"
+        assert page.locator('.react-flow__node[data-id="mask"] input[data-param="low_level"]').count() == 0
+        page.locator('[data-tab="settings"]').click()
+        page.locator("[data-settings-all]").check()
+        page.wait_for_selector('[data-settings][data-settings-mode="all"]')
+        assert page.locator('[data-form-node="mask"] code[data-param="low_level"]').inner_text() == "level = 0.25"
+        assert api_get(server, "api/graphs/knob")["model"]["problems"] == []
+        assert opened.errors == []
+
+
+class TestThePicturesOfATracedNode:
+    """An entry that is a raster is shown as a picture under its summary (user pick A, 2026-11-25): what the node made
+    is open, the rest waits behind "show", and a click opens every pixel of it in a dialog."""
+
+    LOADED = "img => img.complete && img.naturalWidth"
+
+    def _inspect(self, open_graph: Callable[[str], Opened]) -> Opened:
+        opened = open_graph("pets")
+        page = opened.page
+        open_run_tab(page)
+        page.locator('[data-action="run"]').click()
+        wait_answers(page, 1)
+        page.locator(f'{node_root("stream.ops[1]")} .title').click()
+        page.locator('[data-inspect="stream.ops[1]"]').wait_for()
+        return opened
+
+    def _wait_loaded(self, page: Any, selector: str) -> int:
+        page.wait_for_function(
+            "s => { const i = document.querySelector(s); return i !== null && i.complete && i.naturalWidth > 0; }",
+            arg=selector,
+        )
+        return int(page.locator(selector).evaluate("img => img.naturalWidth"))
+
+    def test_what_the_node_made_is_shown_and_what_it_was_handed_waits_behind_show(
+        self, open_graph: Callable[[str], Opened]
+    ) -> None:
+        opened = self._inspect(open_graph)
+        page = opened.page
+        made = '[data-inspect="stream.ops[1]"] [data-summary="output"] img[data-picture="mask"]'
+        assert self._wait_loaded(page, made) == 4  # the 4 x 4 mask the threshold wrote
+        handed = page.locator('[data-inspect="stream.ops[1]"] [data-summary="input"]')
+        assert handed.locator("img").count() == 0
+        toggle = handed.locator('[data-picture-toggle="image"]')
+        assert toggle.inner_text() == "show"
+        toggle.click()
+        assert (
+            self._wait_loaded(page, '[data-inspect="stream.ops[1]"] [data-summary="input"] img[data-picture="image"]')
+            == 4
+        )
+        assert toggle.inner_text() == "hide"
+        toggle.click()
+        assert handed.locator("img").count() == 0
+        label = page.locator('[data-inspect="stream.ops[1]"] tr[data-side="input"][data-entry="class"]')
+        assert label.locator("[data-picture-toggle]").count() == 0  # a label has no picture
+        assert opened.errors == []
+
+    def test_a_click_on_a_picture_opens_every_pixel_of_it_in_a_dialog(
+        self, open_graph: Callable[[str], Opened]
+    ) -> None:
+        opened = self._inspect(open_graph)
+        page = opened.page
+        made = '[data-inspect="stream.ops[1]"] [data-summary="output"] img[data-picture="mask"]'
+        self._wait_loaded(page, made)
+        page.locator(made).click()
+        assert self._wait_loaded(page, '[data-dialog="picture"] [data-picture-full] img') == 4
+        assert "stream.ops[1] · output · mask" in page.locator('[data-dialog="picture"] .modal-title').inner_text()
+        page.keyboard.press("Escape")
+        page.wait_for_selector('[data-dialog="picture"]', state="detached")
+        assert opened.errors == []
+
+
+#: A subgraph whose steps are a top-level key (``steps: !ref:prep``): the run traces INTO it, the canvas draws no card
+#: for ``grey`` and ``mask``.
+REFSTEPS_TEXT = f"""\
+prep:
+  grey:
+    op: !class:recordstream.ops.numpy.Scale {{source_min: 0.0, source_max: 1.0, target_min: 0.0, target_max: 2.0}}
+  mask:
+    op: !class:recordstream.ops.numpy.Threshold {{low_level: 0.5}}
+    from: grey
+
+stream: !class:recordstream.core.stream.Stream
+  source: !class:{MOD}.TinySource {{size: 4}}
+  ops:
+    - !class:recordstream.flow.subgraph.Subgraph
+      steps: !ref:prep
+"""
+
+
+class TestARowOfTheRunTableInspectsItsStep:
+    """A click on a row of the run table opens that step's entry (user pick A, 2026-11-25) — with or without a card
+    on the canvas. Measured before: a step traced inside a subgraph whose steps are a ``!ref:`` had no card, so
+    nothing could open its entry."""
+
+    def _run(self, open_graph: Callable[[str], Opened], graph: str) -> Opened:
+        opened = open_graph(graph)
+        open_run_tab(opened.page)
+        opened.page.locator('[data-action="run"]').click()
+        wait_answers(opened.page, 1)
+        return opened
+
+    def test_a_row_opens_the_entry_of_a_step_that_has_a_card_without_selecting_the_card(
+        self, open_graph: Callable[[str], Opened]
+    ) -> None:
+        opened = self._run(open_graph, "pets")
+        page = opened.page
+        page.locator('[data-run-row="stream.ops[1]"]').click()
+        inspected = page.locator('[data-inspect="stream.ops[1]"]')
+        inspected.wait_for()
+        assert inspected.locator('tr[data-side="output"][data-entry="mask"] [data-field="type"]').inner_text() == "Mask"
+        assert inspected.locator("[data-rerun-form]").count() == 1  # it has a card: its values can be tried
+        assert page.locator('[data-run-row="stream.ops[1]"]').get_attribute("data-inspected") == "true"
+        assert selected_nodes(page) == []  # the selection is where the next run pauses: a row leaves it alone
+        assert page.locator('[data-action="run"]').inner_text() == "run"
+        assert opened.errors == []
+
+    def test_a_row_opens_the_entry_of_a_step_the_canvas_draws_no_card_for(
+        self, open_graph: Callable[[str], Opened], graph_dir: Path
+    ) -> None:
+        (graph_dir / "refsteps.yaml").write_text(REFSTEPS_TEXT)
+        opened = self._run(open_graph, "refsteps")
+        page = opened.page
+        rows = page.locator("[data-run-row]").evaluate_all("rs => rs.map(r => r.dataset.runRow)")
+        assert rows == ["stream.ops[0]", "stream.ops[0]/grey", "stream.ops[0]/mask"]
+        page.locator('[data-run-row="stream.ops[0]/mask"]').click()
+        inspected = page.locator('[data-inspect="stream.ops[0]/mask"]')
+        inspected.wait_for()
+        assert inspected.locator('tr[data-side="output"][data-entry="mask"] [data-field="type"]').inner_text() == "Mask"
+        page.wait_for_function(
+            "() => { const i = document.querySelector('[data-inspect] [data-summary=output] img[data-picture=mask]');"
+            " return i !== null && i.complete && i.naturalWidth === 4; }"
+        )
+        assert inspected.locator("[data-rerun-form]").count() == 0  # no card: nothing to try a value on
+        assert inspected.locator('[data-action="rerun"]').count() == 0
+        page.locator('[data-run-row="stream.ops[0]/grey"]').press("Enter")  # the keyboard opens a row too
+        page.locator('[data-inspect="stream.ops[0]/grey"]').wait_for()
+        assert opened.errors == []
+
+
+class TestTheSidebarsAreSizable:
+    """Each sidebar's edge that faces the canvas is dragged to change its width (user request 2026-11-26); the widths
+    are remembered in the browser and a double click puts one back. Measured before: 300 px and 380 px, fixed."""
+
+    @staticmethod
+    def _width(page: Any, selector: str) -> int:
+        return round(page.locator(selector).bounding_box()["width"])
+
+    @staticmethod
+    def _drag(page: Any, sidebar: str, by: int) -> None:
+        box = page.locator(f'[data-size-edge="{sidebar}"]').bounding_box()
+        x, y = box["x"] + box["width"] / 2, box["y"] + 300
+        page.mouse.move(x, y)
+        page.mouse.down()
+        page.mouse.move(x + by / 2, y)
+        page.mouse.move(x + by, y)
+        page.mouse.up()
+
+    def test_a_dragged_edge_changes_the_width_which_a_reload_keeps_and_a_double_click_puts_back(
+        self, open_graph: Callable[[str], Opened]
+    ) -> None:
+        opened = open_graph("pets")
+        page = opened.page
+        page.locator('button[data-command="toggle-nodes"]').click()
+        page.locator("[data-nodes-sidebar]").wait_for()
+        assert (self._width(page, "[data-nodes-sidebar]"), self._width(page, "aside.side")) == (300, 380)
+
+        self._drag(page, "nodes", 120)
+        self._drag(page, "side", -200)
+        assert (self._width(page, "[data-nodes-sidebar]"), self._width(page, "aside.side")) == (420, 580)
+        assert self._width(page, ".canvas") == 1400 - 420 - 580  # the canvas takes the rest
+
+        page.reload()
+        page.locator('.app[data-ready="true"]').wait_for()
+        page.locator("[data-nodes-sidebar]").wait_for()
+        assert (self._width(page, "[data-nodes-sidebar]"), self._width(page, "aside.side")) == (420, 580)
+
+        page.locator('[data-size-edge="side"]').dblclick()
+        page.locator('[data-size-edge="nodes"]').dblclick()
+        assert (self._width(page, "[data-nodes-sidebar]"), self._width(page, "aside.side")) == (300, 380)
+        assert page.evaluate("() => Object.keys(localStorage).filter(k => k.endsWith('.width'))") == []
+        assert opened.errors == []
+
+    def test_a_drag_stops_at_the_limits(self, open_graph: Callable[[str], Opened]) -> None:
+        opened = open_graph("pets")
+        page = opened.page
+        self._drag(page, "side", 350)  # narrower than a sidebar may be
+        assert self._width(page, "aside.side") == 200
+        self._drag(page, "side", -1300)  # wider than the canvas allows
+        assert self._width(page, "aside.side") == 1400 - 240
+        assert self._width(page, ".canvas") == 240
+        assert opened.errors == []
+
+    def test_the_settings_only_sheet_has_no_edge(self, browser: Any, hosted: Any) -> None:
+        opened = open_hosted(browser, hosted, "graph=pane&embed=1&only=settings")
+        opened.page.wait_for_selector('.app[data-graph="pane"][data-ready="true"] [data-settings]')
+        assert opened.page.locator("[data-size-edge]").count() == 0
+        assert opened.errors == []
+
+
+#: Lets a `TinyGatedSink`'s writes through — a test holds a full run at its first record with it.
+RUN_GATE = threading.Event()
+
+
+@configurable(category="source", group="canvas-test")
+class TinyRows:
+    """Five records that can be counted and indexed: what a full run walks."""
+
+    def __len__(self) -> int:
+        return 5
+
+    def __getitem__(self, index: int) -> Record:
+        return {"image": Image(np.full((2, 2), float(index), dtype=np.float32))}
+
+    def __iter__(self) -> Iterator[Record]:
+        return (self[index] for index in range(len(self)))
+
+
+@configurable(category="sink", group="canvas-test")
+class TinyGatedSink:
+    """Takes each record once ``RUN_GATE`` is set.
+
+    Args:
+        gated: Whether a write waits for the gate.
+        deletes: A folder this sink says a run deletes; blank says nothing.
+    """
+
+    def __init__(self, gated: bool = False, deletes: str = "") -> None:
+        self.gated = gated
+        self.deletes = deletes
+
+    def planned_changes(self) -> List[str]:
+        return [f"delete {self.deletes} (2 files, 1.0K)"] if self.deletes else []
+
+    def write(self, record: Record) -> None:
+        if self.gated:
+            assert RUN_GATE.wait(timeout=20)
+
+    def flush(self) -> None:
+        pass
+
+
+def _convert_text(gated: bool) -> str:
+    return f"""\
+stop: 5
+
+small: !scope:small
+  stop: 2
+
+runnable: !class:recordstream.processing.DatasetProcessor
+  stop: !ref:stop
+  stream: !class:recordstream.core.stream.Stream
+    source: !class:{MOD}.TinyRows {{}}
+  sink: !class:{MOD}.TinyGatedSink {{gated: {str(gated).lower()}}}
+"""
+
+
+class TestTheFullRun:
+    """A graph that holds a ``runnable:`` is run WHOLE from the editor (user request 2026-11-25): the plan first,
+    then one job with its count and Stop — in the run tab, and in a strip under the bar in every tab."""
+
+    def test_the_plan_is_shown_a_scope_changes_it_and_the_run_ends_with_its_count(
+        self, open_graph: Callable[[str], Opened], graph_dir: Path
+    ) -> None:
+        (graph_dir / "convert.yaml").write_text(_convert_text(gated=False))
+        opened = open_graph("convert")
+        page = opened.page
+        open_run_tab(page)
+        page.locator('[data-action="plan"]').click()
+        page.locator('[data-run-all][data-plan="shown"]').wait_for()
+        assert (
+            "records: 5, start: 0, to_build: 5, sink: TinyGatedSink" in page.locator("[data-plan-lines]").inner_text()
+        )
+        page.locator('[data-scope="small"]').check()
+        page.wait_for_function("() => document.querySelector('[data-plan-lines]')?.innerText.includes('to_build: 2')")
+        page.locator('[data-scope="small"]').uncheck()
+        page.wait_for_function("() => document.querySelector('[data-plan-lines]')?.innerText.includes('to_build: 5')")
+        page.locator('[data-action="start-run"]').click()
+        ending = page.locator("[data-run-all] [data-job-ending]")
+        ending.wait_for()
+        assert ending.get_attribute("data-job-status") == "done"
+        assert ending.inner_text().startswith("convert: 5 records run (")
+        assert page.locator("[data-run-all]").get_attribute("data-plan") == "closed"
+        assert page.locator("[data-job-strip]").count() == 0  # the strip is there only while a run is going
+        assert opened.errors == []
+
+    def test_the_bars_button_opens_the_plan_and_the_strip_stops_the_run_from_another_tab(
+        self, open_graph: Callable[[str], Opened], graph_dir: Path
+    ) -> None:
+        (graph_dir / "convert.yaml").write_text(_convert_text(gated=True))
+        RUN_GATE.clear()
+        opened = open_graph("convert")
+        page = opened.page
+        try:
+            page.locator('button[data-command="run-all"]').click()
+            page.locator('[data-run-all][data-plan="shown"]').wait_for()  # the run tab opened on the plan
+            assert page.locator(".app").get_attribute("data-side-tab") == "run"
+            page.locator('[data-action="start-run"]').click()
+            page.locator('[data-run-all] [data-job-status="running"]').wait_for()
+            assert page.locator('button[data-command="run-all"]').is_disabled()  # one run at a time
+            page.locator('[data-tab="text"]').click()
+            strip = page.locator("[data-job-strip]")
+            strip.wait_for()
+            assert strip.locator(".job-title").inner_text() == "convert"
+            strip.locator('[data-action="stop-run"]').click()
+            page.wait_for_function(
+                "() => document.querySelector('[data-job-strip] [data-action=stop-run]')?.innerText === 'stopping…'"
+            )
+        finally:
+            RUN_GATE.set()
+        strip.wait_for(state="detached")
+        open_run_tab(page)
+        ending = page.locator("[data-run-all] [data-job-ending]")
+        ending.wait_for()
+        assert ending.get_attribute("data-job-status") == "stopped"
+        assert ending.inner_text().startswith("convert: stopped after 1 of 5 records — what was written is kept (")
+        assert opened.errors == []
+
+    def test_what_the_run_deletes_is_said_above_start_run(
+        self, open_graph: Callable[[str], Opened], graph_dir: Path
+    ) -> None:
+        text = _convert_text(gated=False).replace("{gated: false}", "{gated: false, deletes: /data/train/images}")
+        (graph_dir / "convert.yaml").write_text(text)
+        opened = open_graph("convert")
+        page = opened.page
+        open_run_tab(page)
+        page.locator('[data-action="plan"]').click()
+        deletes = page.locator("[data-plan-deletes] li")
+        deletes.first.wait_for()
+        assert deletes.all_inner_texts() == ["delete /data/train/images (2 files, 1.0K)"]
+        box, start = page.locator("[data-plan-deletes]").bounding_box(), page.locator('[data-action="start-run"]')
+        assert box["y"] + box["height"] <= start.bounding_box()["y"]  # directly above the button that starts it
+        assert start.is_enabled()  # said, never refused: the run is the person's to start
+        assert opened.errors == []
+
+    def test_a_run_that_deletes_nothing_shows_no_such_lines(
+        self, open_graph: Callable[[str], Opened], graph_dir: Path
+    ) -> None:
+        (graph_dir / "convert.yaml").write_text(_convert_text(gated=False))
+        opened = open_graph("convert")
+        open_run_tab(opened.page)
+        opened.page.locator('[data-action="plan"]').click()
+        opened.page.locator('[data-run-all][data-plan="shown"]').wait_for()
+        assert opened.page.locator("[data-plan-deletes]").count() == 0
+        assert opened.errors == []
+
+    def test_unsaved_changes_are_refused_in_the_plan(
+        self, open_graph: Callable[[str], Opened], graph_dir: Path
+    ) -> None:
+        (graph_dir / "convert.yaml").write_text(_convert_text(gated=False))
+        opened = open_graph("convert")
+        page = opened.page
+        api_put(
+            page.url.split("/?")[0],
+            "api/graphs/convert",
+            {"text": _convert_text(gated=False).replace("stop: 5", "stop: 4")},
+        )
+        open_run_tab(page)
+        page.locator('[data-action="plan"]').click()
+        refused = page.locator("[data-plan-error]")
+        refused.wait_for()
+        assert refused.inner_text() == (
+            "convert.yaml holds unsaved changes — save the graph first: a full run reads the saved file"
+        )
+        assert page.locator('[data-action="start-run"]').is_disabled()
+        assert opened.errors == [REFUSED_400]
+
+    def test_a_graph_without_a_runnable_greys_both_buttons_and_says_why(
+        self, open_graph: Callable[[str], Opened]
+    ) -> None:
+        opened = open_graph("pets")
+        page = opened.page
+        open_run_tab(page)
+        why = "this graph has no runnable: — a full run runs the object under that key"
+        assert page.locator('[data-action="plan"]').is_disabled()
+        assert page.locator('button[data-command="run-all"]').is_disabled()
+        assert page.locator('button[data-command="run-all"]').get_attribute("title") == why
+        assert page.locator(".run-all-why").inner_text() == why
         assert opened.errors == []

@@ -131,10 +131,12 @@ export type Saved = Graph & { host_error?: string };
 export const saveGraph = (name: string): Promise<Saved> => call("POST", `${graphPath(name)}/save`);
 
 /**
- * `POST api/graphs/<name>/save` `{only: "settings"}` — write the graph's SETTINGS file alone (a settings sheet's save,
- * `?only=settings`): a change of the graph itself the editor holds stays unsaved.
+ * `POST api/graphs/<name>/param` `{node, param, value, save: "settings"}` — set one value AND write the graph's SETTINGS
+ * file alone, in one request (a settings sheet's change, `?only=settings`): a change of the graph itself the editor
+ * holds stays unsaved. A refused save keeps nothing: the server undoes the change before it answers.
  */
-export const saveSettings = (name: string): Promise<Saved> => call("POST", `${graphPath(name)}/save`, { only: "settings" });
+export const setParamAndSaveSettings = (name: string, node: string, param: string, value: Json): Promise<Saved> =>
+  call("POST", `${graphPath(name)}/param`, { node, param, value, save: "settings" });
 
 /** `POST api/graphs/<name>/save-as` `{path, overwrite?}` — write it to `path`; the list entry now names the new file. */
 export const saveGraphAs = (name: string, path: string, overwrite = false): Promise<Saved> =>
@@ -190,6 +192,15 @@ export interface FileListing {
   parent: string | null;
   /** Folders first; hidden entries and `*.layout.yaml` left out. */
   entries: FileEntry[];
+  /** The dialog's shortcut buttons: the graph folder, then each place variable (`HOME`, `DATA_ROOT` …) set to a folder. */
+  places: FilePlace[];
+}
+
+export interface FilePlace {
+  /** `Graphs`, or the variable's name. */
+  name: string;
+  /** Resolved — the spelling a listing answers as `dir`. */
+  path: string;
 }
 
 /**
@@ -203,6 +214,9 @@ export const listFiles = (dir?: string, show: FileShow = "graphs"): Promise<File
   const asked = query.toString();
   return call("GET", asked === "" ? "api/files" : `api/files?${asked}`);
 };
+
+/** `POST api/files/folder` `{dir, name}` — make the folder `name` inside `dir` and answer ITS listing (New folder). */
+export const makeFolder = (dir: string, name: string): Promise<FileListing> => call("POST", "api/files/folder", { dir, name });
 
 // ---------------------------------------------------------------------------------------------------
 // editing — each answers the whole graph after the edit
@@ -593,3 +607,54 @@ export const rerun = (run: string, node: string, params: Record<string, Json>): 
 
 /** `GET api/runs/<run>`. */
 export const getRun = (run: string): Promise<Run> => call("GET", `api/runs/${encodeURIComponent(run)}`);
+
+/** One check of a plan: what a run checks before anything runs. */
+export type PlanCheck = { description: string; ok: boolean; detail: string };
+
+/** recordstream's plan of a runnable: what a run would do, nothing changed. */
+export type RunPlan = {
+  title: string;
+  checks: PlanCheck[];
+  actions: string[];
+  commands: string[][];
+  details: Record<string, Json>;
+  steps: RunPlan[];
+};
+
+/** `POST …/plan`: the plan of a full run under `scopes`, the lines `recordstream run --dry_run` prints for it,
+ * whether a run would stop at a check, and the scopes the graph declares. */
+export type PlanAnswer = {
+  graph: string;
+  declared: string[];
+  scopes: string[];
+  plan: RunPlan;
+  lines: string[];
+  would_stop: boolean;
+};
+
+/** One full run — a background job of the server: its count, and its ending once it ended. */
+export type Job = {
+  id: string;
+  key: string;
+  title: string;
+  unit: string;
+  done: number;
+  total: number | null;
+  message: string;
+  detail: { graph: string; scopes?: string[] };
+  status: "running" | "done" | "stopped" | "failed";
+  running: boolean;
+  stop: boolean;
+  error: string;
+  elapsed_s: number;
+};
+
+export const planRun = (name: string, scopes: string[]): Promise<PlanAnswer> =>
+  call("POST", `${graphPath(name)}/plan`, { scopes });
+
+export const runAll = (name: string, scopes: string[]): Promise<Job> =>
+  call("POST", `${graphPath(name)}/run-all`, { scopes });
+
+export const getJobs = (): Promise<Job[]> => call("GET", "api/jobs");
+
+export const stopJob = (job: string): Promise<Job> => call("POST", `api/jobs/${encodeURIComponent(job)}/stop`);

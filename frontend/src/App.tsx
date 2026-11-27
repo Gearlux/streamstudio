@@ -95,10 +95,10 @@ import {
   restoreRecovery,
   revertGraph,
   saveGraph,
-  saveSettings,
   saveGraphAs,
   saveTemplate,
   setParam as postParam,
+  setParamAndSaveSettings,
   setSlot,
   trace,
   undo as postUndo,
@@ -107,6 +107,10 @@ import {
   type NodeSpec,
   type Run,
   type Template,
+  getJobs,
+  runAll as postRunAll,
+  stopJob as postStopJob,
+  type Job,
 } from "./api";
 import { addPlan, draggedWire } from "./cards";
 import { Canvas, type CanvasMenuRequest, type LayoutChange, type PaletteGesture } from "./canvas/Canvas";
@@ -148,7 +152,7 @@ import {
   type OpenCommand,
   type PageMessage,
 } from "./host";
-import { arrange } from "./layout";
+import { type Direction, arrange } from "./layout";
 import {
   EMPTY_MODEL,
   allNodeNames,
@@ -191,19 +195,25 @@ import type { CanvasNode, Form, Graph, GraphSummary, Json, Model, NewGraphKind, 
 import { NodesSidebar } from "./panels/NodesSidebar";
 import { RunPanel } from "./panels/RunPanel";
 import { SettingsForm } from "./panels/SettingsForm";
+import { SizeEdge } from "./panels/SizeEdge";
+import { JobBar, RunAll } from "./panels/RunAll";
+import { POLL_MS, firstRunning, latestFor } from "./runall";
 import { addedMember, beside, inputTarget, insertTarget, shiftsMembers, wireTarget, type InsertTarget } from "./oplists";
 import {
   answered as recoveryAnswered,
   discardQuestion,
   restoredNames as restoredIn,
+  waitsForAnswer,
   type Recovery,
   type RecoveryPhase,
 } from "./recovery";
 import { nextNode } from "./run";
+import { mountServerButtons, shellServed, wantsServerButtons } from "./shell";
 import { addableSpecs } from "./sidebar";
 import { sourceSlots, type Slot } from "./slots";
 import { selectedAnchor, spotBeside, stepName, uniqueName } from "./steps";
 import { useToasts } from "./toast";
+import { clampWidth, initialWidth, MIN_WIDTH, readWidth, writeWidth, type Sidebar } from "./widths";
 import { Toasts } from "./Toasts";
 import { connectionEnds, deleteWires, drawWire, selectedWires, type Connected, type WireEnds } from "./wires";
 import "./styles.css";
@@ -279,6 +289,8 @@ function Editor() {
   const [tab, setTab] = useState<SideTab>(() => tabFromSearch(window.location.search));
   /** What the host runs each graph with over its settings (`values`, `host.ts`) — the settings form grays by it. */
   const [hostValues, setHostValues] = useState<Record<string, Record<string, Json>>>({});
+  // What the host measured for each setting, by graph (`hints`): a line under the field, never written.
+  const [hostHints, setHostHints] = useState<Record<string, Record<string, string>>>({});
   /** The tab the side panel shows: the settings, always, on a settings-only page. */
   const sideTab: SideTab = settingsOnly ? "settings" : tab;
   /**
@@ -293,6 +305,20 @@ function Editor() {
   const [running, setRunning] = useState(false);
   const [inspected, setInspected] = useState<string | undefined>(undefined);
   const [sidebar, setSidebar] = useState(readSidebar);
+  // a sidebar's width once the person dragged its edge (`null`: where it starts), and the page's width they fit in
+  const [widths, setWidths] = useState<Record<Sidebar, number | null>>(() => ({
+    nodes: readWidth("nodes"),
+    side: readWidth("side"),
+  }));
+  const [pageWidth, setPageWidth] = useState(() => window.innerWidth);
+  // the full runs of this folder's graphs (the server's jobs), and whether the bar asked the run tab for a plan
+  const [jobs, setJobs] = useState<Job[]>([]);
+  const [planAsked, setPlanAsked] = useState(false);
+  useEffect(() => {
+    const resized = (): void => setPageWidth(window.innerWidth);
+    window.addEventListener("resize", resized);
+    return () => window.removeEventListener("resize", resized);
+  }, []);
   // a host's panel starts without the minimap — its corner of a small canvas (View ▸ Minimap shows it)
   const [minimap, setMinimap] = useState(() => !embedFromSearch(window.location.search));
   const [menuOpen, setMenuOpen] = useState<MenuId | null>(null);
@@ -315,6 +341,14 @@ function Editor() {
   const [folder, setFolder] = useState("");
   /** The app the editor is mounted in (`GET api/workspace`'s `host`): a graph without its own source runs ITS record. */
   const [host, setHost] = useState<HostInfo | null>(null);
+  /** The standalone editor's own server: its ↻ and ⏻ go at the end of the bar (`shell.ts`). */
+  const [shell, setShell] = useState(false);
+  const ownServer = wantsServerButtons(shell, embed, host === null ? null : host.name);
+  const serverButtons = useRef<HTMLSpanElement>(null);
+  useEffect(() => {
+    if (!ownServer || serverButtons.current === null) return;
+    return mountServerButtons(serverButtons.current);
+  }, [ownServer]);
   /** A link (or the host) named a graph the list does not hold: the page says so instead of opening another one. */
   const [missing, setMissing] = useState<string | null>(null);
   /** Set source…: the slot whose class picker and form are up (`slots.ts`). */
@@ -375,6 +409,7 @@ function Editor() {
         joinSession(workspace.session); // every request from now on says which editor it was meant for (R1, P1)
         setFolder(workspace.folder);
         setHost(hostOf(workspace));
+        setShell(shellServed(workspace));
         setRecovery(workspace.recovery);
         setRecoveryPhase(workspace.recovery === null ? "none" : "asking");
       },
@@ -544,6 +579,7 @@ function Editor() {
       joinSession(workspace.session);
       setFolder(workspace.folder);
       setHost(hostOf(workspace));
+      setShell(shellServed(workspace));
       setGraphs(list);
       setListed(true);
       setRecovery(workspace.recovery);
@@ -854,21 +890,31 @@ function Editor() {
       const command = parseHostCommand(event.data);
       if (command?.type === "commit") void commitAskedRef.current();
       else if (command?.type === "values") setHostValues((all) => ({ ...all, [command.graph]: command.values }));
+      else if (command?.type === "hints") setHostHints((all) => ({ ...all, [command.graph]: command.hints }));
+      else if (command?.type === "style") {
+        // the host page's font, as variables the settings form reads (styles.css `.app.settings-only`)
+        const root = document.documentElement.style;
+        if (command.fontSizePx !== undefined) root.setProperty("--host-font-size", `${command.fontSizePx}px`);
+        if (command.fontFamily !== undefined) root.setProperty("--host-font-family", command.fontFamily);
+      }
       else if (command !== undefined) void openAskedRef.current(command);
     };
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
   }, [embed]);
 
-  // what the page shows and holds, posted to the host on every change — it warns before closing a panel with unsaved work
+  // what the page shows and holds, posted to the host on every change — it warns before closing a panel with unsaved work,
+  // and uncovers the panel while the recovery question waits for the person (no graph opens before it is answered)
   const unsavedKey = graphs
     .filter((entry) => entry.dirty)
     .map((entry) => entry.name)
     .join("\n");
   const shownDirty = Boolean(graph?.dirty);
+  const askingAboutKeptWork = waitsForAnswer(recoveryPhase);
   useEffect(() => {
-    postToHost(stateMessage(shownName ?? "", shownDirty, unsavedKey === "" ? [] : unsavedKey.split("\n"), tab));
-  }, [postToHost, shownName, shownDirty, unsavedKey, tab]);
+    const unsaved = unsavedKey === "" ? [] : unsavedKey.split("\n");
+    postToHost(stateMessage(shownName ?? "", shownDirty, unsaved, tab, askingAboutKeptWork));
+  }, [postToHost, shownName, shownDirty, unsavedKey, tab, askingAboutKeptWork]);
 
   // ---- document edits: the server's text history holds them ------------------------------------------------------
 
@@ -1165,8 +1211,8 @@ function Editor() {
     if (fitRequests > 0) void flow.fitView({ padding: 0.1, maxZoom: 1, duration: 200 });
   }, [fitRequests, flow]);
 
-  /** dagre over the MEASURED cards, left to right along the wires — then saved like a drag, and shown whole. */
-  const arrangeHere = useCallback(() => {
+  /** dagre over the MEASURED cards along the wires, in `direction` — then saved like a drag, and shown whole. */
+  const arrangeHere = useCallback((direction: Direction) => {
     const current = graphRef.current;
     if (current === null) return;
     const drawn = flow.getNodes().filter((node) => node.type === "generic");
@@ -1175,7 +1221,7 @@ function Editor() {
       width: node.measured?.width ?? CARD.width,
       height: node.measured?.height ?? CARD.height,
     }));
-    const placed = arrange(boxes, viewNow().wires);
+    const placed = arrange(boxes, viewNow().wires, direction);
     void writeLayout(Object.fromEntries(Object.entries(placed).map(([name, { x, y }]) => [name, [x, y]])), undefined, true).then(
       (written) => {
         if (written) showWhole();
@@ -1410,40 +1456,43 @@ function Editor() {
   }, [accept, host, postToHost, push]);
 
   /**
-   * The settings sheet's Save (`?only=settings`): the graph's SETTINGS file alone (`api.saveSettings`) — a change of the
-   * graph itself the editor's tab holds stays unsaved there (user pick 2026-10-05). The host hears it like any Save.
+   * The settings sheet's change (`?only=settings`): the setting and the Save of the graph's SETTINGS file alone in ONE
+   * request (`api.setParamAndSaveSettings`) — a change of the graph itself the editor's tab holds stays unsaved there
+   * (user pick 2026-10-05). A refused Save keeps nothing: the server undoes the change before it answers, so the form
+   * shows what the editor holds and a stop keeps nothing of it. The host hears it like any Save.
    */
-  const saveSettingsAlone = useCallback(async () => {
-    const current = graphRef.current;
-    if (current === null) return;
-    try {
-      const { host_error: hostError, ...saved } = await saveSettings(current.name);
-      accept(saved);
-      postToHost(savedMessage(saved.name, saved.path)); // a host re-runs what reads this graph at once
-      if (hostError !== undefined) push("warning", `${fileOf(saved)} is saved, but ${host?.name ?? "the host"} said: ${hostError}`);
-    } catch (exc) {
-      push("error", errorMessage(exc));
-    }
-  }, [accept, host, postToHost, push]);
+  const setSettingAndSave = useCallback(
+    async (node: string, param: string, value: Json): Promise<boolean> => {
+      const current = graphRef.current;
+      if (current === null) return false;
+      try {
+        const { host_error: hostError, ...saved } = await setParamAndSaveSettings(current.name, node, param, value);
+        accept(saved, { kind: "document" });
+        postToHost(savedMessage(saved.name, saved.path)); // a host re-runs what reads this graph at once
+        if (hostError !== undefined) push("warning", `${fileOf(saved)} is saved, but ${host?.name ?? "the host"} said: ${hostError}`);
+        return true;
+      } catch (exc) {
+        push("error", errorMessage(exc));
+        return false;
+      }
+    },
+    [accept, host, postToHost, push],
+  );
 
   /**
-   * How the page writes a parameter: `setParam`, and on a settings-only page (`?only=settings`) the settings' Save right
-   * after — the sheet holds no unsaved state, and the host hears every change at once (its pane asks again). A setting
-   * the server refuses saves nothing.
+   * How the page writes a parameter: `setParam`, and on a settings-only page (`?only=settings`) the setting with its
+   * Save (`setSettingAndSave`) — the sheet holds no unsaved state, and the host hears every change at once (its pane
+   * asks again). A setting the server refuses, or whose Save it refuses, is not kept.
    */
   const commitParam = useCallback(
     (node: string, param: string, value: Json): Promise<boolean> => {
-      const writing = (async () => {
-        const done = await setParam(node, param, value);
-        if (done && settingsOnly) await saveSettingsAlone();
-        return done;
-      })();
+      const writing = settingsOnly ? setSettingAndSave(node, param, value) : setParam(node, param, value);
       // a host's `commit` waits for every write on its way (`commitAsked`)
       writes.current.add(writing);
       void writing.finally(() => writes.current.delete(writing));
       return writing;
     },
-    [saveSettingsAlone, setParam, settingsOnly],
+    [setParam, setSettingAndSave, settingsOnly],
   );
 
   const saveAs = useCallback(async () => {
@@ -1932,7 +1981,11 @@ function Editor() {
         case "fit":
           return void flow.fitView({ padding: 0.15, duration: 200 });
         case "arrange":
-          return arrangeHere();
+          return arrangeHere("LR");
+        case "arrange-diagonal":
+          return arrangeHere("diagonal");
+        case "arrange-down":
+          return arrangeHere("TB");
         case "arrange-server":
           return void arrangeOnServer();
         case "minimap":
@@ -2180,10 +2233,61 @@ function Editor() {
   const fromHost = graph !== null && host !== null && !hasOwnSource(graph.model);
   const targetShown: InsertTarget = graph ? insertTarget(shownView, shown, graph.kind, selectedAnchor(shownView, selection)) : { kind: "none" };
 
+  // The full runs: a standalone editor's own (a host runs its graphs itself). The page asks for the jobs once — a run
+  // started before a reload is still going — and then only while one runs.
+  const fullRuns = host === null && !embed && !settingsOnly;
+  const refreshJobs = useCallback(async () => {
+    try {
+      setJobs(await getJobs());
+    } catch {
+      // the next poll asks again
+    }
+  }, []);
+  useEffect(() => {
+    if (fullRuns) void refreshJobs();
+  }, [fullRuns, refreshJobs]);
+  const anyRunning = jobs.some((job) => job.running);
+  useEffect(() => {
+    if (!fullRuns || !anyRunning) return undefined;
+    const timer = window.setInterval(() => void refreshJobs(), POLL_MS);
+    return () => window.clearInterval(timer);
+  }, [fullRuns, anyRunning, refreshJobs]);
+  const heard = (job: Job): void => setJobs((held) => [job, ...held.filter((each) => each.id !== job.id)]);
+  const startAll = async (scopes: string[]): Promise<void> => {
+    if (graph !== null) heard(await postRunAll(graph.name, scopes));
+  };
+  const stopRun = (job: string): void => {
+    postStopJob(job).then(heard, (exc) => push("error", errorMessage(exc)));
+  };
+  const noRunnable =
+    graph !== null && !graph.model.nodes.some((node) => node.name === "runnable")
+      ? "this graph has no runnable: — a full run runs the object under that key"
+      : "";
+  const stripJob = fullRuns ? firstRunning(jobs) : undefined;
+
+  // The sidebars' widths: a dragged one stays within the limits beside the other; one nobody dragged is the
+  // stylesheet's (a host's panel has its own), so nothing of the layout changes until an edge is dragged.
+  const nodesOpen = sidebar && !settingsOnly;
+  const sideWidth =
+    widths.side === null
+      ? initialWidth("side", embed)
+      : clampWidth(widths.side, pageWidth, nodesOpen ? MIN_WIDTH : 0);
+  const nodesWidth =
+    widths.nodes === null ? initialWidth("nodes", embed) : clampWidth(widths.nodes, pageWidth, sideWidth);
+  const dragWidth = (which: Sidebar, wanted: number): void => {
+    const other = which === "nodes" ? sideWidth : nodesOpen ? nodesWidth : 0;
+    setWidths((held) => ({ ...held, [which]: clampWidth(wanted, pageWidth, other) }));
+  };
+  const keepWidth = (which: Sidebar): void => writeWidth(which, which === "nodes" ? nodesWidth : sideWidth);
+  const resetWidth = (which: Sidebar): void => {
+    writeWidth(which, null);
+    setWidths((held) => ({ ...held, [which]: null }));
+  };
+
   return (
     <EditorContext.Provider value={editor}>
       <div
-        className={`app${embed ? " embed" : ""}${settingsOnly ? " settings-only" : ""}`}
+        className={`app${embed ? " embed" : ""}${settingsOnly ? " settings-only" : ""}${stripJob ? " with-strip" : ""}`}
         data-embed={embed ? "true" : "false"}
         data-only={settingsOnly ? "settings" : ""}
         data-host={host?.name ?? ""}
@@ -2196,7 +2300,10 @@ function Editor() {
         data-palette-ready={specs === null ? "false" : "true"}
         data-selection={selection.join(",")}
         data-recovery={recoveryPhase}
-        style={{ ["--nodes-width" as string]: sidebar ? "300px" : "0px" }}
+        style={{
+          ["--nodes-width" as string]: nodesOpen ? `${nodesWidth}px` : "0px",
+          ...(widths.side === null ? {} : { ["--side-width" as string]: `${sideWidth}px` }),
+        }}
       >
         {!settingsOnly && <header className="bar" ref={bar}>
           {/* in a host's panel the host's own page says what app this is: no second brand */}
@@ -2260,10 +2367,50 @@ function Editor() {
               </svg>
               Run
             </button>
+            {fullRuns && (
+              <button
+                type="button"
+                className="bar-button"
+                data-command="run-all"
+                disabled={graph === null || noRunnable !== "" || anyRunning}
+                title={noRunnable || "run every record of the saved graph — the plan is shown first"}
+                onClick={() => {
+                  setTab("run");
+                  setPlanAsked(true);
+                }}
+              >
+                Run all…
+              </button>
+            )}
+            {/* ↻ and ⏻ of the standalone editor's own server: the serving framework's shell fills this (`shell.ts`) */}
+            {ownServer && <span className="server-buttons" data-server-buttons ref={serverButtons} />}
           </div>
         </header>}
-        <main className={`body${sidebar && !settingsOnly ? " with-nodes" : ""}`} ref={body}>
-          {sidebar && !settingsOnly && (
+        {stripJob && (
+          <div className="job-strip" data-job-strip>
+            <JobBar job={stripJob} onStop={stopRun} />
+          </div>
+        )}
+        <main className={`body${nodesOpen ? " with-nodes" : ""}`} ref={body}>
+          {nodesOpen && (
+            <SizeEdge
+              sidebar="nodes"
+              width={nodesWidth}
+              onDrag={(wanted) => dragWidth("nodes", wanted)}
+              onDone={() => keepWidth("nodes")}
+              onReset={() => resetWidth("nodes")}
+            />
+          )}
+          {!settingsOnly && (
+            <SizeEdge
+              sidebar="side"
+              width={sideWidth}
+              onDrag={(wanted) => dragWidth("side", wanted)}
+              onDone={() => keepWidth("side")}
+              onReset={() => resetWidth("side")}
+            />
+          )}
+          {nodesOpen && (
             <NodesSidebar
               specs={addable}
               target={targetShown}
@@ -2363,6 +2510,7 @@ function Editor() {
                 onAll={(all) => setAllParams((ticked) => ({ ...ticked, [graph.name]: all }))}
                 fixed={settingsOnly}
                 hostValues={hostValues[graph.name]}
+                hints={hostHints[graph.name]}
               />
             )}
             {sideTab === "run" && graph !== null && (
@@ -2374,7 +2522,9 @@ function Editor() {
                 record={record}
                 onRecord={setRecord}
                 until={until}
+                inspectedName={inspected}
                 inspected={inspectedNode}
+                onInspect={setInspected}
                 form={form}
                 busy={running}
                 host={host}
@@ -2382,6 +2532,19 @@ function Editor() {
                 onRun={onRun}
                 onStep={onStep}
                 onRerun={(node, params) => void onRerun(node, params)}
+                runAll={
+                  fullRuns ? (
+                    <RunAll
+                      graph={graph.name}
+                      unavailable={noRunnable}
+                      job={latestFor(jobs, graph.name)}
+                      asked={planAsked}
+                      onAsked={() => setPlanAsked(false)}
+                      onStart={startAll}
+                      onStop={stopRun}
+                    />
+                  ) : null
+                }
               />
             )}
           </aside>

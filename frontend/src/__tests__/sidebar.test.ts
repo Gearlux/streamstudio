@@ -36,11 +36,11 @@ const opOut = { name: "op", type: "Op", required: false, doc: "this node as an o
 
 describe("groupSpecs", () => {
   const specs = [
-    spec("waivefront.ops.Spectrogram", "op"),
+    spec("signals.ops.Spectrogram", "op"),
     spec("recordstream.ops.numpy.Threshold", "op"),
     spec("recordstream.sources.HuggingFaceSource", "source"),
     spec("recordstream.ops.numpy.Scale", "op"),
-    spec("waivefront.processing.NoiseFloor", "algorithm"),
+    spec("signals.processing.NoiseFloor", "algorithm"),
     spec("keras.optimizers.Adam", "value"),
   ];
 
@@ -49,7 +49,7 @@ describe("groupSpecs", () => {
     expect(grouped.map((section) => [section.name, section.count])).toEqual([
       ["keras", 1],
       ["recordstream", 3],
-      ["waivefront", 2],
+      ["signals", 2],
     ]);
   });
 
@@ -57,8 +57,8 @@ describe("groupSpecs", () => {
     const recordstream = groupSpecs(specs).find((section) => section.name === "recordstream")!;
     expect(recordstream.kinds.map((section) => section.kind)).toEqual(["source", "op"]);
     expect(recordstream.kinds.map((section) => section.label)).toEqual(["Sources", "Ops"]);
-    const waivefront = groupSpecs(specs).find((section) => section.name === "waivefront")!;
-    expect(waivefront.kinds.map((section) => section.kind)).toEqual(["op", "algorithm"]);
+    const signals = groupSpecs(specs).find((section) => section.name === "signals")!;
+    expect(signals.kinds.map((section) => section.kind)).toEqual(["op", "algorithm"]);
   });
 
   it("sorts the entries of a kind by name", () => {
@@ -84,19 +84,19 @@ describe("groupSpecs", () => {
 
 describe("groupSpecs — folders from the class's @configurable group", () => {
   const specs = [
-    spec("waivefront.fourier.window.WindowOp", "op", { group: "fourier/numpy" }),
-    spec("waivefront.fourier.fourier.FourierOp", "op", { group: "fourier/numpy" }),
-    spec("waivefront.fourier_torch.fourier.TorchFourierOp", "op", { group: "fourier/torch" }),
-    spec("waivefront.processing.measure.MeasureOp", "op", { group: "measure" }),
-    spec("waivefront.detection.LocateOp", "op"),
-    spec("waivefront.zigbee.zcl.OnOff", "value", { group: "zigbee/zcl" }),
+    spec("signals.fourier.window.WindowOp", "op", { group: "fourier/numpy" }),
+    spec("signals.fourier.fourier.FourierOp", "op", { group: "fourier/numpy" }),
+    spec("signals.fourier_torch.fourier.TorchFourierOp", "op", { group: "fourier/torch" }),
+    spec("signals.processing.measure.MeasureOp", "op", { group: "measure" }),
+    spec("signals.detection.LocateOp", "op"),
+    spec("signals.zigbee.zcl.OnOff", "value", { group: "zigbee/zcl" }),
     spec("keras.losses.Huber", "value"),
     spec("keras.losses.Dice", "value"),
   ];
-  const waivefront = () => groupSpecs(specs).find((section) => section.name === "waivefront")!;
+  const signals = () => groupSpecs(specs).find((section) => section.name === "signals")!;
 
   it("nests a class under its kind, then one folder per segment of its group", () => {
-    const ops = waivefront().kinds.find((kind) => kind.kind === "op")!;
+    const ops = signals().kinds.find((kind) => kind.kind === "op")!;
     const fourier = ops.folders.find((folder) => folder.name === "fourier")!;
     const numpy = fourier.folders.find((folder) => folder.name === "numpy")!;
     expect(numpy.specs.map((entry) => entry.name)).toEqual(["FourierOp", "WindowOp"]);
@@ -105,21 +105,21 @@ describe("groupSpecs — folders from the class's @configurable group", () => {
   });
 
   it("keys every folder by its path from the package — the name the sidebar remembers it under", () => {
-    const ops = waivefront().kinds.find((kind) => kind.kind === "op")!;
-    expect(ops.key).toBe("waivefront/op");
+    const ops = signals().kinds.find((kind) => kind.kind === "op")!;
+    expect(ops.key).toBe("signals/op");
     const fourier = ops.folders.find((folder) => folder.name === "fourier")!;
-    expect(fourier.key).toBe("waivefront/op/fourier");
-    expect(fourier.folders.map((folder) => folder.key)).toEqual(["waivefront/op/fourier/numpy", "waivefront/op/fourier/torch"]);
+    expect(fourier.key).toBe("signals/op/fourier");
+    expect(fourier.folders.map((folder) => folder.key)).toEqual(["signals/op/fourier/numpy", "signals/op/fourier/torch"]);
   });
 
   it("lists the folders alphabetically, then the classes with no group of their own", () => {
-    const ops = waivefront().kinds.find((kind) => kind.kind === "op")!;
+    const ops = signals().kinds.find((kind) => kind.kind === "op")!;
     expect(ops.folders.map((folder) => folder.name)).toEqual(["fourier", "measure"]);
     expect(ops.specs.map((entry) => entry.name)).toEqual(["LocateOp"]);
   });
 
   it("counts every class beneath a folder, at every level", () => {
-    const section = waivefront();
+    const section = signals();
     expect(section.count).toBe(6);
     const ops = section.kinds.find((kind) => kind.kind === "op")!;
     expect(ops.count).toBe(5);
@@ -128,7 +128,7 @@ describe("groupSpecs — folders from the class's @configurable group", () => {
       ["measure", 1],
     ]);
     const values = section.kinds.find((kind) => kind.kind === "value")!;
-    expect(values.folders[0].folders[0]).toMatchObject({ name: "zcl", count: 1, key: "waivefront/value/zigbee/zcl" });
+    expect(values.folders[0].folders[0]).toMatchObject({ name: "zcl", count: 1, key: "signals/value/zigbee/zcl" });
   });
 
   it("leaves a package that declares no group exactly as flat as before: its classes straight under the kind", () => {
@@ -174,7 +174,7 @@ describe("sidebarMatches", () => {
 
 describe("chips — what an entry reads and writes", () => {
   it("leaves out the record that every op passes on, and the op and object outputs", () => {
-    const noise = spec("waivefront.processing.NoiseFloor", "algorithm", {
+    const noise = spec("signals.processing.NoiseFloor", "algorithm", {
       inputs: [record, { name: "spectrogram", type: "Spectrogram", required: true, doc: "The dB spectrogram." }],
       outputs: [recordOut, opOut, { name: "noise_floor_db", type: "number", required: false, doc: "" }],
     });

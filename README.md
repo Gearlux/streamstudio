@@ -83,7 +83,7 @@ and the next start offers it back.
 | **New** | Flow graph… · Pipeline… · Source graph (with its contract)… — each written to disk at once |
 | **File** | Open… `Ctrl+O` · Save `Ctrl+S` · Save As… `Ctrl+Shift+S` · Revert |
 | **Edit** | Undo `Ctrl+Z` · Redo `Ctrl+Shift+Z` · Cut · Copy · Paste · Delete · Select all · Rename… `F2` |
-| **View** | Nodes sidebar `N` · Fit to view · Arrange · Arrange in columns · Minimap |
+| **View** | Nodes sidebar `N` · Fit to view · Arrange left to right · Arrange diagonally · Arrange top to bottom · Arrange in columns · Minimap |
 | **Graph** | Add group · Group selection `G` · Convert selection to subgraph · Insert template ▸ · Save selection as template… · Check graph |
 | **Run** | Run `Ctrl+Enter` · Step · Rerun selected node |
 
@@ -103,13 +103,13 @@ Three kinds of graph:
 
 ```python
 from flask import Flask
-from streamstudio.app import editor_blueprint, page_blueprint, studio_of
+from streamstudio.app import editor_blueprint, keep_unsaved_edits, page_blueprint
 
 app = Flask(__name__)
 app.register_blueprint(editor_blueprint(graph_dir), url_prefix="/studio")   # the API at /studio/api/…
 app.register_blueprint(page_blueprint(), url_prefix="/studio")             # the page at /studio/
 ...
-studio_of(app).stash()   # on your app's stop: unsaved work is offered at the next start
+keep_unsaved_edits(app)   # on your app's stop: unsaved work is offered at the next start
 ```
 
 Instead of a folder, an app may give the editor a HOST — an object with a `name` and the methods `folder()`,
@@ -120,8 +120,15 @@ graphs with the page's `open` message. The whole protocol, with a host that runs
 
 ## Plugins
 
-An installed package can supply the list beside a field its classes stamp with a tag of their own. It names a module in
-the `streamstudio.plugins` entry-point group, and that module declares one function per tag:
+A class can name a picker of its own for a parameter, and an installed package can supply the list behind it. The
+class stamps the parameter with a tag:
+
+```python
+class ShopSource:
+    __streamstudio_widget_params__ = {"dataset": "SHOP_DATASET"}   # parameter -> tag
+```
+
+and the package names a module in the `streamstudio.plugins` entry-point group that declares one function per tag:
 
 ```python
 # my_plugin/studio/__init__.py
@@ -134,25 +141,35 @@ LOOKUPS = {"SHOP_DATASET": shop_datasets}
 
 See [docs/settings.md](docs/settings.md#a-plugins-lists-beside-a-field).
 
+## Environment variables
+
+`HF_HOME` is the HuggingFace cache folder the editor's dataset pickers read. It is read at import, so restart the
+editor after changing it. `HOME`, `PROJECT_ROOT`, `DATA_ROOT`, `MODEL_ROOT` and `RUN_DIR`, when set to a folder, are
+buttons of the file browser that jump there. `env.complete` lists them.
+
 ## Command line
 
 ```bash
 streamstudio path/to/graphs                    # serve that folder on port 8190
 streamstudio                                   # the current directory
+streamstudio path/to/graphs/demo.yaml          # that graph's folder; the browser opens on demo
 streamstudio path/to/graphs --port 8191 --templates-dir ~/my-templates
-streamstudio stop                              # stop what listens on 8190 (its unsaved work is kept)
+streamstudio path/to/graphs --background       # serve detached; the prompt comes back once it answers
+streamstudio list                              # every running editor: its port, its folder, its address
+streamstudio stop                              # stop the running editor (its unsaved work is kept)
+streamstudio stop 8191                         # the one on port 8191 — or name it by its folder
 streamstudio restart                           # stop it, then serve the same folder again
 streamstudio restart --help                    # every command's options, generated from its signature
 ```
 
-`-p` is the short form of `--port`, and an option works on either side of the command name. A taken port is refused
-before anything starts, with the address of what is there and the same command one port up. An option a command does
-not have is refused by name, not ignored:
+`-p` is the short form of `--port` and `-b` of `--background`. A folder that is already being served is not started
+twice: its address is printed. `stop` and `restart` only ever touch a StreamStudio server — a port another program
+holds is refused, never stopped. An option a command does not have is refused by name, not ignored:
 
 ```
 $ streamstudio restart --prt 9000
 Error: streamstudio: unknown option 'prt' — it names no parameter of the 'restart' command and no key in the
-configuration. Did you mean 'port'? Declared parameters: graph_dir, port, templates_dir.
+configuration. Did you mean 'port'? Declared parameters: target, port, templates_dir, background, browser.
 ```
 
 Shell completion comes from [liquifai](https://github.com/Gearlux/liquifai)'s installer: `liquifai-install-completions`.
@@ -178,7 +195,7 @@ Shell completion comes from [liquifai](https://github.com/Gearlux/liquifai)'s in
 | `pyyaml` | locating, and patching, the line an edit is about |
 | `liquifai` | the command line |
 | `loggair` | logging |
-| `psutil` | `stop` and `restart` find the server by the port it holds |
+| `portail` | serving the standalone editor: `stop`, `restart` and `list` find a server by what it answers |
 | `datasets` | the HuggingFace pickers: a dataset's columns and splits |
 
 ## Development
@@ -195,4 +212,4 @@ Changing the editor's page needs Node.js; the page is rebuilt and committed with
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+[PolyForm Noncommercial License 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0) (the `LICENSE` file): free for personal, academic and other noncommercial use. Commercial use needs a separate licence from the author.

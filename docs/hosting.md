@@ -8,7 +8,7 @@ methods.
 from pathlib import Path
 from typing import Mapping, Sequence
 
-from streamstudio.app import HostRecord, editor_blueprint, page_blueprint, studio_of
+from streamstudio.app import HostRecord, editor_link, keep_unsaved_edits, mount_editor
 
 
 class ViewerHost:
@@ -31,11 +31,23 @@ class ViewerHost:
         return {"view_scan": Path(my_package.__file__).parent / "graphs" / "scan.yaml"}
 
 
-app.register_blueprint(editor_blueprint(host=ViewerHost(viewer)), url_prefix="/studio")   # /studio/api/…
-app.register_blueprint(page_blueprint(), url_prefix="/studio")                          # the page at /studio/
+studio = mount_editor(app, ViewerHost(viewer))   # the API at /studio/api/…, the page at /studio/
 ...
-studio_of(app).stash()   # on the host's own stop: the unsaved work is offered at the next start
+editor_link("view_scan", tab="settings")         # "studio/?graph=view_scan&embed=1&tab=settings", for the host's page
+keep_unsaved_edits(app)                          # on the host's own stop: the unsaved work is offered at the next start
 ```
+
+The calls a host makes, all from `streamstudio.app` (`studio` is what `mount_editor` answers, `studio_of(app)`):
+
+| call | does |
+| --- | --- |
+| `mount_editor(app, host, prefix="/studio")` | registers the editor's API (`editor_blueprint`) and its page (`page_blueprint`) under one prefix and answers the editor (`studio_of(app)`). A host that wants the API alone registers `editor_blueprint` itself. |
+| `editor_link(graph, tab="", only="", prefix="/studio")` | the link the host's page frames the editor by, RELATIVE to that page so it holds behind a path proxy. `tab` is `text`, `settings` or `run`; `only="settings"` shows the settings form and nothing else. Any other word is a `ValueError` naming the ones the page knows. |
+| `keep_unsaved_edits(app)` | on the host's way out: the unsaved work goes into the folder's recovery file. Answers the graph files kept; `[]` when nothing was unsaved or no editor is mounted. |
+| `studio.settings(graph)` | the graph's settings as the editor holds them, `{key: value}` — what a host shows in a surface of its own. |
+| `studio.set_settings(graph, {key: value, …})` | one gesture of the host that changes settings (a knob of its page, a remembered run): every named setting set and the settings file saved, in one turn of the editor. A key the graph does not declare is a `ValueError` naming its settings, and nothing is set. A save the editor refuses undoes every setting it set: saved, or nothing left held. |
+| `studio.reset_settings(graph)` | every setting back to the graph's own value, saved (the settings file goes); answers whether anything changed; a refused save undoes it. |
+| `studio.forget(graph)` | after the host REPLACED or removed a graph itself (a copy written into the folder of a graph it ships, a graph deleted): the editor lets go of the one it holds and reads afresh. Unsaved edits of it go too; the answer says whether there were any. A file the host merely rewrote needs no call — a graph holding nothing unsaved is read again by itself. |
 
 ```
 GET /studio            -> 308 /studio/            GET /studio/api/graphs    -> the host folder's graphs
@@ -62,7 +74,7 @@ import numpy as np
 from flask import Flask
 from recordstream.items import Image
 
-from streamstudio.app import HostRecord, editor_blueprint, page_blueprint
+from streamstudio.app import HostRecord, mount_editor
 
 
 class Host:
@@ -86,8 +98,7 @@ class Host:
 
 
 app = Flask(__name__)
-app.register_blueprint(editor_blueprint(host=Host(Path(sys.argv[1]))), url_prefix="/studio")
-app.register_blueprint(page_blueprint(), url_prefix="/studio")
+mount_editor(app, Host(Path(sys.argv[1])))
 
 client = app.test_client()
 print(client.get("/studio/api/workspace").get_json()["host"])
@@ -141,6 +152,8 @@ The Run asked the host for its record and set its fill on `mask` (`Threshold` ha
   plus `host_error: "RuntimeError: …"`, for the page to show.
 - **`shipped()`** names the graphs the host ships from OUTSIDE its folder (a package's templates), by name: each is
   listed and opened while the folder holds no file of its name ([A graph the host ships](settings.md#a-graph-the-host-ships)).
+  A relative `include:` in it names the file beside where it ships (another graph the host ships with it): the editor
+  rewrites the entry to reach that file from the folder, so the graph loads there and a copy saved later keeps it.
   A host that ships nothing answers `{}`. If it raises, the request is a refusal in words naming the host, like
   `folder()`'s.
 - **Every path the host is handed is spelled ONE way** — under `folder()` exactly as `folder()` spells it, for a file
@@ -151,13 +164,15 @@ The Run asked the host for its record and set its fill on `mask` (`Threshold` ha
   time the editor is asked for it — when the editor holds NOTHING unsaved of it: the list, the panel and Run then
   show what the file says. A graph holding unsaved edits keeps them, and its Save refuses ("changed on disk since
   the editor read it — Revert to load it, or Save As to keep both"). Post `open` for the graph shown (below) to make
-  the panel show the new text at once.
+  the panel show the new text at once. A graph's SETTINGS file is read again whenever the editor holds nothing
+  unsaved of that file — even while the graph holds other unsaved work (a moved node) — so a setting set through the
+  editor always starts from what the file holds.
 - **Relative `include:` entries follow a moved folder**: when `folder()` names another folder, a graph the editor holds
   that includes a file OUT of the old folder (`../../home/gert/steps/prep.steps.yaml`, as Insert steps file… writes
   it) is rewritten to name the same file from the new place (`../../steps/prep.steps.yaml`), in its undo history
   too, as Save As does; the graph is then unsaved, and Save writes the corrected include. An include between two
   files of the moved folder is left as written.
-- **`studio_of(app).stash()`** on the host's stop keeps the unsaved work in the host folder's recovery file
+- **`keep_unsaved_edits(app)`** (`studio_of(app).stash()`) on the host's stop keeps the unsaved work in the host folder's recovery file
   ([Unsaved work survives a stop](editor.md#unsaved-work-survives-a-stop)); the next mount over that folder offers it, and
   the page asks the same question as the standalone editor.
 - **One request at a time:** the panel's requests and the host's own reach the editor from the threads of one server,
@@ -170,10 +185,10 @@ The Run asked the host for its record and set its fill on `mask` (`Threshold` ha
 
   ```python
   studio = studio_of(app)
-  with studio.lock:                     # waits while the panel's request is served
+  studio.set_settings("view_fft", {"flow.fft.op.size": 4096})   # one turn of the editor: set, saved — or undone
+  with studio.lock:                     # anything else: waits while the panel's request is served
       document = studio.document("view_fft")
-      document.set_param("fft", "size", 4096)
-      studio.save("view_fft", only="settings")
+      ...
   ```
 
 ### The page in the host's panel
@@ -189,7 +204,8 @@ listens to its own parent window only:
   // what the page posts — on every change of what it shows or holds, and after a Save wrote a file
   window.addEventListener("message", (event) => {
     if (event.origin !== location.origin || event.data?.source !== "streamstudio") return;
-    // {source: "streamstudio", type: "state", graph: "view_scan", dirty: true, unsaved: ["view_scan"], tab: "settings"}
+    // {source: "streamstudio", type: "state", graph: "view_scan", dirty: true, unsaved: ["view_scan"], tab: "settings",
+    //  asking: false}   — `asking`: the page asks about the last session's unsaved work; no graph opens until answered
     // {source: "streamstudio", type: "saved", graph: "view_scan", path: "/data/app/graphs/view_scan.yaml"}
     // {source: "streamstudio", type: "unavailable"}   — from the page served INSTEAD of the editor
     // {source: "streamstudio", type: "committed", graph: "view_scan"}   — the answer to a `commit`
@@ -201,11 +217,22 @@ listens to its own parent window only:
   // …or say what the host RUNS the graph with over its settings (values it applies by name and never writes)
   studio.contentWindow.postMessage({target: "streamstudio", type: "values", graph: "view_scan",
                                     values: {rule: "fixed"}}, location.origin);
+  // …or show a line under a setting (what the host measured for it), never written
+  studio.contentWindow.postMessage({target: "streamstudio", type: "hints", graph: "view_scan",
+                                    hints: {level_db: "measured 14.6 dB"}}, location.origin);
+  // …or hand the settings form the host page's font
+  studio.contentWindow.postMessage({target: "streamstudio", type: "style", font_size_px: 13,
+                                    font_family: "-apple-system, sans-serif"}, location.origin);
 </script>
 ```
 
-A host that saves a SETTING itself does it through the editor — `studio_of(app).document(name).set_param(node, param,
-value)`, then `studio_of(app).save(name, only="settings")`, the editor staying the settings file's one writer — and
+When the host stopped with unsaved work in the editor (`studio_of(app).stash()`), the page's next load asks the
+person whether to restore it, and opens no graph — the one the link or an `open` names included — until that is
+answered. Meanwhile every `state` says `asking: true`, so a host that covers its panel until the graph it asked for
+shows must uncover it then, or the question is never seen.
+
+A host that saves a SETTING itself does it through the editor — `studio_of(app).set_settings(name, {key: value})`,
+the editor staying the settings file's one writer — and
 posts `open` for the graph shown: the page shows the new value (an `open` of the graph shown re-presents it when its
 text or its model changed).
 

@@ -11,7 +11,7 @@ else — never a per-class table. The palette marks a parameter's JSON-schema fr
 * on a ``HuggingFace*`` class: ``path`` / ``repo_id`` → ``hf_dataset`` (a hub id, NOT a folder),
   ``input_feature`` / ``target_feature`` → ``hf_feature``, ``split`` → ``hf_split``, ``metadata_features`` →
   ``hf_metadata``;
-* a producer's ``__taidal_widget_params__`` stamp names the picker itself and wins over every rule above.
+* a producer's ``__streamstudio_widget_params__`` stamp names the picker itself and wins over every rule above.
 
 The routes behind them: ``GET /api/files?dir=…&show=all`` lists every file (a file picker) besides the graph
 browser's folders-and-graphs listing, ``$VAR`` in ``dir`` expanded; ``GET /api/hf/datasets`` / ``…/features`` /
@@ -118,7 +118,7 @@ class StampedWriter:
         other_dir: A folder.
     """
 
-    __taidal_widget_params__ = {"output_dir": "PLATFORM_DATASET_ID"}
+    __streamstudio_widget_params__ = {"output_dir": "PLATFORM_DATASET_ID"}
 
     def __init__(self, output_dir: str = "", other_dir: str = "") -> None:
         self.output_dir = output_dir

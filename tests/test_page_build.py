@@ -32,6 +32,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from flask import Flask
+from portail import serving
 from werkzeug.serving import make_server
 
 from streamstudio import app as app_module
@@ -1063,8 +1064,7 @@ class TestWhoChecks:
     def test_the_canvas_editor_checks_its_page_before_it_serves(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, page_checks: List[str]
     ) -> None:
-        monkeypatch.setattr(cli, "_port_in_use", lambda port, host=cli.STUDIO_HOST: False)
-        monkeypatch.setattr(cli, "_unsaved_work", lambda port: None)
+        monkeypatch.setattr(serving, "port_in_use", lambda host, port: False)
         double = MagicMock()
         double.extensions = {app_module.EXTENSION: app_module.Studio(tmp_path)}
         double.run.side_effect = lambda **kwargs: page_checks.append("serving")
@@ -1078,7 +1078,7 @@ class TestWhoChecks:
             cli.main()
         assert page_checks == ["checked", "app made", "serving"]
 
-    def test_a_port_taken_while_the_page_was_built_is_refused_in_streamstudios_words(
+    def test_a_port_taken_while_the_page_was_built_is_refused_before_the_app_is_made(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
@@ -1087,28 +1087,23 @@ class TestWhoChecks:
     ) -> None:
         """Measured before: two starts on one port both passed the port check during a 5 s build, and the second
         died in werkzeug's words — ``Address already in use`` / ``Port 8193 is in use by another program…``."""
-        probes: List[str] = []
 
-        def in_use(port: int, host: str = cli.STUDIO_HOST) -> bool:
-            probes.append("port probed")
-            page_checks.append("port probed")
-            return len(probes) > 1  # free before the page was checked, taken after
+        def in_use(host: str, port: int) -> bool:
+            return "checked" in page_checks  # free before the page was checked, taken after
 
-        monkeypatch.setattr(cli, "_port_in_use", in_use)
-        monkeypatch.setattr(cli, "_unsaved_work", lambda port: None)
+        monkeypatch.setattr(serving, "port_in_use", in_use)
         monkeypatch.setattr(sys, "argv", ["streamstudio", str(tmp_path), "--port", "9123"])
         with patch("streamstudio.app.create_app") as create_app_mock, pytest.raises(SystemExit) as ended:
             cli.main()
         assert ended.value.code == 1
         create_app_mock.assert_not_called()
-        assert page_checks[-3:] == ["port probed", "checked", "port probed"]
-        assert "9123" in capsys.readouterr().out
+        assert page_checks == ["checked"]
+        assert "port 9123 on 127.0.0.1 is in use" in " ".join(capsys.readouterr().out.split())
 
     def test_a_refused_port_checks_nothing(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, page_checks: List[str]
     ) -> None:
-        monkeypatch.setattr(cli, "_port_in_use", lambda port, host=cli.STUDIO_HOST: True)
-        monkeypatch.setattr(cli, "_unsaved_work", lambda port: None)
+        monkeypatch.setattr(serving, "port_in_use", lambda host, port: True)
         monkeypatch.setattr(sys, "argv", ["streamstudio", str(tmp_path), "--port", "9123"])
         with patch("streamstudio.app.create_app") as create_app_mock, pytest.raises(SystemExit):
             cli.main()

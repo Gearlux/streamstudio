@@ -10,43 +10,73 @@ gesture by gesture: what each does to the document, and what it refuses.
 ```bash
 streamstudio path/to/graphs                                  # port 8190; the folder's *.yaml files are the graphs
 streamstudio                                                 # the same, over the current directory
+streamstudio path/to/graphs/demo.yaml                        # that graph's folder; the browser opens on demo
 streamstudio path/to/graphs --port 8191 --templates-dir ~/my-templates
-streamstudio stop                                            # stop what listens on 8190
-streamstudio stop --port 8191                                # stop what listens on 8191
+streamstudio path/to/graphs --background                     # serve detached; the prompt comes back once it answers
+streamstudio list                                            # every running editor: port, folder, address
+streamstudio stop                                            # stop the running editor
+streamstudio stop 8191                                       # the one on port 8191
+streamstudio stop path/to/graphs                             # the one serving that folder
+streamstudio stop --all                                      # every running editor
 streamstudio restart                                         # stop it, then serve the SAME folder again
-streamstudio restart path/to/graphs                          # stop it, then serve that folder
+streamstudio restart 8191                                    # the one on port 8191, on that port again
+streamstudio restart path/to/graphs                          # stop the one serving that folder, serve it again
 ```
 
+Naming a graph's file serves its folder — every graph of the folder is in the list — and opens your browser on that
+graph once the editor answers (`http://127.0.0.1:8190/?graph=demo`, also printed on a line of its own). A folder
+already being served is not started twice: the tab opens on the graph in the running editor. `--browser never` keeps
+the browser closed.
+
+`-p` is the short form of `--port`, `-b` of `--background`. `--browser always|new|never` opens the editor's address in
+your browser once it answers (default: `never` for a folder, `always` for a graph's file); `--auto-port` takes the next free port without asking.
+
 `stop` and `restart` never throw away unsaved work: the editor keeps it in a hidden file of its folder, and the
-next start offers it back ([Unsaved work survives a stop](#unsaved-work-survives-a-stop)). `restart` without a folder asks
-the running editor which folder it serves and serves that one again, so the kept work is offered at once.
+next start offers it back ([Unsaved work survives a stop](#unsaved-work-survives-a-stop)). A bare `restart` serves the
+folder served last; `restart <port>` serves the folder the editor on that port serves, with the templates folder it
+was started with, so the kept work is offered at once.
+
+**From the page:** the bar ends in two buttons. **↻** restarts the server with the code on disk now — what
+`streamstudio restart <port>` does — and reloads the tab once the new server answers. **⏻** stops it — what
+`streamstudio stop <port>` does — and closes the tab. Both keep unsaved work the same way. Every other open tab of that
+editor is told its server went. A page shown in another app's panel has neither button: that server is the app's.
 
 The folder is resolved once, so every path the editor shows is absolute. A folder that is not there is refused
 before anything is stopped or started (`restart` included):
 
 ```
 $ streamstudio restart grpahs
-Graph directory not found: /home/me/grpahs
+Error: 'grpahs' is not a workspace folder
 ```
 
-A taken port is refused before anything starts. The message gives the address to open, and the same command one
-port up (the folder printed absolute):
+A folder that is already being served is not started twice — the command prints where it is served and returns:
 
 ```
 $ streamstudio graphs
-Port 8190 is already in use — StreamStudio may already be running there.
-
-    Open it:  http://127.0.0.1:8190
-
-If that is a different program, run StreamStudio elsewhere:  streamstudio /home/me/graphs --port 8191
+streamstudio is already running — serving /home/me/graphs
+  http://127.0.0.1:8190
+  'streamstudio stop' stops it; 'streamstudio restart' reloads it.
 ```
+
+When ANOTHER folder is served on the port, the command asks whether to take the next free port (`--auto-port` takes
+it without asking). A port a program that is not StreamStudio holds is refused, and `stop` and `restart` never signal
+such a program:
+
+```
+$ streamstudio graphs --port 5432
+Error: port 5432 on 127.0.0.1 is in use (pid 801 postgres) — name another with --port (or stop that process)
+$ streamstudio stop 5432
+Error: port 5432 is held by something that is not streamstudio (pid 801 postgres) — not stopping it
+```
+
+With several editors running, a bare `stop` lists them and asks which one (`--all` stops every one).
 
 An option the command does not have is refused by name, not ignored:
 
 ```
 $ streamstudio restart --prt 9000
 Error: streamstudio: unknown option 'prt' — it names no parameter of the 'restart' command and no key in the
-configuration. Did you mean 'port'? Declared parameters: graph_dir, port, templates_dir.
+configuration. Did you mean 'port'? Declared parameters: target, port, templates_dir, background, browser.
 ```
 
 ## Unsaved work survives a stop
@@ -58,11 +88,12 @@ files themselves are not touched. `stop` says where the work went:
 
 ```
 $ streamstudio stop
-Stopped StreamStudio on port 8190 (pid 57474). Its unsaved work (demo.yaml) is kept in /home/me/graphs/.streamstudio-workspace.json — the next start asks what to do.
+streamstudio (/home/me/graphs): stopped pid 57474 (port 8190)
+Its unsaved work (demo.yaml) is kept in /home/me/graphs/.streamstudio-workspace.json — the next start asks what to do.
 ```
 
 The editor's own terminal prints the same as it exits (`Unsaved work (demo.yaml) is kept in … — the next start
-asks what to do.`). With nothing unsaved, `stop` prints only `Stopped StreamStudio on port 8190 (pid 57503).` and no
+asks what to do.`). With nothing unsaved, `stop` prints only its first line and no
 file is written. A graph made with New… and not changed since is not unsaved work: New… already wrote its file.
 
 **The next start on that folder** says so before anything else:
@@ -126,18 +157,39 @@ A menu bar across the top, the canvas in the middle, a side panel on the right w
 YAML as the editor holds it), **settings** (a form of every node on the level the canvas shows — of the graph's
 `app:` fields when it declares them, [below](settings.md#settings-a-graphs-app-fields)) and **run**.
 
+**A setting is typed where it is shown** — on its card, and in the settings tab. Enter or leaving the field saves the
+value into the editor; a refused value puts the old one back. What the field is follows the setting's type:
+
+| the setting is | its field |
+| --- | --- |
+| a choice | a list to pick from |
+| yes / no | a tick |
+| a number | a number box |
+| text | a text box |
+| a list of text (`names: List[str]`) | ONE text box, the names separated by commas: `cat, dog` writes `names: [cat, dog]`. Spaces around a name go; an emptied box writes an empty list. |
+| a list of numbers (`rates_hz: List[float]`) | ONE text box, the numbers separated by commas: `1200, 2400` writes `rates_hz: [1200, 2400]`. Text that is not all numbers goes back to the value; an emptied box writes an empty list. |
+| a fixed count of numbers (`shape: Tuple[int, int, int]`) | that many number boxes, written together as one list when a box is left. Two of them are a `(min, max)` pair. |
+| names with a number or a text each (`mapping: Dict[str, int]`) | in the settings tab, one row per name: a name box, a value box and ✕ to remove it; **+ add a name** adds a row. The rows are written together as one map, the names in the order of the rows. A row with a name and no value yet (or the reverse) waits, marked, and nothing is written. A card shows the map and does not edit it. |
+| anything else (a list of lists, a map of lists, a list whose names hold a comma) | shown, not typed: edit it in the graph's YAML file |
+| read from a key at the top of the graph (`stop: !ref:limit` under `limit: 3`) | the key and its value, `limit = 3`, shown and not typed: the key may feed several settings, so change it in the text tab. Setting it through the editor is refused: `source.stop is the value of the top-level key limit (!ref:limit) — change limit in the text tab`. A key that is not there is a problem at the node's line: `source.stop: !ref:nowhere names no node and no top-level value`. |
+
 | menu | items (shortcut; on a Mac ⌘ for Ctrl) |
 | --- | --- |
 | **New** | Flow graph… · Pipeline… · Source graph (with its contract)… |
 | **File** | Open… `Ctrl+O` · Save `Ctrl+S` · Save As… `Ctrl+Shift+S` · Revert |
 | **Edit** | Undo `Ctrl+Z` · Redo `Ctrl+Shift+Z` (or `Ctrl+Y`) · Cut `Ctrl+X` · Copy `Ctrl+C` · Paste `Ctrl+V` · Delete `Delete`/`Backspace` · Select all `Ctrl+A` · Rename… `F2` |
-| **View** | Nodes sidebar `N` · Fit to view · Arrange · Arrange in columns · Minimap |
+| **View** | Nodes sidebar `N` · Fit to view · Arrange left to right · Arrange diagonally · Arrange top to bottom · Arrange in columns · Minimap |
 | **Graph** | Add group · Group selection `G` · Convert selection to subgraph · Insert template ▸ · Save selection as template… · Delete template ▸ · Check graph |
 | **Run** | Run `Ctrl+Enter` · Step · Rerun selected node |
 
 An item that cannot act is greyed — Save while nothing changed, Copy with nothing selected. Keys are ignored
 while you type in a field. `Escape` closes an open menu; with none open, it goes up one subgraph level. The bar
 also has a **Nodes** button (the sidebar) and a green **▶ Run**.
+
+**The sidebars are sizable.** Drag the edge of the Nodes sidebar or of the side panel that faces the canvas to
+change its width — the pointer turns into a resize arrow over it. A sidebar is never narrower than 200 px and the
+canvas always keeps 240 px. Double-click the edge to put the width back. The widths are remembered in your browser;
+nothing of them is written into a graph's files.
 
 **A link opens a view.** The address follows what the page shows, so a reload or a shared link opens the same
 graph, subgraph level and side tab:
@@ -174,7 +226,42 @@ page asks first. On the document of [Subgraphs](#subgraphs--a-flow-used-as-one-s
 | **File ▸ Save** | `target_max: 2.0` | `demo.yaml` |
 | undo back to the saved text | unchanged | the ● goes away |
 
-**Run** traces what the editor holds, not the file: an unsaved value is the value the run uses.
+**Run** traces what the editor holds, not the file: an unsaved value is the value the run uses. In a graph of several
+streams it runs the one no other node draws its records from — a stream that only makes a source indexable for a
+split or a range is a helper, not the run. Two streams that are both an end of the graph are refused by name:
+`graph.yaml: several streams draw records (['first', 'second']) and no node draws from either — tracing one of
+several is not supported`.
+
+**Inspecting a step.** After a run, select a card or click the step's row in the run table: the run tab shows what the step was handed (**input**) and what it
+handed on (**output**), an entry a line — its type, shape and range. An entry that is a picture (an image, a mask, a
+2-D array of numbers such as a spectrogram) has **show** / **hide** at the end of its line. What the step made — an
+output entry it changed or added — is shown at once, fitted to the panel; what it only passed on waits behind
+**show**. An array of numbers is drawn grey from its lowest to its highest value, and the boxes the step's record
+holds for a picture of that size are outlined on it. Click a picture for every pixel of it, in a dialog that scrolls
+both ways; Escape closes it. After **rerun this node** the pictures of that step are asked again. A row opens any step the run traced, also one
+the canvas draws no card for (a step inside a subgraph whose steps are a `!ref:`); such a step shows its entries and
+pictures and has no rerun form. A row never changes the selection, which is where the next run pauses.
+
+**Running the whole graph.** Run and Step send ONE record through the graph. A graph that holds a `runnable:` — a
+conversion, a dataset build — is also run whole: **run all…** in the run tab, or **Run all…** in the bar, which opens
+the run tab on the same plan.
+
+1. The plan is shown first, and nothing runs yet: the checks a run makes, how many records it builds, the sink —
+   what `recordstream run <graph>.yaml --dry_run` prints. A graph that declares scopes (`smoke: !scope:smoke`) has a
+   tick box for each; ticking one shows the plan under it.
+2. **Start run** runs every record as one job of the editor. Its count (`312 of 807 records`) and **Stop** show in
+   the run tab and in a strip under the bar, in every tab.
+3. At the end the run tab says how it ended and how long it took: the records run, the error in words, or where it
+   was stopped.
+
+**Stop** ends the run after the record in hand. The sink is closed as at the end of a run, so what was written is
+kept. A full run reads the SAVED graph: with unsaved changes it is refused, and says to save first. One run of a
+graph goes at a time. The run lives in the editor: stopping or restarting the editor ends it. In a host's panel a
+full run is not offered. A source that cannot say how many records it holds runs without a count.
+
+**What a run deletes is said before it starts.** Every `delete …` line of the plan — a sink that replaces its
+folder says which, with the files and size it holds — is shown again in amber directly above **Start run**. The
+lines are the runnable's own; a sink that does not report what it replaces shows none.
 
 **Save refuses to overwrite someone else's change.** When the file changed on disk since the editor read or wrote
 it, nothing is written:
@@ -272,6 +359,22 @@ red; changing the name or the folder clears it:
 folder: folders first, then `.yaml` files; hidden entries and `*.layout.yaml` are left out. An opened file joins
 the list. An unreadable file is refused with its name, and the list is untouched.
 
+Above the path, a row of buttons jumps to a folder: **Graphs** (the folder the editor was started on), then `HOME`,
+`PROJECT_ROOT`, `DATA_ROOT`, `MODEL_ROOT` and `RUN_DIR` — each only when the editor's environment sets it to a
+folder; the button of the folder shown is highlighted, and hovering one shows its path. Every browser of the editor
+has them: Open, Save As, New…'s **Browse…**, and the `…` of a folder or file field.
+
+**New folder** (in Save As and the folder browsers) makes a folder inside the one shown and enters it — a place for a
+run's outputs. It is made at once, without Save. Escape closes its name field and keeps the browser open.
+
+| You type in New folder | The browser says |
+| --- | --- |
+| `outputs`, inside `/data` | enters `/data/outputs` |
+| `outputs`, where `/data/outputs` exists | `/data/outputs already exists — pick another name` |
+| `a/b` | `'a/b' is not a folder name — a name holds no '/'` |
+| `.cache` | `'.cache' starts with a dot — the file browser hides it; pick another name` |
+| nothing | `a new folder needs a name` |
+
 ## The Nodes sidebar
 
 `N` (or the **Nodes** button) opens every class the editor can describe as a tree of folders: the **package** (the
@@ -302,7 +405,8 @@ nothing selected it reads `Click adds at the end of stream.ops · drag places it
 The `Subgraph` class is not listed — an empty one
 is refused — and the footer says how one is made instead:
 `A subgraph is made from steps: Graph ▸ Convert selection to subgraph, Insert template ▸ or Insert steps file…`.
-Double-clicking empty canvas opens the same catalogue as a search palette.
+Double-clicking empty canvas opens the same catalogue as a search palette. It, too, looks for every word you type, in
+any order, in the class's name and path: `class names` finds `ClassNamesOutput`, as `ClassNames` does.
 
 **When the catalogue is read.** Building it means importing every installed package that declares classes (torch,
 TensorFlow, JAX, the training and detection backends) and describing each class. The editor does that in a separate
@@ -579,7 +683,7 @@ an op into the source slot       stream.source = !class:recordstream.ops.numpy.T
 
 | on | items |
 | --- | --- |
-| empty canvas | Add Node ▸ (by kind, with a search) · Add Group · Paste · Insert template ▸ · Insert steps file… · Arrange |
+| empty canvas | Add Node ▸ (by kind, with a search) · Add Group · Paste · Insert template ▸ · Insert steps file… · Arrange left to right · Arrange diagonally · Arrange top to bottom |
 | a node | Rename… · Delete · Copy · Group · Convert to subgraph · Save as template… · Run to here — on a `Stream` also Set source… ([above](#set-source--putting-a-source-into-a-stream)), and on a subgraph node also Open · Move to its own file… |
 | a group's title bar | Rename… · Colour ▸ · Ungroup · Convert group to subgraph |
 
@@ -596,9 +700,22 @@ height plus 17 px, on the canvas's 10-px grid. 183 px is six rows under the titl
 output), or five on a subgraph card, whose bar of inner steps adds 26 px. A tall card never hides the card below it.
 
 A node the positions file does not name yet — a step added through the API — is laid out the same way, starting below the
-lowest card already placed. **View ▸ Arrange in columns** lays the whole graph out this way again; **View ▸ Arrange**
-spaces the cards by the sizes the page drew, left to right. Delete a line of the positions file to lay that node
-out again, the file to lay out everything.
+lowest card already placed. **View ▸ Arrange in columns** lays the whole graph out this way again. The other three
+arranges space the cards by the sizes the page drew, along the wires:
+
+- **Arrange left to right** — a column per step, the first on the left.
+- **Arrange diagonally** — the same columns, each one starting 20 px below the tallest card of the column before it,
+  so a chain runs from the top left to the bottom right.
+- **Arrange top to bottom** — a row per step, the first at the top.
+
+The sockets follow the drawing. When most of a level's wires run down — as *Arrange top to bottom* leaves them — every
+card on that level draws its inputs along its top edge and its outputs along its bottom edge, in the order its rows
+list them; on any other level they sit on the card's left and right. A parameter's small socket stays on its row. The
+sockets turn when a drag is let go, with an undo, and when the graph is opened again, since they are read from where
+the cards are.
+
+Each is saved like a drag and undone with `Ctrl+Z`. Delete a line of the positions file to lay that node out again,
+the file to lay out everything.
 
 ## Groups
 

@@ -68,7 +68,7 @@ MARGIN = 40
 GRID = 10
 
 #: How tall the page draws a node card (``frontend/src/canvas/GenericNode.tsx`` + ``styles.css``), in canvas pixels,
-#: part by part — calibrated 2026-10-01 on 197 drawn cards (every graph of the waivefront annotation panes, the
+#: part by part — calibrated 2026-10-01 on 197 drawn cards (every graph of a signal project's annotation panes, the
 #: annotaide workspace templates and a one-subgraph flow; headless chromium, the React Flow node's height at zoom 1):
 #: the sum is exact on 195 cards and 1 px over on the two subgraph boundary pills, never under. The title: the name,
 #: the kind badge and the class line.

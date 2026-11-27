@@ -616,6 +616,7 @@ class TestGroups:
 
 
 class TestPaletteAndForm:
+    @pytest.mark.slow  # 19.8 s, 0 of 29 runs failed (`aisland tests report streamstudio`, 2026-10-28)
     def test_the_palette_lists_at_least_recordstreams_own_classes(self, client: Any) -> None:
         from confluid import get_registry
 

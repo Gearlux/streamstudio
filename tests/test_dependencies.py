@@ -2,7 +2,7 @@
 package.
 
 Dependencies run one way: a domain's package reaches the editor (its tests open its graphs in it, a workspace mounts
-it) and declares that; the editor never declares a domain. The ``[waivefront]`` extra did, and 82 of this suite's tests
+it) and declares that; the editor never declares a domain. A signal domain's extra did, and 82 of this suite's tests
 then ran only where the signal domain happened to be installed — skipped in CI, so a change to a signal pane broke four
 of them unseen (2026-10-08). A test that needs a domain's graphs lives in that domain's suite.
 

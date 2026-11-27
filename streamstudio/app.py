@@ -89,10 +89,12 @@ from typing import (
     get_args,
     runtime_checkable,
 )
+from urllib.parse import urlencode
 
 import yaml
-from flask import Blueprint, Flask, Response, abort, current_app, g, jsonify, request, send_from_directory
+from flask import Blueprint, Flask, Response, abort, current_app, g, request, send_from_directory
 from loggair import get_logger
+from portail.jobs import Job, Jobs
 from recordstream.core.stream import Stream
 from recordstream.flow import FlowGraph, Tracer
 from recordstream.items import Record
@@ -142,6 +144,12 @@ FileEntryKind = Literal["dir", "yaml", "file"]
 #: file picker of a parameter that names one, ``checkpoint_path``).
 FileShow = Literal["graphs", "all"]
 FILE_SHOWS: Tuple[str, ...] = get_args(FileShow)
+
+#: The environment variables the file browser offers as shortcut buttons, in this order, after the graph folder —
+#: each only while this machine sets it to a folder (user request 2026-10-28). Read at every listing, never cached.
+PLACE_VARIABLES: Tuple[str, ...] = ("HOME", "PROJECT_ROOT", "DATA_ROOT", "MODEL_ROOT", "RUN_DIR")
+#: The shortcut button of the folder the editor was started on (a host's: its folder).
+GRAPHS_PLACE = "Graphs"
 
 #: The RECOVERY FILE: what a stop keeps of the unsaved work, in the folder the editor was started on (the user's
 #: item 1, 2026-09-29: "save the file to a tmp workspace file (hidden)"). Hidden (a leading dot — the graph list
@@ -670,6 +678,8 @@ class Studio:
         self._paths: Dict[str, Path] = {}
         self._documents: Dict[str, Document] = {}
         self._runs: Dict[str, Run] = {}
+        # The full runs of this folder's graphs (`run_all`): started here, listed with their count, stopped by id.
+        self.jobs = Jobs()
         # The graphs a host ships (``EditorHost.shipped``), by list name: the file each is shipped in, while the
         # folder holds no file of that name (its entry in ``_paths`` is where the copy would be written).
         self._shipped: Dict[str, Path] = {}
@@ -789,10 +799,15 @@ class Studio:
         writes graph files itself (a conversion, an edit of its own source graph), and someone may edit one in another
         editor. Measured before 2026-10-01: the first text read was kept for the life of the process, so the panel, a
         reload and Run showed ``label: one`` after the file said ``label: two`` — and only an edit's Save found out,
-        refused as changed on disk. A document holding unsaved work is never re-read: its Save is what refuses."""
+        refused as changed on disk. A document holding unsaved work is never re-read: its Save is what refuses — but its
+        SETTINGS file is, while the editor holds nothing unsaved of THAT file (:meth:`Document.follow_settings`): a
+        moved node kept the settings hours old, and the settings sheet's change was then refused and kept (2026-11-19).
+        """
         self.follow()
         held = self._documents.get(name)
         readable = held is not None and (held.path.is_file() or held.is_shipped)
+        if held is not None and readable:
+            held.follow_settings()  # its settings file, even while something else is unsaved (a moved node)
         if held is not None and not held.dirty and readable and held.changed_on_disk():
             logger.debug(f"{held.path} changed on disk and the editor held nothing unsaved of it — read again")
             del self._documents[name]
@@ -823,6 +838,19 @@ class Studio:
         """Whether the editor holds changes of ``name`` its file does not (a graph never opened holds none)."""
         document = self._documents.get(name)
         return document is not None and document.dirty
+
+    def forget(self, name: str) -> bool:
+        """Let go of the document of ``name`` the editor holds, so its next use reads the graph afresh — what a HOST
+        calls after it replaced or removed the graph itself. :meth:`document` already reads a changed file again, but
+        not a graph that was the host's shipped one and now has a copy in the folder, nor one whose file is gone.
+
+        Whatever the editor held unsaved of it goes with it — the host decided the graph is another one now — and the
+        answer says whether there was any, so the host can say so. A graph the editor never opened is ``False``."""
+        with self.lock:
+            held = self._documents.pop(name, None)
+        if held is not None and held.dirty:
+            logger.debug(f"forgot {name} with unsaved edits: its host replaced or removed the graph")
+        return held is not None and held.dirty
 
     def graphs(self) -> List[Dict[str, Any]]:
         """``[{name, path, kind, dirty, shipped}]`` of every graph of the list — ``shipped``: still the graph its host
@@ -930,16 +958,7 @@ class Studio:
         naming it (``DATA_ROOT is not set on the editor's machine ($DATA_ROOT/captures)``)."""
         if show not in FILE_SHOWS:
             raise ValueError(f"show must be one of {', '.join(FILE_SHOWS)} — got {show!r}")
-        expanded = os.path.expandvars(directory) if directory else ""
-        folder = self._absolute(expanded) if directory else self.graph_dir
-        if not folder.is_dir():
-            # a `$VAR` this machine does not have is named — measured before: the path was read against the graph
-            # folder, "no directory <folder>/$DATA_ROOT/captures"; a folder really named `$x` is listed as any other
-            unset = _UNSET_VARIABLE.search(expanded)
-            if unset is not None:
-                raise KeyError(f"{unset.group(1) or unset.group(2)} is not set on the editor's machine ({directory})")
-            raise KeyError(f"no directory {folder}")
-        folder = folder.resolve()
+        folder = self._browsed_folder(directory)
         # Every look at the directory's children is inside the try: read permission WITHOUT search permission
         # lists the names but cannot tell a file from a directory (measured before: `is_dir()` raised, a 500).
         try:
@@ -959,7 +978,53 @@ class Studio:
             "dir": str(folder),
             "parent": None if folder.parent == folder else str(folder.parent),
             "entries": [_file_entry(d, "dir") for d in dirs] + sorted(listed, key=lambda entry: entry["name"].lower()),
+            "places": self.places(),
         }
+
+    def _browsed_folder(self, directory: Optional[str]) -> Path:
+        """The existing folder ``directory`` names, resolved — the graph folder when it is absent; a ``$VAR`` in it
+        expanded. A missing one is a ``KeyError`` naming it, or naming the variable this machine does not have."""
+        expanded = os.path.expandvars(directory) if directory else ""
+        folder = self._absolute(expanded) if directory else self.graph_dir
+        if not folder.is_dir():
+            # a `$VAR` this machine does not have is named — measured before: the path was read against the graph
+            # folder, "no directory <folder>/$DATA_ROOT/captures"; a folder really named `$x` is listed as any other
+            unset = _UNSET_VARIABLE.search(expanded)
+            if unset is not None:
+                raise KeyError(f"{unset.group(1) or unset.group(2)} is not set on the editor's machine ({directory})")
+            raise KeyError(f"no directory {folder}")
+        return folder.resolve()
+
+    def places(self) -> List[Dict[str, str]]:
+        """The file browser's shortcut buttons, ``[{name, path}]``: the graph folder, then each of
+        :data:`PLACE_VARIABLES` this machine sets to an absolute folder (``~`` expanded), resolved — the spelling a
+        listing answers as ``dir``, so the page marks the button of the folder shown. Unset, empty, relative or not a
+        folder: left out, never an error (a published editor runs where none of them is set)."""
+        found = [{"name": GRAPHS_PLACE, "path": str(self.graph_dir.resolve())}]
+        for variable in PLACE_VARIABLES:
+            value = os.environ.get(variable, "")
+            path = Path(value).expanduser() if value else None
+            if path is not None and path.is_absolute() and path.is_dir():
+                found.append({"name": variable, "path": str(path.resolve())})
+        return found
+
+    def new_folder(self, directory: str, name: str) -> Dict[str, Any]:
+        """Make the folder ``name`` inside ``directory`` (a ``$VAR`` expanded) and answer ITS listing (:meth:`files`)
+        — the file browser's New folder, for a run's outputs (user request 2026-10-28). A name that is empty, holds a
+        ``/``, is ``.``/``..``, starts with a dot (the browser hides it) or is already there is refused, and nothing
+        is made; a folder the disk refuses is the route's ``OSError`` answer, naming the path."""
+        wanted = name.strip()
+        if wanted == "":
+            raise ValueError("a new folder needs a name")
+        if "/" in wanted or wanted in (".", ".."):
+            raise ValueError(f"{wanted!r} is not a folder name — a name holds no '/'")
+        if wanted.startswith("."):
+            raise ValueError(f"{wanted!r} starts with a dot — the file browser hides it; pick another name")
+        path = self._browsed_folder(directory) / wanted
+        if path.exists():
+            raise ValueError(f"{path} already exists — pick another name")
+        path.mkdir()
+        return self.files(str(path))
 
     # -- save, save as, revert, check ----------------------------------------------------------
 
@@ -1214,9 +1279,81 @@ class Studio:
         self.document(name).replace_text(text)
         return self.graph(name)
 
-    def set_param(self, name: str, node: str, param: str, value: Any) -> Dict[str, Any]:  # value: any YAML scalar
-        self.document(name).set_param(node, param, value)
-        return self.graph(name)
+    def set_param(  # value: any YAML scalar
+        self, name: str, node: str, param: str, value: Any, save: str = ""
+    ) -> Dict[str, Any]:
+        """Set ``node.param`` (:meth:`Document.set_param`: a setting goes to the graph's settings file).
+
+        ``save="settings"`` also writes the settings file — what the settings sheet (``?only=settings``) does with each
+        change — in the same turn, so no other edit comes between the change and its save. A refused save (a file
+        changed on disk, a disk that will not take it) UNDOES the change before it raises: a change saved "at once"
+        is saved or leaves nothing held. Measured before 2026-11-21: the sheet set and saved in two requests, and a
+        save refused as changed on disk left its change held, for the stop to keep as unsaved work."""
+        if save and save not in SAVE_ONLY:
+            raise ValueError(f"save must be one of {', '.join(SAVE_ONLY)} — got {save!r}")
+        document = self.document(name)
+        document.set_param(node, param, value)
+        if not save:
+            return self.graph(name)
+        try:
+            written = document.save_settings()
+        except (ValueError, OSError):
+            document.undo()
+            raise
+        return self._tell_host(written, self.graph(name))
+
+    def settings(self, name: str) -> Dict[str, Any]:  # a value: any YAML scalar or container
+        """The settings of the graph ``name`` as the editor holds them — ``{key: value}`` in the order its ``app:``
+        block declares them, each the settings file's value, else what the graph gives its node. What a HOST reads to
+        show a graph's settings in a surface of its own."""
+        with self.lock:
+            document = self.document(name)
+            model = document.model
+            return {field.key: model.node(field.node).params[field.param].value for field in document.declared().fields}
+
+    def set_settings(self, name: str, values: Mapping[str, Any]) -> Dict[str, Any]:  # a value: as above
+        """Set the settings ``values`` names by their KEY and save the graph's settings file alone — one gesture of a
+        HOST (a knob of its page, a remembered run picked), in ONE turn of the editor. Answers :meth:`settings`.
+
+        A key the graph does not declare is refused naming its settings, and nothing is set. A refused save (a file
+        changed on disk, a disk that will not take it) UNDOES every setting it set before it raises, as
+        :meth:`set_param` with ``save="settings"`` does for one: saved, or nothing left held. No values change
+        nothing and write nothing."""
+        with self.lock:
+            document = self.document(name)
+            fields = {field.key: field for field in document.declared().fields}
+            unknown = [key for key in values if key not in fields]
+            if unknown:
+                raise ValueError(
+                    f"{', '.join(unknown)} is not a setting of {name} — its settings are: {', '.join(fields) or 'none'}"
+                )
+            edits = 0
+            try:
+                for key, value in values.items():
+                    document.set_param(fields[key].node, fields[key].param, value)
+                    edits += 1
+                if edits:
+                    self.save(name, only="settings")
+            except (ValueError, OSError):
+                for _ in range(edits):
+                    document.undo()
+                raise
+            return self.settings(name)
+
+    def reset_settings(self, name: str) -> bool:
+        """Every setting of the graph ``name`` back to the value the graph itself gives its node, SAVED — which
+        removes the settings file (:meth:`Document.reset_settings`). Answers whether anything was reset. A refused
+        save undoes the reset before it raises, as :meth:`set_settings` does."""
+        with self.lock:
+            document = self.document(name)
+            if not document.reset_settings():
+                return False
+            try:
+                self.save(name, only="settings")
+            except (ValueError, OSError):
+                document.undo()
+                raise
+            return True
 
     def set_slot(self, name: str, node: str, slot: str, class_path: str, params: Dict[str, Any]) -> Dict[str, Any]:
         """Put a new ``class_path`` object, built from ``params``, into the single slot ``slot`` of ``node`` — what
@@ -1611,6 +1748,107 @@ class Studio:
         run.rerun(node, params)
         return run.to_dict()
 
+    def picture(self, run_id: str, node: str, entry: str, side: str = "output", width: Optional[int] = None) -> bytes:
+        """The entry ``entry`` of ``node``'s input or output in the run, as a PNG at most ``width`` pixels wide —
+        recordstream's picture of it (``Tracer.picture``: an image, a mask, a 2-D array of numbers, the snapshot's
+        boxes outlined over it), read from the run's own objects outside the editor's turn. An entry whose summary
+        carries no ``picture``, and a node the run has no such side of yet, are a ``ValueError`` in words; a run, a
+        node or an entry that is not there is a ``KeyError`` naming what is."""
+        if side not in ("input", "output"):
+            raise ValueError(f"'side' must be input or output, got {side!r}")
+        run = self.run(run_id)
+        try:
+            return run.tracer.picture(
+                run.engine_name(node), entry, "input" if side == "input" else "output", width=width
+            )
+        except RuntimeError as never_reached:  # the tracer's word for a side the run has not made (yet)
+            raise ValueError(str(never_reached)) from never_reached
+
+    # -- the full run ------------------------------------------------------------------------
+
+    def _runnable(self, name: str, scopes: Sequence[str]) -> Tuple[Any, List[str]]:  # the built ``runnable:``
+        """The graph's ``runnable:`` built from its SAVED file under ``scopes``, and the scopes the graph declares.
+        Refused in words: unsaved text (the run would not be the file's), a scope the graph does not declare, no
+        ``runnable:``. The document is read and built in the editor's turn, like a trace's."""
+        with self.lock:
+            document = self.document(name)
+            where = document.path.name
+            if document.unsaved_text:
+                raise ValueError(
+                    f"{where} holds unsaved changes — save the graph first: a full run reads the saved file"
+                )
+            declared = document.declared_scopes()
+            for scope in scopes:
+                if scope not in declared:
+                    known = ", ".join(declared) or "none"
+                    raise ValueError(f"{where} declares no scope {scope!r} — its scopes are: {known}")
+            try:
+                built = document.load(list(scopes))
+            except Exception as exc:  # noqa: BLE001 — confluid's located refusal to build, answered in its words
+                raise ValueError(f"{document.path}: does not build: {type(exc).__name__}: {exc}") from exc
+        runnable = built.get("runnable") if isinstance(built, dict) else None
+        if runnable is None:
+            raise ValueError(
+                f"{where} has no runnable: — a full run runs the object under the top-level key 'runnable'"
+            )
+        return runnable, declared
+
+    def plan(self, name: str, scopes: Sequence[str] = ()) -> Dict[str, Any]:
+        """What a full run of the graph would do under ``scopes``, nothing changed — recordstream's plan of its
+        ``runnable:`` (``recordstream run --dry_run``'s) as data and as the lines that command prints, whether a run
+        would stop at a check, and the scopes the graph declares."""
+        from recordstream.workflow import plan_lines, plan_of  # at the call: the app's import stays light
+
+        runnable, declared = self._runnable(name, scopes)
+        plan = plan_of(runnable)
+        return {
+            "graph": name,
+            "declared": declared,
+            "scopes": list(scopes),
+            "plan": plan.to_dict(),
+            "lines": plan_lines(plan),
+            "would_stop": plan.would_stop,
+        }
+
+    def run_all(self, name: str, scopes: Sequence[str] = ()) -> Dict[str, Any]:
+        """Start the graph's ``runnable:`` over every record as ONE job, and answer the job — or the one already
+        running for this graph, starting nothing. The job counts the records through the runnable's own progress hook
+        and reads the stop between two records: what was written is kept."""
+        with self.lock:
+            held = self.jobs.running(f"run:{name}")
+        if held is not None:
+            return held.state()
+        runnable, _declared = self._runnable(name, scopes)
+        if not callable(getattr(runnable, "run", None)):
+            raise ValueError(f"{name}.yaml: its runnable ({type(runnable).__name__}) has no run()")
+
+        def work(job: Job) -> Dict[str, Any]:
+            def progressed(value: float, total: Optional[float], desc: str = "") -> None:
+                job.step(int(value), total=int(total) if total else None)
+
+            # recordstream's two hooks, by shape: the count per record, and the question it asks between records
+            for hook, handed in (("set_progress_callback", progressed), ("set_stop_request", lambda: job.stop)):
+                setter = getattr(runnable, hook, None)
+                if callable(setter):
+                    setter(handed)
+            runnable.run()
+            # A source that cannot say how many records it holds reports no count (recordstream's hook): say none.
+            if job.stop_asked:  # the run returned because it was asked to: it flushed its sink and kept its records
+                after = f" after {job.done} of {job.total} records" if job.total else ""
+                return {"message": f"{name}: stopped{after} — what was written is kept"}
+            return {"message": f"{name}: {job.done} records run" if job.total else f"{name}: run to its end"}
+
+        title = name if not scopes else f"{name} ({', '.join(scopes)})"
+        return self.jobs.start(f"run:{name}", title, work, detail={"graph": name, "scopes": list(scopes)}).state()
+
+    def job_list(self) -> List[Dict[str, Any]]:
+        """Every full run's state: the running ones first, then the ended ones newest first."""
+        return self.jobs.list()
+
+    def stop_job(self, job_id: str) -> Dict[str, Any]:
+        """Ask a full run to stop and answer it at once; it ends after the record in hand."""
+        return self.jobs.stop(job_id).state()
+
     def _new_run_id(self) -> str:
         while True:
             run_id = f"run_{secrets.token_hex(_RUN_ID_BYTES)}"
@@ -1660,12 +1898,23 @@ def _no_source(where: str) -> str:
 
 def _fed_stream(model: Model, where: str) -> Optional[Node]:
     """The ONE engine node whose ``source`` slot is wired — the stream a trace draws its record from — or ``None``
-    when no stream draws its own records (the graph runs the record a host supplies)."""
+    when no stream draws its own records (the graph runs the record a host supplies).
+
+    Of several, the one no other node draws ITS records from: a pipeline may hold a helper stream that only makes a
+    source indexable for the split or the range the run stream then reads (measured before: such a graph was refused
+    whole — ``several streams draw records (['indexable', 'runnable.stream'])``). Several that are each an end of the
+    graph are refused by name: nothing says which the person means."""
     fed = {wire.target for wire in model.wires if wire.target_socket == "source"}
     streams = [node for node in model.nodes if node.kind == "engine" and node.name in fed]
     if len(streams) > 1:
+        read = {wire.source for wire in model.wires if wire.target_socket == "source"}
+        streams = [node for node in streams if node.name not in read]
+    if len(streams) > 1:
         names = [node.name for node in streams]
-        raise ValueError(f"{where}: several streams draw records ({names}) — tracing one of several is not supported")
+        raise ValueError(
+            f"{where}: several streams draw records ({names}) and no node draws from either — "
+            "tracing one of several is not supported"
+        )
     return streams[0] if streams else None
 
 
@@ -1759,7 +2008,22 @@ def _statuses(tracer: Tracer) -> Dict[str, str]:
 #: keeps the run (:meth:`Studio.trace`): a run may take minutes. A route that reads the graph list or a document never
 #: joins.
 TURN_FREE = frozenset(
-    {"palette_route", "class_route", "types", "lookup", "hf_datasets", "hf_features", "hf_splits", "trace", "rerun"}
+    {
+        "palette_route",
+        "class_route",
+        "types",
+        "lookup",
+        "hf_datasets",
+        "hf_features",
+        "hf_splits",
+        "trace",
+        "rerun",
+        "run_picture",
+        "plan",
+        "run_all",
+        "jobs",
+        "stop_job",
+    }
 )
 
 
@@ -1783,11 +2047,27 @@ def _field(body: Mapping[str, Any], key: str) -> Any:  # one required field of t
     return body[key]
 
 
+def _names(body: Mapping[str, Any], key: str) -> List[str]:  # one list-of-names field, defaulting to []
+    value = body.get(key, [])
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ValueError(f"{key!r} must be a list of names, got {value!r}")
+    return value
+
+
 def _mapping(body: Mapping[str, Any], key: str) -> Dict[str, Any]:  # one JSON-object field, defaulting to {}
     value = body.get(key, {})
     if not isinstance(value, dict):
         raise ValueError(f"{key!r} must be a JSON object, got {value!r}")
     return value
+
+
+def jsonify(data: Any) -> Response:
+    """One answer of the editor's API as JSON, every mapping's names in the order the editor holds them — a map
+    setting's rows are the order a person typed. Flask's own ``jsonify`` sorts names unless the APP says otherwise,
+    and the app may be a host's: its setting is the host's, so the editor's routes never go through it."""
+    provider = current_app.json
+    text = json.dumps(data, default=getattr(provider, "default", None), ensure_ascii=False, sort_keys=False)
+    return current_app.response_class(f"{text}\n", mimetype="application/json")
 
 
 def _error(message: str, status: int) -> Tuple[Response, int]:
@@ -1969,6 +2249,11 @@ def editor_blueprint(
         show = cast(FileShow, request.args.get("show") or "graphs")  # checked against FILE_SHOWS by files
         return jsonify(_studio().files(request.args.get("dir") or None, show))
 
+    @blueprint.post("/api/files/folder")
+    def new_folder() -> Response:
+        body = _body()
+        return jsonify(_studio().new_folder(str(_field(body, "dir")), str(_field(body, "name"))))
+
     @blueprint.get("/api/hf/datasets")
     def hf_datasets() -> Response:
         return jsonify(_studio().hf_datasets())
@@ -1990,7 +2275,11 @@ def editor_blueprint(
 
     @blueprint.get("/api/workspace")
     def workspace() -> Response:
-        return jsonify(_studio().workspace())
+        # `shell`: whether the app serves the framework's page shell beside the page (`/portail/<file>`, the
+        # standalone editor's own server) — the page loads its ↻ and ⏻ from there, and must not ask an app that has
+        # none: a file that is not there is an error in the browser's console.
+        shell = any(rule.rule.startswith("/portail/") for rule in current_app.url_map.iter_rules())
+        return jsonify({**_studio().workspace(), "shell": shell})
 
     @blueprint.post("/api/workspace/recovery/restore")
     def restore_recovery() -> Response:
@@ -2061,9 +2350,8 @@ def editor_blueprint(
     @blueprint.post("/api/graphs/<name>/param")
     def set_param(name: str) -> Response:
         body = _body()
-        return jsonify(
-            _studio().set_param(name, str(_field(body, "node")), str(_field(body, "param")), _field(body, "value"))
-        )
+        node, param, value = str(_field(body, "node")), str(_field(body, "param")), _field(body, "value")
+        return jsonify(_studio().set_param(name, node, param, value, _text(body, "save") or ""))
 
     @blueprint.post("/api/graphs/<name>/slot")
     def set_slot(name: str) -> Response:
@@ -2193,6 +2481,22 @@ def editor_blueprint(
         until = body.get("until")
         return jsonify(_studio().trace(name, record, None if until is None else str(until)))
 
+    @blueprint.post("/api/graphs/<name>/plan")
+    def plan(name: str) -> Response:
+        return jsonify(_studio().plan(name, _names(_body(), "scopes")))
+
+    @blueprint.post("/api/graphs/<name>/run-all")
+    def run_all(name: str) -> Response:
+        return jsonify(_studio().run_all(name, _names(_body(), "scopes")))
+
+    @blueprint.get("/api/jobs")
+    def jobs() -> Response:
+        return jsonify(_studio().job_list())
+
+    @blueprint.post("/api/jobs/<job>/stop")
+    def stop_job(job: str) -> Response:
+        return jsonify(_studio().stop_job(job))
+
     @blueprint.post("/api/runs/<run>/rerun")
     def rerun(run: str) -> Response:
         body = _body()
@@ -2201,6 +2505,21 @@ def editor_blueprint(
     @blueprint.get("/api/runs/<run>")
     def get_run(run: str) -> Response:
         return jsonify(_studio().run(run).to_dict())
+
+    @blueprint.get("/api/runs/<run>/picture")
+    def run_picture(run: str) -> Response:
+        """``?node=&entry=[&side=input|output][&width=N]`` → the PNG. Never kept by the browser: a rerun changes what
+        the same address answers."""
+        node, entry = request.args.get("node", ""), request.args.get("entry", "")
+        if not node or not entry:
+            raise ValueError(f"'{'entry' if node else 'node'}' is required")
+        asked = request.args.get("width")
+        if asked is not None and not asked.lstrip("-").isdigit():
+            raise ValueError(f"'width' must be a whole number of pixels, got {asked!r}")
+        png = _studio().picture(
+            run, node, entry, request.args.get("side", "output"), None if asked is None else int(asked)
+        )
+        return Response(png, mimetype="image/png", headers={"Cache-Control": "no-store"})
 
     return blueprint
 
@@ -2350,11 +2669,66 @@ def studio_of(app: Flask) -> Studio:
     return studio
 
 
+#: Where a host mounts the editor unless it says otherwise: the page at ``/studio/``, the API at ``/studio/api/…``.
+#: Never the root of a host that has an ``/api/workspace`` of its own — the two would collide.
+STUDIO_PREFIX = "/studio"
+
+#: The side tabs of the editor's page a link may open (``?tab=``; ``text`` is the page's default).
+EditorTab = Literal["text", "settings", "run"]
+EDITOR_TABS = get_args(EditorTab)
+#: What a link may ask the page to show and nothing else — ``?only=settings``: the graph's settings form, each change
+#: saved at once.
+EditorOnly = Literal["settings"]
+EDITOR_ONLY = get_args(EditorOnly)
+
+
+def mount_editor(app: Flask, host: EditorHost, prefix: str = STUDIO_PREFIX) -> Studio:
+    """Mount the editor on a host's ``app``: its API (:func:`editor_blueprint`) and its page (:func:`page_blueprint`)
+    side by side under ``prefix``, hosted by ``host``. Answers the editor (:func:`studio_of`)."""
+    app.register_blueprint(editor_blueprint(host=host), url_prefix=prefix)
+    app.register_blueprint(page_blueprint(), url_prefix=prefix)
+    return studio_of(app)
+
+
+def editor_link(graph: str, tab: str = "", only: str = "", prefix: str = STUDIO_PREFIX) -> str:
+    """The link a host's page frames the editor by — ``studio/?graph=<name>&embed=1[&tab=<tab>][&only=settings]``.
+
+    RELATIVE to the host's page, so it holds wherever that page is served (behind a path proxy the page sits under a
+    prefix of the proxy's, and a link from the site's root would leave the host). ``graph`` is the name the editor
+    LISTS the graph under (its file's stem); ``embed=1`` is the page's embedded mode; ``tab`` opens one of
+    :data:`EDITOR_TABS`; ``only="settings"`` shows the settings form and nothing else.
+
+    Raises:
+        ValueError: ``tab`` is not one of :data:`EDITOR_TABS`, or ``only`` not one of :data:`EDITOR_ONLY`.
+    """
+    if tab and tab not in EDITOR_TABS:
+        raise ValueError(f"tab must be one of {', '.join(EDITOR_TABS)} — got {tab!r}")
+    if only and only not in EDITOR_ONLY:
+        raise ValueError(f"only must be one of {', '.join(EDITOR_ONLY)} — got {only!r}")
+    query = {"graph": graph, "embed": "1", **({"tab": tab} if tab else {}), **({"only": only} if only else {})}
+    return f"{prefix.strip('/')}/?{urlencode(query)}"
+
+
+def keep_unsaved_edits(app: Any) -> List[str]:  # app: a Flask app, or anything a host's way out is handed
+    """Keep the mounted editor's unsaved work in its folder's recovery file — what a host calls on its own way out
+    (:meth:`Studio.stash`). Answers the graph files kept: none when nothing was unsaved, and none — never an error —
+    when no editor is mounted on ``app``."""
+    try:
+        studio = studio_of(app)
+    except (KeyError, AttributeError):
+        return []
+    return list(studio.stash())
+
+
 __all__ = [
     "BROKEN_RECOVERY_FILE",
     "BUILD_COMMAND",
+    "EDITOR_ONLY",
+    "EDITOR_TABS",
     "EXTENSION",
     "EditorHost",
+    "EditorOnly",
+    "EditorTab",
     "FILE_SHOWS",
     "FileEntryKind",
     "FileShow",
@@ -2369,11 +2743,15 @@ __all__ = [
     "SESSION_HEADER",
     "SIDECAR_SUFFIX",
     "STEPS_SUFFIX",
+    "STUDIO_PREFIX",
     "Studio",
     "create_app",
     "default_templates_dir",
     "editor_blueprint",
+    "editor_link",
     "ensure_page_built",
+    "keep_unsaved_edits",
+    "mount_editor",
     "page_blueprint",
     "page_check_environment",
     "starter_text",

@@ -1,12 +1,12 @@
 """A document's short class name (``AnnotationUpdateSink``) is found by importing ONE entry point at a time.
 
-A registry key resolves only once the module defining it has been imported. Before, the first miss imported
-every ``confluid.configurables`` entry point (``confluid.load_configurables``) — measured 2026-10-02 in a fresh
-annotation app: the first graph list of the editor took 13.9 s for ONE key from ``waivefront.sinks``, because the
-miss also imported torch, transformers and the detection backends. Now the miss walks the entry points one by one
-and stops at the first after which the name resolves; entry points of a package that is already imported go first,
-an entry point whose module is already imported is not loaded again, and a name nothing defines ends with every
-entry point imported exactly once per process, so a later miss costs nothing.
+A registry key resolves only once the module defining it has been imported. Before, the first miss imported every
+``confluid.configurables`` entry point (``confluid.load_configurables``) — measured 2026-10-02 in a fresh annotation
+app: the first graph list of the editor took 13.9 s for ONE key from a domain package's ``sinks``, because the miss also
+imported torch, transformers and the detection backends. Now the miss walks the entry points one by one and stops at the
+first after which the name resolves; entry points of a package that is already imported go first, an entry point whose
+module is already imported is not loaded again, and a name nothing defines ends with every entry point imported exactly
+once per process, so a later miss costs nothing.
 
 The entry points are real ``importlib.metadata.EntryPoint`` objects over modules written to ``tmp_path`` (the
 import genuinely happens inside the lookup); ``importlib.metadata.entry_points`` serves only them for the group. A
@@ -158,9 +158,9 @@ def write(tmp_path: Path, module: str, body: str) -> None:
 
 def test_a_short_name_imports_the_entry_point_that_defines_it_and_stops_there(tmp_path: Path, served: Served) -> None:
     write(tmp_path, "ssq4_plain", defining("Ssq4Plain"))
-    write(tmp_path, "ssq4_sinks", defining("Ssq4LookupSink"))
+    write(tmp_path, "ssq4_outputs", defining("Ssq4LookupSink"))  # a module whose name shares no word with the class
     write(tmp_path, "ssq4_heavy", defining("Ssq4Heavy"))
-    served.entries = [entry("plain", "ssq4_plain"), entry("sinks", "ssq4_sinks"), entry("heavy", "ssq4_heavy")]
+    served.entries = [entry("plain", "ssq4_plain"), entry("sinks", "ssq4_outputs"), entry("heavy", "ssq4_heavy")]
 
     found = document._resolve("Ssq4LookupSink")
 
@@ -176,7 +176,7 @@ def test_a_short_name_imports_the_entry_point_that_defines_it_and_stops_there(tm
 
 
 def test_the_entry_points_of_an_already_imported_package_are_tried_first(tmp_path: Path, served: Served) -> None:
-    """The real case: the sink's package (``waivefront``) is imported by the app already; the backends are not."""
+    """The real case: the sink's package (a domain package) is imported by the app already; the backends are not."""
     write(tmp_path, "ssq4_backend", defining("Ssq4Backend"))
     write(tmp_path, "ssq4_domain.__init__", "")
     write(tmp_path, "ssq4_domain.sinks", defining("Ssq4DomainSink"))
@@ -188,6 +188,35 @@ def test_the_entry_points_of_an_already_imported_package_are_tried_first(tmp_pat
     assert found is not None and found.__name__ == "Ssq4DomainSink"
     assert dict(LOADS) == {"domain-sinks": 1}  # listed second, tried first
     assert "ssq4_backend" not in sys.modules
+
+
+def test_a_module_named_with_the_names_words_is_tried_first_within_its_tier(tmp_path: Path, served: Served) -> None:
+    """The real case: a host's graphs named ``ExportMask`` and ``GeneratedSignals``, and the entry points of the
+    imported top-level package listed before its ``….export_mask`` and ``….generate`` were eight other packages —
+    seconds in listed order. A module whose own name shares the name's words (by stem: generated, generate) goes first,
+    the most words first; an imported package's entry points still go before the rest."""
+    write(tmp_path, "ssq4_backend.__init__", "")
+    write(tmp_path, "ssq4_backend.export_mask_tools", defining("Ssq4Unrelated"))
+    write(tmp_path, "ssq4_domain.__init__", "")
+    write(tmp_path, "ssq4_domain.satellite", defining("Ssq4Satellite"))
+    write(tmp_path, "ssq4_domain.mask_store", defining("Ssq4Store"))
+    write(tmp_path, "ssq4_domain.export_mask", defining("Ssq4ExportMask"))
+    write(tmp_path, "ssq4_domain.generate", defining("Ssq4GeneratedSignals"))
+    importlib.import_module("ssq4_domain")
+    served.entries = [
+        entry("backend-export-mask", "ssq4_backend.export_mask_tools"),  # every word, but its package is not imported
+        entry("satellite", "ssq4_domain.satellite"),
+        entry("mask-store", "ssq4_domain.mask_store"),  # one word
+        entry("export-mask", "ssq4_domain.export_mask"),  # both words
+        entry("generate", "ssq4_domain.generate"),
+    ]
+
+    assert document._resolve("Ssq4ExportMask") is not None
+    assert dict(LOADS) == {"export-mask": 1}
+
+    assert document._resolve("Ssq4GeneratedSignals") is not None
+    assert dict(LOADS) == {"export-mask": 1, "generate": 1}
+    assert "ssq4_domain.satellite" not in sys.modules and "ssq4_backend" not in sys.modules
 
 
 def test_an_entry_point_whose_module_is_imported_already_is_not_imported_again(

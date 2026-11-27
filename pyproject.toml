@@ -4,11 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "streamstudio"
-version = "0.1.0a1"
+version = "0.1.0a2"
 description = "A graph editor for recordstream pipelines written as confluid YAML."
 readme = "README.md"
 authors = [{ name = "Gert Behiels" }]
-license = "MIT"
+license = "PolyForm-Noncommercial-1.0.0"
 license-files = ["LICENSE"]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -23,29 +23,31 @@ classifiers = [
     "Topic :: Multimedia :: Graphics :: Editors",
     "Typing :: Typed",
 ]
+# Floors are what the suite runs against in a clean venv resolving from PyPI alone, and each release
+# raises every workspace floor to the newest release (user choice 2026-11-26). Measured 2026-11-27 at
+# confluid 0.5.0, liquifai 0.4.0, loggair 0.3.0, recordstream 0.1.0a4 and portail 0.1.0a1:
+# the suite passed (1351, 5 skipped).
 dependencies = [
     # 0.3.0 is the floor for `strict_flags=True` (cli.py) and the declared `short=`
     # options every command carries — both absent from 0.2.0, and both used at MODULE
     # level, so an older liquifai is not a degraded CLI but an ImportError-equivalent:
     # `LiquifyApp.__init__() got an unexpected keyword argument 'strict_flags'` at
     # import, taking every entry point with it (measured 2026-09-03 against 0.2.0).
-    "liquifai>=0.3.0",
-    "loggair>=0.2.0",
+    "liquifai>=0.4.0",
+    "loggair>=0.3.0",
     # [pydantic] extra: palette.py enumerates a class's fields via confluid.to_pydantic.
     # The editor also needs `confluid.load(path, texts=)` (confluid 0.4.0) for EVERY graph: document.py
     # hands confluid the graph's path and every text it holds instead of writing them to disk.
-    "confluid[pydantic]>=0.4.0",
+    "confluid[pydantic]>=0.5.0",
     # The pre-release segment is REQUIRED, not cosmetic: under PEP 440 a plain `>=0.1.0`
     # excludes every pre-release of 0.1.0, so it would refuse the only recordstream that
     # exists and resolve to nothing. 0.1.0a2 is the first release carrying the op-chain
     # contract this package imports (RecordContract, check_chain, ChainContractError).
-    "recordstream>=0.1.0a3",
+    "recordstream>=0.1.0a4",
     # Imported lazily by the HuggingFace pickers (streamstudio/__init__.py: a dataset's columns and splits).
     "datasets",
-    # Imported at MODULE scope by cli.py: `stop` / `restart` locate the running studio by the port
-    # it holds, and the only unprivileged way to do that is a per-process connection scan (the
-    # whole-system psutil.net_connections() raises AccessDenied on macOS).
-    "psutil",
+    # The standalone server: serving, `stop` / `restart` / `list` by the server's identity (cli.py).
+    "portail>=0.1.0a1",
     # Imported at MODULE scope by document.py / _yamltext.py: the document model composes the YAML
     # text with PyYAML's own node tree (yaml.compose) to locate the line a marker came from, and
     # spells patched values with yaml.safe_dump. Already transitive via confluid; declared because
@@ -72,12 +74,11 @@ dev = [
     "isort>=5.13.0,<6.0.0",
     "flake8>=6.0.0,<8.0.0",
     "mypy>=1.0.0,<2.0.0",
-    # Type stubs for two DECLARED dependencies that ship none (pyyaml, psutil). This project's own CI
+    # Type stubs for a DECLARED dependency that ships none (pyyaml). This project's own CI
     # runs `mypy .` from the project directory with the default error codes, so without them every
-    # `import yaml` / `import psutil` is an `import-untyped` error there (the workspace-root run hides
+    # `import yaml` is an `import-untyped` error there (the workspace-root run hides
     # it by disabling that code).
     "types-PyYAML>=6.0.0",
-    "types-psutil",
     "pytest>=7.0.0,<9.0.0",
     "pytest-cov>=4.0.0,<7.0.0",
 ]
@@ -131,6 +132,10 @@ streamstudio = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# The fast run (plain `pytest`) stays within 5 minutes; `aisland tests report streamstudio` picks the tests that move
+# to the slow run (`pytest -m slow`, CI's slow leg) — never-failed and slowest first.
+addopts = "-m 'not slow'"
+markers = ["slow: never failed and among the slowest; left out of the fast run, run by CI's slow leg"]
 
 [tool.isort]
 profile = "black"
