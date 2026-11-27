@@ -99,8 +99,9 @@ class YamlText:
     # -- the tree ----------------------------------------------------------------------------
 
     @property
-    def root(self) -> yaml.Node:
-        """The composed root node (a syntax error raises PyYAML's located error)."""
+    def root(self) -> Optional[yaml.Node]:
+        """The composed root node, ``None`` for a text holding no document (empty, or comments only); a syntax error
+        raises PyYAML's located error."""
         if self._root is None:
             self._root = yaml.compose(self.text, Loader=yaml.SafeLoader)
         return self._root
@@ -112,7 +113,7 @@ class YamlText:
         the mapping is the marker.
         """
         wanted = (line - 1, col - 1)
-        for node in _walk(self.root):
+        for node in self.nodes():
             if (node.start_mark.line, node.start_mark.column) == wanted:
                 return node
         raise ValueError(f"no YAML node starts at {line}:{col}")
@@ -159,8 +160,9 @@ class YamlText:
         return self.text[self.line_start(start) : self.line_start(stop)]
 
     def nodes(self) -> List[yaml.Node]:
-        """Every node of the tree, parents before children, in document order."""
-        return _walk(self.root)
+        """Every node of the tree, parents before children, in document order; none for a text holding no document."""
+        root = self.root
+        return [] if root is None else _walk(root)
 
     def item_stop_line(self, sequence: yaml.SequenceNode, index: int) -> int:
         """The first 0-based line AFTER item ``index`` of a BLOCK sequence — where the next item's ``- `` is.

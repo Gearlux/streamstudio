@@ -1714,6 +1714,14 @@ class TestPatcher:
         with pytest.raises(ValueError, match="no YAML node starts at"):
             YamlText("a: 1\n").set_kwarg(7, 7, "x", 1)
 
+    def test_a_text_holding_no_document_has_no_root_and_no_nodes(self) -> None:
+        from streamstudio._yamltext import YamlText
+
+        text = YamlText("# only a comment\n")
+        assert text.root is None and text.nodes() == []
+        with pytest.raises(ValueError, match="no YAML node starts at 1:1"):
+            text.node_at(1, 1)
+
     def test_spellings(self) -> None:
         from streamstudio._yamltext import spell
 
