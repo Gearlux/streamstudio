@@ -23,23 +23,27 @@ classifiers = [
     "Topic :: Multimedia :: Graphics :: Editors",
     "Typing :: Typed",
 ]
+# Floors are what the suite runs against in a clean venv resolving from PyPI alone, and each release
+# raises every workspace floor to the newest release (user choice 2026-11-26). Measured 2026-11-27 at
+# confluid 0.5.0, liquifai 0.4.0, loggair 0.3.0, recordstream 0.1.0a4 and portail 0.1.0a1:
+# the suite passed (1351, 5 skipped).
 dependencies = [
     # 0.3.0 is the floor for `strict_flags=True` (cli.py) and the declared `short=`
     # options every command carries — both absent from 0.2.0, and both used at MODULE
     # level, so an older liquifai is not a degraded CLI but an ImportError-equivalent:
     # `LiquifyApp.__init__() got an unexpected keyword argument 'strict_flags'` at
     # import, taking every entry point with it (measured 2026-09-03 against 0.2.0).
-    "liquifai>=0.3.0",
-    "loggair>=0.2.0",
+    "liquifai>=0.4.0",
+    "loggair>=0.3.0",
     # [pydantic] extra: palette.py enumerates a class's fields via confluid.to_pydantic.
     # The editor also needs `confluid.load(path, texts=)` (confluid 0.4.0) for EVERY graph: document.py
     # hands confluid the graph's path and every text it holds instead of writing them to disk.
-    "confluid[pydantic]>=0.4.0",
+    "confluid[pydantic]>=0.5.0",
     # The pre-release segment is REQUIRED, not cosmetic: under PEP 440 a plain `>=0.1.0`
     # excludes every pre-release of 0.1.0, so it would refuse the only recordstream that
     # exists and resolve to nothing. 0.1.0a2 is the first release carrying the op-chain
     # contract this package imports (RecordContract, check_chain, ChainContractError).
-    "recordstream>=0.1.0a3",
+    "recordstream>=0.1.0a4",
     # Imported lazily by the HuggingFace pickers (streamstudio/__init__.py: a dataset's columns and splits).
     "datasets",
     # The standalone server: serving, `stop` / `restart` / `list` by the server's identity (cli.py).

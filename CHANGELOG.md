@@ -68,6 +68,9 @@ All notable changes to this project are documented here. The format follows
   work, when no graph opens until the person answers — a host that covers its panel while a graph loads uncovers it.
 
 ### Changed
+- **StreamStudio requires the newest releases of its own dependencies** — confluid 0.5.0 (was `>=0.4.0`),
+  liquifai 0.4.0 (was `>=0.3.0`), loggair 0.3.0 (was `>=0.2.0`) and recordstream 0.1.0a4 (was `>=0.1.0a3`); the
+  suite is tested against them. The full run and a step's pictures need this recordstream.
 - **The licence is now the PolyForm Noncommercial License 1.0.0** (`LICENSE`, `pyproject.toml`): free for personal, academic and other noncommercial use; commercial use needs a separate licence from the author. It was MIT; the versions released under MIT keep that licence.
 - **The search palette looks for every word** — the palette a double-click or a dropped wire opens matched the
   query as one piece, so `class names` found nothing; it now finds `ClassNamesOutput`, the words in any order, as
@@ -81,6 +84,8 @@ All notable changes to this project are documented here. The format follows
   (`{"dataset": "SHOP_DATASET"}`): the pickers and a plugin's lists read it.
 
 ### Fixed
+- A YAML text holding no document (empty, or comments only) has no nodes, and a place looked up in it is
+  refused like any place no node starts at (`no YAML node starts at 1:1`); it raised an `AttributeError`.
 - **Run works on a pipeline that holds a helper stream.** A graph whose run stream draws from a split or a range
   over a second, indexable stream was refused (`several streams draw records`); Run now traces the stream no
   other node draws its records from.

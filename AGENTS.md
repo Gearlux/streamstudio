@@ -14,8 +14,8 @@ plugin lists (`lookups.py`) and the page build (`page.py`). A host app can mount
 
 Landed: phases 0–4 (`docs/rewrite.md`); the ComfyUI editor was deleted 2026-10-14, before the first release (user
 decision) — no module, test, command or document of it remains. Next: phase 5 (agent tools; root `TASKS.md`). Version
-`0.1.0a1`, on PyPI since 2026-10-15 (`pip install streamstudio`); the repository stays private (user decision
-2026-10-14).
+`0.1.0aN` (the version in `pyproject.toml`), on PyPI since 2026-10-15 (`pip install streamstudio`); the repository is
+public (user decision 2026-11-26).
 
 Invariants:
 - **The YAML document is the only truth** (§0); the canvas is a drawing of it.
@@ -507,6 +507,8 @@ arch: "A host mounts the editor through three methods"; pins `tests/test_host.py
   guarded import stays undeclared. (`tests/test_packaging.py::test_module_scope_imports_are_declared_dependencies`)
 - No requirement, extras included, carries a URL — PyPI refuses it.
   (`tests/test_packaging.py::test_no_requirement_is_a_direct_url`)
+- Each release raises every workspace floor to the newest release and runs the suite there, and a dependent's next
+  release raises its `streamstudio>=` the same way (user choice 2026-11-26).
 - **No package that depends on streamstudio is one of its dependencies** — not even in an extra, not through another
   package (user ruling 2026-10-08: a domain depends on the editor, never the reverse). The walk reads INSTALLED
   metadata: reinstall a stale editable before trusting a pass. (`tests/test_dependencies.py`)
